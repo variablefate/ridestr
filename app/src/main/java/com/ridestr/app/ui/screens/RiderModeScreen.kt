@@ -230,7 +230,7 @@ private fun LocationInputCard(
             // Pickup location
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
-                    Icons.Default.MyLocation,
+                    Icons.Default.Place,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.size(20.dp)

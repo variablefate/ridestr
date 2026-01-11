@@ -144,12 +144,19 @@ fun DrivestrApp() {
             }
 
             Screen.DEBUG -> {
+                val useGeocodingSearch by settingsManager.useGeocodingSearch.collectAsState()
+                val useDemoLocation by settingsManager.useDemoLocation.collectAsState()
+
                 DebugScreen(
                     npub = onboardingViewModel.getKeyManager().getNpub(),
                     pubKeyHex = onboardingViewModel.getKeyManager().getPubKeyHex(),
                     connectionStates = connectionStates,
                     recentEvents = recentEvents,
                     notices = notices,
+                    useGeocodingSearch = useGeocodingSearch,
+                    useDemoLocation = useDemoLocation,
+                    onToggleGeocodingSearch = { settingsManager.toggleUseGeocodingSearch() },
+                    onToggleDemoLocation = { settingsManager.toggleUseDemoLocation() },
                     onConnect = { nostrService.connect() },
                     onDisconnect = { nostrService.disconnect() },
                     onBack = { currentScreen = Screen.MAIN },

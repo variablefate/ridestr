@@ -8,6 +8,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.ridestr.common.settings.DisplayCurrency
+import com.ridestr.common.settings.DistanceUnit
 import com.ridestr.common.settings.SettingsManager
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -18,6 +20,8 @@ fun SettingsScreen(
     modifier: Modifier = Modifier
 ) {
     val autoOpenNavigation by settingsManager.autoOpenNavigation.collectAsState()
+    val displayCurrency by settingsManager.displayCurrency.collectAsState()
+    val distanceUnit by settingsManager.distanceUnit.collectAsState()
 
     Scaffold(
         topBar = {
@@ -41,21 +45,42 @@ fun SettingsScreen(
                 .padding(padding)
                 .padding(16.dp)
         ) {
+            // Display Currency Setting
+            SettingsSwitchRow(
+                title = "Display Currency",
+                description = if (displayCurrency == DisplayCurrency.USD)
+                    "Showing fares in US Dollars"
+                else
+                    "Showing fares in Satoshis",
+                checked = displayCurrency == DisplayCurrency.USD,
+                onCheckedChange = { settingsManager.toggleDisplayCurrency() },
+                checkedLabel = "USD",
+                uncheckedLabel = "Sats"
+            )
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+            // Distance Units Setting
+            SettingsSwitchRow(
+                title = "Distance Units",
+                description = if (distanceUnit == DistanceUnit.MILES)
+                    "Showing distances in miles"
+                else
+                    "Showing distances in kilometers",
+                checked = distanceUnit == DistanceUnit.MILES,
+                onCheckedChange = { settingsManager.toggleDistanceUnit() },
+                checkedLabel = "Miles",
+                uncheckedLabel = "km"
+            )
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
             // Auto-open Navigation Setting
             SettingsSwitchRow(
                 title = "Auto-open Navigation",
                 description = "Automatically open your maps app when heading to pickup or destination",
                 checked = autoOpenNavigation,
                 onCheckedChange = { settingsManager.setAutoOpenNavigation(it) }
-            )
-
-            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-
-            // Placeholder for future settings
-            Text(
-                text = "More settings coming soon",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
     }
@@ -67,7 +92,9 @@ private fun SettingsSwitchRow(
     description: String,
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    checkedLabel: String? = null,
+    uncheckedLabel: String? = null
 ) {
     Row(
         modifier = modifier
@@ -88,9 +115,29 @@ private fun SettingsSwitchRow(
             )
         }
         Spacer(modifier = Modifier.width(16.dp))
-        Switch(
-            checked = checked,
-            onCheckedChange = onCheckedChange
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (uncheckedLabel != null) {
+                Text(
+                    text = uncheckedLabel,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (!checked) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+            }
+            Switch(
+                checked = checked,
+                onCheckedChange = onCheckedChange
+            )
+            if (checkedLabel != null) {
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = checkedLabel,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (checked) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
     }
 }

@@ -5,10 +5,16 @@ import kotlin.math.roundToInt
 
 /**
  * Represents a geographic location with latitude and longitude.
+ *
+ * @param lat Latitude coordinate
+ * @param lon Longitude coordinate
+ * @param addressLabel Optional human-readable address for UI display only.
+ *                     Not serialized to Nostr events.
  */
 data class Location(
     val lat: Double,
-    val lon: Double
+    val lon: Double,
+    val addressLabel: String? = null
 ) {
     /**
      * Convert to JSON object for event content.
@@ -24,8 +30,19 @@ data class Location(
      */
     fun approximate(): Location = Location(
         lat = (lat * 100).roundToInt() / 100.0,
-        lon = (lon * 100).roundToInt() / 100.0
+        lon = (lon * 100).roundToInt() / 100.0,
+        addressLabel = addressLabel
     )
+
+    /**
+     * Create a copy with the given address label.
+     */
+    fun withAddress(label: String?): Location = copy(addressLabel = label)
+
+    /**
+     * Get display string: address label if available, otherwise coordinates.
+     */
+    fun getDisplayString(): String = addressLabel ?: "${String.format("%.4f", lat)}, ${String.format("%.4f", lon)}"
 
     companion object {
         /**

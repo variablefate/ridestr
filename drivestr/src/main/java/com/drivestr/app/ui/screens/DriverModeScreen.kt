@@ -1,7 +1,12 @@
 package com.drivestr.app.ui.screens
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.util.Log
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -10,6 +15,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -17,17 +23,32 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import com.drivestr.app.viewmodels.DriverStage
 import com.drivestr.app.viewmodels.DriverUiState
 import com.drivestr.app.viewmodels.DriverViewModel
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
+import com.google.android.gms.tasks.CancellationTokenSource
 import com.ridestr.common.nostr.events.BroadcastRideOfferData
 import com.ridestr.common.nostr.events.Location
 import com.ridestr.common.nostr.events.RideOfferData
 import com.ridestr.common.nostr.events.RideshareChatData
+import com.ridestr.common.routing.RouteResult
+import com.ridestr.common.settings.DisplayCurrency
+import com.ridestr.common.settings.DistanceUnit
 import com.ridestr.common.settings.SettingsManager
 import com.ridestr.common.ui.ChatBottomSheet
 import com.ridestr.common.ui.FareDisplay
 import com.ridestr.common.ui.SlideToConfirm
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
+
+private const val TAG = "DriverModeScreen"
+
+// Demo location coordinates for fallback
+private const val DEMO_DRIVER_LAT = 38.4604331
+private const val DEMO_DRIVER_LON = -108.8817009
 
 @Composable
 fun DriverModeScreen(
@@ -36,11 +57,238 @@ fun DriverModeScreen(
     autoOpenNavigation: Boolean = true,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val uiState by viewModel.uiState.collectAsState()
     var showChatSheet by remember { mutableStateOf(false) }
 
-    // Demo location (would come from GPS in real app)
-    val demoLocation = remember { Location(lat = 38.429719, lon = -108.827425) }
+    // Demo location fallback
+    val demoLocation = remember { Location(lat = DEMO_DRIVER_LAT, lon = DEMO_DRIVER_LON) }
+
+    // Current driver location (GPS or demo)
+    var currentLocation by remember { mutableStateOf<Location?>(null) }
+    var isFetchingLocation by remember { mutableStateOf(false) }
+    var locationError by remember { mutableStateOf<String?>(null) }
+
+    // Get demo location setting
+    val useDemoLocation by settingsManager.useDemoLocation.collectAsState()
+
+    // FusedLocationProviderClient for GPS
+    val fusedLocationClient = remember { LocationServices.getFusedLocationProviderClient(context) }
+
+    // Function to fetch GPS location
+    fun fetchGpsLocation(onComplete: (Location) -> Unit) {
+        val hasPermission = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED ||
+        ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.ACCESS_COARSE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (!hasPermission) {
+            Log.w(TAG, "No location permission, using demo location")
+            currentLocation = demoLocation
+            locationError = "Location permission required"
+            onComplete(demoLocation)
+            return
+        }
+
+        isFetchingLocation = true
+        scope.launch {
+            try {
+                Log.d(TAG, "Fetching GPS location...")
+                val cancellationTokenSource = CancellationTokenSource()
+                val location = fusedLocationClient.getCurrentLocation(
+                    Priority.PRIORITY_HIGH_ACCURACY,
+                    cancellationTokenSource.token
+                ).await()
+
+                if (location != null) {
+                    Log.d(TAG, "GPS location received: ${location.latitude}, ${location.longitude}")
+                    val loc = Location(lat = location.latitude, lon = location.longitude)
+                    currentLocation = loc
+                    locationError = null
+                    onComplete(loc)
+                } else {
+                    Log.w(TAG, "GPS returned null, using demo location")
+                    currentLocation = demoLocation
+                    locationError = "GPS unavailable"
+                    onComplete(demoLocation)
+                }
+            } catch (e: SecurityException) {
+                Log.e(TAG, "Security exception fetching location", e)
+                currentLocation = demoLocation
+                locationError = "Location permission denied"
+                onComplete(demoLocation)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error fetching GPS location", e)
+                currentLocation = demoLocation
+                locationError = "Location error"
+                onComplete(demoLocation)
+            } finally {
+                isFetchingLocation = false
+            }
+        }
+    }
+
+    // Permission launcher
+    var pendingAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val fineGranted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true
+        val coarseGranted = permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+
+        Log.d(TAG, "Permission result: fine=$fineGranted, coarse=$coarseGranted")
+
+        if (fineGranted || coarseGranted) {
+            // Permission granted, execute pending action
+            pendingAction?.invoke()
+            pendingAction = null
+        } else {
+            Log.w(TAG, "Location permission denied")
+            currentLocation = demoLocation
+            locationError = "Permission denied - using demo"
+            // Execute pending action with demo location
+            pendingAction?.invoke()
+            pendingAction = null
+        }
+    }
+
+    // Function to get current location (GPS or demo) and execute action
+    fun withCurrentLocation(action: (Location) -> Unit) {
+        // If demo mode is on, always use demo location
+        if (useDemoLocation) {
+            Log.d(TAG, "Demo mode ON - using demo location")
+            currentLocation = demoLocation
+            action(demoLocation)
+            return
+        }
+
+        // Check permission
+        val hasPermission = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED ||
+        ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.ACCESS_COARSE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (hasPermission) {
+            // Fetch GPS and then execute action
+            fetchGpsLocation { location ->
+                action(location)
+            }
+        } else {
+            // Request permission, then execute action
+            pendingAction = {
+                fetchGpsLocation { location ->
+                    action(location)
+                }
+            }
+            permissionLauncher.launch(
+                arrayOf(
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                )
+            )
+        }
+    }
+
+    // Watch for location refresh requests (e.g., when app returns to foreground)
+    val locationRefreshRequested by viewModel.locationRefreshRequested.collectAsState()
+    LaunchedEffect(locationRefreshRequested) {
+        if (locationRefreshRequested && uiState.stage == DriverStage.AVAILABLE) {
+            Log.d(TAG, "Location refresh requested (e.g., app returned to foreground)")
+            viewModel.acknowledgeLocationRefresh()
+
+            if (useDemoLocation) {
+                // Demo mode - no need to fetch GPS
+                viewModel.updateLocation(demoLocation, force = false)
+            } else {
+                // GPS mode - fetch real location
+                val hasPermission = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.ACCESS_FINE_LOCATION
+                ) == PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                ) == PackageManager.PERMISSION_GRANTED
+
+                if (hasPermission) {
+                    try {
+                        val cancellationTokenSource = CancellationTokenSource()
+                        val location = fusedLocationClient.getCurrentLocation(
+                            Priority.PRIORITY_HIGH_ACCURACY,
+                            cancellationTokenSource.token
+                        ).await()
+
+                        if (location != null) {
+                            val loc = Location(lat = location.latitude, lon = location.longitude)
+                            currentLocation = loc
+                            // Use default throttling (not forced) for background refresh
+                            viewModel.updateLocation(loc, force = false)
+                        } else {
+                            Log.w(TAG, "GPS returned null on foreground refresh")
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error fetching GPS on foreground refresh", e)
+                    }
+                }
+            }
+        }
+    }
+
+    // Watch for demo mode changes while online - update location automatically
+    // Use force=true since this is a deliberate user action (bypasses throttling)
+    LaunchedEffect(useDemoLocation) {
+        // Only update if we're online (AVAILABLE stage)
+        if (uiState.stage == DriverStage.AVAILABLE) {
+            Log.d(TAG, "Demo mode setting changed to $useDemoLocation while online - updating location (forced)")
+            if (useDemoLocation) {
+                // Switched to demo mode - use demo location
+                currentLocation = demoLocation
+                viewModel.updateLocation(demoLocation, force = true)
+            } else {
+                // Switched to GPS mode - fetch real location
+                val hasPermission = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.ACCESS_FINE_LOCATION
+                ) == PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                ) == PackageManager.PERMISSION_GRANTED
+
+                if (hasPermission) {
+                    try {
+                        val cancellationTokenSource = CancellationTokenSource()
+                        val location = fusedLocationClient.getCurrentLocation(
+                            Priority.PRIORITY_HIGH_ACCURACY,
+                            cancellationTokenSource.token
+                        ).await()
+
+                        if (location != null) {
+                            val loc = Location(lat = location.latitude, lon = location.longitude)
+                            currentLocation = loc
+                            viewModel.updateLocation(loc, force = true)
+                        } else {
+                            Log.w(TAG, "GPS returned null, keeping current location")
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error fetching GPS location on mode change", e)
+                    }
+                } else {
+                    Log.w(TAG, "No location permission, can't switch to GPS mode")
+                    locationError = "Permission required for GPS"
+                }
+            }
+        }
+    }
 
     // Chat bottom sheet
     ChatBottomSheet(
@@ -100,14 +348,16 @@ fun DriverModeScreen(
             DriverStage.OFFLINE -> {
                 OfflineContent(
                     statusMessage = uiState.statusMessage,
-                    onGoOnline = { viewModel.toggleAvailability(demoLocation) }
+                    isFetchingLocation = isFetchingLocation,
+                    locationError = locationError,
+                    onGoOnline = { withCurrentLocation { location -> viewModel.toggleAvailability(location) } }
                 )
             }
 
             DriverStage.AVAILABLE -> {
                 AvailableContent(
                     uiState = uiState,
-                    onGoOffline = { viewModel.toggleAvailability(demoLocation) },
+                    onGoOffline = { withCurrentLocation { location -> viewModel.toggleAvailability(location) } },
                     onAcceptBroadcastRequest = { viewModel.acceptBroadcastRequest(it) },
                     onDeclineBroadcastRequest = { viewModel.declineBroadcastRequest(it) },
                     onAcceptOffer = { viewModel.acceptOffer(it) },
@@ -166,7 +416,7 @@ fun DriverModeScreen(
             DriverStage.RIDE_COMPLETED -> {
                 RideCompletedContent(
                     uiState = uiState,
-                    onFinish = { viewModel.finishAndGoOnline(demoLocation) },
+                    onFinish = { withCurrentLocation { location -> viewModel.finishAndGoOnline(location) } },
                     onGoOffline = { viewModel.clearAcceptedOffer() },
                     settingsManager = settingsManager,
                     priceService = viewModel.bitcoinPriceService
@@ -179,6 +429,8 @@ fun DriverModeScreen(
 @Composable
 private fun OfflineContent(
     statusMessage: String,
+    isFetchingLocation: Boolean,
+    locationError: String?,
     onGoOnline: () -> Unit
 ) {
     Card(
@@ -218,15 +470,37 @@ private fun OfflineContent(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
+            // Show location error if any
+            locationError?.let { error ->
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = error,
+                    style = MaterialTheme.typography.bodySmall,
+                    textAlign = TextAlign.Center,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+
             Spacer(modifier = Modifier.height(24.dp))
 
             Button(
                 onClick = onGoOnline,
+                enabled = !isFetchingLocation,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Icon(Icons.Default.Power, contentDescription = null)
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("Go Online")
+                if (isFetchingLocation) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Getting Location...")
+                } else {
+                    Icon(Icons.Default.Power, contentDescription = null)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Go Online")
+                }
             }
         }
     }
@@ -349,6 +623,7 @@ private fun AvailableContent(
             items(uiState.pendingBroadcastRequests) { request ->
                 BroadcastRideRequestCard(
                     request = request,
+                    pickupRoute = uiState.pickupRoutes[request.eventId],
                     isProcessing = uiState.isProcessingOffer,
                     onAccept = { onAcceptBroadcastRequest(request) },
                     onDecline = { onDeclineBroadcastRequest(request) },
@@ -1190,17 +1465,22 @@ private fun RideOfferCard(
 
 /**
  * Card for displaying a broadcast ride request.
- * Shows fare prominently, route info, and request age.
+ * Shows fare prominently, route info, earnings metrics, and request age.
  */
 @Composable
 private fun BroadcastRideRequestCard(
     request: BroadcastRideOfferData,
+    pickupRoute: RouteResult?,
     isProcessing: Boolean,
     onAccept: () -> Unit,
     onDecline: () -> Unit,
     settingsManager: SettingsManager,
     priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
+    val distanceUnit by settingsManager.distanceUnit.collectAsState()
+    val displayCurrency by settingsManager.displayCurrency.collectAsState()
+    val btcPrice by priceService.btcPriceUsd.collectAsState()
+
     // Update relative time every second
     var relativeTime by remember { mutableStateOf(formatRelativeTime(request.createdAt)) }
     LaunchedEffect(request.createdAt) {
@@ -1208,6 +1488,47 @@ private fun BroadcastRideRequestCard(
             relativeTime = formatRelativeTime(request.createdAt)
             kotlinx.coroutines.delay(1000)
         }
+    }
+
+    // Distance conversion (km to miles if needed)
+    val rideDistanceKm = request.routeDistanceKm
+    val rideDurationMin = request.routeDurationMin
+
+    // Format ride distance based on user preference
+    val rideDistanceStr = formatDistance(rideDistanceKm, distanceUnit)
+
+    // Pickup route info (only available if calculated)
+    val pickupDistanceKm = pickupRoute?.distanceKm
+    val pickupDurationMin = pickupRoute?.let { it.durationSeconds / 60.0 }
+    val pickupDistanceStr = pickupDistanceKm?.let { formatDistance(it, distanceUnit) }
+
+    // Calculate earnings metrics ONLY if we have pickup route data
+    // Without pickup time, $/hr would be misleadingly high
+    val earningsPerHour: String?
+    val earningsPerDistance: String?
+
+    if (pickupRoute != null && pickupDurationMin != null) {
+        // Total time = pickup time + ride time (in hours)
+        val totalTimeHours = (pickupDurationMin + rideDurationMin) / 60.0
+        // Total distance for $/mile = ride distance only (not pickup - that's unpaid)
+        val rideDistanceForEarnings = if (distanceUnit == DistanceUnit.MILES) {
+            rideDistanceKm * 0.621371
+        } else {
+            rideDistanceKm
+        }
+
+        earningsPerHour = if (totalTimeHours > 0) {
+            formatEarnings(request.fareEstimate / totalTimeHours, displayCurrency, btcPrice, "/hr")
+        } else null
+
+        earningsPerDistance = if (rideDistanceForEarnings > 0) {
+            val perDistanceUnit = if (distanceUnit == DistanceUnit.MILES) "/mi" else "/km"
+            formatEarnings(request.fareEstimate / rideDistanceForEarnings, displayCurrency, btcPrice, perDistanceUnit)
+        } else null
+    } else {
+        // Don't show earnings without pickup route - they'd be misleading
+        earningsPerHour = null
+        earningsPerDistance = null
     }
 
     Card(
@@ -1249,77 +1570,106 @@ private fun BroadcastRideRequestCard(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Route info
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                // Distance
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        Icons.Default.Straighten,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = "${String.format("%.1f", request.routeDistanceKm)} km",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                }
-                // Duration
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        Icons.Default.Schedule,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = "${request.routeDurationMin.toInt()} min",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Locations
+            // Pickup info - distance/time from driver's location
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
-                    Icons.Default.MyLocation,
+                    Icons.Default.DirectionsCar,
                     contentDescription = null,
-                    modifier = Modifier.size(16.dp),
+                    modifier = Modifier.size(18.dp),
                     tint = MaterialTheme.colorScheme.primary
                 )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = "Pickup: ${String.format("%.4f", request.pickupArea.lat)}, ${String.format("%.4f", request.pickupArea.lon)}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                Spacer(modifier = Modifier.width(6.dp))
+                if (pickupDistanceStr != null && pickupDurationMin != null) {
+                    Text(
+                        text = "$pickupDistanceStr away",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = " • ${pickupDurationMin.toInt()} min to pickup",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    Text(
+                        text = "Calculating route...",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
 
-            Spacer(modifier = Modifier.height(4.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
+            // Ride info - distance/time of the trip
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
-                    Icons.Default.Flag,
+                    Icons.Default.Place,
                     contentDescription = null,
-                    modifier = Modifier.size(16.dp),
-                    tint = MaterialTheme.colorScheme.error
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.tertiary
                 )
-                Spacer(modifier = Modifier.width(4.dp))
+                Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = "Dest: ${String.format("%.4f", request.destinationArea.lat)}, ${String.format("%.4f", request.destinationArea.lon)}",
-                    style = MaterialTheme.typography.bodySmall,
+                    text = "$rideDistanceStr ride",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium
+                )
+                Text(
+                    text = " • ${rideDurationMin.toInt()} min trip",
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Earnings metrics row
+            if (earningsPerHour != null || earningsPerDistance != null) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    // $/hr metric
+                    earningsPerHour?.let { perHour ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Default.Schedule,
+                                contentDescription = null,
+                                modifier = Modifier.size(14.dp),
+                                tint = MaterialTheme.colorScheme.secondary
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = perHour,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.secondary
+                            )
+                        }
+                    }
+                    // $/mi or $/km metric
+                    earningsPerDistance?.let { perDistance ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Default.Straighten,
+                                contentDescription = null,
+                                modifier = Modifier.size(14.dp),
+                                tint = MaterialTheme.colorScheme.secondary
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = perDistance,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.secondary
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+            }
 
             // Action buttons
             Row(
@@ -1354,6 +1704,54 @@ private fun BroadcastRideRequestCard(
                         Text("Accept")
                     }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * Format distance based on user's preferred unit.
+ */
+private fun formatDistance(distanceKm: Double, unit: DistanceUnit): String {
+    return when (unit) {
+        DistanceUnit.MILES -> {
+            val miles = distanceKm * 0.621371
+            if (miles < 0.1) {
+                "${(miles * 5280).toInt()} ft"
+            } else {
+                String.format("%.1f mi", miles)
+            }
+        }
+        DistanceUnit.KILOMETERS -> {
+            if (distanceKm < 1) {
+                "${(distanceKm * 1000).toInt()} m"
+            } else {
+                String.format("%.1f km", distanceKm)
+            }
+        }
+    }
+}
+
+/**
+ * Format earnings rate (sats/unit) with currency conversion.
+ */
+private fun formatEarnings(
+    satsPerUnit: Double,
+    displayCurrency: DisplayCurrency,
+    btcPriceUsd: Int?,
+    suffix: String
+): String {
+    return when (displayCurrency) {
+        DisplayCurrency.SATS -> {
+            "${satsPerUnit.toInt()} sats$suffix"
+        }
+        DisplayCurrency.USD -> {
+            if (btcPriceUsd != null && btcPriceUsd > 0) {
+                // Convert sats to USD: sats / 100_000_000 * btcPriceUsd
+                val usdValue = (satsPerUnit / 100_000_000.0) * btcPriceUsd
+                String.format("$%.2f$suffix", usdValue)
+            } else {
+                "${satsPerUnit.toInt()} sats$suffix"
             }
         }
     }

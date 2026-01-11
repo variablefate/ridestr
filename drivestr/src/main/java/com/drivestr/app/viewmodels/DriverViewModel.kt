@@ -14,6 +14,8 @@ import com.ridestr.common.nostr.events.PickupVerificationData
 import com.ridestr.common.nostr.events.RideConfirmationData
 import com.ridestr.common.nostr.events.RideOfferData
 import com.ridestr.common.nostr.events.RideshareChatData
+import com.ridestr.common.routing.RouteResult
+import com.ridestr.common.routing.ValhallaRoutingService
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -54,7 +56,33 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         private const val KEY_RIDE_STATE = "active_ride"
         // Maximum age of persisted ride state (2 hours)
         private const val MAX_RIDE_STATE_AGE_MS = 2 * 60 * 60 * 1000L
+        // Route cache settings
+        private const val LOCATION_CACHE_PRECISION = 3 // ~100m precision for cache key
+        private const val DRIVER_MOVEMENT_THRESHOLD_KM = 0.5 // Recalculate if driver moved >500m
+        private const val ROUTE_RECALC_THROTTLE_MS = 30 * 1000L // Min 30s between full recalculations
+        // Location update throttling - don't spam relays with frequent updates
+        private const val MIN_LOCATION_UPDATE_DISTANCE_M = 1000.0 // Min 1000m movement
+        private const val MIN_LOCATION_UPDATE_INTERVAL_MS = 30 * 1000L // Min 30 seconds between updates
+
+        /**
+         * Calculate distance between two locations using Haversine formula.
+         * @return Distance in meters
+         */
+        fun calculateDistanceMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+            val earthRadiusM = 6371000.0 // Earth's radius in meters
+            val dLat = Math.toRadians(lat2 - lat1)
+            val dLon = Math.toRadians(lon2 - lon1)
+            val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                    Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+                    Math.sin(dLon / 2) * Math.sin(dLon / 2)
+            val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+            return earthRadiusM * c
+        }
     }
+
+    // Track last broadcast for throttling
+    private var lastBroadcastLocation: Location? = null
+    private var lastBroadcastTimeMs: Long = 0L
 
     private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
@@ -62,6 +90,22 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
     // Bitcoin price service for fare conversion
     val bitcoinPriceService = BitcoinPriceService()
+
+    // Valhalla routing service for calculating distances
+    private val routingService = ValhallaRoutingService(application)
+
+    // Cache for pickup route calculations
+    // Key: location pair hash (driver location + pickup location, rounded to ~100m precision)
+    // This allows reuse when rider boosts fare (new event, same locations)
+    private val locationRouteCache = mutableMapOf<String, RouteResult>()
+
+    // Map eventId -> cache key for UI state lookup
+    private val eventToCacheKey = mutableMapOf<String, String>()
+
+    // Track the driver location used for each cached route (to invalidate on significant movement)
+    private var lastCacheDriverLocation: Location? = null
+    // Track last time we did a full route recalculation (throttle to avoid excessive recalcs)
+    private var lastRouteRecalcTimeMs: Long = 0
 
     private val _uiState = MutableStateFlow(DriverUiState())
     val uiState: StateFlow<DriverUiState> = _uiState.asStateFlow()
@@ -88,6 +132,20 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Start Bitcoin price auto-refresh (every 5 minutes)
         bitcoinPriceService.startAutoRefresh()
 
+        // Initialize Valhalla routing service
+        viewModelScope.launch {
+            val initialized = routingService.initialize()
+            Log.d(TAG, "Valhalla routing service initialized: $initialized")
+
+            // If we have pending requests that couldn't calculate routes, retry now
+            if (initialized && _uiState.value.pendingBroadcastRequests.isNotEmpty()) {
+                Log.d(TAG, "Recalculating routes for ${_uiState.value.pendingBroadcastRequests.size} pending requests")
+                _uiState.value.pendingBroadcastRequests.forEach { request ->
+                    calculatePickupRoute(request.eventId, request.pickupArea)
+                }
+            }
+        }
+
         // Set user's public key
         nostrService.getPubKeyHex()?.let { pubKey ->
             _uiState.value = _uiState.value.copy(myPubKey = pubKey)
@@ -95,6 +153,17 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
         // Restore any active ride state from previous session
         restoreRideState()
+    }
+
+    // Flag to request location refresh from UI (since GPS lives there)
+    private val _locationRefreshRequested = MutableStateFlow(false)
+    val locationRefreshRequested: StateFlow<Boolean> = _locationRefreshRequested.asStateFlow()
+
+    /**
+     * Called by UI after it has fetched and provided the new location.
+     */
+    fun acknowledgeLocationRefresh() {
+        _locationRefreshRequested.value = false
     }
 
     /**
@@ -105,8 +174,16 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         Log.d(TAG, "onResume - ensuring relay connections and refreshing subscriptions")
         nostrService.ensureConnected()
 
-        // If we have an active ride with a confirmation, refresh subscriptions
         val state = _uiState.value
+
+        // If driver is AVAILABLE, request location refresh
+        // The UI will fetch GPS and call updateLocation()
+        if (state.stage == DriverStage.AVAILABLE) {
+            Log.d(TAG, "Driver is AVAILABLE, requesting location refresh")
+            _locationRefreshRequested.value = true
+        }
+
+        // If we have an active ride with a confirmation, refresh subscriptions
         val confId = state.confirmationEventId
         if (confId != null && state.stage in listOf(
                 DriverStage.EN_ROUTE_TO_PICKUP,
@@ -330,24 +407,94 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             }
             stopBroadcasting()
             closeOfferSubscription()
+            // Reset throttle tracking for next time driver goes online
+            lastBroadcastLocation = null
+            lastBroadcastTimeMs = 0L
             _uiState.value = currentState.copy(
                 stage = DriverStage.OFFLINE,
                 currentLocation = null,
                 statusMessage = "You are now offline"
             )
         } else if (currentState.stage == DriverStage.OFFLINE) {
-            // Go online
-            startBroadcasting(location)
-            subscribeToBroadcastRequests(location)
-            // Also subscribe to direct offers (legacy/advanced mode)
-            subscribeToOffers()
+            // Go online - set location FIRST so route calculations work
             _uiState.value = currentState.copy(
                 stage = DriverStage.AVAILABLE,
                 currentLocation = location,
                 statusMessage = "You are now available for rides"
             )
+            // Initialize cache location tracker
+            lastCacheDriverLocation = location
+
+            // Now start subscriptions (location is already set for route calculations)
+            startBroadcasting(location)
+            subscribeToBroadcastRequests(location)
+            // Also subscribe to direct offers (legacy/advanced mode)
+            subscribeToOffers()
         }
         // Don't allow toggling during a ride
+    }
+
+    /**
+     * Update the driver's location while online.
+     * This updates the stored location and triggers an immediate re-broadcast.
+     *
+     * Throttling: To avoid spamming relays, updates are only broadcast if:
+     * - At least MIN_LOCATION_UPDATE_DISTANCE_M (1000m) from last broadcast, AND
+     * - At least MIN_LOCATION_UPDATE_INTERVAL_MS (30s) since last broadcast
+     *
+     * @param newLocation The new location
+     * @param force If true, bypasses throttling (use for deliberate user actions like toggling demo mode)
+     */
+    fun updateLocation(newLocation: Location, force: Boolean = false) {
+        val currentState = _uiState.value
+
+        // Only update if we're available (online and not in a ride)
+        if (currentState.stage != DriverStage.AVAILABLE) {
+            Log.d(TAG, "Not updating location - not in AVAILABLE stage (current: ${currentState.stage})")
+            return
+        }
+
+        // Check throttling unless forced
+        if (!force && lastBroadcastLocation != null) {
+            val timeSinceLastBroadcast = System.currentTimeMillis() - lastBroadcastTimeMs
+            val distanceFromLastBroadcast = calculateDistanceMeters(
+                lastBroadcastLocation!!.lat, lastBroadcastLocation!!.lon,
+                newLocation.lat, newLocation.lon
+            )
+
+            val timeOk = timeSinceLastBroadcast >= MIN_LOCATION_UPDATE_INTERVAL_MS
+            val distanceOk = distanceFromLastBroadcast >= MIN_LOCATION_UPDATE_DISTANCE_M
+
+            if (!timeOk || !distanceOk) {
+                Log.d(TAG, "Location update throttled: distance=${distanceFromLastBroadcast.toInt()}m (need ${MIN_LOCATION_UPDATE_DISTANCE_M.toInt()}m), " +
+                        "time=${timeSinceLastBroadcast/1000}s (need ${MIN_LOCATION_UPDATE_INTERVAL_MS/1000}s)")
+                // Still update the local state for UI, just don't broadcast
+                _uiState.value = currentState.copy(currentLocation = newLocation)
+                return
+            }
+        }
+
+        Log.d(TAG, "Updating driver location to: ${newLocation.lat}, ${newLocation.lon}" + if (force) " (forced)" else "")
+
+        // Update the stored location
+        _uiState.value = currentState.copy(
+            currentLocation = newLocation
+        )
+
+        // Update cache location tracker for route calculations
+        lastCacheDriverLocation = newLocation
+
+        // Track this broadcast for throttling
+        lastBroadcastLocation = newLocation
+        lastBroadcastTimeMs = System.currentTimeMillis()
+
+        // Restart broadcasting with the new location to trigger immediate update
+        // The periodic broadcast will now use the new location from state
+        stopBroadcasting()
+        startBroadcasting(newLocation)
+
+        // Also resubscribe to broadcast requests with new geohash
+        subscribeToBroadcastRequests(newLocation)
     }
 
     /**
@@ -495,6 +642,11 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Update location when available or during a ride
         if (_uiState.value.stage != DriverStage.OFFLINE) {
             _uiState.value = _uiState.value.copy(currentLocation = location)
+
+            // Check if driver moved significantly and needs route recalculation
+            if (_uiState.value.stage == DriverStage.AVAILABLE) {
+                checkDriverLocationChange(location)
+            }
         }
     }
 
@@ -1146,9 +1298,20 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun startBroadcasting(location: Location) {
         availabilityJob?.cancel()
+
+        // Initialize throttle tracking for first broadcast
+        if (lastBroadcastLocation == null) {
+            lastBroadcastLocation = location
+            lastBroadcastTimeMs = System.currentTimeMillis()
+        }
+
         availabilityJob = viewModelScope.launch {
             while (isActive) {
                 val currentLocation = _uiState.value.currentLocation ?: location
+
+                // Track this broadcast for throttling
+                lastBroadcastLocation = currentLocation
+                lastBroadcastTimeMs = System.currentTimeMillis()
 
                 val previousEventId = publishedAvailabilityEventIds.lastOrNull()
                 if (previousEventId != null) {
@@ -1236,6 +1399,174 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /**
+     * Create a cache key from driver location and pickup location.
+     * Rounds to ~100m precision to allow cache hits for nearby locations.
+     */
+    private fun createLocationCacheKey(driverLoc: Location, pickupLoc: Location): String {
+        // Round to 3 decimal places (~111m at equator, good enough for cache)
+        val dLat = String.format("%.${LOCATION_CACHE_PRECISION}f", driverLoc.lat)
+        val dLon = String.format("%.${LOCATION_CACHE_PRECISION}f", driverLoc.lon)
+        val pLat = String.format("%.${LOCATION_CACHE_PRECISION}f", pickupLoc.lat)
+        val pLon = String.format("%.${LOCATION_CACHE_PRECISION}f", pickupLoc.lon)
+        return "$dLat,$dLon->$pLat,$pLon"
+    }
+
+    /**
+     * Check if driver has moved significantly since last cache update.
+     * If so, clear the cache and recalculate routes for visible requests.
+     * Throttled to prevent excessive recalculations when many rides are available.
+     */
+    private fun checkDriverLocationChange(newLocation: Location) {
+        val lastLoc = lastCacheDriverLocation
+        if (lastLoc != null) {
+            // Simple distance approximation (good enough for ~500m threshold)
+            val latDiff = Math.abs(newLocation.lat - lastLoc.lat)
+            val lonDiff = Math.abs(newLocation.lon - lastLoc.lon)
+            // Roughly convert to km (1 degree ~= 111km)
+            val distKm = Math.sqrt(latDiff * latDiff + lonDiff * lonDiff) * 111.0
+
+            if (distKm > DRIVER_MOVEMENT_THRESHOLD_KM) {
+                // Check time throttle - don't recalculate too frequently
+                val now = System.currentTimeMillis()
+                if (now - lastRouteRecalcTimeMs < ROUTE_RECALC_THROTTLE_MS) {
+                    Log.d(TAG, "Driver moved but throttling recalc (${(now - lastRouteRecalcTimeMs) / 1000}s since last)")
+                    return
+                }
+
+                Log.d(TAG, "Driver moved ${String.format("%.2f", distKm)} km, clearing route cache")
+                clearRouteCache()
+                lastCacheDriverLocation = newLocation
+                lastRouteRecalcTimeMs = now
+
+                // Recalculate routes for all visible requests
+                _uiState.value.pendingBroadcastRequests.forEach { request ->
+                    calculatePickupRoute(request.eventId, request.pickupArea)
+                }
+            }
+        } else {
+            lastCacheDriverLocation = newLocation
+        }
+    }
+
+    /**
+     * Clear all cached routes.
+     */
+    private fun clearRouteCache() {
+        locationRouteCache.clear()
+        eventToCacheKey.clear()
+        _uiState.value = _uiState.value.copy(pickupRoutes = emptyMap())
+    }
+
+    /**
+     * Calculate the route from driver's current location to a pickup location.
+     * Uses location-based caching to avoid recalculating when:
+     * - Rider boosts fare (new event, same locations)
+     * - Same pickup location from different requests
+     * Falls back to straight-line distance if routing fails.
+     */
+    private fun calculatePickupRoute(requestEventId: String, pickupLocation: Location) {
+        val driverLocation = _uiState.value.currentLocation
+        if (driverLocation == null) {
+            Log.w(TAG, "No driver location available for route calculation")
+            return
+        }
+
+        // Create cache key based on locations
+        val cacheKey = createLocationCacheKey(driverLocation, pickupLocation)
+
+        // Check if we already have this event mapped
+        if (eventToCacheKey[requestEventId] == cacheKey && _uiState.value.pickupRoutes.containsKey(requestEventId)) {
+            return // Already calculated with same locations
+        }
+
+        // Check if we have a cached route for these locations
+        val cachedRoute = locationRouteCache[cacheKey]
+        if (cachedRoute != null) {
+            Log.d(TAG, "Using cached route for ${requestEventId.take(8)} (same locations)")
+            eventToCacheKey[requestEventId] = cacheKey
+            _uiState.value = _uiState.value.copy(
+                pickupRoutes = _uiState.value.pickupRoutes + (requestEventId to cachedRoute)
+            )
+            return
+        }
+
+        // Need to calculate new route
+        viewModelScope.launch {
+            if (!routingService.isReady()) {
+                Log.w(TAG, "Routing service not ready, using straight-line fallback")
+                val fallbackRoute = calculateStraightLineRoute(driverLocation, pickupLocation)
+                storeFallbackRoute(requestEventId, cacheKey, fallbackRoute)
+                return@launch
+            }
+
+            Log.d(TAG, "Calculating route: driver(${driverLocation.lat}, ${driverLocation.lon}) -> pickup(${pickupLocation.lat}, ${pickupLocation.lon})")
+
+            val route = routingService.calculateRoute(
+                originLat = driverLocation.lat,
+                originLon = driverLocation.lon,
+                destLat = pickupLocation.lat,
+                destLon = pickupLocation.lon
+            )
+
+            if (route != null) {
+                Log.d(TAG, "Calculated pickup route for ${requestEventId.take(8)}: ${route.distanceKm} km, ${route.durationSeconds}s")
+
+                // Store in location-based cache
+                locationRouteCache[cacheKey] = route
+                eventToCacheKey[requestEventId] = cacheKey
+
+                // Update UI state with new route
+                _uiState.value = _uiState.value.copy(
+                    pickupRoutes = _uiState.value.pickupRoutes + (requestEventId to route)
+                )
+            } else {
+                Log.w(TAG, "Valhalla routing failed for ${requestEventId.take(8)}, using straight-line fallback")
+                val fallbackRoute = calculateStraightLineRoute(driverLocation, pickupLocation)
+                storeFallbackRoute(requestEventId, cacheKey, fallbackRoute)
+            }
+        }
+    }
+
+    /**
+     * Calculate straight-line distance between two points as a fallback.
+     * Uses Haversine formula and estimates driving time at ~40 km/h average.
+     */
+    private fun calculateStraightLineRoute(from: Location, to: Location): RouteResult {
+        val earthRadiusKm = 6371.0
+        val dLat = Math.toRadians(to.lat - from.lat)
+        val dLon = Math.toRadians(to.lon - from.lon)
+        val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                Math.cos(Math.toRadians(from.lat)) * Math.cos(Math.toRadians(to.lat)) *
+                Math.sin(dLon / 2) * Math.sin(dLon / 2)
+        val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+        val straightLineKm = earthRadiusKm * c
+
+        // Estimate driving distance as 1.3x straight line, time at 40 km/h
+        val estimatedDrivingKm = straightLineKm * 1.3
+        val estimatedTimeSeconds = (estimatedDrivingKm / 40.0) * 3600.0
+
+        Log.d(TAG, "Straight-line fallback: ${String.format("%.2f", straightLineKm)} km -> est ${String.format("%.2f", estimatedDrivingKm)} km driving")
+
+        return RouteResult(
+            distanceKm = estimatedDrivingKm,
+            durationSeconds = estimatedTimeSeconds,
+            encodedPolyline = null,
+            maneuvers = emptyList()
+        )
+    }
+
+    /**
+     * Store a fallback route in cache and UI state.
+     */
+    private fun storeFallbackRoute(requestEventId: String, cacheKey: String, route: RouteResult) {
+        locationRouteCache[cacheKey] = route
+        eventToCacheKey[requestEventId] = cacheKey
+        _uiState.value = _uiState.value.copy(
+            pickupRoutes = _uiState.value.pickupRoutes + (requestEventId to route)
+        )
+    }
+
+    /**
      * Subscribe to broadcast ride requests in the driver's area.
      * This is the new primary flow where riders broadcast and any driver can accept.
      */
@@ -1289,6 +1620,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     pendingBroadcastRequests = sortedRequests
                 )
 
+                // Calculate route to pickup location
+                calculatePickupRoute(request.eventId, request.pickupArea)
+
                 // Subscribe to acceptances for this request to detect if another driver takes it
                 subscribeToAcceptancesForRequest(request.eventId)
             }
@@ -1325,7 +1659,15 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Remove from pending requests
         val currentRequests = _uiState.value.pendingBroadcastRequests
         val updatedRequests = currentRequests.filter { it.eventId != requestEventId }
-        _uiState.value = _uiState.value.copy(pendingBroadcastRequests = updatedRequests)
+
+        // Remove from eventId -> cacheKey mapping (but keep location cache for other requests with same location)
+        eventToCacheKey.remove(requestEventId)
+        val updatedRoutes = _uiState.value.pickupRoutes - requestEventId
+
+        _uiState.value = _uiState.value.copy(
+            pendingBroadcastRequests = updatedRequests,
+            pickupRoutes = updatedRoutes
+        )
 
         // Close the acceptance subscription for this request (no longer needed)
         requestAcceptanceSubscriptionIds.remove(requestEventId)?.let {
@@ -1435,6 +1777,8 @@ data class DriverUiState(
     val pendingOffers: List<RideOfferData> = emptyList(),
     // Ride offers - Broadcast requests (new primary flow)
     val pendingBroadcastRequests: List<BroadcastRideOfferData> = emptyList(),
+    // Cached pickup routes for broadcast requests (keyed by eventId)
+    val pickupRoutes: Map<String, RouteResult> = emptyMap(),
     val isProcessingOffer: Boolean = false,
 
     // Active ride info

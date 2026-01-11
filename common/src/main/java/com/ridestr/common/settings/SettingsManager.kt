@@ -15,6 +15,14 @@ enum class DisplayCurrency {
 }
 
 /**
+ * Distance unit preference for displaying distances.
+ */
+enum class DistanceUnit {
+    MILES,      // Display distances in miles
+    KILOMETERS  // Display distances in kilometers
+}
+
+/**
  * Manages app settings using SharedPreferences with StateFlow for reactive UI updates.
  */
 class SettingsManager(context: Context) {
@@ -23,6 +31,11 @@ class SettingsManager(context: Context) {
         private const val PREFS_NAME = "ridestr_settings"
         private const val KEY_AUTO_OPEN_NAVIGATION = "auto_open_navigation"
         private const val KEY_DISPLAY_CURRENCY = "display_currency"
+        private const val KEY_DISTANCE_UNIT = "distance_unit"
+
+        // Debug settings
+        private const val KEY_USE_GEOCODING_SEARCH = "use_geocoding_search"
+        private const val KEY_USE_DEMO_LOCATION = "use_demo_location"
     }
 
     private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -46,18 +59,31 @@ class SettingsManager(context: Context) {
         setAutoOpenNavigation(!_autoOpenNavigation.value)
     }
 
-    // Currency display setting (default: SATS)
+    // Currency display setting (default: USD)
     private val _displayCurrency = MutableStateFlow(
         try {
             DisplayCurrency.valueOf(
-                prefs.getString(KEY_DISPLAY_CURRENCY, DisplayCurrency.SATS.name)
-                    ?: DisplayCurrency.SATS.name
+                prefs.getString(KEY_DISPLAY_CURRENCY, DisplayCurrency.USD.name)
+                    ?: DisplayCurrency.USD.name
             )
         } catch (e: IllegalArgumentException) {
-            DisplayCurrency.SATS
+            DisplayCurrency.USD
         }
     )
     val displayCurrency: StateFlow<DisplayCurrency> = _displayCurrency.asStateFlow()
+
+    // Distance unit setting (default: MILES)
+    private val _distanceUnit = MutableStateFlow(
+        try {
+            DistanceUnit.valueOf(
+                prefs.getString(KEY_DISTANCE_UNIT, DistanceUnit.MILES.name)
+                    ?: DistanceUnit.MILES.name
+            )
+        } catch (e: IllegalArgumentException) {
+            DistanceUnit.MILES
+        }
+    )
+    val distanceUnit: StateFlow<DistanceUnit> = _distanceUnit.asStateFlow()
 
     /**
      * Set the currency display preference.
@@ -77,5 +103,70 @@ class SettingsManager(context: Context) {
             DisplayCurrency.SATS
         }
         setDisplayCurrency(newCurrency)
+    }
+
+    /**
+     * Set the distance unit preference.
+     */
+    fun setDistanceUnit(unit: DistanceUnit) {
+        prefs.edit().putString(KEY_DISTANCE_UNIT, unit.name).apply()
+        _distanceUnit.value = unit
+    }
+
+    /**
+     * Toggle between MILES and KILOMETERS display.
+     */
+    fun toggleDistanceUnit() {
+        val newUnit = if (_distanceUnit.value == DistanceUnit.MILES) {
+            DistanceUnit.KILOMETERS
+        } else {
+            DistanceUnit.MILES
+        }
+        setDistanceUnit(newUnit)
+    }
+
+    // ===================
+    // DEBUG SETTINGS
+    // ===================
+
+    // Use geocoding search instead of manual coordinate entry (default: true)
+    private val _useGeocodingSearch = MutableStateFlow(prefs.getBoolean(KEY_USE_GEOCODING_SEARCH, true))
+    val useGeocodingSearch: StateFlow<Boolean> = _useGeocodingSearch.asStateFlow()
+
+    /**
+     * Set whether to use geocoding search for location input.
+     * When false, shows manual coordinate entry fields.
+     */
+    fun setUseGeocodingSearch(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_USE_GEOCODING_SEARCH, enabled).apply()
+        _useGeocodingSearch.value = enabled
+    }
+
+    /**
+     * Toggle geocoding search on/off.
+     */
+    fun toggleUseGeocodingSearch() {
+        setUseGeocodingSearch(!_useGeocodingSearch.value)
+    }
+
+    // Use demo location instead of GPS (default: true for testing, false for production)
+    private val _useDemoLocation = MutableStateFlow(prefs.getBoolean(KEY_USE_DEMO_LOCATION, true))
+    val useDemoLocation: StateFlow<Boolean> = _useDemoLocation.asStateFlow()
+
+    /**
+     * Set whether to use demo location instead of GPS.
+     * When true, uses hardcoded demo coordinates for testing.
+     * When false, attempts to use actual GPS location.
+     */
+    fun setUseDemoLocation(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_USE_DEMO_LOCATION, enabled).apply()
+        _useDemoLocation.value = enabled
+    }
+
+    /**
+     * Toggle demo location on/off.
+     */
+    fun toggleUseDemoLocation() {
+        setUseDemoLocation(!_useDemoLocation.value)
     }
 }

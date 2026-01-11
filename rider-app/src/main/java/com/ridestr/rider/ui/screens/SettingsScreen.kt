@@ -8,6 +8,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.ridestr.common.settings.DisplayCurrency
+import com.ridestr.common.settings.DistanceUnit
 import com.ridestr.common.settings.SettingsManager
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -33,24 +35,41 @@ fun SettingsScreen(
         },
         modifier = modifier
     ) { padding ->
+        val displayCurrency by settingsManager.displayCurrency.collectAsState()
+        val distanceUnit by settingsManager.distanceUnit.collectAsState()
+
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
                 .padding(16.dp)
         ) {
-            // Placeholder for future rider-specific settings
-            Text(
-                text = "Settings",
-                style = MaterialTheme.typography.titleLarge
+            // Display Currency Setting
+            SettingsSwitchRow(
+                title = "Display Currency",
+                description = if (displayCurrency == DisplayCurrency.USD)
+                    "Showing fares in US Dollars"
+                else
+                    "Showing fares in Satoshis",
+                checked = displayCurrency == DisplayCurrency.USD,
+                onCheckedChange = { settingsManager.toggleDisplayCurrency() },
+                checkedLabel = "USD",
+                uncheckedLabel = "Sats"
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
-            Text(
-                text = "More settings coming soon",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+            // Distance Units Setting
+            SettingsSwitchRow(
+                title = "Distance Units",
+                description = if (distanceUnit == DistanceUnit.MILES)
+                    "Showing distances in miles"
+                else
+                    "Showing distances in kilometers",
+                checked = distanceUnit == DistanceUnit.MILES,
+                onCheckedChange = { settingsManager.toggleDistanceUnit() },
+                checkedLabel = "Miles",
+                uncheckedLabel = "km"
             )
         }
     }
@@ -62,7 +81,9 @@ private fun SettingsSwitchRow(
     description: String,
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    checkedLabel: String? = null,
+    uncheckedLabel: String? = null
 ) {
     Row(
         modifier = modifier
@@ -83,9 +104,29 @@ private fun SettingsSwitchRow(
             )
         }
         Spacer(modifier = Modifier.width(16.dp))
-        Switch(
-            checked = checked,
-            onCheckedChange = onCheckedChange
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (uncheckedLabel != null) {
+                Text(
+                    text = uncheckedLabel,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (!checked) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+            }
+            Switch(
+                checked = checked,
+                onCheckedChange = onCheckedChange
+            )
+            if (checkedLabel != null) {
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = checkedLabel,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (checked) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
     }
 }

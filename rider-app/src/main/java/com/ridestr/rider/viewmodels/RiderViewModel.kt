@@ -5,6 +5,8 @@ import android.content.Context
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.ridestr.common.location.GeocodingResult
+import com.ridestr.common.location.GeocodingService
 import com.ridestr.common.nostr.NostrService
 import com.ridestr.common.nostr.events.DriverAvailabilityData
 import com.ridestr.common.nostr.events.DriverStatusData
@@ -18,6 +20,8 @@ import com.ridestr.common.nostr.events.geohash
 import kotlin.random.Random
 import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.routing.RouteResult
+import com.ridestr.common.settings.DisplayCurrency
+import com.ridestr.common.settings.SettingsManager
 import com.ridestr.common.routing.ValhallaRoutingService
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -36,10 +40,15 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
         private const val TAG = "RiderViewModel"
-        // Base fare in sats per km
-        private const val FARE_PER_KM = 100.0
-        // Base fare minimum
-        private const val BASE_FARE = 500.0
+        // Fare pricing in USD
+        private const val FARE_USD_PER_MILE = 2.0  // $2 per mile
+        // Fare boost amounts
+        private const val FARE_BOOST_USD = 1.0     // $1 boost in USD mode
+        private const val FARE_BOOST_SATS = 1000.0 // 1000 sats boost in sats mode
+        // Fallback sats per mile when BTC price unavailable (assumes ~$100k BTC)
+        private const val FALLBACK_SATS_PER_MILE = 2000.0
+        // Conversion factor: 1 km = 0.621371 miles
+        private const val KM_TO_MILES = 0.621371
         // Time after which a driver is considered stale (10 minutes)
         private const val STALE_DRIVER_TIMEOUT_MS = 10 * 60 * 1000L
         // How often to check for stale drivers (30 seconds)
@@ -57,13 +66,34 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         private const val ACCEPTANCE_TIMEOUT_MS = 20_000L
         // Time to wait for any driver to accept broadcast request (2 minutes)
         private const val BROADCAST_TIMEOUT_MS = 120_000L
-        // Default fare boost amount in sats
-        private const val FARE_BOOST_AMOUNT = 100.0
+
+        // Demo location coordinates for testing
+        private const val DEMO_PICKUP_LAT = 38.429719
+        private const val DEMO_PICKUP_LON = -108.827425
+        private const val DEMO_DEST_LAT = 38.4604331
+        private const val DEMO_DEST_LON = -108.8817009
     }
 
     private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val nostrService = NostrService(application)
     private val routingService = ValhallaRoutingService(application)
+    private val geocodingService = GeocodingService(application)
+
+    // Settings manager for user preferences
+    val settingsManager = SettingsManager(application)
+
+    // Geocoding state
+    private val _pickupSearchResults = MutableStateFlow<List<GeocodingResult>>(emptyList())
+    val pickupSearchResults: StateFlow<List<GeocodingResult>> = _pickupSearchResults.asStateFlow()
+
+    private val _destSearchResults = MutableStateFlow<List<GeocodingResult>>(emptyList())
+    val destSearchResults: StateFlow<List<GeocodingResult>> = _destSearchResults.asStateFlow()
+
+    private val _isSearchingPickup = MutableStateFlow(false)
+    val isSearchingPickup: StateFlow<Boolean> = _isSearchingPickup.asStateFlow()
+
+    private val _isSearchingDest = MutableStateFlow(false)
+    val isSearchingDest: StateFlow<Boolean> = _isSearchingDest.asStateFlow()
 
     // Bitcoin price service for fare conversion
     val bitcoinPriceService = BitcoinPriceService()
@@ -396,6 +426,260 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         calculateRouteIfReady()
     }
 
+    // ==================== Geocoding Methods ====================
+
+    /**
+     * Search for pickup locations by address.
+     */
+    fun searchPickupLocations(query: String) {
+        if (query.length < 3) {
+            _pickupSearchResults.value = emptyList()
+            return
+        }
+
+        viewModelScope.launch {
+            _isSearchingPickup.value = true
+            try {
+                val results = geocodingService.searchAddress(query)
+                _pickupSearchResults.value = results
+                Log.d(TAG, "Pickup search '$query' returned ${results.size} results")
+            } catch (e: Exception) {
+                Log.e(TAG, "Pickup search failed", e)
+                _pickupSearchResults.value = emptyList()
+            } finally {
+                _isSearchingPickup.value = false
+            }
+        }
+    }
+
+    /**
+     * Search for destination locations by address.
+     */
+    fun searchDestLocations(query: String) {
+        if (query.length < 3) {
+            _destSearchResults.value = emptyList()
+            return
+        }
+
+        viewModelScope.launch {
+            _isSearchingDest.value = true
+            try {
+                val results = geocodingService.searchAddress(query)
+                _destSearchResults.value = results
+                Log.d(TAG, "Destination search '$query' returned ${results.size} results")
+            } catch (e: Exception) {
+                Log.e(TAG, "Destination search failed", e)
+                _destSearchResults.value = emptyList()
+            } finally {
+                _isSearchingDest.value = false
+            }
+        }
+    }
+
+    /**
+     * Select a pickup location from search results.
+     */
+    fun selectPickupFromSearch(result: GeocodingResult) {
+        val location = Location(
+            lat = result.lat,
+            lon = result.lon,
+            addressLabel = result.addressLine
+        )
+        setPickupLocationWithAddress(location)
+        _pickupSearchResults.value = emptyList()
+    }
+
+    /**
+     * Select a destination from search results.
+     */
+    fun selectDestFromSearch(result: GeocodingResult) {
+        val location = Location(
+            lat = result.lat,
+            lon = result.lon,
+            addressLabel = result.addressLine
+        )
+        setDestinationWithAddress(location)
+        _destSearchResults.value = emptyList()
+    }
+
+    /**
+     * Set pickup location with address label.
+     */
+    fun setPickupLocationWithAddress(location: Location) {
+        val newGeohash = location.geohash(precision = 4)
+
+        _uiState.value = _uiState.value.copy(
+            pickupLocation = location,
+            routeResult = null,
+            fareEstimate = null
+        )
+
+        // If geohash changed significantly, resubscribe to get local drivers
+        if (newGeohash != currentSubscriptionGeohash) {
+            Log.d(TAG, "Pickup location geohash changed: $currentSubscriptionGeohash -> $newGeohash")
+            resubscribeToDrivers()
+        }
+
+        calculateRouteIfReady()
+    }
+
+    /**
+     * Set destination location with address label.
+     */
+    fun setDestinationWithAddress(location: Location) {
+        _uiState.value = _uiState.value.copy(
+            destination = location,
+            routeResult = null,
+            fareEstimate = null
+        )
+        calculateRouteIfReady()
+    }
+
+    // Track if using current location for pickup
+    private val _usingCurrentLocationForPickup = MutableStateFlow(false)
+    val usingCurrentLocationForPickup: StateFlow<Boolean> = _usingCurrentLocationForPickup.asStateFlow()
+
+    // Track if we're fetching current location
+    private val _isFetchingLocation = MutableStateFlow(false)
+    val isFetchingLocation: StateFlow<Boolean> = _isFetchingLocation.asStateFlow()
+
+    /**
+     * Use current location for pickup.
+     * If useDemoLocation setting is true, uses demo coordinates.
+     * Otherwise, uses the provided GPS coordinates (caller must handle permission).
+     *
+     * @param gpsLat GPS latitude (null if GPS unavailable)
+     * @param gpsLon GPS longitude (null if GPS unavailable)
+     */
+    fun useCurrentLocationForPickup(gpsLat: Double? = null, gpsLon: Double? = null) {
+        viewModelScope.launch {
+            _isFetchingLocation.value = true
+            _usingCurrentLocationForPickup.value = true
+
+            // Check demo setting at call time (not captured earlier)
+            val useDemoLocation = settingsManager.useDemoLocation.value
+            Log.d(TAG, "useCurrentLocationForPickup: useDemoLocation=$useDemoLocation, gpsLat=$gpsLat, gpsLon=$gpsLon")
+
+            val (lat, lon, labelSuffix) = when {
+                // Demo mode enabled - always use demo coordinates
+                useDemoLocation -> {
+                    Log.d(TAG, "Demo mode ON - using demo coordinates")
+                    Triple(DEMO_PICKUP_LAT, DEMO_PICKUP_LON, "Demo Location")
+                }
+                // GPS coordinates provided - use them
+                gpsLat != null && gpsLon != null -> {
+                    Log.d(TAG, "Using GPS coordinates: $gpsLat, $gpsLon")
+                    Triple(gpsLat, gpsLon, null) // Will use reverse geocoded address
+                }
+                // Demo mode OFF but GPS unavailable - use demo as fallback with warning
+                else -> {
+                    Log.w(TAG, "Demo mode OFF but GPS unavailable - using demo as fallback")
+                    Triple(DEMO_PICKUP_LAT, DEMO_PICKUP_LON, "GPS unavailable")
+                }
+            }
+
+            val location = Location(lat = lat, lon = lon)
+
+            // Try to get address for the location
+            val address = try {
+                geocodingService.reverseGeocode(lat, lon)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to reverse geocode pickup location", e)
+                null
+            }
+
+            // Determine the label
+            val label = when {
+                labelSuffix == "Demo Location" -> address ?: "Demo Location"
+                labelSuffix == "GPS unavailable" -> address?.let { "$it (GPS unavailable)" } ?: "Demo Location (GPS unavailable)"
+                address != null -> address
+                else -> "Current Location"
+            }
+
+            setPickupLocationWithAddress(location.withAddress(label))
+            _isFetchingLocation.value = false
+        }
+    }
+
+    /**
+     * Stop using current location for pickup (user wants to type address).
+     */
+    fun stopUsingCurrentLocationForPickup() {
+        _usingCurrentLocationForPickup.value = false
+        clearPickupLocation()
+    }
+
+    /**
+     * Use demo pickup location for testing.
+     */
+    fun useDemoPickupLocation() {
+        useCurrentLocationForPickup(null, null)
+    }
+
+    /**
+     * Use demo destination location for testing.
+     */
+    fun useDemoDestLocation() {
+        viewModelScope.launch {
+            val location = Location(
+                lat = DEMO_DEST_LAT,
+                lon = DEMO_DEST_LON
+            )
+
+            // Try to get address for demo location
+            val address = try {
+                geocodingService.reverseGeocode(DEMO_DEST_LAT, DEMO_DEST_LON)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to reverse geocode demo destination", e)
+                null
+            }
+
+            setDestinationWithAddress(location.withAddress(address ?: "Demo Destination"))
+            Log.d(TAG, "Using demo destination location: $DEMO_DEST_LAT, $DEMO_DEST_LON")
+        }
+    }
+
+    /**
+     * Clear pickup search results.
+     */
+    fun clearPickupSearchResults() {
+        _pickupSearchResults.value = emptyList()
+    }
+
+    /**
+     * Clear destination search results.
+     */
+    fun clearDestSearchResults() {
+        _destSearchResults.value = emptyList()
+    }
+
+    /**
+     * Clear pickup location.
+     */
+    fun clearPickupLocation() {
+        _uiState.value = _uiState.value.copy(
+            pickupLocation = null,
+            routeResult = null,
+            fareEstimate = null
+        )
+    }
+
+    /**
+     * Clear destination location.
+     */
+    fun clearDestination() {
+        _uiState.value = _uiState.value.copy(
+            destination = null,
+            routeResult = null,
+            fareEstimate = null
+        )
+    }
+
+    /**
+     * Check if geocoding is available on this device.
+     */
+    fun isGeocodingAvailable(): Boolean = geocodingService.isAvailable()
+
     /**
      * Select a driver from the available list.
      */
@@ -535,11 +819,13 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * Boost the fare and re-broadcast the ride request.
      * Deletes the old request and creates a new one with higher fare.
+     * Stores actual sats boosted (not count) to handle currency switching correctly.
      */
     fun boostFare() {
         val state = _uiState.value
         val currentFare = state.fareEstimate ?: return
-        val newFare = currentFare + FARE_BOOST_AMOUNT
+        val boostAmount = getBoostAmount()
+        val newFare = currentFare + boostAmount
 
         viewModelScope.launch {
             // Cancel current timeout
@@ -555,15 +841,15 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
             acceptanceSubscriptionId = null
 
-            // Update fare in state
+            // Update fare in state - store actual sats boosted (not count)
             _uiState.value = _uiState.value.copy(
                 fareEstimate = newFare,
-                boostCount = state.boostCount + 1,
+                totalBoostSats = state.totalBoostSats + boostAmount,
                 pendingOfferEventId = null
             )
 
             // Re-broadcast with new fare
-            Log.d(TAG, "Boosting fare from $currentFare to $newFare sats")
+            Log.d(TAG, "Boosting fare from $currentFare to $newFare sats (total boost: ${state.totalBoostSats + boostAmount} sats)")
             broadcastRideRequest()
         }
     }
@@ -593,12 +879,28 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             pendingOfferEventId = null,
             rideStage = RideStage.IDLE,
             broadcastStartTimeMs = null,
-            boostCount = 0,
+            totalBoostSats = 0.0,
             statusMessage = "Request cancelled"
         )
 
         // Clear persisted ride state
         clearSavedRideState()
+    }
+
+    /**
+     * Continue waiting with the current fare.
+     * Restarts the 2-minute broadcast timeout without modifying the fare.
+     */
+    fun continueWaiting() {
+        Log.d(TAG, "Continuing to wait with current fare: ${_uiState.value.fareEstimate}")
+
+        // Restart the broadcast timeout
+        startBroadcastTimeout()
+
+        _uiState.value = _uiState.value.copy(
+            broadcastStartTimeMs = System.currentTimeMillis(),
+            statusMessage = "Searching for drivers..."
+        )
     }
 
     /**
@@ -671,7 +973,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        Log.d(TAG, "Broadcast timeout - no driver accepted. Boost count: ${state.boostCount}")
+        Log.d(TAG, "Broadcast timeout - no driver accepted. Total boost: ${state.totalBoostSats} sats")
 
         // Don't automatically delete the offer - let user decide to boost or cancel
         _uiState.value = state.copy(
@@ -940,8 +1242,10 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
             _uiState.value = _uiState.value.copy(
                 availableDrivers = freshDrivers,
+                nearbyDriverCount = freshDrivers.size,  // Also update the count!
                 selectedDriver = if (selectedStillExists) selectedDriver else null
             )
+            Log.d(TAG, "Removed ${staleDrivers.size} stale drivers, ${freshDrivers.size} remaining")
         }
     }
 
@@ -1442,8 +1746,43 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun calculateFare(route: RouteResult): Double {
-        // Simple fare calculation: base fare + rate per km
-        return BASE_FARE + (route.distanceKm * FARE_PER_KM)
+        // Convert km to miles
+        val distanceMiles = route.distanceKm * KM_TO_MILES
+        // Calculate fare in USD ($2 per mile)
+        val fareUsd = distanceMiles * FARE_USD_PER_MILE
+
+        // Convert USD to sats using current BTC price
+        val sats = bitcoinPriceService.usdToSats(fareUsd)
+
+        // Return sats, or fallback if price unavailable
+        return sats?.toDouble() ?: (distanceMiles * FALLBACK_SATS_PER_MILE)
+    }
+
+    /**
+     * Get the fare boost amount based on currency setting.
+     * USD mode: $1 converted to sats
+     * SATS mode: 1000 sats
+     *
+     * Note: Reads directly from SharedPreferences to ensure we get the current setting,
+     * since the ViewModel's SettingsManager instance may be out of sync with the UI's instance.
+     */
+    private fun getBoostAmount(): Double {
+        // Read currency setting directly from SharedPreferences to get current value
+        val settingsPrefs = getApplication<Application>().getSharedPreferences("ridestr_settings", Context.MODE_PRIVATE)
+        val currencyName = settingsPrefs.getString("display_currency", DisplayCurrency.USD.name) ?: DisplayCurrency.USD.name
+        val currency = try {
+            DisplayCurrency.valueOf(currencyName)
+        } catch (e: IllegalArgumentException) {
+            DisplayCurrency.USD
+        }
+
+        return when (currency) {
+            DisplayCurrency.USD -> {
+                // $1 boost, convert to sats
+                bitcoinPriceService.usdToSats(FARE_BOOST_USD)?.toDouble() ?: FARE_BOOST_SATS
+            }
+            DisplayCurrency.SATS -> FARE_BOOST_SATS
+        }
     }
 
     override fun onCleared() {
@@ -1511,7 +1850,7 @@ data class RiderUiState(
     // Broadcast mode (new flow)
     val broadcastStartTimeMs: Long? = null,       // When we started broadcasting
     val broadcastTimeoutDurationMs: Long = 120_000L, // How long to wait (2 minutes)
-    val boostCount: Int = 0,                       // Number of times fare was boosted
+    val totalBoostSats: Double = 0.0,              // Total sats added via boosts (stored in sats for accuracy)
 
     // Acceptance timeout tracking (for direct offers - legacy/advanced)
     val acceptanceTimeoutStartMs: Long? = null,   // When we started waiting for acceptance

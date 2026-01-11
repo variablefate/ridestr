@@ -109,6 +109,25 @@ class BitcoinPriceService {
         return String.format("$%.2f", dollars)
     }
 
+    /**
+     * Convert USD cents to sats.
+     * Returns null if price not available.
+     */
+    fun usdCentsToSats(cents: Long): Long? {
+        val price = _btcPriceUsd.value ?: return null
+        if (price == 0) return null
+        // cents / 100 / price * 100_000_000 = cents * 1_000_000 / price
+        return (cents * 1_000_000L) / price
+    }
+
+    /**
+     * Convert USD dollars to sats.
+     * Returns null if price not available.
+     */
+    fun usdToSats(dollars: Double): Long? {
+        return usdCentsToSats((dollars * 100).toLong())
+    }
+
     fun cleanup() {
         stopAutoRefresh()
         scope.cancel()

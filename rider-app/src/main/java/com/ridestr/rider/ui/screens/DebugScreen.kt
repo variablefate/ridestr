@@ -33,6 +33,10 @@ fun DebugScreen(
     connectionStates: Map<String, RelayConnectionState>,
     recentEvents: List<Pair<Event, String>>,
     notices: List<Pair<String, String>>,
+    useGeocodingSearch: Boolean,
+    useDemoLocation: Boolean,
+    onToggleGeocodingSearch: () -> Unit,
+    onToggleDemoLocation: () -> Unit,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
     onBack: () -> Unit,
@@ -87,6 +91,15 @@ fun DebugScreen(
                     connectionStates = connectionStates,
                     onConnect = onConnect,
                     onDisconnect = onDisconnect
+                )
+            }
+
+            item {
+                DebugSettingsSection(
+                    useGeocodingSearch = useGeocodingSearch,
+                    useDemoLocation = useDemoLocation,
+                    onToggleGeocodingSearch = onToggleGeocodingSearch,
+                    onToggleDemoLocation = onToggleDemoLocation
                 )
             }
 
@@ -382,6 +395,80 @@ private fun EventItem(
                 Text(
                     text = event.content.take(100) + if (event.content.length > 100) "..." else "",
                     style = MaterialTheme.typography.bodySmall
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DebugSettingsSection(
+    useGeocodingSearch: Boolean,
+    useDemoLocation: Boolean,
+    onToggleGeocodingSearch: () -> Unit,
+    onToggleDemoLocation: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp)
+        ) {
+            Text(
+                text = "Debug Settings",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Geocoding search toggle
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Use Geocoding Search",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = if (useGeocodingSearch) "Address search enabled"
+                               else "Manual coordinates mode",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = useGeocodingSearch,
+                    onCheckedChange = { onToggleGeocodingSearch() }
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Demo location toggle
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Use Demo Location",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = if (useDemoLocation) "Using hardcoded test coordinates"
+                               else "Using GPS location",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = useDemoLocation,
+                    onCheckedChange = { onToggleDemoLocation() }
                 )
             }
         }
