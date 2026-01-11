@@ -44,6 +44,8 @@ fun ProfileSetupScreen(
             onLightningAddressChange = viewModel::updateLightningAddress,
             onCarMakeChange = viewModel::updateCarMake,
             onCarModelChange = viewModel::updateCarModel,
+            onCarColorChange = viewModel::updateCarColor,
+            onCarYearChange = viewModel::updateCarYear,
             onSave = { viewModel.saveProfile(onComplete) },
             modifier = modifier.padding(padding)
         )
@@ -60,6 +62,8 @@ private fun ProfileSetupContent(
     onLightningAddressChange: (String) -> Unit,
     onCarMakeChange: (String) -> Unit,
     onCarModelChange: (String) -> Unit,
+    onCarColorChange: (String) -> Unit,
+    onCarYearChange: (String) -> Unit,
     onSave: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -211,6 +215,31 @@ private fun ProfileSetupContent(
             modifier = Modifier.fillMaxWidth(),
             singleLine = true
         )
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            OutlinedTextField(
+                value = uiState.carColor,
+                onValueChange = onCarColorChange,
+                label = { Text("Color") },
+                placeholder = { Text("Blue") },
+                modifier = Modifier.weight(1f),
+                singleLine = true
+            )
+
+            OutlinedTextField(
+                value = uiState.carYear,
+                onValueChange = onCarYearChange,
+                label = { Text("Year") },
+                placeholder = { Text("2024") },
+                modifier = Modifier.weight(1f),
+                singleLine = true
+            )
+        }
 
         Spacer(modifier = Modifier.height(8.dp))
 

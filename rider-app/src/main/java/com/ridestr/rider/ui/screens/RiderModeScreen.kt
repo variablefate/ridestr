@@ -9,6 +9,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -27,8 +28,12 @@ import com.ridestr.common.nostr.events.Location
 import com.ridestr.common.nostr.events.RideshareChatData
 import com.ridestr.common.nostr.events.UserProfile
 import com.ridestr.common.routing.RouteResult
+import com.ridestr.common.bitcoin.BitcoinPriceService
+import com.ridestr.common.settings.SettingsManager
 import com.ridestr.common.ui.ChatBottomSheet
 import com.ridestr.common.ui.ChatButton
+import com.ridestr.common.ui.FareDisplay
+import com.ridestr.common.ui.formatFare
 import com.ridestr.rider.viewmodels.RideStage
 import com.ridestr.rider.viewmodels.RiderUiState
 import com.ridestr.rider.viewmodels.RiderViewModel
@@ -36,6 +41,7 @@ import com.ridestr.rider.viewmodels.RiderViewModel
 @Composable
 fun RiderModeScreen(
     viewModel: RiderViewModel,
+    settingsManager: SettingsManager,
     modifier: Modifier = Modifier
 ) {
     val uiState by viewModel.uiState.collectAsState()
@@ -105,7 +111,20 @@ fun RiderModeScreen(
                     onSelectDriver = viewModel::selectDriver,
                     onClearDriver = viewModel::clearSelectedDriver,
                     onSendOffer = viewModel::sendRideOffer,
-                    onToggleExpandedSearch = viewModel::toggleExpandedSearch
+                    onBroadcastRequest = viewModel::broadcastRideRequest,
+                    onToggleExpandedSearch = viewModel::toggleExpandedSearch,
+                    settingsManager = settingsManager,
+                    priceService = viewModel.bitcoinPriceService
+                )
+            }
+            RideStage.BROADCASTING_REQUEST -> {
+                // Broadcast waiting screen with 2-minute countdown
+                BroadcastWaitingContent(
+                    uiState = uiState,
+                    onBoostFare = viewModel::boostFare,
+                    onCancel = viewModel::cancelBroadcastRequest,
+                    settingsManager = settingsManager,
+                    priceService = viewModel.bitcoinPriceService
                 )
             }
             RideStage.WAITING_FOR_ACCEPTANCE -> {
@@ -156,8 +175,14 @@ private fun IdleContent(
     onSelectDriver: (DriverAvailabilityData) -> Unit,
     onClearDriver: () -> Unit,
     onSendOffer: () -> Unit,
-    onToggleExpandedSearch: () -> Unit
+    onBroadcastRequest: () -> Unit,
+    onToggleExpandedSearch: () -> Unit,
+    settingsManager: SettingsManager,
+    priceService: BitcoinPriceService
 ) {
+    // Track whether advanced driver selection is expanded
+    var showAdvancedDriverSelection by remember { mutableStateOf(false) }
+
     LazyColumn(
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
@@ -177,98 +202,201 @@ private fun IdleContent(
                 RouteInfoCard(
                     routeResult = uiState.routeResult,
                     fareEstimate = uiState.fareEstimate,
-                    isCalculating = uiState.isCalculatingRoute
+                    isCalculating = uiState.isCalculatingRoute,
+                    settingsManager = settingsManager,
+                    priceService = priceService
                 )
             }
         }
 
-        // Only show driver list after route is calculated
-        if (uiState.routeResult != null) {
-            // Available drivers section header with expand toggle
+        // Show request ride section after route is calculated
+        if (uiState.routeResult != null && uiState.fareEstimate != null) {
+            // Nearby driver count indicator
             item {
-                Row(
+                Card(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
                 ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.DirectionsCar,
+                                contentDescription = null,
+                                modifier = Modifier.size(20.dp),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "${uiState.nearbyDriverCount} driver${if (uiState.nearbyDriverCount != 1) "s" else ""} nearby",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                        FilterChip(
+                            selected = uiState.expandedSearch,
+                            onClick = onToggleExpandedSearch,
+                            label = {
+                                Text(if (uiState.expandedSearch) "20+ mi" else "Nearby")
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = if (uiState.expandedSearch)
+                                        Icons.Default.ZoomOutMap
+                                    else
+                                        Icons.Default.NearMe,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        )
+                    }
+                }
+            }
+
+            // Main "Request Ride" button (broadcasts to all drivers)
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = "Ready to request your ride",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Your request will be sent to all nearby drivers",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Button(
+                            onClick = onBroadcastRequest,
+                            enabled = !uiState.isSendingOffer,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            if (uiState.isSendingOffer) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Icon(
+                                    Icons.Default.Search,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Request Ride (${formatFare(uiState.fareEstimate, settingsManager, priceService)})")
+                            }
+                        }
+                        if (uiState.nearbyDriverCount == 0) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "No drivers online nearby. Your request will be visible when drivers come online.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Advanced: Select specific driver (collapsible)
+            item {
+                TextButton(
+                    onClick = { showAdvancedDriverSelection = !showAdvancedDriverSelection },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        if (showAdvancedDriverSelection) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = if (showAdvancedDriverSelection) "Hide driver list" else "Select specific driver (advanced)",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+
+            // Driver list (only shown if expanded)
+            if (showAdvancedDriverSelection) {
+                item {
                     Text(
                         text = "Available Drivers (${uiState.availableDrivers.size})",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
-                    FilterChip(
-                        selected = uiState.expandedSearch,
-                        onClick = onToggleExpandedSearch,
-                        label = {
-                            Text(if (uiState.expandedSearch) "20+ mi" else "Nearby")
-                        },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = if (uiState.expandedSearch)
-                                    Icons.Default.ZoomOutMap
-                                else
-                                    Icons.Default.NearMe,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-                    )
                 }
-            }
 
-            if (uiState.availableDrivers.isEmpty()) {
-                item {
-                    Card(
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(24.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
+                if (uiState.availableDrivers.isEmpty()) {
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth()
                         ) {
-                            Text(
-                                text = "Searching for nearby drivers...",
-                                textAlign = TextAlign.Center,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            if (!uiState.expandedSearch) {
-                                Spacer(modifier = Modifier.height(8.dp))
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(24.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
                                 Text(
-                                    text = "Tap \"20+ mi\" to expand search area",
-                                    style = MaterialTheme.typography.bodySmall,
+                                    text = "No drivers found yet...",
                                     textAlign = TextAlign.Center,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
                         }
                     }
+                } else {
+                    items(uiState.availableDrivers) { driver ->
+                        DriverCard(
+                            driver = driver,
+                            profile = uiState.driverProfiles[driver.driverPubKey],
+                            isSelected = uiState.selectedDriver?.driverPubKey == driver.driverPubKey,
+                            onSelect = { onSelectDriver(driver) }
+                        )
+                    }
                 }
-            } else {
-                items(uiState.availableDrivers) { driver ->
-                    DriverCard(
-                        driver = driver,
-                        profile = uiState.driverProfiles[driver.driverPubKey],
-                        isSelected = uiState.selectedDriver?.driverPubKey == driver.driverPubKey,
-                        onSelect = { onSelectDriver(driver) }
-                    )
-                }
-            }
-        }
 
-        // Request ride button
-        if (uiState.selectedDriver != null && uiState.pickupLocation != null &&
-            uiState.destination != null && uiState.fareEstimate != null) {
-            item {
-                Spacer(modifier = Modifier.height(8.dp))
-                RequestRideCard(
-                    driver = uiState.selectedDriver,
-                    driverProfile = uiState.driverProfiles[uiState.selectedDriver.driverPubKey],
-                    fareEstimate = uiState.fareEstimate,
-                    isSending = uiState.isSendingOffer,
-                    onRequest = onSendOffer,
-                    onCancel = onClearDriver
-                )
+                // Direct request card (for specific driver)
+                if (uiState.selectedDriver != null && uiState.pickupLocation != null &&
+                    uiState.destination != null) {
+                    item {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        RequestRideCard(
+                            driver = uiState.selectedDriver,
+                            driverProfile = uiState.driverProfiles[uiState.selectedDriver.driverPubKey],
+                            fareEstimate = uiState.fareEstimate,
+                            isSending = uiState.isSendingOffer,
+                            onRequest = onSendOffer,
+                            onCancel = onClearDriver,
+                            settingsManager = settingsManager,
+                            priceService = priceService
+                        )
+                    }
+                }
             }
         }
     }
@@ -401,7 +529,9 @@ private fun LocationInputCard(
 private fun RouteInfoCard(
     routeResult: RouteResult?,
     fareEstimate: Double?,
-    isCalculating: Boolean
+    isCalculating: Boolean,
+    settingsManager: SettingsManager,
+    priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -451,11 +581,12 @@ private fun RouteInfoCard(
                     )
                 }
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        text = "${fareEstimate?.toInt() ?: 0} sats",
+                    FareDisplay(
+                        satsAmount = fareEstimate ?: 0.0,
+                        settingsManager = settingsManager,
+                        priceService = priceService,
                         style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
+                        fontWeight = FontWeight.Bold
                     )
                     Text(
                         text = "Est. Fare",
@@ -538,7 +669,9 @@ private fun RequestRideCard(
     fareEstimate: Double,
     isSending: Boolean,
     onRequest: () -> Unit,
-    onCancel: () -> Unit
+    onCancel: () -> Unit,
+    settingsManager: SettingsManager,
+    priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -568,11 +701,12 @@ private fun RequestRideCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            Text(
-                text = "Fare: ${fareEstimate.toInt()} sats",
+            FareDisplay(
+                satsAmount = fareEstimate,
+                settingsManager = settingsManager,
+                priceService = priceService,
                 style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.primary
+                prefix = "Fare: "
             )
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -706,6 +840,189 @@ private fun WaitingForAcceptanceContent(
                 OutlinedButton(onClick = onCancel) {
                     Text("Cancel Request")
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BroadcastWaitingContent(
+    uiState: RiderUiState,
+    onBoostFare: () -> Unit,
+    onCancel: () -> Unit,
+    settingsManager: SettingsManager,
+    priceService: com.ridestr.common.bitcoin.BitcoinPriceService
+) {
+    // Calculate progress based on broadcast timeout (2 minutes)
+    val startTime = uiState.broadcastStartTimeMs
+    val duration = uiState.broadcastTimeoutDurationMs
+
+    // Animated progress state
+    var progress by remember { mutableFloatStateOf(0f) }
+    var remainingSeconds by remember { mutableIntStateOf((duration / 1000).toInt()) }
+
+    // Update progress every 100ms
+    LaunchedEffect(startTime) {
+        if (startTime != null) {
+            while (true) {
+                val elapsed = System.currentTimeMillis() - startTime
+                progress = (elapsed.toFloat() / duration).coerceIn(0f, 1f)
+                remainingSeconds = ((duration - elapsed) / 1000).toInt().coerceAtLeast(0)
+                delay(100)
+            }
+        }
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // Circular countdown timer
+            Box(
+                modifier = Modifier.size(100.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                val primaryColor = MaterialTheme.colorScheme.primary
+                val surfaceVariant = MaterialTheme.colorScheme.surfaceVariant
+
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val strokeWidth = 8.dp.toPx()
+                    val radius = (size.minDimension - strokeWidth) / 2
+                    val center = Offset(size.width / 2, size.height / 2)
+
+                    // Background circle
+                    drawCircle(
+                        color = surfaceVariant,
+                        radius = radius,
+                        center = center,
+                        style = Stroke(width = strokeWidth)
+                    )
+
+                    // Progress arc (fills clockwise as time runs out)
+                    drawArc(
+                        color = primaryColor,
+                        startAngle = -90f,
+                        sweepAngle = 360f * progress,
+                        useCenter = false,
+                        topLeft = Offset(
+                            center.x - radius,
+                            center.y - radius
+                        ),
+                        size = Size(radius * 2, radius * 2),
+                        style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
+                    )
+                }
+
+                // Time remaining in center
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    val minutes = remainingSeconds / 60
+                    val seconds = remainingSeconds % 60
+                    Text(
+                        text = String.format("%d:%02d", minutes, seconds),
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            // Animated dots for "Searching"
+            var dotCount by remember { mutableIntStateOf(0) }
+            LaunchedEffect(Unit) {
+                while (true) {
+                    delay(500)
+                    dotCount = (dotCount + 1) % 4
+                }
+            }
+            val dots = ".".repeat(dotCount)
+
+            Text(
+                text = "Searching for drivers$dots",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = "Waiting for a driver to accept your request",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Current fare display
+            val currentFare = uiState.fareEstimate ?: 0.0
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer
+                )
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Default.Bolt,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.secondary
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    FareDisplay(
+                        satsAmount = currentFare,
+                        settingsManager = settingsManager,
+                        priceService = priceService,
+                        style = MaterialTheme.typography.titleSmall,
+                        prefix = "Current fare: ",
+                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                    if (uiState.boostCount > 0) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Badge {
+                            Text("+${uiState.boostCount * 100}")
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // Boost fare button
+            OutlinedButton(
+                onClick = onBoostFare,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(
+                    Icons.Default.TrendingUp,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Boost Fare (+100 sats)")
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Cancel button
+            TextButton(
+                onClick = onCancel,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.textButtonColors(
+                    contentColor = MaterialTheme.colorScheme.error
+                )
+            ) {
+                Text("Cancel Request")
             }
         }
     }
@@ -874,6 +1191,10 @@ private fun DriverOnTheWayContent(
                 .padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            // Get driver profile from acceptance
+            val driverPubKey = uiState.acceptance?.driverPubKey
+            val driverProfile = driverPubKey?.let { uiState.driverProfiles[it] }
+
             Icon(
                 Icons.Default.DirectionsCar,
                 contentDescription = null,
@@ -883,16 +1204,27 @@ private fun DriverOnTheWayContent(
 
             Spacer(modifier = Modifier.height(16.dp))
 
+            // Driver name
             Text(
-                text = "Driver is on the way",
+                text = driverProfile?.bestName() ?: "Your driver",
                 style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.Bold
             )
 
+            // Car description (color, year, make, model)
+            driverProfile?.carDescription()?.let { carInfo ->
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = carInfo,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+            }
+
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-                text = "Your driver is heading to pick you up",
+                text = "is on the way to pick you up",
                 style = MaterialTheme.typography.bodyMedium,
                 textAlign = TextAlign.Center
             )

@@ -386,6 +386,138 @@ class NostrService(context: Context) {
         }
     }
 
+    // ==================== Broadcast Ride Operations ====================
+
+    /**
+     * Broadcast a public ride request (visible to all drivers in the pickup area).
+     * This is the new primary flow where riders broadcast and drivers choose to accept.
+     *
+     * @param pickup Pickup location
+     * @param destination Destination location
+     * @param fareEstimate Fare in sats
+     * @param routeDistanceKm Route distance in kilometers
+     * @param routeDurationMin Route duration in minutes
+     * @return The event ID if successful, null on failure
+     */
+    suspend fun broadcastRideRequest(
+        pickup: Location,
+        destination: Location,
+        fareEstimate: Double,
+        routeDistanceKm: Double,
+        routeDurationMin: Double
+    ): String? {
+        val signer = keyManager.getSigner()
+        if (signer == null) {
+            Log.e(TAG, "Cannot broadcast ride request: Not logged in")
+            return null
+        }
+
+        return try {
+            val event = RideOfferEvent.createBroadcast(
+                signer = signer,
+                pickup = pickup,
+                destination = destination,
+                fareEstimate = fareEstimate,
+                routeDistanceKm = routeDistanceKm,
+                routeDurationMin = routeDurationMin
+            )
+            relayManager.publish(event)
+            Log.d(TAG, "Broadcast ride request: ${event.id} (fare=$fareEstimate sats)")
+            event.id
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to broadcast ride request", e)
+            null
+        }
+    }
+
+    /**
+     * Subscribe to broadcast ride requests in an area (for drivers).
+     * Filters by geohash to only see local requests.
+     *
+     * @param location Driver's current location for geohash filtering
+     * @param expandSearch If true, include neighboring cells for wider coverage
+     * @param onRequest Called when a ride request is received
+     * @return Subscription ID for closing later
+     */
+    fun subscribeToBroadcastRideRequests(
+        location: Location,
+        expandSearch: Boolean = false,
+        onRequest: (BroadcastRideOfferData) -> Unit
+    ): String {
+        // Get geohashes for driver's area
+        val geohashes = Geohash.getSearchAreaGeohashes(location.lat, location.lon, expandSearch)
+        Log.d(TAG, "Subscribing to ride requests in ${geohashes.size} geohash cell(s): ${geohashes.joinToString()}")
+
+        // Only get requests from last 5 minutes to avoid stale ones
+        val fiveMinutesAgo = (System.currentTimeMillis() / 1000) - (5 * 60)
+
+        return relayManager.subscribe(
+            kinds = listOf(RideshareEventKinds.RIDE_OFFER),
+            tags = mapOf(
+                "g" to geohashes,
+                "t" to listOf(RideOfferEvent.RIDE_REQUEST_TAG)  // Only broadcast requests
+            ),
+            since = fiveMinutesAgo
+        ) { event, _ ->
+            // Parse as broadcast offer (not direct)
+            RideOfferEvent.parseBroadcast(event)?.let { data ->
+                Log.d(TAG, "Received ride request ${event.id.take(8)} from ${event.pubKey.take(8)}, fare=${data.fareEstimate}")
+                onRequest(data)
+            }
+        }
+    }
+
+    /**
+     * Accept a broadcast ride request.
+     * @param request The broadcast ride request to accept
+     * @return The event ID if successful, null on failure
+     */
+    suspend fun acceptBroadcastRide(request: BroadcastRideOfferData): String? {
+        val signer = keyManager.getSigner()
+        if (signer == null) {
+            Log.e(TAG, "Cannot accept broadcast ride: Not logged in")
+            return null
+        }
+
+        return try {
+            val event = RideAcceptanceEvent.create(
+                signer = signer,
+                offerEventId = request.eventId,
+                riderPubKey = request.riderPubKey
+            )
+            relayManager.publish(event)
+            Log.d(TAG, "Accepted broadcast ride: ${event.id}")
+            event.id
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to accept broadcast ride", e)
+            null
+        }
+    }
+
+    /**
+     * Subscribe to acceptances for a broadcast ride request.
+     * Used by riders to detect when a driver accepts, and by drivers to detect
+     * when another driver has accepted (ride is taken).
+     *
+     * @param offerEventId The ride offer event ID to watch
+     * @param onAcceptance Called when acceptance is received
+     * @return Subscription ID for closing later
+     */
+    fun subscribeToAcceptancesForOffer(
+        offerEventId: String,
+        onAcceptance: (RideAcceptanceData) -> Unit
+    ): String {
+        return relayManager.subscribe(
+            kinds = listOf(RideshareEventKinds.RIDE_ACCEPTANCE),
+            tags = mapOf("e" to listOf(offerEventId))
+        ) { event, _ ->
+            RideAcceptanceEvent.parse(event)?.let { data ->
+                Log.d(TAG, "Received acceptance for offer ${offerEventId.take(8)} from driver ${data.driverPubKey.take(8)}")
+                onAcceptance(data)
+            }
+        }
+    }
+
     // ==================== Subscriptions ====================
 
     /**

@@ -258,6 +258,7 @@ fun MainScreen(
 
         DriverModeScreen(
             viewModel = driverViewModel,
+            settingsManager = settingsManager,
             autoOpenNavigation = autoOpenNavigation,
             modifier = Modifier.weight(1f)
         )

@@ -41,6 +41,8 @@ class ProfileViewModel(application: Application) : AndroidViewModel(application)
                 lightningAddress = profile.lud16 ?: _uiState.value.lightningAddress,
                 carMake = profile.carMake ?: _uiState.value.carMake,
                 carModel = profile.carModel ?: _uiState.value.carModel,
+                carColor = profile.carColor ?: _uiState.value.carColor,
+                carYear = profile.carYear ?: _uiState.value.carYear,
                 existingProfile = profile
             )
         }
@@ -74,6 +76,14 @@ class ProfileViewModel(application: Application) : AndroidViewModel(application)
         _uiState.value = _uiState.value.copy(carModel = carModel)
     }
 
+    fun updateCarColor(carColor: String) {
+        _uiState.value = _uiState.value.copy(carColor = carColor)
+    }
+
+    fun updateCarYear(carYear: String) {
+        _uiState.value = _uiState.value.copy(carYear = carYear)
+    }
+
     fun saveProfile(onComplete: () -> Unit) {
         val state = _uiState.value
 
@@ -91,7 +101,9 @@ class ProfileViewModel(application: Application) : AndroidViewModel(application)
                 nip05 = state.existingProfile?.nip05,
                 lud06 = state.existingProfile?.lud06,
                 carMake = state.carMake.takeIf { it.isNotBlank() },
-                carModel = state.carModel.takeIf { it.isNotBlank() }
+                carModel = state.carModel.takeIf { it.isNotBlank() },
+                carColor = state.carColor.takeIf { it.isNotBlank() },
+                carYear = state.carYear.takeIf { it.isNotBlank() }
             )
 
             val eventId = nostrService.publishProfile(profile)
@@ -136,6 +148,8 @@ data class ProfileUiState(
     val lightningAddress: String = "",
     val carMake: String = "",
     val carModel: String = "",
+    val carColor: String = "",
+    val carYear: String = "",
     val isSaving: Boolean = false,
     val saveSuccess: Boolean = false,
     val error: String? = null,

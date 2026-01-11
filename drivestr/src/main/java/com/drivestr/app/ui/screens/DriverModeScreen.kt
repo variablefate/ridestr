@@ -20,15 +20,19 @@ import androidx.compose.ui.unit.dp
 import com.drivestr.app.viewmodels.DriverStage
 import com.drivestr.app.viewmodels.DriverUiState
 import com.drivestr.app.viewmodels.DriverViewModel
+import com.ridestr.common.nostr.events.BroadcastRideOfferData
 import com.ridestr.common.nostr.events.Location
 import com.ridestr.common.nostr.events.RideOfferData
 import com.ridestr.common.nostr.events.RideshareChatData
+import com.ridestr.common.settings.SettingsManager
 import com.ridestr.common.ui.ChatBottomSheet
+import com.ridestr.common.ui.FareDisplay
 import com.ridestr.common.ui.SlideToConfirm
 
 @Composable
 fun DriverModeScreen(
     viewModel: DriverViewModel,
+    settingsManager: SettingsManager,
     autoOpenNavigation: Boolean = true,
     modifier: Modifier = Modifier
 ) {
@@ -104,8 +108,12 @@ fun DriverModeScreen(
                 AvailableContent(
                     uiState = uiState,
                     onGoOffline = { viewModel.toggleAvailability(demoLocation) },
+                    onAcceptBroadcastRequest = { viewModel.acceptBroadcastRequest(it) },
+                    onDeclineBroadcastRequest = { viewModel.declineBroadcastRequest(it) },
                     onAcceptOffer = { viewModel.acceptOffer(it) },
-                    onDeclineOffer = { viewModel.declineOffer(it) }
+                    onDeclineOffer = { viewModel.declineOffer(it) },
+                    settingsManager = settingsManager,
+                    priceService = viewModel.bitcoinPriceService
                 )
             }
 
@@ -115,7 +123,9 @@ fun DriverModeScreen(
                     onStartRoute = { viewModel.startRouteToPickup() },
                     onCancel = { viewModel.cancelRide() },
                     onOpenChat = { showChatSheet = true },
-                    chatMessageCount = uiState.chatMessages.size
+                    chatMessageCount = uiState.chatMessages.size,
+                    settingsManager = settingsManager,
+                    priceService = viewModel.bitcoinPriceService
                 )
             }
 
@@ -147,7 +157,9 @@ fun DriverModeScreen(
                     onComplete = { viewModel.completeRide() },
                     onCancel = { viewModel.cancelRide() },
                     onOpenChat = { showChatSheet = true },
-                    chatMessageCount = uiState.chatMessages.size
+                    chatMessageCount = uiState.chatMessages.size,
+                    settingsManager = settingsManager,
+                    priceService = viewModel.bitcoinPriceService
                 )
             }
 
@@ -155,7 +167,9 @@ fun DriverModeScreen(
                 RideCompletedContent(
                     uiState = uiState,
                     onFinish = { viewModel.finishAndGoOnline(demoLocation) },
-                    onGoOffline = { viewModel.clearAcceptedOffer() }
+                    onGoOffline = { viewModel.clearAcceptedOffer() },
+                    settingsManager = settingsManager,
+                    priceService = viewModel.bitcoinPriceService
                 )
             }
         }
@@ -222,9 +236,16 @@ private fun OfflineContent(
 private fun AvailableContent(
     uiState: DriverUiState,
     onGoOffline: () -> Unit,
+    onAcceptBroadcastRequest: (BroadcastRideOfferData) -> Unit,
+    onDeclineBroadcastRequest: (BroadcastRideOfferData) -> Unit,
     onAcceptOffer: (RideOfferData) -> Unit,
-    onDeclineOffer: (RideOfferData) -> Unit
+    onDeclineOffer: (RideOfferData) -> Unit,
+    settingsManager: SettingsManager,
+    priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
+    // Total requests count (broadcast + direct)
+    val totalRequests = uiState.pendingBroadcastRequests.size + uiState.pendingOffers.size
+
     // Online status card
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -285,35 +306,77 @@ private fun AvailableContent(
 
     Spacer(modifier = Modifier.height(16.dp))
 
-    // Ride requests section
+    // Ride requests section header
     Text(
-        text = "Incoming Ride Requests (${uiState.pendingOffers.size})",
+        text = "Available Ride Requests ($totalRequests)",
         style = MaterialTheme.typography.titleMedium,
         fontWeight = FontWeight.Bold
     )
 
     Spacer(modifier = Modifier.height(8.dp))
 
-    if (uiState.pendingOffers.isEmpty()) {
+    if (totalRequests == 0) {
         Card(modifier = Modifier.fillMaxWidth()) {
-            Text(
-                text = "Waiting for ride requests...",
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(24.dp),
-                textAlign = TextAlign.Center,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Icon(
+                    Icons.Default.DirectionsCar,
+                    contentDescription = null,
+                    modifier = Modifier.size(40.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Waiting for ride requests...",
+                    textAlign = TextAlign.Center,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = "Requests from nearby riders will appear here",
+                    style = MaterialTheme.typography.bodySmall,
+                    textAlign = TextAlign.Center,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                )
+            }
         }
     } else {
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(uiState.pendingOffers) { offer ->
-                RideOfferCard(
-                    offer = offer,
+            // Show broadcast requests first (sorted by fare, highest first)
+            items(uiState.pendingBroadcastRequests) { request ->
+                BroadcastRideRequestCard(
+                    request = request,
                     isProcessing = uiState.isProcessingOffer,
-                    onAccept = { onAcceptOffer(offer) },
-                    onDecline = { onDeclineOffer(offer) }
+                    onAccept = { onAcceptBroadcastRequest(request) },
+                    onDecline = { onDeclineBroadcastRequest(request) },
+                    settingsManager = settingsManager,
+                    priceService = priceService
                 )
+            }
+
+            // Show direct offers (legacy/advanced) if any
+            if (uiState.pendingOffers.isNotEmpty()) {
+                item {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Direct Requests (${uiState.pendingOffers.size})",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                items(uiState.pendingOffers) { offer ->
+                    RideOfferCard(
+                        offer = offer,
+                        isProcessing = uiState.isProcessingOffer,
+                        onAccept = { onAcceptOffer(offer) },
+                        onDecline = { onDeclineOffer(offer) },
+                        settingsManager = settingsManager,
+                        priceService = priceService
+                    )
+                }
             }
         }
     }
@@ -325,7 +388,9 @@ private fun RideAcceptedContent(
     onStartRoute: () -> Unit,
     onCancel: () -> Unit,
     onOpenChat: () -> Unit,
-    chatMessageCount: Int
+    chatMessageCount: Int,
+    settingsManager: SettingsManager,
+    priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
     val context = LocalContext.current
     val offer = uiState.acceptedOffer ?: return
@@ -395,11 +460,12 @@ private fun RideAcceptedContent(
                         style = MaterialTheme.typography.bodyMedium
                     )
                     Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "Fare: ${offer.fareEstimate.toInt()} sats",
+                    FareDisplay(
+                        satsAmount = offer.fareEstimate,
+                        settingsManager = settingsManager,
+                        priceService = priceService,
                         style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
+                        prefix = "Fare: "
                     )
                 }
             }
@@ -692,6 +758,41 @@ private fun ArrivedAtPickupContent(
 
             Spacer(modifier = Modifier.height(8.dp))
 
+            // Show timeout message if verification timed out
+            if (uiState.pinVerificationTimedOut) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Icon(
+                            Icons.Default.Warning,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "No response from rider",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                        Text(
+                            text = "The rider's app may not have received the PIN. Try again or cancel.",
+                            style = MaterialTheme.typography.bodySmall,
+                            textAlign = TextAlign.Center,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+            }
+
             Button(
                 onClick = {
                     onSubmitPin(pinInput)
@@ -707,6 +808,10 @@ private fun ArrivedAtPickupContent(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("Verifying...")
+                } else if (uiState.pinVerificationTimedOut) {
+                    Icon(Icons.Default.Refresh, contentDescription = null)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Retry PIN Verification")
                 } else {
                     Icon(Icons.Default.Check, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
@@ -716,9 +821,10 @@ private fun ArrivedAtPickupContent(
 
             Spacer(modifier = Modifier.height(8.dp))
 
+            // Cancel button - always enabled except when actively verifying
             TextButton(
                 onClick = onCancel,
-                enabled = !uiState.isAwaitingPinVerification
+                modifier = Modifier.fillMaxWidth()
             ) {
                 Text("Cancel Ride", color = MaterialTheme.colorScheme.error)
             }
@@ -733,7 +839,9 @@ private fun InRideContent(
     onComplete: () -> Unit,
     onCancel: () -> Unit,
     onOpenChat: () -> Unit,
-    chatMessageCount: Int
+    chatMessageCount: Int,
+    settingsManager: SettingsManager,
+    priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
     val context = LocalContext.current
     val offer = uiState.acceptedOffer ?: return
@@ -793,11 +901,12 @@ private fun InRideContent(
                 textAlign = TextAlign.Center
             )
 
-            Text(
-                text = "Fare: ${offer.fareEstimate.toInt()} sats",
+            FareDisplay(
+                satsAmount = offer.fareEstimate,
+                settingsManager = settingsManager,
+                priceService = priceService,
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.primary
+                prefix = "Fare: "
             )
 
             // Auto-navigation countdown indicator (only show if enabled)
@@ -865,7 +974,9 @@ private fun InRideContent(
 private fun RideCompletedContent(
     uiState: DriverUiState,
     onFinish: () -> Unit,
-    onGoOffline: () -> Unit
+    onGoOffline: () -> Unit,
+    settingsManager: SettingsManager,
+    priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
     val offer = uiState.acceptedOffer
 
@@ -899,11 +1010,12 @@ private fun RideCompletedContent(
             Spacer(modifier = Modifier.height(8.dp))
 
             offer?.let {
-                Text(
-                    text = "Fare: ${it.fareEstimate.toInt()} sats",
+                FareDisplay(
+                    satsAmount = it.fareEstimate,
+                    settingsManager = settingsManager,
+                    priceService = priceService,
                     style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary
+                    prefix = "Fare: "
                 )
             }
 
@@ -957,7 +1069,9 @@ private fun RideOfferCard(
     offer: RideOfferData,
     isProcessing: Boolean,
     onAccept: () -> Unit,
-    onDecline: () -> Unit
+    onDecline: () -> Unit,
+    settingsManager: SettingsManager,
+    priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
     // Update relative time every second
     var relativeTime by remember { mutableStateOf(formatRelativeTime(offer.createdAt)) }
@@ -987,11 +1101,11 @@ private fun RideOfferCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                Text(
-                    text = "${offer.fareEstimate.toInt()} sats",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary
+                FareDisplay(
+                    satsAmount = offer.fareEstimate,
+                    settingsManager = settingsManager,
+                    priceService = priceService,
+                    style = MaterialTheme.typography.titleMedium
                 )
             }
 
@@ -1052,6 +1166,177 @@ private fun RideOfferCard(
                     Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(4.dp))
                     Text("Decline")
+                }
+                Button(
+                    onClick = onAccept,
+                    enabled = !isProcessing,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    if (isProcessing) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Accept")
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Card for displaying a broadcast ride request.
+ * Shows fare prominently, route info, and request age.
+ */
+@Composable
+private fun BroadcastRideRequestCard(
+    request: BroadcastRideOfferData,
+    isProcessing: Boolean,
+    onAccept: () -> Unit,
+    onDecline: () -> Unit,
+    settingsManager: SettingsManager,
+    priceService: com.ridestr.common.bitcoin.BitcoinPriceService
+) {
+    // Update relative time every second
+    var relativeTime by remember { mutableStateOf(formatRelativeTime(request.createdAt)) }
+    LaunchedEffect(request.createdAt) {
+        while (true) {
+            relativeTime = formatRelativeTime(request.createdAt)
+            kotlinx.coroutines.delay(1000)
+        }
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        )
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            // Header: Fare + Time
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Default.Bolt,
+                            contentDescription = null,
+                            modifier = Modifier.size(24.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        FareDisplay(
+                            satsAmount = request.fareEstimate,
+                            settingsManager = settingsManager,
+                            priceService = priceService,
+                            style = MaterialTheme.typography.headlineSmall
+                        )
+                    }
+                }
+                Text(
+                    text = relativeTime,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Route info
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                // Distance
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Default.Straighten,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "${String.format("%.1f", request.routeDistanceKm)} km",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+                // Duration
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Default.Schedule,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "${request.routeDurationMin.toInt()} min",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Locations
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.MyLocation,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = "Pickup: ${String.format("%.4f", request.pickupArea.lat)}, ${String.format("%.4f", request.pickupArea.lon)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.Flag,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.error
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = "Dest: ${String.format("%.4f", request.destinationArea.lat)}, ${String.format("%.4f", request.destinationArea.lon)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Action buttons
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick = onDecline,
+                    enabled = !isProcessing,
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error
+                    )
+                ) {
+                    Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Pass")
                 }
                 Button(
                     onClick = onAccept,

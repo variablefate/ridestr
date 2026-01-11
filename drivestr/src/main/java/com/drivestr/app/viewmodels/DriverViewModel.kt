@@ -5,7 +5,9 @@ import android.content.Context
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.nostr.NostrService
+import com.ridestr.common.nostr.events.BroadcastRideOfferData
 import com.ridestr.common.nostr.events.DriverStatusType
 import com.ridestr.common.nostr.events.Location
 import com.ridestr.common.nostr.events.PickupVerificationData
@@ -45,6 +47,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         private const val AVAILABILITY_BROADCAST_INTERVAL_MS = 5 * 60 * 1000L
         // Refresh chat subscription every 15 seconds to ensure messages are received
         private const val CHAT_REFRESH_INTERVAL_MS = 15 * 1000L
+        // Timeout for PIN verification response (30 seconds)
+        private const val PIN_VERIFICATION_TIMEOUT_MS = 30 * 1000L
         // SharedPreferences keys for ride state persistence
         private const val PREFS_NAME = "drivestr_ride_state"
         private const val KEY_RIDE_STATE = "active_ride"
@@ -56,12 +60,17 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
     private val nostrService = NostrService(application)
 
+    // Bitcoin price service for fare conversion
+    val bitcoinPriceService = BitcoinPriceService()
+
     private val _uiState = MutableStateFlow(DriverUiState())
     val uiState: StateFlow<DriverUiState> = _uiState.asStateFlow()
 
     private var availabilityJob: Job? = null
     private var chatRefreshJob: Job? = null
-    private var offerSubscriptionId: String? = null
+    private var pinVerificationTimeoutJob: Job? = null
+    private var offerSubscriptionId: String? = null                    // Direct offers (legacy/advanced)
+    private var broadcastRequestSubscriptionId: String? = null         // Broadcast ride requests (new flow)
     private var confirmationSubscriptionId: String? = null
     private var verificationSubscriptionId: String? = null
     private var chatSubscriptionId: String? = null
@@ -69,9 +78,15 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     private val publishedAvailabilityEventIds = mutableListOf<String>()
     // Track accepted offer IDs to filter out when resubscribing (avoids duplicate offers after ride completion)
     private val acceptedOfferEventIds = mutableSetOf<String>()
+    // Track subscription IDs for watching acceptances of each visible ride request
+    private val requestAcceptanceSubscriptionIds = mutableMapOf<String, String>()
+    // Track offer IDs that have been taken by another driver
+    private val takenOfferEventIds = mutableSetOf<String>()
 
     init {
         nostrService.connect()
+        // Start Bitcoin price auto-refresh (every 5 minutes)
+        bitcoinPriceService.startAutoRefresh()
 
         // Set user's public key
         nostrService.getPubKeyHex()?.let { pubKey ->
@@ -323,6 +338,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         } else if (currentState.stage == DriverStage.OFFLINE) {
             // Go online
             startBroadcasting(location)
+            subscribeToBroadcastRequests(location)
+            // Also subscribe to direct offers (legacy/advanced mode)
             subscribeToOffers()
             _uiState.value = currentState.copy(
                 stage = DriverStage.AVAILABLE,
@@ -386,6 +403,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.value = state.copy(
             stage = DriverStage.OFFLINE,
             acceptedOffer = null,
+            acceptedBroadcastRequest = null,
             acceptanceEventId = null,
             confirmationEventId = null,
             precisePickupLocation = null,
@@ -395,6 +413,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             chatMessages = emptyList(),
             isSendingMessage = false,
             pendingOffers = emptyList(),
+            pendingBroadcastRequests = emptyList(),
             statusMessage = "Ride cancelled. Tap to go online."
         )
 
@@ -440,6 +459,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.value = state.copy(
             stage = DriverStage.OFFLINE,
             acceptedOffer = null,
+            acceptedBroadcastRequest = null,
             acceptanceEventId = null,
             confirmationEventId = null,
             precisePickupLocation = null,
@@ -449,6 +469,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             chatMessages = emptyList(),
             isSendingMessage = false,
             pendingOffers = emptyList(),
+            pendingBroadcastRequests = emptyList(),
             statusMessage = "Tap to go online"
         )
 
@@ -462,6 +483,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     private fun closeOfferSubscription() {
         offerSubscriptionId?.let { nostrService.closeSubscription(it) }
         offerSubscriptionId = null
+        broadcastRequestSubscriptionId?.let { nostrService.closeSubscription(it) }
+        broadcastRequestSubscriptionId = null
+        // Close all per-request acceptance subscriptions
+        requestAcceptanceSubscriptionIds.values.forEach { nostrService.closeSubscription(it) }
+        requestAcceptanceSubscriptionIds.clear()
+        takenOfferEventIds.clear()
     }
 
     fun updateLocation(location: Location) {
@@ -602,12 +629,100 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     lastPinSubmissionEventId = eventId,
                     statusMessage = "Waiting for rider to verify PIN..."
                 )
+                // Start timeout for PIN verification
+                startPinVerificationTimeout()
             } else {
                 _uiState.value = _uiState.value.copy(
                     isAwaitingPinVerification = false,
                     error = "Failed to submit PIN"
                 )
             }
+        }
+    }
+
+    /**
+     * Start a timeout for PIN verification. If no response is received,
+     * show options to retry or cancel.
+     */
+    private fun startPinVerificationTimeout() {
+        pinVerificationTimeoutJob?.cancel()
+        pinVerificationTimeoutJob = viewModelScope.launch {
+            delay(PIN_VERIFICATION_TIMEOUT_MS)
+
+            // Check if still waiting for verification
+            val state = _uiState.value
+            if (state.isAwaitingPinVerification && state.stage == DriverStage.ARRIVED_AT_PICKUP) {
+                Log.w(TAG, "PIN verification timed out - no response from rider")
+                _uiState.value = state.copy(
+                    isAwaitingPinVerification = false,
+                    pinVerificationTimedOut = true,
+                    statusMessage = "No response from rider. Try again or cancel."
+                )
+            }
+        }
+    }
+
+    /**
+     * Retry PIN submission after timeout.
+     */
+    fun retryPinSubmission(pin: String) {
+        _uiState.value = _uiState.value.copy(pinVerificationTimedOut = false)
+        submitPinForVerification(pin)
+    }
+
+    /**
+     * Cancel the current ride (can be called at any stage).
+     */
+    fun cancelCurrentRide(reason: String = "driver_cancelled") {
+        val state = _uiState.value
+        val confirmationEventId = state.confirmationEventId
+        val riderPubKey = state.acceptedOffer?.riderPubKey
+
+        // Cancel timeout job if running
+        pinVerificationTimeoutJob?.cancel()
+        pinVerificationTimeoutJob = null
+
+        viewModelScope.launch {
+            // Send cancellation event if we have an active ride
+            if (confirmationEventId != null && riderPubKey != null) {
+                nostrService.publishRideCancellation(
+                    confirmationEventId = confirmationEventId,
+                    otherPartyPubKey = riderPubKey,
+                    reason = reason
+                )
+                Log.d(TAG, "Sent cancellation event for ride: $confirmationEventId")
+            }
+
+            // Clean up all subscriptions
+            confirmationSubscriptionId?.let { nostrService.closeSubscription(it) }
+            confirmationSubscriptionId = null
+            verificationSubscriptionId?.let { nostrService.closeSubscription(it) }
+            verificationSubscriptionId = null
+            chatSubscriptionId?.let { nostrService.closeSubscription(it) }
+            chatSubscriptionId = null
+            cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
+            cancellationSubscriptionId = null
+            chatRefreshJob?.cancel()
+            chatRefreshJob = null
+
+            // Reset state
+            _uiState.value = _uiState.value.copy(
+                stage = DriverStage.OFFLINE,
+                acceptedOffer = null,
+                confirmationEventId = null,
+                precisePickupLocation = null,
+                pinAttempts = 0,
+                isAwaitingPinVerification = false,
+                pinVerificationTimedOut = false,
+                lastPinSubmissionEventId = null,
+                chatMessages = emptyList(),
+                isSendingMessage = false,
+                error = null,
+                statusMessage = "Ride cancelled"
+            )
+
+            // Clear persisted ride state
+            clearSavedRideState()
         }
     }
 
@@ -627,21 +742,26 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      * Handle a PIN verification response from the rider.
      */
     private fun handlePinVerification(verification: PickupVerificationData) {
+        // Cancel timeout job since we received a response
+        pinVerificationTimeoutJob?.cancel()
+        pinVerificationTimeoutJob = null
+
         val state = _uiState.value
 
-        // Only process if we're at pickup AND we actually submitted a PIN
+        // Only process if we're at pickup AND we actually submitted a PIN (or timed out)
         if (state.stage != DriverStage.ARRIVED_AT_PICKUP) {
             Log.d(TAG, "Ignoring verification - not at pickup (stage=${state.stage})")
             return
         }
 
-        if (!state.isAwaitingPinVerification) {
+        if (!state.isAwaitingPinVerification && !state.pinVerificationTimedOut) {
             Log.d(TAG, "Ignoring verification - not awaiting verification (stale event?)")
             return
         }
 
         _uiState.value = state.copy(
             isAwaitingPinVerification = false,
+            pinVerificationTimedOut = false,
             pinAttempts = verification.attemptNumber
         )
 
@@ -903,10 +1023,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.value = state.copy(
             stage = newStage,
             acceptedOffer = null,
+            acceptedBroadcastRequest = null,
             confirmationEventId = null,
             precisePickupLocation = null,
             isAwaitingPinVerification = false,
             chatMessages = emptyList(),
+            pendingBroadcastRequests = emptyList(),
             statusMessage = if (newStage == DriverStage.AVAILABLE) "Rider cancelled - waiting for new requests" else "Rider cancelled ride",
             error = reason ?: "Rider cancelled the ride"
         )
@@ -1000,6 +1122,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             _uiState.value = state.copy(
                 stage = DriverStage.OFFLINE,
                 acceptedOffer = null,
+                acceptedBroadcastRequest = null,
                 acceptanceEventId = null,
                 confirmationEventId = null,
                 precisePickupLocation = null,
@@ -1008,6 +1131,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 lastPinSubmissionEventId = null,
                 chatMessages = emptyList(),
                 isSendingMessage = false,
+                pendingBroadcastRequests = emptyList(),
                 statusMessage = "Tap to go online"
             )
 
@@ -1111,15 +1235,190 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    /**
+     * Subscribe to broadcast ride requests in the driver's area.
+     * This is the new primary flow where riders broadcast and any driver can accept.
+     */
+    private fun subscribeToBroadcastRequests(location: Location) {
+        broadcastRequestSubscriptionId?.let { nostrService.closeSubscription(it) }
+
+        broadcastRequestSubscriptionId = nostrService.subscribeToBroadcastRideRequests(
+            location = location,
+            expandSearch = false
+        ) { request ->
+            Log.d(TAG, "Received broadcast ride request from ${request.riderPubKey.take(8)}, fare=${request.fareEstimate}")
+
+            // Filter out requests we've already accepted
+            if (request.eventId in acceptedOfferEventIds) {
+                Log.d(TAG, "Ignoring already-accepted request: ${request.eventId.take(8)}")
+                return@subscribeToBroadcastRideRequests
+            }
+
+            // Filter out requests that were taken by another driver
+            if (request.eventId in takenOfferEventIds) {
+                Log.d(TAG, "Ignoring taken request: ${request.eventId.take(8)}")
+                return@subscribeToBroadcastRideRequests
+            }
+
+            // Filter out stale requests (>5 minutes old for broadcast)
+            val currentTimeSeconds = System.currentTimeMillis() / 1000
+            val requestAgeSeconds = currentTimeSeconds - request.createdAt
+            val maxRequestAgeSeconds = 5 * 60 // 5 minutes for broadcast requests
+
+            if (requestAgeSeconds > maxRequestAgeSeconds) {
+                Log.d(TAG, "Ignoring stale broadcast request (${requestAgeSeconds}s old)")
+                return@subscribeToBroadcastRideRequests
+            }
+
+            // Check if we already have this exact request
+            val currentRequests = _uiState.value.pendingBroadcastRequests
+            if (currentRequests.none { it.eventId == request.eventId }) {
+                // Filter out stale requests and any previous requests from the same rider
+                // (handles fare boosts - new request replaces old one from same rider)
+                val freshRequests = currentRequests.filter {
+                    (currentTimeSeconds - it.createdAt) <= maxRequestAgeSeconds &&
+                    it.eventId !in takenOfferEventIds &&
+                    it.riderPubKey != request.riderPubKey  // Remove old request from same rider
+                }
+                // Sort by fare (highest first), then by time (newest first)
+                val sortedRequests = (freshRequests + request)
+                    .sortedWith(compareByDescending<BroadcastRideOfferData> { it.fareEstimate }
+                        .thenByDescending { it.createdAt })
+
+                _uiState.value = _uiState.value.copy(
+                    pendingBroadcastRequests = sortedRequests
+                )
+
+                // Subscribe to acceptances for this request to detect if another driver takes it
+                subscribeToAcceptancesForRequest(request.eventId)
+            }
+        }
+    }
+
+    /**
+     * Subscribe to acceptances for a specific ride request.
+     * When another driver accepts, we remove the request from our list.
+     */
+    private fun subscribeToAcceptancesForRequest(requestEventId: String) {
+        // Don't double-subscribe
+        if (requestAcceptanceSubscriptionIds.containsKey(requestEventId)) return
+
+        val myPubKey = nostrService.getPubKeyHex() ?: return
+
+        val subId = nostrService.subscribeToAcceptancesForOffer(requestEventId) { acceptance ->
+            // If the acceptance is from a different driver, the ride is taken
+            if (acceptance.driverPubKey != myPubKey) {
+                Log.d(TAG, "Request ${requestEventId.take(8)} was taken by driver ${acceptance.driverPubKey.take(8)}")
+                markRequestAsTaken(requestEventId)
+            }
+        }
+
+        requestAcceptanceSubscriptionIds[requestEventId] = subId
+    }
+
+    /**
+     * Mark a ride request as taken and remove from visible list.
+     */
+    private fun markRequestAsTaken(requestEventId: String) {
+        takenOfferEventIds.add(requestEventId)
+
+        // Remove from pending requests
+        val currentRequests = _uiState.value.pendingBroadcastRequests
+        val updatedRequests = currentRequests.filter { it.eventId != requestEventId }
+        _uiState.value = _uiState.value.copy(pendingBroadcastRequests = updatedRequests)
+
+        // Close the acceptance subscription for this request (no longer needed)
+        requestAcceptanceSubscriptionIds.remove(requestEventId)?.let {
+            nostrService.closeSubscription(it)
+        }
+    }
+
+    /**
+     * Accept a broadcast ride request.
+     * This is the new primary flow.
+     */
+    fun acceptBroadcastRequest(request: BroadcastRideOfferData) {
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isProcessingOffer = true)
+
+            // Track this request as accepted
+            acceptedOfferEventIds.add(request.eventId)
+
+            val eventId = nostrService.acceptBroadcastRide(request)
+
+            if (eventId != null) {
+                Log.d(TAG, "Accepted broadcast ride request: $eventId")
+                // Stop broadcasting availability
+                stopBroadcasting()
+                deleteAllAvailabilityEvents()
+
+                // Create a RideOfferData from broadcast data for compatibility
+                // (needed for existing ride flow which uses RideOfferData)
+                val compatibleOffer = RideOfferData(
+                    eventId = request.eventId,
+                    riderPubKey = request.riderPubKey,
+                    driverEventId = "", // No driver event reference in broadcast mode
+                    driverPubKey = nostrService.getPubKeyHex() ?: "",
+                    approxPickup = request.pickupArea,
+                    destination = request.destinationArea,
+                    fareEstimate = request.fareEstimate,
+                    createdAt = request.createdAt
+                )
+
+                _uiState.value = _uiState.value.copy(
+                    stage = DriverStage.RIDE_ACCEPTED,
+                    isProcessingOffer = false,
+                    acceptedOffer = compatibleOffer,
+                    acceptedBroadcastRequest = request,  // Keep original for reference
+                    acceptanceEventId = eventId,
+                    pendingOffers = emptyList(),
+                    pendingBroadcastRequests = emptyList(),
+                    pinAttempts = 0,
+                    statusMessage = "Ride accepted! Waiting for rider confirmation..."
+                )
+
+                // Save ride state for persistence
+                saveRideState()
+
+                // Subscribe to rider's confirmation
+                subscribeToConfirmation(eventId)
+
+                // Subscribe to PIN verification responses
+                subscribeToVerifications()
+            } else {
+                _uiState.value = _uiState.value.copy(
+                    isProcessingOffer = false,
+                    error = "Failed to accept ride request"
+                )
+            }
+        }
+    }
+
+    /**
+     * Decline a broadcast ride request (remove from list without accepting).
+     */
+    fun declineBroadcastRequest(request: BroadcastRideOfferData) {
+        val currentRequests = _uiState.value.pendingBroadcastRequests
+        _uiState.value = _uiState.value.copy(
+            pendingBroadcastRequests = currentRequests.filter { it.eventId != request.eventId }
+        )
+        // Also add to accepted set to prevent it from showing again on refresh
+        acceptedOfferEventIds.add(request.eventId)
+    }
+
     override fun onCleared() {
         super.onCleared()
         stopBroadcasting()
         offerSubscriptionId?.let { nostrService.closeSubscription(it) }
+        broadcastRequestSubscriptionId?.let { nostrService.closeSubscription(it) }
+        requestAcceptanceSubscriptionIds.values.forEach { nostrService.closeSubscription(it) }
         confirmationSubscriptionId?.let { nostrService.closeSubscription(it) }
         verificationSubscriptionId?.let { nostrService.closeSubscription(it) }
         chatSubscriptionId?.let { nostrService.closeSubscription(it) }
         cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
         nostrService.disconnect()
+        // Clean up Bitcoin price service
+        bitcoinPriceService.cleanup()
     }
 }
 
@@ -1132,12 +1431,15 @@ data class DriverUiState(
     val currentLocation: Location? = null,
     val lastBroadcastTime: Long? = null,
 
-    // Ride offers (only shown when AVAILABLE)
+    // Ride offers - Direct offers (legacy/advanced - only shown when AVAILABLE)
     val pendingOffers: List<RideOfferData> = emptyList(),
+    // Ride offers - Broadcast requests (new primary flow)
+    val pendingBroadcastRequests: List<BroadcastRideOfferData> = emptyList(),
     val isProcessingOffer: Boolean = false,
 
     // Active ride info
-    val acceptedOffer: RideOfferData? = null,
+    val acceptedOffer: RideOfferData? = null,                 // Compatible format for ride flow
+    val acceptedBroadcastRequest: BroadcastRideOfferData? = null, // Original broadcast data (if applicable)
     val acceptanceEventId: String? = null,  // Our acceptance event (Kind 3174) for cleanup
     val confirmationEventId: String? = null,
     val precisePickupLocation: Location? = null,
@@ -1145,6 +1447,7 @@ data class DriverUiState(
     // PIN verification (rider generates PIN, driver submits for verification)
     val pinAttempts: Int = 0,                           // Number of PIN submission attempts
     val isAwaitingPinVerification: Boolean = false,     // Waiting for rider to verify
+    val pinVerificationTimedOut: Boolean = false,       // True if verification timed out (show retry/cancel)
     val lastPinSubmissionEventId: String? = null,       // Last PIN submission event ID
 
     // Chat (NIP-17 style private messaging)

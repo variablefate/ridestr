@@ -257,6 +257,7 @@ fun MainScreen(
 
         RiderModeScreen(
             viewModel = riderViewModel,
+            settingsManager = settingsManager,
             modifier = Modifier.weight(1f)
         )
     }

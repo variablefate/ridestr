@@ -16,6 +16,7 @@ import com.ridestr.common.nostr.events.RideshareChatData
 import com.ridestr.common.nostr.events.UserProfile
 import com.ridestr.common.nostr.events.geohash
 import kotlin.random.Random
+import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.routing.RouteResult
 import com.ridestr.common.routing.ValhallaRoutingService
 import kotlinx.coroutines.Job
@@ -52,13 +53,20 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         private const val KEY_RIDE_STATE = "active_ride"
         // Maximum age of persisted ride state (2 hours)
         private const val MAX_RIDE_STATE_AGE_MS = 2 * 60 * 60 * 1000L
-        // Time to wait for driver to accept before timeout (20 seconds)
+        // Time to wait for driver to accept direct offer before timeout (20 seconds)
         private const val ACCEPTANCE_TIMEOUT_MS = 20_000L
+        // Time to wait for any driver to accept broadcast request (2 minutes)
+        private const val BROADCAST_TIMEOUT_MS = 120_000L
+        // Default fare boost amount in sats
+        private const val FARE_BOOST_AMOUNT = 100.0
     }
 
     private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val nostrService = NostrService(application)
     private val routingService = ValhallaRoutingService(application)
+
+    // Bitcoin price service for fare conversion
+    val bitcoinPriceService = BitcoinPriceService()
 
     private val _uiState = MutableStateFlow(RiderUiState())
     val uiState: StateFlow<RiderUiState> = _uiState.asStateFlow()
@@ -72,14 +80,19 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     private var staleDriverCleanupJob: Job? = null
     private var chatRefreshJob: Job? = null
     private var acceptanceTimeoutJob: Job? = null
+    private var broadcastTimeoutJob: Job? = null
     private val profileSubscriptionIds = mutableMapOf<String, String>()
     private var currentSubscriptionGeohash: String? = null
+    // First-acceptance-wins flag for broadcast mode
+    private var hasAcceptedDriver: Boolean = false
 
     init {
         // Connect to relays and subscribe to drivers
         nostrService.connect()
         subscribeToDrivers()
         startStaleDriverCleanup()
+        // Start Bitcoin price auto-refresh (every 5 minutes)
+        bitcoinPriceService.startAutoRefresh()
 
         // Set user's public key
         nostrService.getPubKeyHex()?.let { pubKey ->
@@ -317,6 +330,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     private fun getStatusMessageForStage(stage: RideStage, pin: String?): String {
         return when (stage) {
             RideStage.IDLE -> "Find available drivers"
+            RideStage.BROADCASTING_REQUEST -> "Searching for drivers..."
             RideStage.WAITING_FOR_ACCEPTANCE -> "Waiting for driver to accept..."
             RideStage.DRIVER_ACCEPTED -> "Driver accepted! Confirming ride..."
             RideStage.RIDE_CONFIRMED -> "Ride confirmed! Tell driver PIN: ${pin ?: "N/A"}"
@@ -467,6 +481,203 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
         // Clear persisted ride state (in case any was saved)
         clearSavedRideState()
+    }
+
+    // ==================== Broadcast Ride Request (New Flow) ====================
+
+    /**
+     * Broadcast a public ride request visible to all drivers in the pickup area.
+     * This is the new primary flow - riders broadcast and any driver can accept.
+     */
+    fun broadcastRideRequest() {
+        val state = _uiState.value
+        val pickup = state.pickupLocation ?: return
+        val destination = state.destination ?: return
+        val fareEstimate = state.fareEstimate ?: return
+        val routeResult = state.routeResult ?: return
+
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isSendingOffer = true)
+
+            val eventId = nostrService.broadcastRideRequest(
+                pickup = pickup,
+                destination = destination,
+                fareEstimate = fareEstimate,
+                routeDistanceKm = routeResult.distanceKm,
+                routeDurationMin = routeResult.durationSeconds / 60.0
+            )
+
+            if (eventId != null) {
+                Log.d(TAG, "Broadcast ride request: $eventId")
+                // Reset first-acceptance flag
+                hasAcceptedDriver = false
+                // Subscribe to acceptances from any driver
+                subscribeToAcceptancesForBroadcast(eventId)
+                // Start 2-minute timeout
+                startBroadcastTimeout()
+
+                _uiState.value = _uiState.value.copy(
+                    isSendingOffer = false,
+                    pendingOfferEventId = eventId,
+                    rideStage = RideStage.BROADCASTING_REQUEST,
+                    broadcastStartTimeMs = System.currentTimeMillis(),
+                    statusMessage = "Searching for drivers..."
+                )
+            } else {
+                _uiState.value = _uiState.value.copy(
+                    isSendingOffer = false,
+                    error = "Failed to broadcast ride request"
+                )
+            }
+        }
+    }
+
+    /**
+     * Boost the fare and re-broadcast the ride request.
+     * Deletes the old request and creates a new one with higher fare.
+     */
+    fun boostFare() {
+        val state = _uiState.value
+        val currentFare = state.fareEstimate ?: return
+        val newFare = currentFare + FARE_BOOST_AMOUNT
+
+        viewModelScope.launch {
+            // Cancel current timeout
+            cancelBroadcastTimeout()
+
+            // Delete old offer
+            state.pendingOfferEventId?.let { offerId ->
+                Log.d(TAG, "Deleting old offer before boost: $offerId")
+                nostrService.deleteEvent(offerId, "fare boosted")
+            }
+
+            // Close old acceptance subscription
+            acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
+            acceptanceSubscriptionId = null
+
+            // Update fare in state
+            _uiState.value = _uiState.value.copy(
+                fareEstimate = newFare,
+                boostCount = state.boostCount + 1,
+                pendingOfferEventId = null
+            )
+
+            // Re-broadcast with new fare
+            Log.d(TAG, "Boosting fare from $currentFare to $newFare sats")
+            broadcastRideRequest()
+        }
+    }
+
+    /**
+     * Cancel the broadcast ride request.
+     */
+    fun cancelBroadcastRequest() {
+        val state = _uiState.value
+
+        // Cancel the timeout
+        cancelBroadcastTimeout()
+
+        // Close acceptance subscription
+        acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
+        acceptanceSubscriptionId = null
+
+        // Delete the offer event (NIP-09)
+        viewModelScope.launch {
+            state.pendingOfferEventId?.let { offerId ->
+                Log.d(TAG, "Deleting cancelled broadcast request: $offerId")
+                nostrService.deleteEvent(offerId, "request cancelled")
+            }
+        }
+
+        _uiState.value = state.copy(
+            pendingOfferEventId = null,
+            rideStage = RideStage.IDLE,
+            broadcastStartTimeMs = null,
+            boostCount = 0,
+            statusMessage = "Request cancelled"
+        )
+
+        // Clear persisted ride state
+        clearSavedRideState()
+    }
+
+    /**
+     * Subscribe to acceptances for a broadcast ride request.
+     * First acceptance wins - subsequent ones are ignored.
+     */
+    private fun subscribeToAcceptancesForBroadcast(offerEventId: String) {
+        acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
+
+        acceptanceSubscriptionId = nostrService.subscribeToAcceptancesForOffer(offerEventId) { acceptance ->
+            // First-acceptance-wins logic
+            if (hasAcceptedDriver) {
+                Log.d(TAG, "Ignoring duplicate acceptance from ${acceptance.driverPubKey.take(8)} - already accepted")
+                return@subscribeToAcceptancesForOffer
+            }
+
+            // Only process if we're still broadcasting
+            if (_uiState.value.rideStage != RideStage.BROADCASTING_REQUEST) {
+                Log.d(TAG, "Ignoring acceptance - not in broadcasting stage (stage=${_uiState.value.rideStage})")
+                return@subscribeToAcceptancesForOffer
+            }
+
+            Log.d(TAG, "First driver accepted! ${acceptance.driverPubKey.take(8)}")
+            hasAcceptedDriver = true
+
+            // Cancel the timeout
+            cancelBroadcastTimeout()
+
+            _uiState.value = _uiState.value.copy(
+                acceptance = acceptance,
+                rideStage = RideStage.DRIVER_ACCEPTED,
+                broadcastStartTimeMs = null,
+                statusMessage = "Driver accepted! Confirming ride..."
+            )
+
+            // Auto-confirm the ride (send precise pickup location)
+            autoConfirmRide(acceptance)
+        }
+    }
+
+    /**
+     * Start the 2-minute broadcast timeout.
+     */
+    private fun startBroadcastTimeout() {
+        cancelBroadcastTimeout()
+        Log.d(TAG, "Starting broadcast timeout (${BROADCAST_TIMEOUT_MS / 1000}s)")
+        broadcastTimeoutJob = viewModelScope.launch {
+            delay(BROADCAST_TIMEOUT_MS)
+            handleBroadcastTimeout()
+        }
+    }
+
+    /**
+     * Cancel the broadcast timeout.
+     */
+    private fun cancelBroadcastTimeout() {
+        broadcastTimeoutJob?.cancel()
+        broadcastTimeoutJob = null
+    }
+
+    /**
+     * Handle broadcast timeout - no driver accepted in 2 minutes.
+     */
+    private fun handleBroadcastTimeout() {
+        val state = _uiState.value
+
+        // Only timeout if we're still broadcasting
+        if (state.rideStage != RideStage.BROADCASTING_REQUEST) {
+            Log.d(TAG, "Broadcast timeout ignored - not broadcasting (stage=${state.rideStage})")
+            return
+        }
+
+        Log.d(TAG, "Broadcast timeout - no driver accepted. Boost count: ${state.boostCount}")
+
+        // Don't automatically delete the offer - let user decide to boost or cancel
+        _uiState.value = state.copy(
+            broadcastStartTimeMs = null,
+            statusMessage = "No drivers responded. Boost fare or try again?"
+        )
     }
 
     /**
@@ -650,7 +861,10 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
-            _uiState.value = _uiState.value.copy(availableDrivers = currentDrivers)
+            _uiState.value = _uiState.value.copy(
+                availableDrivers = currentDrivers,
+                nearbyDriverCount = currentDrivers.size
+            )
         }
     }
 
@@ -1237,6 +1451,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         staleDriverCleanupJob?.cancel()
         chatRefreshJob?.cancel()
         acceptanceTimeoutJob?.cancel()
+        broadcastTimeoutJob?.cancel()
         driverSubscriptionId?.let { nostrService.closeSubscription(it) }
         acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
         pinSubmissionSubscriptionId?.let { nostrService.closeSubscription(it) }
@@ -1248,6 +1463,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         }
         profileSubscriptionIds.clear()
         nostrService.disconnect()
+        // Clean up Bitcoin price service
+        bitcoinPriceService.cleanup()
     }
 }
 
@@ -1256,7 +1473,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
  */
 enum class RideStage {
     IDLE,                   // No active ride
-    WAITING_FOR_ACCEPTANCE, // Offer sent, waiting for driver
+    BROADCASTING_REQUEST,   // Broadcasting request, waiting for any driver (new flow)
+    WAITING_FOR_ACCEPTANCE, // Direct offer sent, waiting for specific driver (legacy/advanced)
     DRIVER_ACCEPTED,        // Driver accepted, need to confirm
     RIDE_CONFIRMED,         // Ride confirmed, driver on the way
     IN_PROGRESS,            // Currently in the ride
@@ -1272,6 +1490,7 @@ data class RiderUiState(
     val selectedDriver: DriverAvailabilityData? = null,
     val driverProfiles: Map<String, UserProfile> = emptyMap(),
     val expandedSearch: Boolean = false,
+    val nearbyDriverCount: Int = 0,               // Count of nearby drivers (for display)
 
     // Route information
     val pickupLocation: Location? = null,
@@ -1289,7 +1508,12 @@ data class RiderUiState(
     val isSendingOffer: Boolean = false,
     val isConfirmingRide: Boolean = false,
 
-    // Acceptance timeout tracking
+    // Broadcast mode (new flow)
+    val broadcastStartTimeMs: Long? = null,       // When we started broadcasting
+    val broadcastTimeoutDurationMs: Long = 120_000L, // How long to wait (2 minutes)
+    val boostCount: Int = 0,                       // Number of times fare was boosted
+
+    // Acceptance timeout tracking (for direct offers - legacy/advanced)
     val acceptanceTimeoutStartMs: Long? = null,   // When we started waiting for acceptance
     val acceptanceTimeoutDurationMs: Long = 20_000L, // How long to wait
 

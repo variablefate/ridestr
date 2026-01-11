@@ -60,7 +60,9 @@ data class UserProfile(
     val lud06: String? = null, // LNURL
     // Driver-specific fields (stored in profile for rideshare)
     val carMake: String? = null,
-    val carModel: String? = null
+    val carModel: String? = null,
+    val carColor: String? = null,
+    val carYear: String? = null
 ) {
     /**
      * Convert to JSON string for event content.
@@ -78,19 +80,18 @@ data class UserProfile(
         lud06?.let { json.put("lud06", it) }
         carMake?.let { json.put("car_make", it) }
         carModel?.let { json.put("car_model", it) }
+        carColor?.let { json.put("car_color", it) }
+        carYear?.let { json.put("car_year", it) }
         return json.toString()
     }
 
     /**
      * Get formatted car description.
+     * Example output: "Blue 2024 Toyota Camry"
      */
     fun carDescription(): String? {
-        return when {
-            carMake != null && carModel != null -> "$carMake $carModel"
-            carMake != null -> carMake
-            carModel != null -> carModel
-            else -> null
-        }
+        val parts = listOfNotNull(carColor, carYear, carMake, carModel)
+        return if (parts.isNotEmpty()) parts.joinToString(" ") else null
     }
 
     /**
@@ -121,7 +122,9 @@ data class UserProfile(
                 lud16 = json.optString("lud16").takeIf { it.isNotBlank() },
                 lud06 = json.optString("lud06").takeIf { it.isNotBlank() },
                 carMake = json.optString("car_make").takeIf { it.isNotBlank() },
-                carModel = json.optString("car_model").takeIf { it.isNotBlank() }
+                carModel = json.optString("car_model").takeIf { it.isNotBlank() },
+                carColor = json.optString("car_color").takeIf { it.isNotBlank() },
+                carYear = json.optString("car_year").takeIf { it.isNotBlank() }
             )
         }
     }
