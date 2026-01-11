@@ -1,0 +1,805 @@
+package com.ridestr.common.nostr
+
+import android.content.Context
+import android.util.Log
+import com.ridestr.common.nostr.events.*
+import com.ridestr.common.nostr.keys.KeyManager
+import com.ridestr.common.nostr.relay.RelayConfig
+import com.ridestr.common.nostr.relay.RelayConnectionState
+import com.ridestr.common.nostr.relay.RelayManager
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+
+/**
+ * High-level facade for all Nostr operations in the rideshare app.
+ *
+ * This service provides a simplified API for:
+ * - Key management (via KeyManager)
+ * - Relay connections (via RelayManager)
+ * - Publishing rideshare events
+ * - Subscribing to rideshare events
+ */
+class NostrService(context: Context) {
+
+    companion object {
+        private const val TAG = "NostrService"
+    }
+
+    val keyManager = KeyManager(context)
+    val relayManager = RelayManager(RelayConfig.DEFAULT_RELAYS)
+
+    /**
+     * Connection states for all relays.
+     */
+    val connectionStates: StateFlow<Map<String, RelayConnectionState>> = relayManager.connectionStates
+
+    /**
+     * Connect to all configured relays.
+     */
+    fun connect() {
+        Log.d(TAG, "Connecting to relays")
+        relayManager.connectAll()
+    }
+
+    /**
+     * Disconnect from all relays.
+     */
+    fun disconnect() {
+        Log.d(TAG, "Disconnecting from relays")
+        relayManager.disconnectAll()
+    }
+
+    /**
+     * Ensure all relays are connected. Call this when app returns to foreground.
+     * Reconnects any dropped connections, cleans up stale subscriptions (>30min),
+     * and resends active subscriptions.
+     */
+    fun ensureConnected() {
+        Log.d(TAG, "Ensuring relay connections")
+        relayManager.ensureConnected()
+    }
+
+    /**
+     * Clear all subscriptions. Use for debugging or to reset state.
+     */
+    fun clearAllSubscriptions() {
+        Log.d(TAG, "Clearing all subscriptions")
+        relayManager.clearAllSubscriptions()
+    }
+
+    /**
+     * Check if the user is logged in (has a key).
+     */
+    fun isLoggedIn(): Boolean = keyManager.hasKey()
+
+    /**
+     * Get the current user's public key in hex format.
+     * @return The public key hex string, or null if not logged in
+     */
+    fun getPubKeyHex(): String? = keyManager.getPubKeyHex()
+
+    /**
+     * Check if connected to at least one relay.
+     */
+    fun isConnected(): Boolean = relayManager.isConnected()
+
+    // ==================== Driver Operations ====================
+
+    /**
+     * Broadcast driver availability.
+     * @param location Current driver location
+     * @return The event ID if successful, null on failure
+     */
+    suspend fun broadcastAvailability(location: Location): String? {
+        val signer = keyManager.getSigner()
+        if (signer == null) {
+            Log.e(TAG, "Cannot broadcast availability: Not logged in")
+            return null
+        }
+
+        return try {
+            val event = DriverAvailabilityEvent.create(signer, location)
+            relayManager.publish(event)
+            Log.d(TAG, "Broadcast availability: ${event.id}")
+            event.id
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to broadcast availability", e)
+            null
+        }
+    }
+
+    /**
+     * Broadcast driver going offline.
+     * @param lastLocation Last known location (for context)
+     * @return The event ID if successful, null on failure
+     */
+    suspend fun broadcastOffline(lastLocation: Location): String? {
+        val signer = keyManager.getSigner()
+        if (signer == null) {
+            Log.e(TAG, "Cannot broadcast offline: Not logged in")
+            return null
+        }
+
+        return try {
+            val event = DriverAvailabilityEvent.createOffline(signer, lastLocation)
+            relayManager.publish(event)
+            Log.d(TAG, "Broadcast offline: ${event.id}")
+            event.id
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to broadcast offline", e)
+            null
+        }
+    }
+
+    /**
+     * Request deletion of events (NIP-09).
+     * Used to clean up old availability events to prevent relay spam.
+     *
+     * @param eventIds List of event IDs to request deletion of
+     * @param reason Optional reason for deletion
+     * @return The deletion event ID if successful, null on failure
+     */
+    suspend fun deleteEvents(eventIds: List<String>, reason: String = ""): String? {
+        if (eventIds.isEmpty()) return null
+
+        val signer = keyManager.getSigner()
+        if (signer == null) {
+            Log.e(TAG, "Cannot delete events: Not logged in")
+            return null
+        }
+
+        return try {
+            val event = DeletionEvent.create(signer, eventIds, reason)
+            relayManager.publish(event)
+            Log.d(TAG, "Requested deletion of ${eventIds.size} event(s): ${event.id}")
+            event.id
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to request event deletion", e)
+            null
+        }
+    }
+
+    /**
+     * Request deletion of a single event (NIP-09).
+     *
+     * @param eventId The event ID to request deletion of
+     * @param reason Optional reason for deletion
+     * @return The deletion event ID if successful, null on failure
+     */
+    suspend fun deleteEvent(eventId: String, reason: String = ""): String? {
+        return deleteEvents(listOf(eventId), reason)
+    }
+
+    /**
+     * Accept a ride offer.
+     * PIN is no longer included - the rider generates it and shares verbally.
+     * @param offer The offer to accept
+     * @return The event ID if successful, null on failure
+     */
+    suspend fun acceptRide(offer: RideOfferData): String? {
+        val signer = keyManager.getSigner()
+        if (signer == null) {
+            Log.e(TAG, "Cannot accept ride: Not logged in")
+            return null
+        }
+
+        return try {
+            val event = RideAcceptanceEvent.create(
+                signer = signer,
+                offerEventId = offer.eventId,
+                riderPubKey = offer.riderPubKey
+            )
+            relayManager.publish(event)
+            Log.d(TAG, "Accepted ride: ${event.id}")
+            event.id
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to accept ride", e)
+            null
+        }
+    }
+
+    /**
+     * Submit a PIN for verification (driver submits PIN heard from rider).
+     * Content is NIP-44 encrypted so only the rider can verify.
+     * @param confirmationEventId The ride confirmation event ID
+     * @param riderPubKey The rider's public key
+     * @param submittedPin The PIN the driver heard from the rider
+     * @return The event ID if successful, null on failure
+     */
+    suspend fun submitPin(
+        confirmationEventId: String,
+        riderPubKey: String,
+        submittedPin: String
+    ): String? {
+        val signer = keyManager.getSigner()
+        if (signer == null) {
+            Log.e(TAG, "Cannot submit PIN: Not logged in")
+            return null
+        }
+
+        return try {
+            val event = PinSubmissionEvent.create(
+                signer = signer,
+                confirmationEventId = confirmationEventId,
+                riderPubKey = riderPubKey,
+                submittedPin = submittedPin
+            )
+            relayManager.publish(event)
+            Log.d(TAG, "Submitted PIN for verification: ${event.id}")
+            event.id
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to submit PIN", e)
+            null
+        }
+    }
+
+    /**
+     * Send a PIN verification response (rider verifies driver's PIN submission).
+     * @param pinSubmissionEventId The PIN submission event ID being verified
+     * @param driverPubKey The driver's public key
+     * @param verified True if PIN was correct, false if rejected
+     * @param attemptNumber The current attempt number (for brute force tracking)
+     * @return The event ID if successful, null on failure
+     */
+    suspend fun sendPinVerification(
+        pinSubmissionEventId: String,
+        driverPubKey: String,
+        verified: Boolean,
+        attemptNumber: Int
+    ): String? {
+        val signer = keyManager.getSigner()
+        if (signer == null) {
+            Log.e(TAG, "Cannot send PIN verification: Not logged in")
+            return null
+        }
+
+        return try {
+            val event = PickupVerificationEvent.create(
+                signer = signer,
+                pinSubmissionEventId = pinSubmissionEventId,
+                driverPubKey = driverPubKey,
+                verified = verified,
+                attemptNumber = attemptNumber
+            )
+            relayManager.publish(event)
+            Log.d(TAG, "Sent PIN verification: ${event.id} (verified=$verified, attempt=$attemptNumber)")
+            event.id
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to send PIN verification", e)
+            null
+        }
+    }
+
+    /**
+     * Send a driver status update.
+     * @param confirmationEventId The ride confirmation event ID
+     * @param riderPubKey The rider's public key
+     * @param status Current status (use DriverStatusType constants)
+     * @param location Current location (optional)
+     * @param finalFare Final fare for completed rides (optional)
+     * @param invoice Lightning invoice for payment (optional)
+     * @return The event ID if successful, null on failure
+     */
+    suspend fun sendStatusUpdate(
+        confirmationEventId: String,
+        riderPubKey: String,
+        status: String,
+        location: Location? = null,
+        finalFare: Double? = null,
+        invoice: String? = null
+    ): String? {
+        val signer = keyManager.getSigner()
+        if (signer == null) {
+            Log.e(TAG, "Cannot send status update: Not logged in")
+            return null
+        }
+
+        return try {
+            val event = DriverStatusEvent.create(
+                signer = signer,
+                confirmationEventId = confirmationEventId,
+                riderPubKey = riderPubKey,
+                status = status,
+                location = location,
+                finalFare = finalFare,
+                invoice = invoice
+            )
+            relayManager.publish(event)
+            Log.d(TAG, "Sent status update: ${event.id} ($status)")
+            event.id
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to send status update", e)
+            null
+        }
+    }
+
+    // ==================== Rider Operations ====================
+
+    /**
+     * Send a ride offer to a driver.
+     * @param driverAvailability The driver's availability event
+     * @param pickup Pickup location
+     * @param destination Destination location
+     * @param fareEstimate Estimated fare in sats
+     * @return The event ID if successful, null on failure
+     */
+    suspend fun sendRideOffer(
+        driverAvailability: DriverAvailabilityData,
+        pickup: Location,
+        destination: Location,
+        fareEstimate: Double
+    ): String? {
+        val signer = keyManager.getSigner()
+        if (signer == null) {
+            Log.e(TAG, "Cannot send ride offer: Not logged in")
+            return null
+        }
+
+        return try {
+            val event = RideOfferEvent.create(
+                signer = signer,
+                driverAvailabilityEventId = driverAvailability.eventId,
+                driverPubKey = driverAvailability.driverPubKey,
+                pickup = pickup,
+                destination = destination,
+                fareEstimate = fareEstimate
+            )
+            relayManager.publish(event)
+            Log.d(TAG, "Sent ride offer: ${event.id}")
+            event.id
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to send ride offer", e)
+            null
+        }
+    }
+
+    /**
+     * Confirm a ride with precise pickup location (encrypted).
+     * @param acceptance The driver's acceptance
+     * @param precisePickup Precise pickup location (will be encrypted)
+     * @return The event ID if successful, null on failure
+     */
+    suspend fun confirmRide(
+        acceptance: RideAcceptanceData,
+        precisePickup: Location
+    ): String? {
+        val signer = keyManager.getSigner()
+        if (signer == null) {
+            Log.e(TAG, "Cannot confirm ride: Not logged in")
+            return null
+        }
+
+        return try {
+            val event = RideConfirmationEvent.create(
+                signer = signer,
+                acceptanceEventId = acceptance.eventId,
+                driverPubKey = acceptance.driverPubKey,
+                precisePickup = precisePickup
+            )
+            relayManager.publish(event)
+            Log.d(TAG, "Confirmed ride: ${event.id}")
+            event.id
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to confirm ride", e)
+            null
+        }
+    }
+
+    // ==================== Subscriptions ====================
+
+    /**
+     * Subscribe to available drivers near the specified location.
+     * Uses geohash filtering for efficient relay queries.
+     *
+     * Coverage:
+     * - Default (expandSearch=false): ~24mi x 12mi (single cell), auto-expands near edges
+     * - Expanded (expandSearch=true): ~72mi x 36mi (9 cells), guaranteed 20+ mile radius
+     *
+     * @param location The rider's current location for geohash filtering (optional)
+     * @param expandSearch If true, always include neighboring cells for wider coverage
+     * @param onDriver Called when a driver availability event is received
+     * @return Subscription ID for closing later
+     */
+    fun subscribeToDrivers(
+        location: Location? = null,
+        expandSearch: Boolean = false,
+        onDriver: (DriverAvailabilityData) -> Unit
+    ): String {
+        val tags = mutableMapOf<String, List<String>>(
+            "t" to listOf(RideshareTags.RIDESHARE_TAG)
+        )
+
+        // If location provided, add geohash filters
+        location?.let {
+            val geohashes = Geohash.getSearchAreaGeohashes(it.lat, it.lon, expandSearch)
+            tags["g"] = geohashes  // Note: RelayManager adds # prefix automatically
+            Log.d(TAG, "Subscribing to drivers in ${geohashes.size} geohash cell(s): ${geohashes.joinToString()}")
+        }
+
+        // Only get events from last 15 minutes to avoid stale drivers
+        val fifteenMinutesAgo = (System.currentTimeMillis() / 1000) - (15 * 60)
+
+        return relayManager.subscribe(
+            kinds = listOf(RideshareEventKinds.DRIVER_AVAILABILITY),
+            tags = tags,
+            since = fifteenMinutesAgo
+        ) { event, _ ->
+            DriverAvailabilityEvent.parse(event)?.let { data ->
+                onDriver(data)
+            }
+        }
+    }
+
+    /**
+     * Subscribe to ride offers for the current user (as driver).
+     * Only returns offers from the last 10 minutes to avoid stale requests.
+     * @param onOffer Called when a ride offer is received
+     * @return Subscription ID for closing later, null if not logged in
+     */
+    fun subscribeToOffers(
+        onOffer: (RideOfferData) -> Unit
+    ): String? {
+        val myPubKey = keyManager.getPubKeyHex() ?: return null
+
+        // Only get offers from last 10 minutes to avoid old requests
+        val tenMinutesAgo = (System.currentTimeMillis() / 1000) - (10 * 60)
+
+        return relayManager.subscribe(
+            kinds = listOf(RideshareEventKinds.RIDE_OFFER),
+            tags = mapOf("p" to listOf(myPubKey)),
+            since = tenMinutesAgo
+        ) { event, _ ->
+            RideOfferEvent.parse(event)?.let { data ->
+                onOffer(data)
+            }
+        }
+    }
+
+    /**
+     * Subscribe to ride acceptances for a specific offer.
+     * @param offerEventId The offer event ID to watch
+     * @param onAcceptance Called when acceptance is received
+     * @return Subscription ID for closing later
+     */
+    fun subscribeToAcceptance(
+        offerEventId: String,
+        onAcceptance: (RideAcceptanceData) -> Unit
+    ): String {
+        return relayManager.subscribe(
+            kinds = listOf(RideshareEventKinds.RIDE_ACCEPTANCE),
+            tags = mapOf("e" to listOf(offerEventId))
+        ) { event, _ ->
+            RideAcceptanceEvent.parse(event)?.let { data ->
+                onAcceptance(data)
+            }
+        }
+    }
+
+    /**
+     * Subscribe to ride confirmations for a specific acceptance (driver listens for rider's confirmation).
+     * Automatically decrypts the precise pickup location.
+     * @param acceptanceEventId The acceptance event ID to watch
+     * @param onConfirmation Called when confirmation is received (with decrypted location)
+     * @return Subscription ID for closing later
+     */
+    fun subscribeToConfirmation(
+        acceptanceEventId: String,
+        onConfirmation: (RideConfirmationData) -> Unit
+    ): String {
+        return relayManager.subscribe(
+            kinds = listOf(RideshareEventKinds.RIDE_CONFIRMATION),
+            tags = mapOf("e" to listOf(acceptanceEventId))
+        ) { event, _ ->
+            // Parse encrypted confirmation
+            RideConfirmationEvent.parseEncrypted(event)?.let { encryptedData ->
+                // Decrypt using driver's key
+                val signer = keyManager.getSigner()
+                if (signer != null) {
+                    GlobalScope.launch {
+                        RideConfirmationEvent.decrypt(signer, encryptedData)?.let { data ->
+                            onConfirmation(data)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Subscribe to PIN submissions for a confirmed ride (rider listens for driver's PIN).
+     * Automatically decrypts the PIN using the rider's key.
+     * @param confirmationEventId The confirmation event ID to watch
+     * @param onPinSubmission Called when PIN is submitted (with decrypted PIN)
+     * @return Subscription ID for closing later
+     */
+    fun subscribeToPinSubmissions(
+        confirmationEventId: String,
+        onPinSubmission: (PinSubmissionData) -> Unit
+    ): String {
+        return relayManager.subscribe(
+            kinds = listOf(RideshareEventKinds.PIN_SUBMISSION),
+            tags = mapOf("e" to listOf(confirmationEventId))
+        ) { event, _ ->
+            // Parse encrypted submission
+            PinSubmissionEvent.parseEncrypted(event)?.let { encryptedData ->
+                // Decrypt using rider's key
+                val signer = keyManager.getSigner()
+                if (signer != null) {
+                    GlobalScope.launch {
+                        PinSubmissionEvent.decrypt(signer, encryptedData)?.let { data ->
+                            onPinSubmission(data)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Subscribe to PIN verification responses (driver listens for rider's verification).
+     * @param pinSubmissionEventId The PIN submission event ID to watch (optional, if null watches all)
+     * @param onVerification Called when verification is received
+     * @return Subscription ID for closing later
+     */
+    fun subscribeToPinVerifications(
+        pinSubmissionEventId: String? = null,
+        onVerification: (PickupVerificationData) -> Unit
+    ): String {
+        val tags = mutableMapOf<String, List<String>>()
+        pinSubmissionEventId?.let { tags["e"] = listOf(it) }
+
+        // Also filter by driver's pubkey to only see verifications for us
+        val myPubKey = keyManager.getPubKeyHex()
+        myPubKey?.let { tags["p"] = listOf(it) }
+
+        return relayManager.subscribe(
+            kinds = listOf(RideshareEventKinds.PICKUP_VERIFICATION),
+            tags = tags
+        ) { event, _ ->
+            PickupVerificationEvent.parse(event)?.let { data ->
+                onVerification(data)
+            }
+        }
+    }
+
+    /**
+     * Subscribe to driver status updates for a confirmed ride.
+     * @param confirmationEventId The confirmation event ID to watch
+     * @param onStatus Called when status update is received
+     * @return Subscription ID for closing later, or null if not logged in
+     */
+    fun subscribeToStatusUpdates(
+        confirmationEventId: String,
+        onStatus: (DriverStatusData) -> Unit
+    ): String? {
+        val myPubKey = keyManager.getPubKeyHex() ?: return null
+
+        // Subscribe to Kind 3180 events addressed to us for this ride
+        // Filter by both p tag (recipient) and e tag (confirmation) for reliable delivery
+        return relayManager.subscribe(
+            kinds = listOf(RideshareEventKinds.DRIVER_STATUS),
+            tags = mapOf(
+                "p" to listOf(myPubKey),
+                "e" to listOf(confirmationEventId)
+            )
+        ) { event, _ ->
+            Log.d(TAG, "Received status event ${event.id} from ${event.pubKey.take(8)}")
+            DriverStatusEvent.parse(event)?.let { data ->
+                onStatus(data)
+            }
+        }
+    }
+
+    /**
+     * Publish a ride cancellation event.
+     * @param confirmationEventId The ride confirmation event ID being cancelled
+     * @param otherPartyPubKey The other party's public key (to notify them)
+     * @param reason Optional reason for cancellation
+     * @return The event ID if successful, null on failure
+     */
+    suspend fun publishRideCancellation(
+        confirmationEventId: String,
+        otherPartyPubKey: String,
+        reason: String? = null
+    ): String? {
+        val signer = keyManager.getSigner()
+        if (signer == null) {
+            Log.e(TAG, "Cannot publish cancellation: Not logged in")
+            return null
+        }
+
+        return try {
+            val event = RideCancellationEvent.create(
+                signer = signer,
+                confirmationEventId = confirmationEventId,
+                otherPartyPubKey = otherPartyPubKey,
+                reason = reason
+            )
+            relayManager.publish(event)
+            Log.d(TAG, "Published ride cancellation: ${event.id}")
+            event.id
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to publish cancellation", e)
+            null
+        }
+    }
+
+    /**
+     * Subscribe to ride cancellation events for a confirmed ride.
+     * @param confirmationEventId The confirmation event ID to watch
+     * @param onCancellation Called when cancellation is received
+     * @return Subscription ID for closing later, or null if not logged in
+     */
+    fun subscribeToCancellation(
+        confirmationEventId: String,
+        onCancellation: (RideCancellationData) -> Unit
+    ): String? {
+        val myPubKey = keyManager.getPubKeyHex() ?: return null
+
+        // Subscribe to Kind 3179 events addressed to us for this ride
+        // Filter by both p tag (recipient) and e tag (confirmation) for reliable delivery
+        return relayManager.subscribe(
+            kinds = listOf(RideCancellationEvent.KIND),
+            tags = mapOf(
+                "p" to listOf(myPubKey),
+                "e" to listOf(confirmationEventId)
+            )
+        ) { event, _ ->
+            Log.d(TAG, "Received cancellation event ${event.id} from ${event.pubKey.take(8)}")
+            RideCancellationEvent.parse(event)?.let { data ->
+                onCancellation(data)
+            }
+        }
+    }
+
+    /**
+     * Close a subscription.
+     */
+    fun closeSubscription(subscriptionId: String) {
+        relayManager.closeSubscription(subscriptionId)
+    }
+
+    // ==================== Chat Operations ====================
+
+    /**
+     * Send a private chat message to the other party in a ride.
+     * Uses simple NIP-44 encryption (no gift wrapping) for reliability.
+     * Messages should be deleted via NIP-09 after ride completes.
+     *
+     * @param confirmationEventId The ride confirmation event ID
+     * @param recipientPubKey The recipient's public key (driver or rider)
+     * @param message The message text
+     * @return The event ID if successful, null on failure
+     */
+    suspend fun sendChatMessage(
+        confirmationEventId: String,
+        recipientPubKey: String,
+        message: String
+    ): String? {
+        val signer = keyManager.getSigner()
+        if (signer == null) {
+            Log.e(TAG, "Cannot send chat message: Not logged in")
+            return null
+        }
+
+        return try {
+            // Create encrypted chat message (NIP-44)
+            val event = RideshareChatEvent.create(
+                signer = signer,
+                confirmationEventId = confirmationEventId,
+                recipientPubKey = recipientPubKey,
+                message = message
+            )
+
+            relayManager.publish(event)
+            Log.d(TAG, "Sent chat message: ${event.id} to ${recipientPubKey.take(8)}")
+            event.id
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to send chat message", e)
+            null
+        }
+    }
+
+    /**
+     * Subscribe to private chat messages for the current user.
+     * Automatically decrypts NIP-44 encrypted messages.
+     *
+     * @param confirmationEventId The ride confirmation event ID to filter by (optional)
+     * @param onMessage Called when a chat message is received (decrypted)
+     * @return Subscription ID for closing later
+     */
+    fun subscribeToChatMessages(
+        confirmationEventId: String? = null,
+        onMessage: (RideshareChatData) -> Unit
+    ): String? {
+        val myPubKey = keyManager.getPubKeyHex() ?: return null
+
+        // Subscribe to Kind 3178 chat events addressed to us
+        return relayManager.subscribe(
+            kinds = listOf(RideshareEventKinds.RIDESHARE_CHAT),
+            tags = mapOf("p" to listOf(myPubKey))
+        ) { event, _ ->
+            Log.d(TAG, "Received chat event ${event.id} from ${event.pubKey.take(8)}")
+
+            // Decrypt the message
+            val signer = keyManager.getSigner()
+            if (signer != null) {
+                GlobalScope.launch {
+                    try {
+                        RideshareChatEvent.parseAndDecrypt(signer, event)?.let { chatData ->
+                            // Filter by confirmation event if specified
+                            if (confirmationEventId == null ||
+                                chatData.confirmationEventId == confirmationEventId) {
+                                Log.d(TAG, "Decrypted chat message: ${chatData.message.take(20)}...")
+                                onMessage(chatData)
+                            } else {
+                                Log.d(TAG, "Ignoring chat for different ride: ${chatData.confirmationEventId.take(8)}")
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to decrypt chat message", e)
+                    }
+                }
+            }
+        }
+    }
+
+    // ==================== Profile Operations ====================
+
+    /**
+     * Publish user profile (metadata).
+     * @param profile The user profile to publish
+     * @return The event ID if successful, null on failure
+     */
+    suspend fun publishProfile(profile: UserProfile): String? {
+        val signer = keyManager.getSigner()
+        if (signer == null) {
+            Log.e(TAG, "Cannot publish profile: Not logged in")
+            return null
+        }
+
+        return try {
+            val event = MetadataEvent.create(signer, profile)
+            relayManager.publish(event)
+            Log.d(TAG, "Published profile: ${event.id}")
+            event.id
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to publish profile", e)
+            null
+        }
+    }
+
+    /**
+     * Subscribe to a user's profile updates.
+     * @param pubKeyHex The user's public key in hex format
+     * @param onProfile Called when profile is received
+     * @return Subscription ID for closing later
+     */
+    fun subscribeToProfile(
+        pubKeyHex: String,
+        onProfile: (UserProfile) -> Unit
+    ): String {
+        return relayManager.subscribe(
+            kinds = listOf(MetadataEvent.KIND),
+            authors = listOf(pubKeyHex),
+            limit = 1
+        ) { event, _ ->
+            MetadataEvent.parse(event)?.let { profile ->
+                onProfile(profile)
+            }
+        }
+    }
+
+    /**
+     * Subscribe to the current user's own profile.
+     * @param onProfile Called when profile is received
+     * @return Subscription ID for closing later, null if not logged in
+     */
+    fun subscribeToOwnProfile(
+        onProfile: (UserProfile) -> Unit
+    ): String? {
+        val myPubKey = keyManager.getPubKeyHex() ?: return null
+        return subscribeToProfile(myPubKey, onProfile)
+    }
+}

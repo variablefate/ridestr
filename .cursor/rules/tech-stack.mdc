@@ -1,0 +1,147 @@
+---
+description: Current Amethyst Tech Stack
+globs: 
+alwaysApply: false
+---
+
+# Your rule content
+
+# Amethyst Tech Stack
+
+> Amethyst is a leading Nostr client for Android, demonstrating excellence in modern Android development practices and decentralized social networking.
+
+## Core Technology Stack
+
+### Platform & Language
+- **Primary Language**: Kotlin
+- **Platform**: Android 8.0+
+- **Build System**: Gradle
+- **JDK Version**: Java 17+
+- **Architecture Pattern**: MVVM (Model-View-ViewModel)
+
+### UI Framework
+- **Primary UI**: Jetpack Compose
+- **Design System**: Material Design 3
+- **Navigation**: Compose Navigation
+- **Layout System**: Adaptive Layout (Two-pane support)
+- **Image Loading**: Coil
+  - SVG Support
+  - GIF Support
+  - Network Integration via OkHttp
+
+### State Management & Reactivity
+- **State Management**: 
+  - LiveData
+  - Kotlin Flow
+  - Compose State
+- **Lifecycle**: AndroidX Lifecycle Components
+- **Data Binding**: Compose Runtime
+
+### Networking & Communication
+- **WebSocket**: OkHttp
+- **HTTP Client**: OkHttp
+- **Privacy**: Tor/Proxy Support
+- **Media Streaming**: AndroidX Media3/ExoPlayer
+
+### Security
+- **Key Storage**: Android KeyStore System
+- **Encryption**: AndroidX Security Crypto
+- **Authentication**: Biometric Authentication
+- **Code Protection**: ProGuard Optimization
+
+### Data Management
+- **Event Storage**: In-Memory OO Graph
+- **State Updates**: LiveData/Flow Reactive Pattern
+- **Key-Value Storage**: Encrypted SharedPreferences
+- **Binary Data**: Custom Binary Handlers
+
+### Project Modules
+- **amethyst**: Main Android Application
+- **quartz**: Nostr Commons Library
+- **commons**: Shared Utilities
+- **ammolite**: Extension Module
+- **benchmark**: Performance Testing
+
+### Development Tools
+- **Code Quality**:
+  - Spotless Formatter
+  - Git Hooks (pre-commit, pre-push)
+  - Kotlin Linter
+- **Testing**:
+  - JUnit Test Framework
+  - AndroidX Test Suite
+  - Performance Benchmarking
+- **Build Variants**:
+  - Debug/Release Configurations
+  - Play Store Variant
+  - F-Droid Variant (De-googled)
+  - CPU Architecture Splits
+
+### Feature Libraries
+- **QR Processing**: ZXing
+- **Markdown**: Custom Markdown Renderer
+- **Media Handling**: 
+  - AndroidX Media3
+  - ExoPlayer
+  - HLS Support
+- **Notifications**: 
+  - Google Push
+  - Unified Push
+- **Permissions**: Accompanist Permissions
+
+### Nostr Protocol Support
+- **Event Types**: Full NIP-01 Support
+- **Encryption**: NIP-04 Private Messages
+- **Identity**: NIP-05 DNS Verification
+- **Security**: NIP-07 Signing
+- **Social**: 
+  - NIP-25 Reactions
+  - NIP-57 Zaps
+  - NIP-58 Badges
+- **Content**: 
+  - NIP-23 Long-form
+  - NIP-94 File Storage
+  - NIP-96 HTTP Files
+
+## Development Guidelines
+
+### Code Organization
+- Separate UI, Service, and Repository layers
+- Reactive data flow architecture
+- Single source of truth for Nostr events
+- Modular component design
+
+### Security Practices
+- Private key encryption
+- Secure key storage
+- Network traffic encryption
+- User data protection
+
+### Performance Considerations
+- Efficient memory management
+- Reactive updates
+- Background processing
+- Connection pooling
+
+### Build Process
+```gradle
+android {
+    compileSdk 34
+    minSdk 26
+    targetSdk 34
+    
+    buildFeatures {
+        compose true
+        buildConfig true
+    }
+}
+```
+
+## Contribution Requirements
+- Java 17+ Development Environment
+- Android Studio
+- Git Version Control
+- Android 8.0+ Test Device/Emulator
+
+---
+*This tech stack documentation is maintained as part of the Amethyst project.*

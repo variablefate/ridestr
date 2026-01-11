@@ -1,0 +1,235 @@
+package com.ridestr.common.nostr.events
+
+import com.vitorpamplona.quartz.nip01Core.core.Event
+import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
+import org.json.JSONArray
+import org.json.JSONObject
+
+/**
+ * Kind 30174: Ride History Backup Event (Parameterized Replaceable)
+ *
+ * Encrypted backup of user's ride history and statistics.
+ * Content is NIP-44 encrypted to self (user's own pubkey).
+ *
+ * As a parameterized replaceable event with d-tag "rideshare-history",
+ * only the latest backup per user is kept by relays.
+ *
+ * This allows users to:
+ * - Backup their ride history across devices
+ * - Restore history after reinstalling the app
+ * - Maintain aggregate statistics (total rides, total distance, etc.)
+ */
+object RideHistoryEvent {
+
+    /** The d-tag identifier for ride history events */
+    const val D_TAG = "rideshare-history"
+
+    /**
+     * Create and sign a ride history backup event.
+     * The content is encrypted to the user's own pubkey.
+     *
+     * @param signer The NostrSigner to sign and encrypt the event
+     * @param rides List of completed rides to backup
+     * @param stats Aggregate statistics
+     */
+    suspend fun create(
+        signer: NostrSigner,
+        rides: List<RideHistoryEntry>,
+        stats: RideHistoryStats
+    ): Event? {
+        val pubKeyHex = signer.pubKey
+
+        // Build the content JSON
+        val ridesArray = JSONArray()
+        rides.forEach { ride ->
+            ridesArray.put(ride.toJson())
+        }
+
+        val contentJson = JSONObject().apply {
+            put("rides", ridesArray)
+            put("stats", stats.toJson())
+            put("updated_at", System.currentTimeMillis() / 1000)
+        }
+
+        // Encrypt to self using NIP-44 (same key for sender and receiver)
+        val encryptedContent = try {
+            signer.nip44Encrypt(contentJson.toString(), pubKeyHex)
+        } catch (e: Exception) {
+            return null
+        }
+
+        val tags = arrayOf(
+            arrayOf("d", D_TAG),
+            arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG)
+        )
+
+        return signer.sign<Event>(
+            createdAt = System.currentTimeMillis() / 1000,
+            kind = RideshareEventKinds.RIDE_HISTORY_BACKUP,
+            tags = tags,
+            content = encryptedContent
+        )
+    }
+
+    /**
+     * Parse and decrypt a ride history backup event.
+     *
+     * @param signer The NostrSigner to decrypt the content
+     * @param event The event to parse
+     * @return Decrypted ride history data, or null if parsing/decryption fails
+     */
+    suspend fun parseAndDecrypt(
+        signer: NostrSigner,
+        event: Event
+    ): RideHistoryData? {
+        if (event.kind != RideshareEventKinds.RIDE_HISTORY_BACKUP) return null
+        if (event.pubKey != signer.pubKey) return null // Can only decrypt our own
+
+        return try {
+            // Decrypt using NIP-44 (encrypted to self)
+            val decryptedContent = signer.nip44Decrypt(event.content, event.pubKey)
+            val json = JSONObject(decryptedContent)
+
+            val rides = mutableListOf<RideHistoryEntry>()
+            val ridesArrayJson = json.getJSONArray("rides")
+            for (i in 0 until ridesArrayJson.length()) {
+                RideHistoryEntry.fromJson(ridesArrayJson.getJSONObject(i))?.let {
+                    rides.add(it)
+                }
+            }
+
+            val statsJson = json.getJSONObject("stats")
+            val stats = RideHistoryStats.fromJson(statsJson)
+            val updatedAt = json.getLong("updated_at")
+
+            RideHistoryData(
+                eventId = event.id,
+                rides = rides,
+                stats = stats,
+                updatedAt = updatedAt,
+                createdAt = event.createdAt
+            )
+        } catch (e: Exception) {
+            null
+        }
+    }
+}
+
+/**
+ * A single ride entry in the history.
+ */
+data class RideHistoryEntry(
+    val rideId: String,  // The confirmation event ID
+    val timestamp: Long, // When the ride occurred
+    val role: String,    // "rider" or "driver"
+    val counterpartyPubKey: String, // The other party's pubkey
+    val pickupLat: Double,
+    val pickupLon: Double,
+    val dropoffLat: Double,
+    val dropoffLon: Double,
+    val distanceMiles: Double,
+    val durationMinutes: Int,
+    val fareSats: Long,
+    val status: String   // "completed", "cancelled", etc.
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("ride_id", rideId)
+        put("timestamp", timestamp)
+        put("role", role)
+        put("counterparty", counterpartyPubKey)
+        put("pickup_lat", pickupLat)
+        put("pickup_lon", pickupLon)
+        put("dropoff_lat", dropoffLat)
+        put("dropoff_lon", dropoffLon)
+        put("distance_miles", distanceMiles)
+        put("duration_minutes", durationMinutes)
+        put("fare_sats", fareSats)
+        put("status", status)
+    }
+
+    companion object {
+        fun fromJson(json: JSONObject): RideHistoryEntry? {
+            return try {
+                RideHistoryEntry(
+                    rideId = json.getString("ride_id"),
+                    timestamp = json.getLong("timestamp"),
+                    role = json.getString("role"),
+                    counterpartyPubKey = json.getString("counterparty"),
+                    pickupLat = json.getDouble("pickup_lat"),
+                    pickupLon = json.getDouble("pickup_lon"),
+                    dropoffLat = json.getDouble("dropoff_lat"),
+                    dropoffLon = json.getDouble("dropoff_lon"),
+                    distanceMiles = json.getDouble("distance_miles"),
+                    durationMinutes = json.getInt("duration_minutes"),
+                    fareSats = json.getLong("fare_sats"),
+                    status = json.getString("status")
+                )
+            } catch (e: Exception) {
+                null
+            }
+        }
+    }
+}
+
+/**
+ * Aggregate statistics from ride history.
+ */
+data class RideHistoryStats(
+    val totalRidesAsRider: Int,
+    val totalRidesAsDriver: Int,
+    val totalDistanceMiles: Double,
+    val totalDurationMinutes: Int,
+    val totalFareSatsEarned: Long,  // As driver
+    val totalFareSatsPaid: Long,    // As rider
+    val completedRides: Int,
+    val cancelledRides: Int
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("total_rides_rider", totalRidesAsRider)
+        put("total_rides_driver", totalRidesAsDriver)
+        put("total_distance_miles", totalDistanceMiles)
+        put("total_duration_minutes", totalDurationMinutes)
+        put("total_fare_earned", totalFareSatsEarned)
+        put("total_fare_paid", totalFareSatsPaid)
+        put("completed_rides", completedRides)
+        put("cancelled_rides", cancelledRides)
+    }
+
+    companion object {
+        fun fromJson(json: JSONObject): RideHistoryStats {
+            return RideHistoryStats(
+                totalRidesAsRider = json.optInt("total_rides_rider", 0),
+                totalRidesAsDriver = json.optInt("total_rides_driver", 0),
+                totalDistanceMiles = json.optDouble("total_distance_miles", 0.0),
+                totalDurationMinutes = json.optInt("total_duration_minutes", 0),
+                totalFareSatsEarned = json.optLong("total_fare_earned", 0),
+                totalFareSatsPaid = json.optLong("total_fare_paid", 0),
+                completedRides = json.optInt("completed_rides", 0),
+                cancelledRides = json.optInt("cancelled_rides", 0)
+            )
+        }
+
+        /** Create empty stats */
+        fun empty() = RideHistoryStats(
+            totalRidesAsRider = 0,
+            totalRidesAsDriver = 0,
+            totalDistanceMiles = 0.0,
+            totalDurationMinutes = 0,
+            totalFareSatsEarned = 0,
+            totalFareSatsPaid = 0,
+            completedRides = 0,
+            cancelledRides = 0
+        )
+    }
+}
+
+/**
+ * Parsed and decrypted ride history data.
+ */
+data class RideHistoryData(
+    val eventId: String,
+    val rides: List<RideHistoryEntry>,
+    val stats: RideHistoryStats,
+    val updatedAt: Long,
+    val createdAt: Long
+)

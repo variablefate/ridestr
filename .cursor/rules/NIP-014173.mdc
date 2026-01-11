@@ -1,0 +1,637 @@
+---
+description: Helps with NIP implementation for the rideshare NIP
+globs: 
+alwaysApply: true
+---
+## Structure of NIP-014173.
+
+
+This NIP defines a decentralized ridesharing protocol leveraging Nostr for peer-to-peer communication between riders and drivers. It introduces custom event kinds to enable a privacy-focused process where drivers broadcast availability, riders send ride offers, and a handshake ensures mutual agreement before sensitive data is shared. Bitcoin Lightning payments are integrated, triggered after ride completion.
+
+
+Definitions
+Driver: A user offering rides, periodically broadcasting their approximate location.
+
+Rider: A user seeking a ride, sharing location and destination selectively.
+
+Approximate Location: Coarse coordinates (e.g., city-level) to protect privacy.
+
+Precise Location: Exact coordinates and address, shared only after mutual agreement.
+
+Handshake: A mutual agreement process before exchanging sensitive data.
+
+Specification
+This NIP defines ten custom event kinds using the "173" base (from NIP-014173) to avoid conflicts with other NIPs:
+
+Event Kind Ranges:
+- Regular events (stored by relays): 3173-3180
+- Parameterized replaceable (latest per d-tag): 30173-30174
+
+Kind Overview:
+| Kind  | Name                  | Type                      |
+|-------|-----------------------|---------------------------|
+| 30173 | Driver Availability   | Parameterized Replaceable |
+| 3173  | Ride Offer            | Regular                   |
+| 3174  | Ride Acceptance       | Regular                   |
+| 3175  | Ride Confirmation     | Regular                   |
+| 3176  | PIN Submission        | Regular                   |
+| 3177  | Pickup Verification   | Regular                   |
+| 3178  | Rideshare Chat        | Regular                   |
+| 3179  | Ride Cancellation     | Regular                   |
+| 3180  | Driver Status         | Regular                   |
+| 30174 | Ride History Backup   | Parameterized Replaceable |
+
+All events conform to the standard Nostr event structure as defined in NIP-01:
+id: 32-byte lowercase hex-encoded SHA256 hash of the serialized event data.
+
+pubkey: 32-byte lowercase hex-encoded public key of the event creator.
+
+created_at: Unix timestamp in seconds.
+
+kind: Integer between 0 and 65535.
+
+tags: Array of arrays containing arbitrary strings (e.g., ["e", "<event-id>"], ["p", "<pubkey>"]).
+
+content: Arbitrary string (often JSON in this NIP).
+
+sig: 64-byte lowercase hex-encoded signature of the SHA256 hash of the serialized event data.
+
+Kind 30173: Driver Availability (Parameterized Replaceable)
+Description: Driver broadcasts availability to potential riders. Uses geohash tags for geographic filtering.
+As a parameterized replaceable event, only the latest availability per driver is kept by relays.
+Uses d-tag "rideshare-availability" for identification.
+
+Fields:
+id: Unique event identifier (SHA256 hash of serialized data).
+
+pubkey: Driver's public key.
+
+created_at: Unix timestamp of event creation.
+
+kind: 30173.
+
+tags:
+  - ["t", "rideshare"] - hashtag for rideshare filtering
+  - ["g", "<geohash-5>"] - 5-character geohash (~5km precision, city level)
+  - ["g", "<geohash-4>"] - 4-character geohash (~39km precision, regional level)
+  - ["g", "<geohash-3>"] - 3-character geohash (~156km precision, state level) [optional]
+
+content: JSON object with approx_location (latitude, longitude) and status.
+json
+
+{
+  "approx_location": {"lat": 37.78, "lon": -122.42},
+  "status": "available"
+}
+
+sig: Signature of the event's SHA256 hash.
+
+Geohash Precision Levels:
+- 5 characters: ~4.9km x 4.9km - Neighborhood/city level (primary filter)
+- 4 characters: ~39km x 19.5km - Regional level (broader search)
+- 3 characters: ~156km x 156km - State/province level (fallback)
+
+The rider app subscribes to events with geohash tags matching their location, allowing
+relays to filter events by geographic region instead of downloading all driver events globally.
+
+Example tags for San Francisco (lat: 37.78, lon: -122.42):
+  ["t", "rideshare"],
+  ["g", "9q8yy"],  // 5-char precision
+  ["g", "9q8y"]    // 4-char precision
+
+Notes: Multiple "g" tags at different precision levels allow riders to expand their search radius.
+
+Kind 3173: Ride Offer
+Description: Rider sends a ride offer to a specific driver.
+
+Fields:
+id: Unique event identifier.
+
+pubkey: Rider's public key.
+
+created_at: Unix timestamp of event creation.
+
+kind: 3173.
+
+tags: [["e", "<kind-30173-event-id>"], ["p", "<driver-pubkey>"]].
+
+content: JSON object with fare_estimate, destination, and approx_pickup.
+json
+
+{
+  "fare_estimate": "0.0005 BTC",
+  "destination": {"lat": 37.79, "lon": -122.39},
+  "approx_pickup": {"lat": 37.77, "lon": -122.41}
+}
+
+sig: Signature of the event’s SHA256 hash.
+
+Kind 3174: Ride Acceptance
+Description: Driver accepts the rider's offer. No PIN is included - the rider generates the PIN locally for security (see PIN Verification Flow below).
+
+Fields:
+id: Unique event identifier.
+
+pubkey: Driver's public key.
+
+created_at: Unix timestamp of event creation.
+
+kind: 3174.
+
+tags: [["e", "<kind-3173-event-id>"], ["p", "<rider-pubkey>"], ["t", "rideshare"]].
+
+content: JSON object with status.
+json
+
+{
+  "status": "accepted"
+}
+
+sig: Signature of the event's SHA256 hash.
+
+Kind 3175: Ride Confirmation
+Description: Rider confirms the ride and shares their precise pickup location.
+
+Fields:
+id: Unique event identifier.
+
+pubkey: Rider's public key.
+
+created_at: Unix timestamp of event creation.
+
+kind: 3175.
+
+tags: [["e", "<kind-3174-event-id>"], ["p", "<driver-pubkey>"]].
+
+content: Encrypted JSON (using NIP-44) with precise_pickup (latitude, longitude, address).
+json
+
+{
+  "precise_pickup": {"lat": 37.7749, "lon": -122.4194, "address": "123 Main St"}
+}
+
+sig: Signature of the event’s SHA256 hash.
+
+Kind 3180: Driver Status (Regular)
+Description: Driver sends updates during the ride lifecycle, including status and approximate location. Upon completion, it includes payment details.
+As a regular event, status updates are stored by relays. This is critical so completion events can be fetched later if the rider's app was offline when the driver completed the ride.
+
+Note: This was originally Kind 20173 (ephemeral) but was changed to Kind 3180 (regular) to ensure ride completion events are persisted and can be retrieved by riders who weren't online when the driver finished the ride.
+
+Fields:
+id: Unique event identifier.
+
+pubkey: Driver's public key.
+
+created_at: Unix timestamp of event creation.
+
+kind: 3180.
+
+tags: [["e", "<kind-3175-event-id>"], ["p", "<rider-pubkey>"], ["t", "rideshare"]].
+
+content: JSON object with:
+status: String - one of the defined status values below.
+
+approx_location: Object with latitude and longitude (optional).
+
+When status: "completed", additional fields: final_fare and invoice.
+
+Status Values:
+- "en_route_pickup": Driver is on the way to pick up the rider
+- "arrived": Driver has arrived at the pickup location
+- "in_progress": Rider is in the vehicle, ride is underway
+- "completed": Ride finished, includes payment details
+- "cancelled": Ride was cancelled by driver
+
+sig: Signature of the event's SHA256 hash.
+
+Examples:
+json
+
+// En route to pickup
+{
+  "status": "en_route_pickup",
+  "approx_location": {"lat": 37.78, "lon": -122.42}
+}
+
+json
+
+// Arrived at pickup location
+{
+  "status": "arrived",
+  "approx_location": {"lat": 37.77, "lon": -122.41}
+}
+
+json
+
+// Ride in progress
+{
+  "status": "in_progress",
+  "approx_location": {"lat": 37.78, "lon": -122.40}
+}
+
+json
+
+// Ride completed
+{
+  "status": "completed",
+  "approx_location": {"lat": 37.79, "lon": -122.39},
+  "final_fare": "500 sats",
+  "invoice": "lnbc..."
+}
+
+json
+
+// Ride cancelled
+{
+  "status": "cancelled"
+}
+
+Kind 3176: PIN Submission
+Description: Driver submits the PIN they heard verbally from the rider for verification. The content is NIP-44 encrypted so only the rider can verify it. This ensures eavesdroppers cannot see the PIN before it's verified.
+
+Fields:
+id: Unique event identifier.
+
+pubkey: Driver's public key.
+
+created_at: Unix timestamp of event creation.
+
+kind: 3176.
+
+tags: [["e", "<kind-3175-event-id>"], ["p", "<rider-pubkey>"], ["t", "rideshare"]].
+
+content: NIP-44 encrypted JSON object with submitted_pin.
+
+Decrypted content structure:
+json
+
+{
+  "submitted_pin": "1234"
+}
+
+sig: Signature of the event's SHA256 hash.
+
+Kind 3177: Pickup Verification
+Description: Rider verifies the PIN submitted by the driver and sends the result. Contains verification status and attempt count for brute force protection.
+
+Fields:
+id: Unique event identifier.
+
+pubkey: Rider's public key.
+
+created_at: Unix timestamp of event creation.
+
+kind: 3177.
+
+tags: [["e", "<kind-3176-event-id>"], ["p", "<driver-pubkey>"], ["t", "rideshare"]].
+
+content: JSON object with status and attempt.
+json
+
+{
+  "status": "verified",
+  "attempt": 1
+}
+
+- status: "verified" if PIN was correct, "rejected" if incorrect
+- attempt: Current attempt number (1-3). After 3 failed attempts, the ride should be cancelled for security.
+
+sig: Signature of the event's SHA256 hash.
+
+Brute Force Protection: If a driver submits incorrect PINs 3 times, the rider's app should automatically cancel the ride. This prevents attackers from guessing the 4-digit PIN (only 10,000 combinations).
+
+Kind 3178: Rideshare Chat
+Description: Private chat messages between rider and driver during active ride. Uses simple NIP-44 encryption for reliability. Messages should be deleted via NIP-09 after ride completes to protect privacy.
+
+Fields:
+id: Unique event identifier.
+
+pubkey: Sender's public key (visible to relays).
+
+created_at: Unix timestamp of event creation.
+
+kind: 3178.
+
+tags: [["p", "<recipient-pubkey>"], ["e", "<kind-3175-event-id>"], ["t", "rideshare"]].
+- The "p" tag identifies the recipient (for relay routing)
+- The "e" tag references the ride confirmation event (ties message to specific ride)
+
+content: NIP-44 encrypted JSON object with message.
+
+Encrypted content structure (after decryption):
+json
+
+{
+  "message": "I'm outside the blue building"
+}
+
+sig: Signature of the event's SHA256 hash.
+
+Why Kind 3178 Instead of Kind 14 (Standard DM):
+- Standard NIP-04/17 use Kind 4/14 for DMs
+- We use Kind 3178 so messages won't appear in regular Nostr DM clients (Amethyst, Damus, etc.)
+- Only rideshare-aware clients will recognize and display these messages
+- Messages are tied to a specific ride via the "e" tag
+
+Privacy Notes:
+- **Relays see**: Sender pubkey, recipient pubkey, encrypted blob, timestamp
+- **Relays cannot**: Read message content
+- **Cleanup**: Both parties should delete their sent messages (NIP-09) after ride completes
+
+Full Event Example:
+```json
+{
+  "id": "<32-byte-hex>",
+  "pubkey": "<sender-pubkey>",
+  "created_at": 1698765600,
+  "kind": 3178,
+  "tags": [
+    ["p", "<recipient-pubkey>"],
+    ["e", "<confirmation-event-id>"],
+    ["t", "rideshare"]
+  ],
+  "content": "<nip44-encrypted-content>",
+  "sig": "<64-byte-hex>"
+}
+```
+
+Kind 3179: Ride Cancellation
+Description: Sent by either rider or driver to cancel an active ride. Can be used at any stage after offer until completion. The ride should be cancelled gracefully with cleanup of any active subscriptions.
+
+Fields:
+id: Unique event identifier.
+
+pubkey: Public key of the cancelling party (rider or driver).
+
+created_at: Unix timestamp of event creation.
+
+kind: 3179.
+
+tags: [["e", "<ride-event-id>"], ["p", "<counterparty-pubkey>"], ["t", "rideshare"]].
+- The "e" tag references the relevant ride event (offer, acceptance, or confirmation depending on stage)
+- The "p" tag references the other party in the ride
+
+content: JSON object with reason for cancellation.
+json
+
+{
+  "reason": "rider_cancelled"
+}
+
+Possible reason values:
+- "rider_cancelled": Rider cancelled the ride
+- "driver_cancelled": Driver cancelled the ride
+- "timeout": Ride was cancelled due to inactivity/timeout
+- "pin_failed": Ride was cancelled after 3 failed PIN attempts
+- "payment_failed": Ride was cancelled due to payment failure
+
+sig: Signature of the event's SHA256 hash.
+
+Note: Kind 3179 is distinct from the "cancelled" status in Kind 3180 (Driver Status). Kind 3179 is an explicit cancellation event that can be sent by either party, while Kind 3180 with status "cancelled" is specifically a driver-initiated status update.
+
+Kind 30174: Ride History Backup (Parameterized Replaceable)
+Description: Encrypted backup of user's ride history and statistics. Content is NIP-44 encrypted to self (user's own pubkey). As a parameterized replaceable event with d-tag "rideshare-history", only the latest backup per user is kept by relays.
+
+This allows users to:
+- Backup their ride history across devices
+- Restore history after reinstalling the app
+- Maintain aggregate statistics (total rides, total distance, etc.)
+
+Fields:
+id: Unique event identifier.
+
+pubkey: User's public key.
+
+created_at: Unix timestamp of event creation.
+
+kind: 30174.
+
+tags: [["d", "rideshare-history"], ["t", "rideshare"]].
+
+content: NIP-44 encrypted to self, JSON object with rides array and stats.
+
+Decrypted content structure:
+json
+
+{
+  "rides": [
+    {
+      "ride_id": "<kind-3175-event-id>",
+      "timestamp": 1698765600,
+      "role": "rider",
+      "counterparty": "<driver-pubkey>",
+      "pickup_lat": 37.7749,
+      "pickup_lon": -122.4194,
+      "dropoff_lat": 37.79,
+      "dropoff_lon": -122.39,
+      "distance_miles": 2.5,
+      "duration_minutes": 12,
+      "fare_sats": 500,
+      "status": "completed"
+    }
+  ],
+  "stats": {
+    "total_rides_rider": 15,
+    "total_rides_driver": 0,
+    "total_distance_miles": 45.2,
+    "total_duration_minutes": 180,
+    "total_fare_earned": 0,
+    "total_fare_paid": 7500,
+    "completed_rides": 14,
+    "cancelled_rides": 1
+  },
+  "updated_at": 1698765700
+}
+
+sig: Signature of the event's SHA256 hash.
+
+Dependencies
+NIP-01: Defines the standard event structure.
+
+NIP-09: Event deletion requests for cleanup of stale rideshare events.
+
+NIP-44: Enables encryption of precise pickup location data and chat messages.
+
+NIP-52: Calendar events / Geohash tags for geographic filtering.
+
+NIP-59: Gift wrapping for private chat messages (Kind 1059 + Kind 13).
+
+Full Flow Specification Including Payments
+This specification outlines the complete ridesharing process, integrating Nostr events with a Bitcoin Lightning payment handshake, ensuring privacy, security, and decentralization.
+Process Flow
+Driver Broadcasts Availability
+The driver publishes a Kind 30173 event ("Driver Availability") with their approximate location.
+
+Example content: {"approx_location": {"lat": 37.78, "lon": -122.42}}.
+
+Full Event:
+json
+
+{
+  "id": "<32-byte-hex>",
+  "pubkey": "<driver-pubkey>",
+  "created_at": 1698765432,
+  "kind": 30173,
+  "tags": [["d", "rideshare-availability"], ["t", "rideshare"], ["g", "9q8yy"], ["g", "9q8y"]],
+  "content": "{\"approx_location\": {\"lat\": 37.78, \"lon\": -122.42}, \"status\": \"available\"}",
+  "sig": "<64-byte-hex>"
+}
+
+Rider Sends Ride Offer
+The rider calculates a fare estimate using local tools (e.g., GraphHopper) and sends a Kind 3173 event ("Ride Offer").
+
+Example content: {"fare_estimate": "0.0005 BTC", "destination": {"lat": 37.79, "lon": -122.39}, "approx_pickup": {"lat": 37.77, "lon": -122.41}}.
+
+Full Event:
+json
+
+{
+  "id": "<32-byte-hex>",
+  "pubkey": "<rider-pubkey>",
+  "created_at": 1698765450,
+  "kind": 3173,
+  "tags": [["e", "<kind-30173-id>"], ["p", "<driver-pubkey>"]],
+  "content": "{\"fare_estimate\": \"0.0005 BTC\", \"destination\": {\"lat\": 37.79, \"lon\": -122.39}, \"approx_pickup\": {\"lat\": 37.77, \"lon\": -122.41}}",
+  "sig": "<64-byte-hex>"
+}
+
+Driver Accepts Offer
+The driver sends a Kind 3174 event ("Ride Acceptance"). Note: The PIN is generated by the rider locally, not included in the acceptance.
+
+Example content: {"status": "accepted"}.
+
+Full Event:
+json
+
+{
+  "id": "<32-byte-hex>",
+  "pubkey": "<driver-pubkey>",
+  "created_at": 1698765470,
+  "kind": 3174,
+  "tags": [["e", "<kind-3173-id>"], ["p", "<rider-pubkey>"], ["t", "rideshare"]],
+  "content": "{\"status\": \"accepted\"}",
+  "sig": "<64-byte-hex>"
+}
+
+Rider Confirms Ride
+The rider sends a Kind 3175 event ("Ride Confirmation") with encrypted precise pickup details.
+
+Example content (encrypted): <nip-44-encrypted>{"precise_pickup": {"lat": 37.7749, "lon": -122.4194, "address": "123 Main St"}}.
+
+Full Event:
+json
+
+{
+  "id": "<32-byte-hex>",
+  "pubkey": "<rider-pubkey>",
+  "created_at": 1698765490,
+  "kind": 3175,
+  "tags": [["e", "<kind-3174-id>"], ["p", "<driver-pubkey>"]],
+  "content": "<encrypted-string>",
+  "sig": "<64-byte-hex>"
+}
+
+Driver Sends Status Updates
+The driver sends periodic Kind 3180 events ("Driver Status"). As regular events, these are stored by relays so the rider can fetch completion events even if their app was offline.
+
+Example content (on the way): {"status": "on the way", "approx_location": {"lat": 37.78, "lon": -122.42}}.
+
+Full Event:
+json
+
+{
+  "id": "<32-byte-hex>",
+  "pubkey": "<driver-pubkey>",
+  "created_at": 1698765510,
+  "kind": 3180,
+  "tags": [["e", "<kind-3175-id>"], ["p", "<rider-pubkey>"], ["t", "rideshare"]],
+  "content": "{\"status\": \"en_route_pickup\", \"approx_location\": {\"lat\": 37.78, \"lon\": -122.42}}",
+  "sig": "<64-byte-hex>"
+}
+
+Ride Completion and Payment Request
+The driver sends a final Kind 3180 event with payment details.
+
+Example content: {"status": "completed", "approx_location": {"lat": 37.79, "lon": -122.39}, "final_fare": "500 sats", "invoice": "lnbc..."}.
+
+Full Event:
+json
+
+{
+  "id": "<32-byte-hex>",
+  "pubkey": "<driver-pubkey>",
+  "created_at": 1698765600,
+  "kind": 3180,
+  "tags": [["e", "<kind-3175-id>"], ["p", "<rider-pubkey>"], ["t", "rideshare"]],
+  "content": "{\"status\": \"completed\", \"approx_location\": {\"lat\": 37.79, \"lon\": -122.39}, \"final_fare\": \"500 sats\", \"invoice\": \"lnbc...\"}",
+  "sig": "<64-byte-hex>"
+}
+
+Rider Manually Confirms Payment
+The rider’s app prompts for payment confirmation, attempts payment via Nostr Wallet Connect (NWC), or displays the invoice for manual payment if NWC fails.
+
+Payment Confirmation via Encrypted DM
+After payment, the rider sends an encrypted direct message (NIP-44) to the driver with status: "paid" and invoice details.
+
+Payment Handshake Details
+Trigger: Final Kind 3180 event with status: "completed".
+
+Manual Confirmation: Rider explicitly confirms payment.
+
+NWC Attempt: App attempts automated payment via NWC.
+
+Fallback: Rider pays manually using the Lightning invoice if NWC fails.
+
+Confirmation: Encrypted DM confirms payment to the driver.
+
+Privacy and Security
+Location Privacy: Precise location shared only after confirmation, encrypted via NIP-44.
+
+PIN Security: The rider generates the PIN locally (never transmitted until verification). This is critical because:
+- The rider has money at stake - they need to control verification
+- The PIN is only transmitted when the driver submits it (Kind 3176), encrypted to the rider
+- Eavesdroppers cannot see or guess the PIN before the physical handoff
+- Brute force protection: 3 failed attempts = automatic ride cancellation
+
+Payment Privacy: Payment details exchanged via encrypted DMs.
+
+Reputation: Trust enforced through a decentralized reputation system (e.g., ratings).
+
+PIN Verification Flow:
+1. Rider generates a 4-digit PIN locally when confirming the ride (Kind 3175)
+2. Rider displays the PIN on their screen (never transmitted over network)
+3. At pickup, rider verbally tells the PIN to the driver
+4. Driver enters the PIN in their app (Kind 3176 - encrypted to rider)
+5. Rider's app verifies and sends result (Kind 3177)
+6. If verified, ride begins. If rejected 3 times, ride is cancelled for security.
+
+Event Cleanup (NIP-09)
+To prevent relay spam and maintain privacy, events SHOULD be deleted via NIP-09 deletion requests (Kind 5) when no longer needed:
+
+Driver Responsibilities:
+- Kind 30173 (Availability): Automatically replaced when status changes (parameterized replaceable)
+- Kind 3174 (Acceptance): Delete when ride completes or is cancelled
+
+Rider Responsibilities:
+- Kind 3173 (Offer): Delete when offer is cancelled or ride completes
+- Kind 3175 (Confirmation): Delete when ride completes
+
+Deletion Request Format (Kind 5):
+json
+{
+  "kind": 5,
+  "tags": [
+    ["e", "<event-id-to-delete>"],
+    ["e", "<another-event-id>"]
+  ],
+  "content": "ride completed"
+}
+
+Notes:
+- Relays SHOULD honor deletion requests from the original event author
+- Clients should not rely on deletions being permanent (some relays may ignore)
+- Driver status events (Kind 3180) are regular events and stored by relays (critical for completion events)
+- Parameterized replaceable events (Kind 30173, 30174) automatically keep only the latest version
+- Ride cancellation events (Kind 3179) should be cleaned up after a reasonable period
+

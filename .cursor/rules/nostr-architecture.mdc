@@ -1,0 +1,509 @@
+---
+description: Detailed breakdown of Amethyst's Nostr protocol implementation, event handling, and NIP support
+globs: 
+alwaysApply: true
+---
+# Nostr Implementation Architecture
+
+> Detailed breakdown of Amethyst's Nostr protocol implementation, event handling, and NIP support.
+
+## Core Nostr Event Structure
+
+### Basic Event Format
+```kotlin
+data class Event {
+    val id: String          // SHA256(serialized_event_data)
+    val pubkey: String      // 32-bytes hex public key
+    val createdAt: Long     // Unix timestamp
+    val kind: Int          // Event kind number
+    val tags: List<Tag>    // List of tags
+    val content: String    // Content string (may be encrypted)
+    val sig: String        // 64-bytes signature of the event data
+}
+```
+
+### Event Serialization
+```kotlin
+fun serializeEvent(event: Event): String {
+    return JSON.stringify([
+        0,                  // Reserved for future versioning
+        event.pubkey,
+        event.createdAt,
+        event.kind,
+        event.tags,
+        event.content
+    ])
+}
+```
+
+## Event Types and Handling
+
+### Event Kind Categories
+```kotlin
+object EventKind {
+    // Core Events (0-9)
+    const val METADATA = 0          // Profile metadata
+    const val TEXT_NOTE = 1         // Regular text note
+    const val RECOMMEND_RELAY = 2   // Relay recommendations
+    const val CONTACTS = 3          // Contact list
+    const val DM = 4               // Encrypted DM
+    
+    // Deletions and Reactions (10-19)
+    const val DELETE = 5           // Event deletion
+    const val REPOST = 6          // Event repost
+    const val REACTION = 7        // Reaction to event
+    
+    // Channel Events (20-29)
+    const val CHANNEL_CREATE = 40    // Create channel
+    const val CHANNEL_METADATA = 41  // Channel metadata
+    const val CHANNEL_MESSAGE = 42   // Channel message
+    
+    // Zap Events (9730-9739)
+    const val ZAP_REQUEST = 9734    // Request for zap
+    const val ZAP = 9735           // Zap notification
+}
+```
+
+## NIP Implementation Details
+
+### NIP-01: Basic Protocol Flow
+```kotlin
+class NostrService {
+    private val relayPool: RelayPool
+    private val eventProcessor: EventProcessor
+    
+    // Subscribe to events
+    fun subscribe(filters: List<Filter>) {
+        val sub = Subscription(filters)
+        relayPool.subscribe(sub)
+    }
+    
+    // Publish event
+    suspend fun publishEvent(event: Event) {
+        val signedEvent = eventSigner.sign(event)
+        relayPool.broadcast(signedEvent)
+    }
+}
+
+class RelayPool {
+    private val connections: Map<String, RelayConnection>
+    
+    fun broadcast(event: Event) {
+        connections.values.forEach { relay ->
+            relay.send(["EVENT", event])
+        }
+    }
+}
+```
+
+### NIP-04: Encrypted Direct Messages
+```kotlin
+object MessageEncryption {
+    fun encrypt(message: String, publicKey: String, privateKey: String): String {
+        val sharedSecret = generateSharedSecret(privateKey, publicKey)
+        val iv = generateRandomIV()
+        
+        return encryptAESCBC(message, sharedSecret, iv)
+    }
+    
+    fun decrypt(encrypted: String, publicKey: String, privateKey: String): String {
+        val sharedSecret = generateSharedSecret(privateKey, publicKey)
+        val (iv, ciphertext) = parseEncrypted(encrypted)
+        
+        return decryptAESCBC(ciphertext, sharedSecret, iv)
+    }
+}
+```
+
+### NIP-05: DNS Identity Verification
+```kotlin
+class IdentityVerifier {
+    suspend fun verify(name: String, domain: String, pubkey: String): Boolean {
+        val url = "https://$domain/.well-known/nostr.json?name=$name"
+        val response = httpClient.get(url)
+        
+        return response.names[name] == pubkey
+    }
+}
+```
+
+### NIP-57: Lightning Zaps
+```kotlin
+class ZapHandler {
+    // Generate zap request
+    suspend fun createZapRequest(
+        recipient: String,
+        amount: Long,
+        comment: String? = null,
+        relays: List<String>
+    ): Event {
+        return Event(
+            kind = EventKind.ZAP_REQUEST,
+            content = comment ?: "",
+            tags = listOf(
+                Tag("p", recipient),
+                Tag("amount", amount.toString()),
+                Tag("relays", relays)
+            )
+        )
+    }
+    
+    // Process incoming zap
+    suspend fun processZap(zapEvent: Event) {
+        val request = zapEvent.tags.find { it[0] == "request" }
+        val invoice = zapEvent.tags.find { it[0] == "bolt11" }
+        val amount = zapEvent.tags.find { it[0] == "amount" }
+        
+        // Verify and process zap
+        if (verifyZap(zapEvent, request?.get(1), invoice?.get(1), amount?.get(1))) {
+            eventRepository.saveZap(zapEvent)
+        }
+    }
+}
+```
+
+## Event Repository Pattern
+
+### In-Memory Event Graph
+```kotlin
+class EventGraph {
+    private val events: MutableMap<String, Event>
+    private val replies: MutableMap<String, MutableSet<String>>
+    private val mentions: MutableMap<String, MutableSet<String>>
+    
+    fun addEvent(event: Event) {
+        events[event.id] = event
+        processReferences(event)
+    }
+    
+    private fun processReferences(event: Event) {
+        event.tags.forEach { tag ->
+            when (tag[0]) {
+                "e" -> addReply(tag[1], event.id)
+                "p" -> addMention(tag[1], event.id)
+            }
+        }
+    }
+}
+```
+
+### Event Repository Implementation
+```kotlin
+class EventRepository {
+    private val eventGraph: EventGraph
+    private val eventFlow: MutableSharedFlow<Event>
+    
+    suspend fun saveEvent(event: Event) {
+        eventGraph.addEvent(event)
+        eventFlow.emit(event)
+    }
+    
+    fun getThread(eventId: String): Flow<List<Event>> {
+        return eventGraph.getThreadEvents(eventId)
+            .map { events -> events.sortedBy { it.createdAt } }
+    }
+}
+```
+
+## Relay Management
+
+### Relay Connection States
+```kotlin
+sealed class RelayState {
+    object Disconnected : RelayState()
+    object Connecting : RelayState()
+    object Connected : RelayState()
+    data class Failed(val error: Throwable) : RelayState()
+}
+```
+
+### Relay Connection Management
+```kotlin
+class RelayConnection(
+    private val url: String,
+    private val config: RelayConfig
+) {
+    private val socket: WebSocket
+    private val subscriptions: MutableMap<String, Subscription>
+    
+    suspend fun connect() {
+        socket.connect()
+        
+        socket.incoming.collect { message ->
+            when (message[0]) {
+                "EVENT" -> processEvent(message[1])
+                "EOSE" -> processEndOfStoredEvents(message[1])
+                "NOTICE" -> processNotice(message[1])
+                "OK" -> processOK(message[1], message[2])
+            }
+        }
+    }
+}
+```
+
+## Creating New NIPs
+
+### NIP Development Template
+```kotlin
+/**
+ * NIP Template Structure
+ * 
+ * 1. Define Event Kind
+ * 2. Define Tag Structure
+ * 3. Implement Event Creation
+ * 4. Implement Event Processing
+ * 5. Add Repository Support
+ * 6. Add UI Components
+ */
+class NewNIPImplementation {
+    // 1. Event Kind Definition
+    object EventKind {
+        const val NEW_KIND = xxxxx  // Choose number based on NIP guidelines
+    }
+    
+    // 2. Tag Structure
+    data class SpecificTags(
+        val requiredTag: String,
+        val optionalTag: String?
+    )
+    
+    // 3. Event Creation
+    fun createNewKindEvent(data: SpecificData): Event {
+        return Event(
+            kind = EventKind.NEW_KIND,
+            content = encodeContent(data),
+            tags = createTags(data)
+        )
+    }
+    
+    // 4. Event Processing
+    fun processNewKindEvent(event: Event): SpecificData {
+        require(event.kind == EventKind.NEW_KIND)
+        return decodeContent(event.content)
+    }
+}
+```
+
+### NIP Package Organization
+For consistency across the codebase, NIP implementations should follow this package structure:
+
+```
+com.vitorpamplona.quartz
+└── nip<number>[description]
+    ├── EventInterface.kt (base interface)
+    ├── specific event implementations
+    ├── data models
+    └── utility functions
+```
+
+For example, for the rideshare NIP:
+```
+com.vitorpamplona.quartz
+└── nip014173rideshare
+    ├── RideshareEventInterface.kt
+    ├── DriverAvailabilityEvent.kt
+    ├── RideOfferEvent.kt
+    └── ...
+```
+
+### Data Model Consistency
+Maintain consistent data models across related NIPs:
+
+1. **Common Location Class**: Use a unified Location class for all geolocation needs
+   ```kotlin
+   data class Location(
+       val latitude: Double,
+       val longitude: Double,
+       // Other common properties
+   )
+   ```
+
+2. **Content Models**: Define clear content models for each event type
+   ```kotlin
+   data class Content(
+       // Event-specific content properties
+   )
+   ```
+
+3. **Type Converters**: When interfacing with external libraries (like GraphHopper), create clear conversion methods:
+   ```kotlin
+   // Convert from NIP location to external library format
+   fun Location.toExternalPoint(): ExternalPoint = 
+       ExternalPoint(this.latitude, this.longitude)
+       
+   // Convert from external library format to NIP location
+   fun ExternalPoint.toLocation(): Location =
+       Location(this.lat, this.lon)
+   ```
+
+### Event Registration Best Practices
+When registering NIP events with the EventFactory, follow these principles:
+
+```kotlin
+// In a central registration function:
+fun registerEventTypes() {
+    // Register all events for the NIP together
+    EventFactory.registerEventType(RideshareEventInterface.DRIVER_AVAILABILITY) { json ->
+        DriverAvailabilityEvent(/* parameters */)
+    }
+    
+    EventFactory.registerEventType(RideshareEventInterface.RIDE_OFFER) { json ->
+        RideOfferEvent(/* parameters */)
+    }
+    
+    // Additional events...
+}
+```
+
+### Error Handling and Logging Strategy
+For consistent error handling across NIPs:
+
+```kotlin
+// 1. Use try/catch for all external operations
+try {
+    // External operation
+} catch (e: Exception) {
+    // 2. Log with consistent tags and messages
+    Log.e("ClassNameTag", "Descriptive operation message", e)
+    
+    // 3. Return appropriate fallback or null
+    null // or fallback value
+}
+
+// 4. For ViewModel errors, update state
+_state.update { currentState ->
+    currentState.copy(
+        error = "User-friendly error message",
+        isLoading = false
+    )
+}
+```
+
+### View Models and UI Integration
+When creating ViewModels for NIP features:
+
+```kotlin
+// 1. Define a clear state class
+data class NipFeatureState(
+    val items: List<Item> = emptyList(),
+    val isLoading: Boolean = false,
+    val error: String? = null
+)
+
+// 2. Create a standardized ViewModel
+class NipFeatureViewModel(
+    private val account: Account,
+    // Other dependencies
+) : ViewModel() {
+    // State management
+    private val _state = MutableStateFlow(NipFeatureState())
+    val state: StateFlow<NipFeatureState> = _state.asStateFlow()
+    
+    // Feature-specific methods
+}
+```
+
+### Testing NIP Implementations
+For thorough testing of NIP implementations:
+
+```kotlin
+// 1. Event serialization/deserialization tests
+@Test
+fun testEventSerialization() {
+    val event = createSampleEvent()
+    val json = serialize(event)
+    val deserialized = deserialize(json)
+    assertEquals(event, deserialized)
+}
+
+// 2. Content parsing tests
+@Test
+fun testContentParsing() {
+    val content = createSampleContent()
+    val json = serializeContent(content)
+    val parsedContent = parseContent(json)
+    assertEquals(content, parsedContent)
+}
+
+// 3. Integration tests with relay communication
+@Test
+fun testRelayCommunication() {
+    val event = createSampleEvent()
+    val relayResult = mockRelay.publish(event)
+    assertTrue(relayResult.isSuccess)
+}
+```
+
+## Best Practices for NIP Implementation
+
+### 1. Event Validation
+```kotlin
+fun validateEvent(event: Event): Boolean {
+    return when (event.kind) {
+        EventKind.TEXT_NOTE -> validateTextNote(event)
+        EventKind.METADATA -> validateMetadata(event)
+        EventKind.DM -> validateDirectMessage(event)
+        else -> validateGenericEvent(event)
+    }
+}
+```
+
+### 2. Tag Processing
+```kotlin
+fun processTags(tags: List<Tag>): TagMetadata {
+    val references = mutableListOf<String>()
+    val mentions = mutableListOf<String>()
+    val hashtags = mutableSetOf<String>()
+    
+    tags.forEach { tag ->
+        when (tag[0]) {
+            "e" -> references.add(tag[1])
+            "p" -> mentions.add(tag[1])
+            "t" -> hashtags.add(tag[1])
+        }
+    }
+    
+    return TagMetadata(references, mentions, hashtags)
+}
+```
+
+### 3. Event Signing
+```kotlin
+fun signEvent(event: Event, privateKey: String): String {
+    val serialized = serializeEvent(event)
+    val hash = sha256(serialized)
+    return schnorrSign(hash, privateKey)
+}
+```
+
+## Performance Considerations
+
+### Event Caching
+```kotlin
+class EventCache {
+    private val cache: LRUCache<String, Event>
+    private val subscriptionCache: MutableMap<Filter, List<Event>>
+    
+    fun getCachedEvents(filter: Filter): List<Event>? {
+        return subscriptionCache[filter]?.takeIf {
+            it.isNotEmpty() && !isStale(it)
+        }
+    }
+}
+```
+
+### Relay Selection
+```kotlin
+class RelaySelector {
+    fun selectRelaysForEvent(event: Event): List<String> {
+        return when (event.kind) {
+            EventKind.DM -> getPrivateRelays()
+            EventKind.METADATA -> getWriteRelays()
+            else -> getAllRelays()
+        }
+    }
+}
+```
+
+---
+*This architecture documentation provides a foundation for implementing Nostr protocol features in any client application.* 
