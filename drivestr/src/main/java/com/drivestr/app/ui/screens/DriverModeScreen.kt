@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -65,13 +66,10 @@ fun DriverModeScreen(
     // Demo location fallback
     val demoLocation = remember { Location(lat = DEMO_DRIVER_LAT, lon = DEMO_DRIVER_LON) }
 
-    // Current driver location (GPS or demo)
+    // Current driver location from GPS
     var currentLocation by remember { mutableStateOf<Location?>(null) }
     var isFetchingLocation by remember { mutableStateOf(false) }
     var locationError by remember { mutableStateOf<String?>(null) }
-
-    // Get demo location setting
-    val useDemoLocation by settingsManager.useDemoLocation.collectAsState()
 
     // FusedLocationProviderClient for GPS
     val fusedLocationClient = remember { LocationServices.getFusedLocationProviderClient(context) }
@@ -157,13 +155,43 @@ fun DriverModeScreen(
         }
     }
 
-    // Function to get current location (GPS or demo) and execute action
+    // Notification permission launcher (Android 13+)
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        Log.d(TAG, "Notification permission result: $granted")
+        // Continue regardless of permission - notifications are optional but helpful
+    }
+
+    // Check and request notification permission if needed (Android 13+)
+    fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val hasPermission = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+
+            if (!hasPermission) {
+                Log.d(TAG, "Requesting notification permission (Android 13+)")
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
+
+    // Manual location settings
+    val useManualDriverLocation by settingsManager.useManualDriverLocation.collectAsState()
+    val manualDriverLat by settingsManager.manualDriverLat.collectAsState()
+    val manualDriverLon by settingsManager.manualDriverLon.collectAsState()
+
+    // Function to get current location and execute action
     fun withCurrentLocation(action: (Location) -> Unit) {
-        // If demo mode is on, always use demo location
-        if (useDemoLocation) {
-            Log.d(TAG, "Demo mode ON - using demo location")
-            currentLocation = demoLocation
-            action(demoLocation)
+        // Check if manual location mode is enabled
+        if (useManualDriverLocation) {
+            Log.d(TAG, "Using manual location: $manualDriverLat, $manualDriverLon")
+            val manualLocation = Location(lat = manualDriverLat, lon = manualDriverLon)
+            currentLocation = manualLocation
+            locationError = null
+            action(manualLocation)
             return
         }
 
@@ -200,91 +228,48 @@ fun DriverModeScreen(
 
     // Watch for location refresh requests (e.g., when app returns to foreground)
     val locationRefreshRequested by viewModel.locationRefreshRequested.collectAsState()
-    LaunchedEffect(locationRefreshRequested) {
+    LaunchedEffect(locationRefreshRequested, useManualDriverLocation) {
         if (locationRefreshRequested && uiState.stage == DriverStage.AVAILABLE) {
             Log.d(TAG, "Location refresh requested (e.g., app returned to foreground)")
             viewModel.acknowledgeLocationRefresh()
 
-            if (useDemoLocation) {
-                // Demo mode - no need to fetch GPS
-                viewModel.updateLocation(demoLocation, force = false)
-            } else {
-                // GPS mode - fetch real location
-                val hasPermission = ContextCompat.checkSelfPermission(
-                    context,
-                    Manifest.permission.ACCESS_FINE_LOCATION
-                ) == PackageManager.PERMISSION_GRANTED ||
-                ContextCompat.checkSelfPermission(
-                    context,
-                    Manifest.permission.ACCESS_COARSE_LOCATION
-                ) == PackageManager.PERMISSION_GRANTED
-
-                if (hasPermission) {
-                    try {
-                        val cancellationTokenSource = CancellationTokenSource()
-                        val location = fusedLocationClient.getCurrentLocation(
-                            Priority.PRIORITY_HIGH_ACCURACY,
-                            cancellationTokenSource.token
-                        ).await()
-
-                        if (location != null) {
-                            val loc = Location(lat = location.latitude, lon = location.longitude)
-                            currentLocation = loc
-                            // Use default throttling (not forced) for background refresh
-                            viewModel.updateLocation(loc, force = false)
-                        } else {
-                            Log.w(TAG, "GPS returned null on foreground refresh")
-                        }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error fetching GPS on foreground refresh", e)
-                    }
-                }
+            // Check if manual location mode is enabled
+            if (useManualDriverLocation) {
+                Log.d(TAG, "Using manual location for refresh: $manualDriverLat, $manualDriverLon")
+                val manualLocation = Location(lat = manualDriverLat, lon = manualDriverLon)
+                currentLocation = manualLocation
+                viewModel.updateLocation(manualLocation, force = false)
+                return@LaunchedEffect
             }
-        }
-    }
 
-    // Watch for demo mode changes while online - update location automatically
-    // Use force=true since this is a deliberate user action (bypasses throttling)
-    LaunchedEffect(useDemoLocation) {
-        // Only update if we're online (AVAILABLE stage)
-        if (uiState.stage == DriverStage.AVAILABLE) {
-            Log.d(TAG, "Demo mode setting changed to $useDemoLocation while online - updating location (forced)")
-            if (useDemoLocation) {
-                // Switched to demo mode - use demo location
-                currentLocation = demoLocation
-                viewModel.updateLocation(demoLocation, force = true)
-            } else {
-                // Switched to GPS mode - fetch real location
-                val hasPermission = ContextCompat.checkSelfPermission(
-                    context,
-                    Manifest.permission.ACCESS_FINE_LOCATION
-                ) == PackageManager.PERMISSION_GRANTED ||
-                ContextCompat.checkSelfPermission(
-                    context,
-                    Manifest.permission.ACCESS_COARSE_LOCATION
-                ) == PackageManager.PERMISSION_GRANTED
+            // Fetch real GPS location
+            val hasPermission = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.ACCESS_COARSE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
 
-                if (hasPermission) {
-                    try {
-                        val cancellationTokenSource = CancellationTokenSource()
-                        val location = fusedLocationClient.getCurrentLocation(
-                            Priority.PRIORITY_HIGH_ACCURACY,
-                            cancellationTokenSource.token
-                        ).await()
+            if (hasPermission) {
+                try {
+                    val cancellationTokenSource = CancellationTokenSource()
+                    val location = fusedLocationClient.getCurrentLocation(
+                        Priority.PRIORITY_HIGH_ACCURACY,
+                        cancellationTokenSource.token
+                    ).await()
 
-                        if (location != null) {
-                            val loc = Location(lat = location.latitude, lon = location.longitude)
-                            currentLocation = loc
-                            viewModel.updateLocation(loc, force = true)
-                        } else {
-                            Log.w(TAG, "GPS returned null, keeping current location")
-                        }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error fetching GPS location on mode change", e)
+                    if (location != null) {
+                        val loc = Location(lat = location.latitude, lon = location.longitude)
+                        currentLocation = loc
+                        // Use default throttling (not forced) for background refresh
+                        viewModel.updateLocation(loc, force = false)
+                    } else {
+                        Log.w(TAG, "GPS returned null on foreground refresh")
                     }
-                } else {
-                    Log.w(TAG, "No location permission, can't switch to GPS mode")
-                    locationError = "Permission required for GPS"
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error fetching GPS on foreground refresh", e)
                 }
             }
         }
@@ -350,7 +335,12 @@ fun DriverModeScreen(
                     statusMessage = uiState.statusMessage,
                     isFetchingLocation = isFetchingLocation,
                     locationError = locationError,
-                    onGoOnline = { withCurrentLocation { location -> viewModel.toggleAvailability(location) } }
+                    onGoOnline = {
+                        // Request notification permission first (Android 13+)
+                        requestNotificationPermissionIfNeeded()
+                        // Then proceed with location and going online
+                        withCurrentLocation { location -> viewModel.toggleAvailability(location) }
+                    }
                 )
             }
 
@@ -358,6 +348,7 @@ fun DriverModeScreen(
                 AvailableContent(
                     uiState = uiState,
                     onGoOffline = { withCurrentLocation { location -> viewModel.toggleAvailability(location) } },
+                    onToggleExpandedSearch = { viewModel.toggleExpandedSearch() },
                     onAcceptBroadcastRequest = { viewModel.acceptBroadcastRequest(it) },
                     onDeclineBroadcastRequest = { viewModel.declineBroadcastRequest(it) },
                     onAcceptOffer = { viewModel.acceptOffer(it) },
@@ -510,6 +501,7 @@ private fun OfflineContent(
 private fun AvailableContent(
     uiState: DriverUiState,
     onGoOffline: () -> Unit,
+    onToggleExpandedSearch: () -> Unit,
     onAcceptBroadcastRequest: (BroadcastRideOfferData) -> Unit,
     onDeclineBroadcastRequest: (BroadcastRideOfferData) -> Unit,
     onAcceptOffer: (RideOfferData) -> Unit,
@@ -580,12 +572,35 @@ private fun AvailableContent(
 
     Spacer(modifier = Modifier.height(16.dp))
 
-    // Ride requests section header
-    Text(
-        text = "Available Ride Requests ($totalRequests)",
-        style = MaterialTheme.typography.titleMedium,
-        fontWeight = FontWeight.Bold
-    )
+    // Search area toggle and ride requests header
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "Ride Requests ($totalRequests)",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold
+        )
+        FilterChip(
+            selected = uiState.expandedSearch,
+            onClick = onToggleExpandedSearch,
+            label = {
+                Text(if (uiState.expandedSearch) "Wide Area" else "Expand Search")
+            },
+            leadingIcon = {
+                Icon(
+                    imageVector = if (uiState.expandedSearch)
+                        Icons.Default.ZoomOutMap
+                    else
+                        Icons.Default.ZoomIn,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+        )
+    }
 
     Spacer(modifier = Modifier.height(8.dp))
 
@@ -1507,23 +1522,26 @@ private fun BroadcastRideRequestCard(
     val earningsPerHour: String?
     val earningsPerDistance: String?
 
-    if (pickupRoute != null && pickupDurationMin != null) {
+    if (pickupRoute != null && pickupDurationMin != null && pickupDistanceKm != null) {
         // Total time = pickup time + ride time (in hours)
         val totalTimeHours = (pickupDurationMin + rideDurationMin) / 60.0
-        // Total distance for $/mile = ride distance only (not pickup - that's unpaid)
-        val rideDistanceForEarnings = if (distanceUnit == DistanceUnit.MILES) {
-            rideDistanceKm * 0.621371
+
+        // Total distance = pickup + ride (driver has to drive both, only gets paid for ride)
+        // This gives accurate $/mile for total miles driven
+        val totalDistanceKm = pickupDistanceKm + rideDistanceKm
+        val totalDistanceForEarnings = if (distanceUnit == DistanceUnit.MILES) {
+            totalDistanceKm * 0.621371
         } else {
-            rideDistanceKm
+            totalDistanceKm
         }
 
         earningsPerHour = if (totalTimeHours > 0) {
             formatEarnings(request.fareEstimate / totalTimeHours, displayCurrency, btcPrice, "/hr")
         } else null
 
-        earningsPerDistance = if (rideDistanceForEarnings > 0) {
+        earningsPerDistance = if (totalDistanceForEarnings > 0) {
             val perDistanceUnit = if (distanceUnit == DistanceUnit.MILES) "/mi" else "/km"
-            formatEarnings(request.fareEstimate / rideDistanceForEarnings, displayCurrency, btcPrice, perDistanceUnit)
+            formatEarnings(request.fareEstimate / totalDistanceForEarnings, displayCurrency, btcPrice, perDistanceUnit)
         } else null
     } else {
         // Don't show earnings without pickup route - they'd be misleading

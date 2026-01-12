@@ -1,8 +1,11 @@
 package com.ridestr.common.nostr.events
 
+import android.util.Log
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
 import org.json.JSONObject
+
+private const val TAG = "RideOfferEvent"
 
 /**
  * Kind 3173: Ride Offer Event
@@ -46,8 +49,14 @@ object RideOfferEvent {
         // Build tags with geohash for geographic filtering
         val tagsList = mutableListOf<Array<String>>()
 
-        // Add geohash tags at precision 4 and 5 for the pickup location
-        pickup.geohashTags(minPrecision = 4, maxPrecision = 5).forEach { geohash ->
+        // Add geohash tags at precision 3, 4, and 5 for the pickup location
+        // 3 chars (~100mi) for wide area matching, 4 chars (~24mi) regional, 5 chars (~5km) local
+        val geohashTags = pickup.geohashTags(minPrecision = 3, maxPrecision = 5)
+        Log.d(TAG, "=== RIDE REQUEST (BROADCAST) ===")
+        Log.d(TAG, "Pickup: ${pickup.lat}, ${pickup.lon}")
+        Log.d(TAG, "Geohash tags: $geohashTags")
+
+        geohashTags.forEach { geohash ->
             tagsList.add(arrayOf(RideshareTags.GEOHASH, geohash))
         }
 

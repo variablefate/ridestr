@@ -23,6 +23,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.ridestr.common.nostr.relay.RelayConnectionState
+import com.ridestr.common.routing.ValhallaRoutingService
 import com.vitorpamplona.quartz.nip01Core.core.Event
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -34,9 +35,8 @@ fun DebugScreen(
     recentEvents: List<Pair<Event, String>>,
     notices: List<Pair<String, String>>,
     useGeocodingSearch: Boolean,
-    useDemoLocation: Boolean,
+    routingService: ValhallaRoutingService,
     onToggleGeocodingSearch: () -> Unit,
-    onToggleDemoLocation: () -> Unit,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
     onBack: () -> Unit,
@@ -97,9 +97,14 @@ fun DebugScreen(
             item {
                 DebugSettingsSection(
                     useGeocodingSearch = useGeocodingSearch,
-                    useDemoLocation = useDemoLocation,
-                    onToggleGeocodingSearch = onToggleGeocodingSearch,
-                    onToggleDemoLocation = onToggleDemoLocation
+                    onToggleGeocodingSearch = onToggleGeocodingSearch
+                )
+            }
+
+            item {
+                RoutingTestSection(
+                    routingService = routingService,
+                    scope = scope
                 )
             }
 
@@ -404,9 +409,7 @@ private fun EventItem(
 @Composable
 private fun DebugSettingsSection(
     useGeocodingSearch: Boolean,
-    useDemoLocation: Boolean,
-    onToggleGeocodingSearch: () -> Unit,
-    onToggleDemoLocation: () -> Unit
+    onToggleGeocodingSearch: () -> Unit
 ) {
     Card(
         modifier = Modifier.fillMaxWidth()
@@ -445,30 +448,96 @@ private fun DebugSettingsSection(
                     onCheckedChange = { onToggleGeocodingSearch() }
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun RoutingTestSection(
+    routingService: ValhallaRoutingService,
+    scope: kotlinx.coroutines.CoroutineScope
+) {
+    var testResult by remember { mutableStateOf<String?>(null) }
+    var isTesting by remember { mutableStateOf(false) }
+
+    Card(
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp)
+        ) {
+            Text(
+                text = "Routing Test",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Text(
+                text = "Test Nevada tiles with Las Vegas route",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Demo location toggle
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+            Button(
+                onClick = {
+                    scope.launch {
+                        isTesting = true
+                        testResult = "Initializing Nevada tiles..."
+
+                        val initialized = routingService.initializeWithNevada()
+                        if (!initialized) {
+                            testResult = "Failed to initialize Nevada tiles"
+                            isTesting = false
+                            return@launch
+                        }
+
+                        testResult = "Calculating route in Las Vegas..."
+
+                        // Route from Fremont Street to The Strip
+                        val result = routingService.calculateRoute(
+                            originLat = 36.1699,   // Fremont Street Experience
+                            originLon = -115.1398,
+                            destLat = 36.1147,     // Welcome to Las Vegas sign
+                            destLon = -115.1728
+                        )
+
+                        testResult = if (result != null) {
+                            "SUCCESS!\nDistance: ${result.getFormattedDistance()}\nDuration: ${result.getFormattedDuration()}\nManeuvers: ${result.maneuvers.size}"
+                        } else {
+                            "Route calculation failed"
+                        }
+                        isTesting = false
+                    }
+                },
+                enabled = !isTesting,
+                modifier = Modifier.fillMaxWidth()
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Use Demo Location",
-                        style = MaterialTheme.typography.bodyMedium
+                if (isTesting) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary
                     )
-                    Text(
-                        text = if (useDemoLocation) "Using hardcoded test coordinates"
-                               else "Using GPS location",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Spacer(modifier = Modifier.width(8.dp))
                 }
-                Switch(
-                    checked = useDemoLocation,
-                    onCheckedChange = { onToggleDemoLocation() }
+                Text(if (isTesting) "Testing..." else "Test Nevada Routing")
+            }
+
+            testResult?.let { result ->
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = result,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (result.startsWith("SUCCESS"))
+                        MaterialTheme.colorScheme.primary
+                    else if (result.startsWith("Failed") || result.startsWith("Route calculation failed"))
+                        MaterialTheme.colorScheme.error
+                    else
+                        MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }

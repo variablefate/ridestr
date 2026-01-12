@@ -2,6 +2,7 @@ package com.ridestr.rider.ui.screens
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.os.Build
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -64,8 +65,32 @@ fun RiderModeScreen(
     settingsManager: SettingsManager,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsState()
     var showChatSheet by remember { mutableStateOf(false) }
+
+    // Notification permission launcher (Android 13+)
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        Log.d(TAG, "Notification permission result: $granted")
+        // Continue regardless of permission - notifications are optional but helpful
+    }
+
+    // Check and request notification permission if needed (Android 13+)
+    fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val hasPermission = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+
+            if (!hasPermission) {
+                Log.d(TAG, "Requesting notification permission (Android 13+)")
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
 
     // Chat bottom sheet
     ChatBottomSheet(
@@ -129,7 +154,6 @@ fun RiderModeScreen(
                 val isSearchingPickup by viewModel.isSearchingPickup.collectAsState()
                 val isSearchingDest by viewModel.isSearchingDest.collectAsState()
                 val useGeocodingSearch by settingsManager.useGeocodingSearch.collectAsState()
-                val useDemoLocation by settingsManager.useDemoLocation.collectAsState()
                 val usingCurrentLocationForPickup by viewModel.usingCurrentLocationForPickup.collectAsState()
                 val isFetchingLocation by viewModel.isFetchingLocation.collectAsState()
 
@@ -137,7 +161,6 @@ fun RiderModeScreen(
                 IdleContent(
                     uiState = uiState,
                     useGeocodingSearch = useGeocodingSearch,
-                    useDemoLocation = useDemoLocation,
                     usingCurrentLocationForPickup = usingCurrentLocationForPickup,
                     isFetchingLocation = isFetchingLocation,
                     pickupSearchResults = pickupSearchResults,
@@ -157,7 +180,12 @@ fun RiderModeScreen(
                     onSelectDriver = viewModel::selectDriver,
                     onClearDriver = viewModel::clearSelectedDriver,
                     onSendOffer = viewModel::sendRideOffer,
-                    onBroadcastRequest = viewModel::broadcastRideRequest,
+                    onBroadcastRequest = {
+                        // Request notification permission first (Android 13+)
+                        requestNotificationPermissionIfNeeded()
+                        // Then broadcast the ride request
+                        viewModel.broadcastRideRequest()
+                    },
                     onToggleExpandedSearch = viewModel::toggleExpandedSearch,
                     settingsManager = settingsManager,
                     priceService = viewModel.bitcoinPriceService
@@ -218,7 +246,6 @@ fun RiderModeScreen(
 private fun IdleContent(
     uiState: RiderUiState,
     useGeocodingSearch: Boolean,
-    useDemoLocation: Boolean,
     usingCurrentLocationForPickup: Boolean,
     isFetchingLocation: Boolean,
     pickupSearchResults: List<GeocodingResult>,
@@ -261,7 +288,10 @@ private fun IdleContent(
                     isSearchingDest = isSearchingDest,
                     usingCurrentLocationForPickup = usingCurrentLocationForPickup,
                     isFetchingLocation = isFetchingLocation,
-                    useDemoLocation = useDemoLocation,
+                    routeResult = uiState.routeResult,
+                    fareEstimate = uiState.fareEstimate,
+                    isCalculatingRoute = uiState.isCalculatingRoute,
+                    isSendingOffer = uiState.isSendingOffer,
                     onSearchPickup = onSearchPickup,
                     onSearchDest = onSearchDest,
                     onSelectPickupFromSearch = onSelectPickupFromSearch,
@@ -269,7 +299,13 @@ private fun IdleContent(
                     onUseCurrentLocation = onUseCurrentLocation,
                     onStopUsingCurrentLocation = onStopUsingCurrentLocation,
                     onClearPickup = onClearPickup,
-                    onClearDest = onClearDest
+                    onClearDest = onClearDest,
+                    onBroadcastRequest = onBroadcastRequest,
+                    expandedSearch = uiState.expandedSearch,
+                    nearbyDriverCount = uiState.nearbyDriverCount,
+                    onToggleExpandedSearch = onToggleExpandedSearch,
+                    settingsManager = settingsManager,
+                    priceService = priceService
                 )
             } else {
                 ManualLocationInputCard(
@@ -281,131 +317,8 @@ private fun IdleContent(
             }
         }
 
-        // Route info card (if available)
-        if (uiState.routeResult != null || uiState.isCalculatingRoute) {
-            item {
-                RouteInfoCard(
-                    routeResult = uiState.routeResult,
-                    fareEstimate = uiState.fareEstimate,
-                    isCalculating = uiState.isCalculatingRoute,
-                    settingsManager = settingsManager,
-                    priceService = priceService
-                )
-            }
-        }
-
-        // Show request ride section after route is calculated
+        // Show advanced driver selection after route is calculated
         if (uiState.routeResult != null && uiState.fareEstimate != null) {
-            // Nearby driver count indicator
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceVariant
-                    )
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                Icons.Default.DirectionsCar,
-                                contentDescription = null,
-                                modifier = Modifier.size(20.dp),
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "${uiState.nearbyDriverCount} driver${if (uiState.nearbyDriverCount != 1) "s" else ""} nearby",
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                        }
-                        FilterChip(
-                            selected = uiState.expandedSearch,
-                            onClick = onToggleExpandedSearch,
-                            label = {
-                                Text(if (uiState.expandedSearch) "20+ mi" else "Nearby")
-                            },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = if (uiState.expandedSearch)
-                                        Icons.Default.ZoomOutMap
-                                    else
-                                        Icons.Default.NearMe,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            }
-                        )
-                    }
-                }
-            }
-
-            // Main "Request Ride" button (broadcasts to all drivers)
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer
-                    )
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Text(
-                            text = "Ready to request your ride",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "Your request will be sent to all nearby drivers",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Button(
-                            onClick = onBroadcastRequest,
-                            enabled = !uiState.isSendingOffer,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            if (uiState.isSendingOffer) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(18.dp),
-                                    strokeWidth = 2.dp
-                                )
-                            } else {
-                                Icon(
-                                    Icons.Default.Search,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text("Request Ride (${formatFare(uiState.fareEstimate, settingsManager, priceService)})")
-                            }
-                        }
-                        if (uiState.nearbyDriverCount == 0) {
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = "No drivers online nearby. Your request will be visible when drivers come online.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                textAlign = TextAlign.Center
-                            )
-                        }
-                    }
-                }
-            }
-
             // Advanced: Select specific driver (collapsible)
             item {
                 TextButton(
@@ -501,7 +414,10 @@ private fun GeocodingLocationInputCard(
     isSearchingDest: Boolean,
     usingCurrentLocationForPickup: Boolean,
     isFetchingLocation: Boolean,
-    useDemoLocation: Boolean,
+    routeResult: RouteResult?,
+    fareEstimate: Double?,
+    isCalculatingRoute: Boolean,
+    isSendingOffer: Boolean,
     onSearchPickup: (String) -> Unit,
     onSearchDest: (String) -> Unit,
     onSelectPickupFromSearch: (GeocodingResult) -> Unit,
@@ -509,7 +425,13 @@ private fun GeocodingLocationInputCard(
     onUseCurrentLocation: (Double?, Double?) -> Unit,
     onStopUsingCurrentLocation: () -> Unit,
     onClearPickup: () -> Unit,
-    onClearDest: () -> Unit
+    onClearDest: () -> Unit,
+    onBroadcastRequest: () -> Unit,
+    expandedSearch: Boolean,
+    nearbyDriverCount: Int,
+    onToggleExpandedSearch: () -> Unit,
+    settingsManager: SettingsManager,
+    priceService: BitcoinPriceService
 ) {
     val context = LocalContext.current
     var pickupQuery by rememberSaveable { mutableStateOf("") }
@@ -772,31 +694,149 @@ private fun GeocodingLocationInputCard(
                 onUseMyLocation = null
             )
 
-            // Show coordinates if locations are selected (for debugging)
-            if (pickupLocation != null || destination != null) {
-                Spacer(modifier = Modifier.height(12.dp))
+            // Show Request Ride button when both locations are selected
+            if (pickupLocation != null && destination != null) {
+                Spacer(modifier = Modifier.height(16.dp))
                 HorizontalDivider()
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(16.dp))
 
-                Text(
-                    text = "Selected coordinates:",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                // Show route info summary if available
+                if (routeResult != null && fareEstimate != null) {
+                    val distanceUnit by settingsManager.distanceUnit.collectAsState()
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                text = routeResult.getFormattedDistance(distanceUnit),
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Distance",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                text = routeResult.getFormattedDuration(),
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Duration",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            FareDisplay(
+                                satsAmount = fareEstimate,
+                                settingsManager = settingsManager,
+                                priceService = priceService,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Est. Fare",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
 
-                pickupLocation?.let {
-                    Text(
-                        text = "Pickup: ${String.format("%.6f", it.lat)}, ${String.format("%.6f", it.lon)}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                destination?.let {
-                    Text(
-                        text = "Dest: ${String.format("%.6f", it.lat)}, ${String.format("%.6f", it.lon)}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Nearby drivers and search area toggle
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.DirectionsCar,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "$nearbyDriverCount driver${if (nearbyDriverCount != 1) "s" else ""} nearby",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        FilterChip(
+                            selected = expandedSearch,
+                            onClick = onToggleExpandedSearch,
+                            label = {
+                                Text(
+                                    if (expandedSearch) "Wide Area" else "Expand Search",
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = if (expandedSearch)
+                                        Icons.Default.ZoomOutMap
+                                    else
+                                        Icons.Default.ZoomIn,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Request Ride button
+                    Button(
+                        onClick = onBroadcastRequest,
+                        enabled = !isSendingOffer,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        if (isSendingOffer) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onPrimary
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Requesting...")
+                        } else {
+                            Icon(
+                                Icons.Default.Search,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Request Ride")
+                        }
+                    }
+                } else if (isCalculatingRoute) {
+                    // Show calculating state
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            text = "Calculating route...",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
         }
@@ -971,6 +1011,8 @@ private fun RouteInfoCard(
                 Text("Calculating route...")
             }
         } else if (routeResult != null) {
+            val distanceUnit by settingsManager.distanceUnit.collectAsState()
+
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -979,7 +1021,7 @@ private fun RouteInfoCard(
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
-                        text = routeResult.getFormattedDistance(),
+                        text = routeResult.getFormattedDistance(distanceUnit),
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold
                     )

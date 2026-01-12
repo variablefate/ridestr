@@ -446,7 +446,10 @@ class NostrService(context: Context) {
     ): String {
         // Get geohashes for driver's area
         val geohashes = Geohash.getSearchAreaGeohashes(location.lat, location.lon, expandSearch)
-        Log.d(TAG, "Subscribing to ride requests in ${geohashes.size} geohash cell(s): ${geohashes.joinToString()}")
+        Log.d(TAG, "=== DRIVER SUBSCRIBING TO RIDE REQUESTS ===")
+        Log.d(TAG, "Driver location: ${location.lat}, ${location.lon}")
+        Log.d(TAG, "Expanded search: $expandSearch")
+        Log.d(TAG, "Geohash filter: $geohashes")
 
         // Only get requests from last 5 minutes to avoid stale ones
         val fiveMinutesAgo = (System.currentTimeMillis() / 1000) - (5 * 60)
@@ -546,7 +549,12 @@ class NostrService(context: Context) {
         location?.let {
             val geohashes = Geohash.getSearchAreaGeohashes(it.lat, it.lon, expandSearch)
             tags["g"] = geohashes  // Note: RelayManager adds # prefix automatically
-            Log.d(TAG, "Subscribing to drivers in ${geohashes.size} geohash cell(s): ${geohashes.joinToString()}")
+            Log.d(TAG, "=== RIDER SUBSCRIBING TO DRIVERS ===")
+            Log.d(TAG, "Rider location: ${it.lat}, ${it.lon}")
+            Log.d(TAG, "Expanded search: $expandSearch")
+            Log.d(TAG, "Geohash filter: $geohashes")
+        } ?: run {
+            Log.d(TAG, "=== RIDER SUBSCRIBING TO DRIVERS (no location filter) ===")
         }
 
         // Only get events from last 15 minutes to avoid stale drivers

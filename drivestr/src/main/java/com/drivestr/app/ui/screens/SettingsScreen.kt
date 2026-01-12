@@ -1,8 +1,10 @@
 package com.drivestr.app.ui.screens
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -17,6 +19,7 @@ import com.ridestr.common.settings.SettingsManager
 fun SettingsScreen(
     settingsManager: SettingsManager,
     onBack: () -> Unit,
+    onOpenTiles: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val autoOpenNavigation by settingsManager.autoOpenNavigation.collectAsState()
@@ -82,6 +85,35 @@ fun SettingsScreen(
                 checked = autoOpenNavigation,
                 onCheckedChange = { settingsManager.setAutoOpenNavigation(it) }
             )
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+            // Routing Tiles
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onOpenTiles() }
+                    .padding(vertical = 12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Routing Tiles",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Text(
+                        text = "Manage offline routing data for your area",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = "Open",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
     }
 }

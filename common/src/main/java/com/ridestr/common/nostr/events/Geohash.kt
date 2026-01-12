@@ -272,17 +272,15 @@ object Geohash {
         lon: Double,
         expandSearch: Boolean = false
     ): List<String> {
-        val precision = 4  // ~24mi x 12mi per cell
+        // Precision levels:
+        // - Nearby (expandSearch=false): precision 4 + neighbors (~72mi x 36mi total)
+        // - Expanded (expandSearch=true): precision 3 + neighbors (~300mi x 150mi total)
+        val precision = if (expandSearch) 3 else 4
         val centerGeohash = encode(lat, lon, precision)
 
-        // Expand to neighbors if:
-        // 1. User explicitly requested expanded search, OR
-        // 2. User is within 30% of cell edge (automatic edge protection)
-        return if (expandSearch || isNearEdge(lat, lon, precision, 0.3)) {
-            neighbors(centerGeohash)  // 9 cells, ~72mi x 36mi coverage
-        } else {
-            listOf(centerGeohash)     // 1 cell, ~24mi x 12mi coverage
-        }
+        // Always include neighbors to avoid edge cases where someone
+        // is right across a cell boundary
+        return neighbors(centerGeohash)  // 9 cells at chosen precision
     }
 
     /**

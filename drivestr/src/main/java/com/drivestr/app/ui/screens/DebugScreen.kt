@@ -16,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -32,9 +33,12 @@ fun DebugScreen(
     recentEvents: List<Pair<Event, String>>,
     notices: List<Pair<String, String>>,
     useGeocodingSearch: Boolean,
-    useDemoLocation: Boolean,
+    useManualDriverLocation: Boolean,
+    manualDriverLat: Double,
+    manualDriverLon: Double,
     onToggleGeocodingSearch: () -> Unit,
-    onToggleDemoLocation: () -> Unit,
+    onToggleManualDriverLocation: () -> Unit,
+    onSetManualDriverLocation: (Double, Double) -> Unit,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
     onBack: () -> Unit,
@@ -88,9 +92,12 @@ fun DebugScreen(
             item {
                 DebugSettingsSection(
                     useGeocodingSearch = useGeocodingSearch,
-                    useDemoLocation = useDemoLocation,
+                    useManualDriverLocation = useManualDriverLocation,
+                    manualDriverLat = manualDriverLat,
+                    manualDriverLon = manualDriverLon,
                     onToggleGeocodingSearch = onToggleGeocodingSearch,
-                    onToggleDemoLocation = onToggleDemoLocation
+                    onToggleManualDriverLocation = onToggleManualDriverLocation,
+                    onSetManualDriverLocation = onSetManualDriverLocation
                 )
             }
 
@@ -395,10 +402,17 @@ private fun EventItem(
 @Composable
 private fun DebugSettingsSection(
     useGeocodingSearch: Boolean,
-    useDemoLocation: Boolean,
+    useManualDriverLocation: Boolean,
+    manualDriverLat: Double,
+    manualDriverLon: Double,
     onToggleGeocodingSearch: () -> Unit,
-    onToggleDemoLocation: () -> Unit
+    onToggleManualDriverLocation: () -> Unit,
+    onSetManualDriverLocation: (Double, Double) -> Unit
 ) {
+    // Local state for text fields
+    var latText by remember(manualDriverLat) { mutableStateOf(String.format("%.6f", manualDriverLat)) }
+    var lonText by remember(manualDriverLon) { mutableStateOf(String.format("%.6f", manualDriverLon)) }
+
     Card(
         modifier = Modifier.fillMaxWidth()
     ) {
@@ -437,9 +451,9 @@ private fun DebugSettingsSection(
                 )
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
 
-            // Demo location toggle
+            // Manual driver location toggle
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -447,19 +461,66 @@ private fun DebugSettingsSection(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Use Demo Location",
+                        text = "Manual Driver Location",
                         style = MaterialTheme.typography.bodyMedium
                     )
                     Text(
-                        text = if (useDemoLocation) "Using hardcoded test coordinates"
+                        text = if (useManualDriverLocation) "Using manual coordinates"
                                else "Using GPS location",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 Switch(
-                    checked = useDemoLocation,
-                    onCheckedChange = { onToggleDemoLocation() }
+                    checked = useManualDriverLocation,
+                    onCheckedChange = { onToggleManualDriverLocation() }
+                )
+            }
+
+            // Show coordinate inputs when manual location is enabled
+            if (useManualDriverLocation) {
+                Spacer(modifier = Modifier.height(12.dp))
+
+                OutlinedTextField(
+                    value = latText,
+                    onValueChange = { latText = it },
+                    label = { Text("Latitude") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace)
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedTextField(
+                    value = lonText,
+                    onValueChange = { lonText = it },
+                    label = { Text("Longitude") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace)
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Button(
+                    onClick = {
+                        val lat = latText.toDoubleOrNull()
+                        val lon = lonText.toDoubleOrNull()
+                        if (lat != null && lon != null) {
+                            onSetManualDriverLocation(lat, lon)
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Apply Location")
+                }
+
+                Text(
+                    text = "Tip: Las Vegas = 36.1699, -115.1398",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp)
                 )
             }
         }

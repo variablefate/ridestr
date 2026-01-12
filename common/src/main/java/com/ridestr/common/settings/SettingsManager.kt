@@ -33,9 +33,18 @@ class SettingsManager(context: Context) {
         private const val KEY_DISPLAY_CURRENCY = "display_currency"
         private const val KEY_DISTANCE_UNIT = "distance_unit"
 
+        // Onboarding
+        private const val KEY_ONBOARDING_COMPLETED = "onboarding_completed"
+
         // Debug settings
         private const val KEY_USE_GEOCODING_SEARCH = "use_geocoding_search"
-        private const val KEY_USE_DEMO_LOCATION = "use_demo_location"
+        private const val KEY_USE_MANUAL_DRIVER_LOCATION = "use_manual_driver_location"
+        private const val KEY_MANUAL_DRIVER_LAT = "manual_driver_lat"
+        private const val KEY_MANUAL_DRIVER_LON = "manual_driver_lon"
+
+        // Default manual location: Las Vegas (Fremont St)
+        private const val DEFAULT_MANUAL_LAT = 36.1699
+        private const val DEFAULT_MANUAL_LON = -115.1398
     }
 
     private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -149,24 +158,70 @@ class SettingsManager(context: Context) {
         setUseGeocodingSearch(!_useGeocodingSearch.value)
     }
 
-    // Use demo location instead of GPS (default: true for testing, false for production)
-    private val _useDemoLocation = MutableStateFlow(prefs.getBoolean(KEY_USE_DEMO_LOCATION, true))
-    val useDemoLocation: StateFlow<Boolean> = _useDemoLocation.asStateFlow()
+    // Manual driver location override (for testing when GPS isn't working)
+    private val _useManualDriverLocation = MutableStateFlow(prefs.getBoolean(KEY_USE_MANUAL_DRIVER_LOCATION, false))
+    val useManualDriverLocation: StateFlow<Boolean> = _useManualDriverLocation.asStateFlow()
+
+    private val _manualDriverLat = MutableStateFlow(
+        prefs.getFloat(KEY_MANUAL_DRIVER_LAT, DEFAULT_MANUAL_LAT.toFloat()).toDouble()
+    )
+    val manualDriverLat: StateFlow<Double> = _manualDriverLat.asStateFlow()
+
+    private val _manualDriverLon = MutableStateFlow(
+        prefs.getFloat(KEY_MANUAL_DRIVER_LON, DEFAULT_MANUAL_LON.toFloat()).toDouble()
+    )
+    val manualDriverLon: StateFlow<Double> = _manualDriverLon.asStateFlow()
 
     /**
-     * Set whether to use demo location instead of GPS.
-     * When true, uses hardcoded demo coordinates for testing.
-     * When false, attempts to use actual GPS location.
+     * Enable/disable manual driver location override.
      */
-    fun setUseDemoLocation(enabled: Boolean) {
-        prefs.edit().putBoolean(KEY_USE_DEMO_LOCATION, enabled).apply()
-        _useDemoLocation.value = enabled
+    fun setUseManualDriverLocation(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_USE_MANUAL_DRIVER_LOCATION, enabled).apply()
+        _useManualDriverLocation.value = enabled
     }
 
     /**
-     * Toggle demo location on/off.
+     * Toggle manual driver location on/off.
      */
-    fun toggleUseDemoLocation() {
-        setUseDemoLocation(!_useDemoLocation.value)
+    fun toggleUseManualDriverLocation() {
+        setUseManualDriverLocation(!_useManualDriverLocation.value)
+    }
+
+    /**
+     * Set manual driver location coordinates.
+     */
+    fun setManualDriverLocation(lat: Double, lon: Double) {
+        prefs.edit()
+            .putFloat(KEY_MANUAL_DRIVER_LAT, lat.toFloat())
+            .putFloat(KEY_MANUAL_DRIVER_LON, lon.toFloat())
+            .apply()
+        _manualDriverLat.value = lat
+        _manualDriverLon.value = lon
+    }
+
+    // ===================
+    // ONBOARDING
+    // ===================
+
+    /**
+     * Check if the user has completed the full onboarding flow
+     * (key setup, profile, location permission, tile setup).
+     */
+    fun isOnboardingCompleted(): Boolean {
+        return prefs.getBoolean(KEY_ONBOARDING_COMPLETED, false)
+    }
+
+    /**
+     * Mark onboarding as completed or not.
+     */
+    fun setOnboardingCompleted(completed: Boolean) {
+        prefs.edit().putBoolean(KEY_ONBOARDING_COMPLETED, completed).apply()
+    }
+
+    /**
+     * Reset onboarding (for logout).
+     */
+    fun resetOnboarding() {
+        prefs.edit().putBoolean(KEY_ONBOARDING_COMPLETED, false).apply()
     }
 }

@@ -17,9 +17,14 @@ import com.ridestr.common.nostr.events.RideAcceptanceData
 import com.ridestr.common.nostr.events.RideshareChatData
 import com.ridestr.common.nostr.events.UserProfile
 import com.ridestr.common.nostr.events.geohash
+import com.ridestr.common.notification.NotificationHelper
+import com.ridestr.common.notification.SoundManager
+import com.ridestr.rider.service.RiderActiveService
 import kotlin.random.Random
 import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.routing.RouteResult
+import com.ridestr.common.routing.TileManager
+import com.ridestr.common.routing.TileSource
 import com.ridestr.common.settings.DisplayCurrency
 import com.ridestr.common.settings.SettingsManager
 import com.ridestr.common.routing.ValhallaRoutingService
@@ -41,7 +46,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
         private const val TAG = "RiderViewModel"
         // Fare pricing in USD
-        private const val FARE_USD_PER_MILE = 2.0  // $2 per mile
+        private const val FARE_USD_PER_MILE = 1.85  // $1.85 per mile (competitive with Uber/Lyft)
         // Fare boost amounts
         private const val FARE_BOOST_USD = 1.0     // $1 boost in USD mode
         private const val FARE_BOOST_SATS = 1000.0 // 1000 sats boost in sats mode
@@ -68,16 +73,21 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         private const val BROADCAST_TIMEOUT_MS = 120_000L
 
         // Demo location coordinates for testing
-        private const val DEMO_PICKUP_LAT = 38.429719
-        private const val DEMO_PICKUP_LON = -108.827425
-        private const val DEMO_DEST_LAT = 38.4604331
-        private const val DEMO_DEST_LON = -108.8817009
+        // Demo coordinates - Las Vegas
+        private const val DEMO_PICKUP_LAT = 36.1699      // Fremont Street Experience
+        private const val DEMO_PICKUP_LON = -115.1398
+        private const val DEMO_DEST_LAT = 36.1147        // Welcome to Las Vegas sign
+        private const val DEMO_DEST_LON = -115.1728
     }
 
     private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val nostrService = NostrService(application)
     private val routingService = ValhallaRoutingService(application)
     private val geocodingService = GeocodingService(application)
+    private val tileManager = TileManager.getInstance(application)
+
+    // Track which tile region is currently loaded
+    private var currentTileRegion: String? = null
 
     // Settings manager for user preferences
     val settingsManager = SettingsManager(application)
@@ -129,16 +139,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.value = _uiState.value.copy(myPubKey = pubKey)
         }
 
-        // Initialize routing service
-        viewModelScope.launch {
-            val success = routingService.initialize()
-            _uiState.value = _uiState.value.copy(
-                isRoutingReady = success
-            )
-            if (!success) {
-                Log.w(TAG, "Routing service failed to initialize")
-            }
-        }
+        // Routing is initialized on-demand based on location
+        // Mark as ready - actual tile loading happens when route is calculated
+        _uiState.value = _uiState.value.copy(isRoutingReady = true)
 
         // Restore any active ride state from previous session
         restoreRideState()
@@ -545,8 +548,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * Use current location for pickup.
-     * If useDemoLocation setting is true, uses demo coordinates.
-     * Otherwise, uses the provided GPS coordinates (caller must handle permission).
+     * Uses the provided GPS coordinates (caller must handle permission).
      *
      * @param gpsLat GPS latitude (null if GPS unavailable)
      * @param gpsLon GPS longitude (null if GPS unavailable)
@@ -556,27 +558,19 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             _isFetchingLocation.value = true
             _usingCurrentLocationForPickup.value = true
 
-            // Check demo setting at call time (not captured earlier)
-            val useDemoLocation = settingsManager.useDemoLocation.value
-            Log.d(TAG, "useCurrentLocationForPickup: useDemoLocation=$useDemoLocation, gpsLat=$gpsLat, gpsLon=$gpsLon")
+            Log.d(TAG, "useCurrentLocationForPickup: gpsLat=$gpsLat, gpsLon=$gpsLon")
 
-            val (lat, lon, labelSuffix) = when {
-                // Demo mode enabled - always use demo coordinates
-                useDemoLocation -> {
-                    Log.d(TAG, "Demo mode ON - using demo coordinates")
-                    Triple(DEMO_PICKUP_LAT, DEMO_PICKUP_LON, "Demo Location")
-                }
-                // GPS coordinates provided - use them
-                gpsLat != null && gpsLon != null -> {
-                    Log.d(TAG, "Using GPS coordinates: $gpsLat, $gpsLon")
-                    Triple(gpsLat, gpsLon, null) // Will use reverse geocoded address
-                }
-                // Demo mode OFF but GPS unavailable - use demo as fallback with warning
-                else -> {
-                    Log.w(TAG, "Demo mode OFF but GPS unavailable - using demo as fallback")
-                    Triple(DEMO_PICKUP_LAT, DEMO_PICKUP_LON, "GPS unavailable")
-                }
+            // GPS coordinates required
+            if (gpsLat == null || gpsLon == null) {
+                Log.w(TAG, "GPS unavailable - cannot use current location")
+                _isFetchingLocation.value = false
+                _usingCurrentLocationForPickup.value = false
+                return@launch
             }
+
+            val lat = gpsLat
+            val lon = gpsLon
+            val labelSuffix: String? = null // Will use reverse geocoded address
 
             val location = Location(lat = lat, lon = lon)
 
@@ -800,6 +794,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 // Start 2-minute timeout
                 startBroadcastTimeout()
 
+                // Start foreground service to keep app alive while searching
+                RiderActiveService.startSearching(getApplication())
+
                 _uiState.value = _uiState.value.copy(
                     isSendingOffer = false,
                     pendingOfferEventId = eventId,
@@ -866,6 +863,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         // Close acceptance subscription
         acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
         acceptanceSubscriptionId = null
+
+        // Stop foreground service
+        RiderActiveService.stop(getApplication())
 
         // Delete the offer event (NIP-09)
         viewModelScope.launch {
@@ -1047,6 +1047,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
         statusSubscriptionId?.let { nostrService.closeSubscription(it) }
         statusSubscriptionId = null
+
+        // Stop foreground service
+        RiderActiveService.stop(getApplication())
 
         // If we have an active confirmed ride, notify the driver of cancellation
         val confirmationId = state.confirmationEventId
@@ -1300,6 +1303,12 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
                 acceptanceSubscriptionId = null
 
+                // Play confirmation sound
+                SoundManager.playConfirmationAlert(getApplication())
+
+                // Update foreground service to ride mode
+                RiderActiveService.startRide(getApplication(), null)
+
                 _uiState.value = _uiState.value.copy(
                     confirmationEventId = eventId,
                     pickupPin = pickupPin,
@@ -1433,6 +1442,32 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.value = _uiState.value.copy(chatMessages = currentMessages)
                 // Persist messages for app restart
                 saveRideState()
+
+                // Play sound and show notification for messages from driver (not our own)
+                val myPubKey = nostrService.getPubKeyHex() ?: ""
+                if (chatData.senderPubKey != myPubKey) {
+                    val context = getApplication<Application>()
+                    SoundManager.playChatMessageAlert(context)
+
+                    val notification = NotificationHelper.buildChatMessageNotification(
+                        context = context,
+                        contentIntent = android.app.PendingIntent.getActivity(
+                            context,
+                            0,
+                            android.content.Intent(context, com.ridestr.rider.MainActivity::class.java).apply {
+                                flags = android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
+                            },
+                            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+                        ),
+                        senderName = "Driver",
+                        messagePreview = chatData.message
+                    )
+                    NotificationHelper.showNotification(
+                        context,
+                        NotificationHelper.NOTIFICATION_ID_CHAT_MESSAGE,
+                        notification
+                    )
+                }
             }
         }
 
@@ -1571,6 +1606,10 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     Log.d(TAG, "Driver cancelled via status update")
                     handleDriverCancellation("Driver ended the ride")
                 }
+                statusData.isArrived() -> {
+                    Log.d(TAG, "Driver has arrived at pickup!")
+                    handleDriverArrived()
+                }
                 else -> {
                     Log.d(TAG, "Status update: ${statusData.status}")
                 }
@@ -1605,6 +1644,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         statusSubscriptionId?.let { nostrService.closeSubscription(it) }
         statusSubscriptionId = null
 
+        // Stop foreground service
+        RiderActiveService.stop(getApplication())
+
         // Clear persisted ride state
         clearSavedRideState()
 
@@ -1635,6 +1677,12 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         statusSubscriptionId?.let { nostrService.closeSubscription(it) }
         statusSubscriptionId = null
 
+        // Stop foreground service
+        RiderActiveService.stop(getApplication())
+
+        // Play cancellation alert
+        SoundManager.playCancellationAlert(getApplication())
+
         // Clear persisted ride state
         clearSavedRideState()
 
@@ -1652,6 +1700,42 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             statusMessage = "Driver cancelled the ride",
             error = reason ?: "Driver cancelled the ride"
         )
+    }
+
+    /**
+     * Handle driver arrived at pickup location.
+     */
+    private fun handleDriverArrived() {
+        val context = getApplication<Application>()
+
+        // Play driver arrived alert sound
+        SoundManager.playDriverArrivedAlert(context)
+
+        // Show notification
+        val contentIntent = android.app.PendingIntent.getActivity(
+            context,
+            0,
+            android.content.Intent(context, com.ridestr.rider.MainActivity::class.java).apply {
+                flags = android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP or android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
+            },
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification = NotificationHelper.buildDriverArrivedNotification(context, contentIntent)
+        NotificationHelper.showNotification(
+            context,
+            NotificationHelper.NOTIFICATION_ID_RIDE_UPDATE,
+            notification
+        )
+
+        // Update foreground service notification
+        RiderActiveService.updateMessage(context, "Driver has arrived!")
+
+        // Update UI state
+        _uiState.value = _uiState.value.copy(
+            statusMessage = "Driver has arrived at pickup!"
+        )
+
+        Log.d(TAG, "Driver arrived notification shown and sound played")
     }
 
     /**
@@ -1721,6 +1805,35 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isCalculatingRoute = true)
+
+            // Find tile coverage for pickup location
+            val tileSource = tileManager.getTileForLocation(pickup.lat, pickup.lon)
+
+            if (tileSource == null) {
+                Log.w(TAG, "No tile coverage for location: ${pickup.lat}, ${pickup.lon}")
+                _uiState.value = _uiState.value.copy(
+                    isCalculatingRoute = false,
+                    error = "No routing data for this area. Go to Settings > Routing Tiles to download."
+                )
+                return@launch
+            }
+
+            // Initialize tiles if region changed
+            val regionId = tileSource.region.id
+            if (currentTileRegion != regionId) {
+                Log.d(TAG, "Switching to tile region: $regionId")
+
+                val initialized = routingService.initializeWithTileSource(tileSource)
+                if (!initialized) {
+                    Log.e(TAG, "Failed to initialize tiles for region: $regionId")
+                    _uiState.value = _uiState.value.copy(
+                        isCalculatingRoute = false,
+                        error = "Failed to load routing data for ${tileSource.region.name}"
+                    )
+                    return@launch
+                }
+                currentTileRegion = regionId
+            }
 
             val result = routingService.calculateRoute(
                 originLat = pickup.lat,
@@ -1828,7 +1941,7 @@ data class RiderUiState(
     val availableDrivers: List<DriverAvailabilityData> = emptyList(),
     val selectedDriver: DriverAvailabilityData? = null,
     val driverProfiles: Map<String, UserProfile> = emptyMap(),
-    val expandedSearch: Boolean = false,
+    val expandedSearch: Boolean = true,  // Default to 20+ mile radius for better driver coverage
     val nearbyDriverCount: Int = 0,               // Count of nearby drivers (for display)
 
     // Route information

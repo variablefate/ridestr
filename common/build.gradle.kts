@@ -64,6 +64,9 @@ dependencies {
     api(libs.quartz)
     implementation(libs.security.crypto)
 
+    // Accompanist - Compose utilities
+    implementation(libs.accompanist.permissions)
+
     // Networking
     implementation(libs.okhttp)
 

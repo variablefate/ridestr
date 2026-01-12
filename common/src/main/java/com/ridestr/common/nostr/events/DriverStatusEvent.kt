@@ -113,4 +113,5 @@ data class DriverStatusData(
 ) {
     fun isCompleted(): Boolean = status == DriverStatusType.COMPLETED
     fun isCancelled(): Boolean = status == DriverStatusType.CANCELLED
+    fun isArrived(): Boolean = status == DriverStatusType.ARRIVED
 }

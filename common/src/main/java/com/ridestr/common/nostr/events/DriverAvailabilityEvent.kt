@@ -1,8 +1,11 @@
 package com.ridestr.common.nostr.events
 
+import android.util.Log
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
 import org.json.JSONObject
+
+private const val TAG = "DriverAvailability"
 
 /**
  * Kind 30173: Driver Availability Event (Parameterized Replaceable)
@@ -40,8 +43,13 @@ object DriverAvailabilityEvent {
         }.toString()
 
         // Generate geohash tags at different precision levels
-        // 5 chars (~5km) for local, 4 chars (~39km) for regional
-        val geohashTags = approxLocation.geohashTags(minPrecision = 4, maxPrecision = 5)
+        // 3 chars (~100mi) for wide area, 4 chars (~24mi) for regional, 5 chars (~5km) for local
+        val geohashTags = approxLocation.geohashTags(minPrecision = 3, maxPrecision = 5)
+
+        Log.d(TAG, "=== DRIVER AVAILABILITY EVENT ===")
+        Log.d(TAG, "Original: ${location.lat}, ${location.lon}")
+        Log.d(TAG, "Approx: ${approxLocation.lat}, ${approxLocation.lon}")
+        Log.d(TAG, "Geohash tags: $geohashTags")
 
         val tags = mutableListOf(
             arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG)

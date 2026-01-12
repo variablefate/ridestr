@@ -1,11 +1,17 @@
 package com.drivestr.app.viewmodels
 
 import android.app.Application
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.drivestr.app.MainActivity
+import com.drivestr.app.service.DriverOnlineService
 import com.ridestr.common.bitcoin.BitcoinPriceService
+import com.ridestr.common.notification.NotificationHelper
+import com.ridestr.common.notification.SoundManager
 import com.ridestr.common.nostr.NostrService
 import com.ridestr.common.nostr.events.BroadcastRideOfferData
 import com.ridestr.common.nostr.events.DriverStatusType
@@ -126,6 +132,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     private val requestAcceptanceSubscriptionIds = mutableMapOf<String, String>()
     // Track offer IDs that have been taken by another driver
     private val takenOfferEventIds = mutableSetOf<String>()
+    // Track offer IDs that the driver has declined/passed on
+    private val declinedOfferEventIds = mutableSetOf<String>()
+    // Cleanup timer for pruning stale requests
+    private var staleRequestCleanupJob: kotlinx.coroutines.Job? = null
 
     init {
         nostrService.connect()
@@ -394,6 +404,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
     fun toggleAvailability(location: Location) {
         val currentState = _uiState.value
+        val context = getApplication<Application>()
 
         if (currentState.stage == DriverStage.AVAILABLE) {
             // Go offline
@@ -410,6 +421,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             // Reset throttle tracking for next time driver goes online
             lastBroadcastLocation = null
             lastBroadcastTimeMs = 0L
+
+            // Stop the foreground service
+            DriverOnlineService.stop(context)
+
             _uiState.value = currentState.copy(
                 stage = DriverStage.OFFLINE,
                 currentLocation = null,
@@ -424,6 +439,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             )
             // Initialize cache location tracker
             lastCacheDriverLocation = location
+
+            // Start the foreground service to keep app alive
+            DriverOnlineService.start(context)
 
             // Now start subscriptions (location is already set for route calculations)
             startBroadcasting(location)
@@ -636,6 +654,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         requestAcceptanceSubscriptionIds.values.forEach { nostrService.closeSubscription(it) }
         requestAcceptanceSubscriptionIds.clear()
         takenOfferEventIds.clear()
+        // Stop cleanup timer
+        stopStaleRequestCleanup()
     }
 
     fun updateLocation(location: Location) {
@@ -1030,6 +1050,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 return@subscribeToConfirmation
             }
 
+            // Play confirmation sound
+            val context = getApplication<Application>()
+            SoundManager.playConfirmationAlert(context)
+
             // Store confirmation data
             _uiState.value = _uiState.value.copy(
                 confirmationEventId = confirmation.eventId,
@@ -1097,6 +1121,32 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 _uiState.value = _uiState.value.copy(chatMessages = currentMessages)
                 // Persist messages for app restart
                 saveRideState()
+
+                // Play sound and show notification for messages from rider (not our own)
+                val myPubKey = nostrService.getPubKeyHex() ?: ""
+                if (chatData.senderPubKey != myPubKey) {
+                    val context = getApplication<Application>()
+                    SoundManager.playChatMessageAlert(context)
+
+                    val notification = NotificationHelper.buildChatMessageNotification(
+                        context = context,
+                        contentIntent = android.app.PendingIntent.getActivity(
+                            context,
+                            0,
+                            android.content.Intent(context, com.drivestr.app.MainActivity::class.java).apply {
+                                flags = android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
+                            },
+                            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+                        ),
+                        senderName = "Rider",
+                        messagePreview = chatData.message
+                    )
+                    NotificationHelper.showNotification(
+                        context,
+                        NotificationHelper.NOTIFICATION_ID_CHAT_MESSAGE,
+                        notification
+                    )
+                }
             }
         }
 
@@ -1155,6 +1205,30 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      */
     private fun handleRideCancellation(reason: String?) {
         val state = _uiState.value
+        val context = getApplication<Application>()
+
+        // Play cancellation alert
+        SoundManager.playCancellationAlert(context)
+
+        // Show cancellation notification
+        val contentIntent = PendingIntent.getActivity(
+            context,
+            0,
+            Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification = NotificationHelper.buildRideCancelledNotification(
+            context = context,
+            contentIntent = contentIntent,
+            cancelledBy = "rider"
+        )
+        NotificationHelper.showNotification(
+            context,
+            NotificationHelper.NOTIFICATION_ID_RIDE_CANCELLED,
+            notification
+        )
 
         // Close active subscriptions
         confirmationSubscriptionId?.let { nostrService.closeSubscription(it) }
@@ -1249,6 +1323,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Only clear if ride is completed
         if (_uiState.value.stage == DriverStage.RIDE_COMPLETED) {
             val state = _uiState.value
+            val context = getApplication<Application>()
 
             // Stop chat refresh job
             stopChatRefreshJob()
@@ -1270,6 +1345,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     nostrService.deleteEvent(acceptanceId, "ride completed")
                 }
             }
+
+            // Stop the foreground service since driver is going offline
+            DriverOnlineService.stop(context)
 
             _uiState.value = state.copy(
                 stage = DriverStage.OFFLINE,
@@ -1567,15 +1645,36 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /**
+     * Toggle expanded search to find ride requests in a wider area.
+     */
+    fun toggleExpandedSearch() {
+        _uiState.value = _uiState.value.copy(
+            expandedSearch = !_uiState.value.expandedSearch
+        )
+        Log.d(TAG, "Expanded search: ${_uiState.value.expandedSearch}")
+
+        // Resubscribe with new search area
+        _uiState.value.currentLocation?.let { location ->
+            subscribeToBroadcastRequests(location)
+        }
+    }
+
+    /**
      * Subscribe to broadcast ride requests in the driver's area.
      * This is the new primary flow where riders broadcast and any driver can accept.
      */
     private fun subscribeToBroadcastRequests(location: Location) {
         broadcastRequestSubscriptionId?.let { nostrService.closeSubscription(it) }
 
+        val expandSearch = _uiState.value.expandedSearch
+        Log.d(TAG, "Subscribing to broadcast requests - expanded: $expandSearch")
+
+        // Start cleanup timer to prune stale requests every 30 seconds
+        startStaleRequestCleanup()
+
         broadcastRequestSubscriptionId = nostrService.subscribeToBroadcastRideRequests(
             location = location,
-            expandSearch = false
+            expandSearch = expandSearch
         ) { request ->
             Log.d(TAG, "Received broadcast ride request from ${request.riderPubKey.take(8)}, fare=${request.fareEstimate}")
 
@@ -1591,10 +1690,16 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 return@subscribeToBroadcastRideRequests
             }
 
-            // Filter out stale requests (>5 minutes old for broadcast)
+            // Filter out requests we've already declined/passed on
+            if (request.eventId in declinedOfferEventIds) {
+                Log.d(TAG, "Ignoring declined request: ${request.eventId.take(8)}")
+                return@subscribeToBroadcastRideRequests
+            }
+
+            // Filter out stale requests (>2 minutes old for broadcast)
             val currentTimeSeconds = System.currentTimeMillis() / 1000
             val requestAgeSeconds = currentTimeSeconds - request.createdAt
-            val maxRequestAgeSeconds = 5 * 60 // 5 minutes for broadcast requests
+            val maxRequestAgeSeconds = 2 * 60 // 2 minutes for broadcast requests
 
             if (requestAgeSeconds > maxRequestAgeSeconds) {
                 Log.d(TAG, "Ignoring stale broadcast request (${requestAgeSeconds}s old)")
@@ -1603,7 +1708,47 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
             // Check if we already have this exact request
             val currentRequests = _uiState.value.pendingBroadcastRequests
-            if (currentRequests.none { it.eventId == request.eventId }) {
+            val isNewRequest = currentRequests.none { it.eventId == request.eventId }
+
+            // Check if this is a fare boost (same rider, new event with higher fare)
+            val isFareBoost = currentRequests.any { it.riderPubKey == request.riderPubKey }
+
+            if (isNewRequest) {
+                val context = getApplication<Application>()
+
+                // Play sound and vibrate for NEW requests (not fare boosts which are updates)
+                if (!isFareBoost) {
+                    Log.d(TAG, "NEW ride request - playing alert")
+                    SoundManager.playRideRequestAlert(context)
+
+                    // Show notification
+                    val fareDisplay = "${request.fareEstimate.toInt()} sats"
+                    val distanceDisplay = "${String.format("%.1f", request.routeDistanceKm)} km"
+                    val contentIntent = PendingIntent.getActivity(
+                        context,
+                        0,
+                        Intent(context, MainActivity::class.java).apply {
+                            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                        },
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                    )
+                    val notification = NotificationHelper.buildRideRequestNotification(
+                        context = context,
+                        contentIntent = contentIntent,
+                        fareAmount = fareDisplay,
+                        distance = distanceDisplay
+                    )
+                    NotificationHelper.showNotification(
+                        context,
+                        NotificationHelper.NOTIFICATION_ID_RIDE_REQUEST,
+                        notification
+                    )
+
+                    // Update foreground service notification with request count
+                    DriverOnlineService.updateRequestCount(context, currentRequests.size + 1)
+                } else {
+                    Log.d(TAG, "Fare boost from same rider - updating silently")
+                }
                 // Filter out stale requests and any previous requests from the same rider
                 // (handles fare boosts - new request replaces old one from same rider)
                 val freshRequests = currentRequests.filter {
@@ -1737,6 +1882,55 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /**
+     * Start periodic cleanup of stale ride requests.
+     * Runs every 30 seconds to remove requests older than 2 minutes.
+     */
+    private fun startStaleRequestCleanup() {
+        staleRequestCleanupJob?.cancel()
+        staleRequestCleanupJob = viewModelScope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(30_000) // 30 seconds
+                pruneStaleRequests()
+            }
+        }
+    }
+
+    /**
+     * Stop the stale request cleanup timer.
+     */
+    private fun stopStaleRequestCleanup() {
+        staleRequestCleanupJob?.cancel()
+        staleRequestCleanupJob = null
+    }
+
+    /**
+     * Remove stale requests from the pending list.
+     */
+    private fun pruneStaleRequests() {
+        val currentTimeSeconds = System.currentTimeMillis() / 1000
+        val maxRequestAgeSeconds = 2 * 60 // 2 minutes
+
+        val currentRequests = _uiState.value.pendingBroadcastRequests
+        val freshRequests = currentRequests.filter { request ->
+            val ageSeconds = currentTimeSeconds - request.createdAt
+            val isFresh = ageSeconds <= maxRequestAgeSeconds
+            if (!isFresh) {
+                Log.d(TAG, "Pruning stale request ${request.eventId.take(8)} (${ageSeconds}s old)")
+            }
+            isFresh
+        }
+
+        if (freshRequests.size != currentRequests.size) {
+            Log.d(TAG, "Pruned ${currentRequests.size - freshRequests.size} stale requests")
+            _uiState.value = _uiState.value.copy(
+                pendingBroadcastRequests = freshRequests
+            )
+            // Update foreground service notification
+            DriverOnlineService.updateRequestCount(getApplication(), freshRequests.size)
+        }
+    }
+
+    /**
      * Decline a broadcast ride request (remove from list without accepting).
      */
     fun declineBroadcastRequest(request: BroadcastRideOfferData) {
@@ -1744,13 +1938,15 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.value = _uiState.value.copy(
             pendingBroadcastRequests = currentRequests.filter { it.eventId != request.eventId }
         )
-        // Also add to accepted set to prevent it from showing again on refresh
-        acceptedOfferEventIds.add(request.eventId)
+        // Add to declined set to prevent it from showing again on refresh
+        declinedOfferEventIds.add(request.eventId)
+        Log.d(TAG, "Declined request ${request.eventId.take(8)}, total declined: ${declinedOfferEventIds.size}")
     }
 
     override fun onCleared() {
         super.onCleared()
         stopBroadcasting()
+        stopStaleRequestCleanup()
         offerSubscriptionId?.let { nostrService.closeSubscription(it) }
         broadcastRequestSubscriptionId?.let { nostrService.closeSubscription(it) }
         requestAcceptanceSubscriptionIds.values.forEach { nostrService.closeSubscription(it) }
@@ -1772,6 +1968,8 @@ data class DriverUiState(
     val stage: DriverStage = DriverStage.OFFLINE,
     val currentLocation: Location? = null,
     val lastBroadcastTime: Long? = null,
+    // Search settings - default to expanded (20+ mile radius) for better coverage
+    val expandedSearch: Boolean = true,
 
     // Ride offers - Direct offers (legacy/advanced - only shown when AVAILABLE)
     val pendingOffers: List<RideOfferData> = emptyList(),
