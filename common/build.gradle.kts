@@ -52,6 +52,7 @@ dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.activity.compose)
 
     // Valhalla Mobile - Offline routing engine
     implementation(libs.valhalla.mobile)
@@ -69,6 +70,9 @@ dependencies {
 
     // Networking
     implementation(libs.okhttp)
+
+    // Image Loading
+    api(libs.coil.compose)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

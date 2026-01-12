@@ -2,6 +2,7 @@ package com.ridestr.common.nostr
 
 import android.content.Context
 import android.util.Log
+import com.ridestr.common.data.Vehicle
 import com.ridestr.common.nostr.events.*
 import com.ridestr.common.nostr.keys.KeyManager
 import com.ridestr.common.nostr.relay.RelayConfig
@@ -19,15 +20,21 @@ import kotlinx.coroutines.launch
  * - Relay connections (via RelayManager)
  * - Publishing rideshare events
  * - Subscribing to rideshare events
+ *
+ * @param context Android context for key management
+ * @param relays Custom relay list (defaults to RelayConfig.DEFAULT_RELAYS)
  */
-class NostrService(context: Context) {
+class NostrService(
+    context: Context,
+    relays: List<String> = RelayConfig.DEFAULT_RELAYS
+) {
 
     companion object {
         private const val TAG = "NostrService"
     }
 
     val keyManager = KeyManager(context)
-    val relayManager = RelayManager(RelayConfig.DEFAULT_RELAYS)
+    val relayManager = RelayManager(relays)
 
     /**
      * Connection states for all relays.
@@ -84,6 +91,12 @@ class NostrService(context: Context) {
      */
     fun isConnected(): Boolean = relayManager.isConnected()
 
+    /**
+     * Get the NostrSigner for signing Blossom upload/delete events.
+     * @return The signer, or null if not logged in
+     */
+    fun getSigner() = keyManager.getSigner()
+
     // ==================== Driver Operations ====================
 
     /**
@@ -91,7 +104,7 @@ class NostrService(context: Context) {
      * @param location Current driver location
      * @return The event ID if successful, null on failure
      */
-    suspend fun broadcastAvailability(location: Location): String? {
+    suspend fun broadcastAvailability(location: Location, vehicle: Vehicle? = null): String? {
         val signer = keyManager.getSigner()
         if (signer == null) {
             Log.e(TAG, "Cannot broadcast availability: Not logged in")
@@ -99,9 +112,9 @@ class NostrService(context: Context) {
         }
 
         return try {
-            val event = DriverAvailabilityEvent.create(signer, location)
+            val event = DriverAvailabilityEvent.create(signer, location, vehicle = vehicle)
             relayManager.publish(event)
-            Log.d(TAG, "Broadcast availability: ${event.id}")
+            Log.d(TAG, "Broadcast availability: ${event.id}, vehicle: ${vehicle?.shortName() ?: "none"}")
             event.id
         } catch (e: Exception) {
             Log.e(TAG, "Failed to broadcast availability", e)

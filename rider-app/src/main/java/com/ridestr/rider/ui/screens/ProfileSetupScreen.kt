@@ -3,16 +3,16 @@ package com.ridestr.rider.ui.screens
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.ridestr.common.ui.ProfilePictureEditor
 import com.ridestr.rider.viewmodels.ProfileUiState
 import com.ridestr.rider.viewmodels.ProfileViewModel
+import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -37,6 +37,7 @@ fun ProfileSetupScreen(
     ) { padding ->
         ProfileSetupContent(
             uiState = uiState,
+            signer = viewModel.getSigner(),
             onNameChange = viewModel::updateName,
             onDisplayNameChange = viewModel::updateDisplayName,
             onAboutChange = viewModel::updateAbout,
@@ -51,6 +52,7 @@ fun ProfileSetupScreen(
 @Composable
 private fun ProfileSetupContent(
     uiState: ProfileUiState,
+    signer: NostrSigner?,
     onNameChange: (String) -> Unit,
     onDisplayNameChange: (String) -> Unit,
     onAboutChange: (String) -> Unit,
@@ -66,11 +68,11 @@ private fun ProfileSetupContent(
             .verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Icon(
-            imageVector = Icons.Default.Person,
-            contentDescription = "Profile",
-            modifier = Modifier.size(80.dp),
-            tint = MaterialTheme.colorScheme.primary
+        // Profile picture editor with Blossom upload
+        ProfilePictureEditor(
+            pictureUrl = uiState.picture,
+            onPictureUrlChange = onPictureChange,
+            signer = signer
         )
 
         Spacer(modifier = Modifier.height(8.dp))
@@ -141,17 +143,6 @@ private fun ProfileSetupContent(
             modifier = Modifier.fillMaxWidth(),
             minLines = 2,
             maxLines = 4
-        )
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        OutlinedTextField(
-            value = uiState.picture,
-            onValueChange = onPictureChange,
-            label = { Text("Profile Picture URL") },
-            placeholder = { Text("https://example.com/photo.jpg") },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true
         )
 
         Spacer(modifier = Modifier.height(12.dp))

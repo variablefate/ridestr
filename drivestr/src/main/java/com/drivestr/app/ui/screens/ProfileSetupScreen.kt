@@ -3,8 +3,6 @@ package com.drivestr.app.ui.screens
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -13,6 +11,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.drivestr.app.viewmodels.ProfileUiState
 import com.drivestr.app.viewmodels.ProfileViewModel
+import com.ridestr.common.ui.ProfilePictureEditor
+import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -37,15 +37,12 @@ fun ProfileSetupScreen(
     ) { padding ->
         ProfileSetupContent(
             uiState = uiState,
+            signer = viewModel.getSigner(),
             onNameChange = viewModel::updateName,
             onDisplayNameChange = viewModel::updateDisplayName,
             onAboutChange = viewModel::updateAbout,
             onPictureChange = viewModel::updatePicture,
             onLightningAddressChange = viewModel::updateLightningAddress,
-            onCarMakeChange = viewModel::updateCarMake,
-            onCarModelChange = viewModel::updateCarModel,
-            onCarColorChange = viewModel::updateCarColor,
-            onCarYearChange = viewModel::updateCarYear,
             onSave = { viewModel.saveProfile(onComplete) },
             modifier = modifier.padding(padding)
         )
@@ -55,15 +52,12 @@ fun ProfileSetupScreen(
 @Composable
 private fun ProfileSetupContent(
     uiState: ProfileUiState,
+    signer: NostrSigner?,
     onNameChange: (String) -> Unit,
     onDisplayNameChange: (String) -> Unit,
     onAboutChange: (String) -> Unit,
     onPictureChange: (String) -> Unit,
     onLightningAddressChange: (String) -> Unit,
-    onCarMakeChange: (String) -> Unit,
-    onCarModelChange: (String) -> Unit,
-    onCarColorChange: (String) -> Unit,
-    onCarYearChange: (String) -> Unit,
     onSave: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -74,11 +68,11 @@ private fun ProfileSetupContent(
             .verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Icon(
-            imageVector = Icons.Default.Person,
-            contentDescription = "Profile",
-            modifier = Modifier.size(80.dp),
-            tint = MaterialTheme.colorScheme.primary
+        // Profile picture editor with Blossom upload
+        ProfilePictureEditor(
+            pictureUrl = uiState.picture,
+            onPictureUrlChange = onPictureChange,
+            signer = signer
         )
 
         Spacer(modifier = Modifier.height(8.dp))
@@ -154,17 +148,6 @@ private fun ProfileSetupContent(
         Spacer(modifier = Modifier.height(12.dp))
 
         OutlinedTextField(
-            value = uiState.picture,
-            onValueChange = onPictureChange,
-            label = { Text("Profile Picture URL") },
-            placeholder = { Text("https://example.com/photo.jpg") },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true
-        )
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        OutlinedTextField(
             value = uiState.lightningAddress,
             onValueChange = onLightningAddressChange,
             label = { Text("Lightning Address") },
@@ -177,74 +160,6 @@ private fun ProfileSetupContent(
 
         Text(
             text = "Your lightning address is where riders will send payments and tips",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center
-        )
-
-        Spacer(modifier = Modifier.height(24.dp))
-
-        HorizontalDivider()
-
-        Spacer(modifier = Modifier.height(24.dp))
-
-        Text(
-            text = "Vehicle Information",
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.onSurface
-        )
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        OutlinedTextField(
-            value = uiState.carMake,
-            onValueChange = onCarMakeChange,
-            label = { Text("Car Make") },
-            placeholder = { Text("Toyota") },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true
-        )
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        OutlinedTextField(
-            value = uiState.carModel,
-            onValueChange = onCarModelChange,
-            label = { Text("Car Model") },
-            placeholder = { Text("Camry") },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true
-        )
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            OutlinedTextField(
-                value = uiState.carColor,
-                onValueChange = onCarColorChange,
-                label = { Text("Color") },
-                placeholder = { Text("Blue") },
-                modifier = Modifier.weight(1f),
-                singleLine = true
-            )
-
-            OutlinedTextField(
-                value = uiState.carYear,
-                onValueChange = onCarYearChange,
-                label = { Text("Year") },
-                placeholder = { Text("2024") },
-                modifier = Modifier.weight(1f),
-                singleLine = true
-            )
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        Text(
-            text = "Help riders identify your vehicle",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center

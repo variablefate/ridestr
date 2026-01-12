@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ridestr.common.nostr.NostrService
 import com.ridestr.common.nostr.events.UserProfile
+import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -39,10 +40,6 @@ class ProfileViewModel(application: Application) : AndroidViewModel(application)
                 about = profile.about ?: _uiState.value.about,
                 picture = profile.picture ?: _uiState.value.picture,
                 lightningAddress = profile.lud16 ?: _uiState.value.lightningAddress,
-                carMake = profile.carMake ?: _uiState.value.carMake,
-                carModel = profile.carModel ?: _uiState.value.carModel,
-                carColor = profile.carColor ?: _uiState.value.carColor,
-                carYear = profile.carYear ?: _uiState.value.carYear,
                 existingProfile = profile
             )
         }
@@ -64,24 +61,13 @@ class ProfileViewModel(application: Application) : AndroidViewModel(application)
         _uiState.value = _uiState.value.copy(picture = picture)
     }
 
+    /**
+     * Get the NostrSigner for Blossom upload/delete operations.
+     */
+    fun getSigner(): NostrSigner? = nostrService.getSigner()
+
     fun updateLightningAddress(lud16: String) {
         _uiState.value = _uiState.value.copy(lightningAddress = lud16)
-    }
-
-    fun updateCarMake(carMake: String) {
-        _uiState.value = _uiState.value.copy(carMake = carMake)
-    }
-
-    fun updateCarModel(carModel: String) {
-        _uiState.value = _uiState.value.copy(carModel = carModel)
-    }
-
-    fun updateCarColor(carColor: String) {
-        _uiState.value = _uiState.value.copy(carColor = carColor)
-    }
-
-    fun updateCarYear(carYear: String) {
-        _uiState.value = _uiState.value.copy(carYear = carYear)
     }
 
     fun saveProfile(onComplete: () -> Unit) {
@@ -100,10 +86,11 @@ class ProfileViewModel(application: Application) : AndroidViewModel(application)
                 website = state.existingProfile?.website,
                 nip05 = state.existingProfile?.nip05,
                 lud06 = state.existingProfile?.lud06,
-                carMake = state.carMake.takeIf { it.isNotBlank() },
-                carModel = state.carModel.takeIf { it.isNotBlank() },
-                carColor = state.carColor.takeIf { it.isNotBlank() },
-                carYear = state.carYear.takeIf { it.isNotBlank() }
+                // Note: Vehicle info is stored in VehicleRepository, not in Nostr profile
+                carMake = state.existingProfile?.carMake,
+                carModel = state.existingProfile?.carModel,
+                carColor = state.existingProfile?.carColor,
+                carYear = state.existingProfile?.carYear
             )
 
             val eventId = nostrService.publishProfile(profile)
@@ -146,10 +133,6 @@ data class ProfileUiState(
     val about: String = "",
     val picture: String = "",
     val lightningAddress: String = "",
-    val carMake: String = "",
-    val carModel: String = "",
-    val carColor: String = "",
-    val carYear: String = "",
     val isSaving: Boolean = false,
     val saveSuccess: Boolean = false,
     val error: String? = null,

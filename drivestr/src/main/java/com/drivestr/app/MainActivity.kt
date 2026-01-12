@@ -9,10 +9,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.BugReport
-import androidx.compose.material.icons.filled.Key
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -29,11 +26,18 @@ import com.drivestr.app.ui.screens.DriverModeScreen
 import com.drivestr.app.ui.screens.KeyBackupScreen
 import com.drivestr.app.ui.screens.OnboardingScreen
 import com.drivestr.app.ui.screens.ProfileSetupScreen
-import com.drivestr.app.ui.screens.SettingsScreen
+import com.drivestr.app.ui.screens.SettingsContent
+import com.drivestr.app.ui.screens.VehiclesScreen
+import com.drivestr.app.ui.screens.VehicleSetupScreen
+import com.drivestr.app.ui.screens.WalletScreen
+import com.ridestr.common.data.VehicleRepository
 import com.ridestr.common.routing.NostrTileDiscoveryService
 import com.ridestr.common.routing.TileDownloadService
 import com.ridestr.common.routing.TileManager
 import com.ridestr.common.settings.SettingsManager
+import com.ridestr.common.ui.AccountBottomSheet
+import com.ridestr.common.ui.DeveloperOptionsScreen
+import com.ridestr.common.ui.RelaySignalIndicator
 import com.ridestr.common.ui.LocationPermissionScreen
 import com.ridestr.common.ui.TileManagementScreen
 import com.ridestr.common.ui.TileSetupScreen
@@ -41,23 +45,35 @@ import com.drivestr.app.viewmodels.DriverViewModel
 import com.drivestr.app.viewmodels.OnboardingViewModel
 import com.drivestr.app.viewmodels.ProfileViewModel
 import com.ridestr.common.nostr.NostrService
+import com.ridestr.common.nostr.events.UserProfile
 import com.ridestr.common.nostr.relay.RelayConnectionState
 import com.ridestr.common.notification.NotificationHelper
 import com.ridestr.common.ui.theme.RidestrTheme
 
 /**
- * App navigation screens.
+ * Bottom navigation tabs for the main screen.
+ */
+enum class Tab {
+    DRIVE,      // Main driver mode
+    WALLET,     // Earnings & payments
+    VEHICLES,   // Vehicle management
+    SETTINGS    // Settings & developer options
+}
+
+/**
+ * App navigation screens (for modals and onboarding).
  */
 enum class Screen {
     ONBOARDING,
     PROFILE_SETUP,
+    VEHICLE_SETUP,      // Vehicle onboarding for drivers without vehicles
     LOCATION_PERMISSION,
     TILE_SETUP,
-    MAIN,
+    MAIN,           // Shows bottom navigation with tabs
     DEBUG,
     BACKUP_KEYS,
-    SETTINGS,
-    TILES
+    TILES,
+    DEV_OPTIONS
 }
 
 class MainActivity : ComponentActivity() {
@@ -83,11 +99,14 @@ fun DrivestrApp() {
         NotificationHelper.createDriverChannels(context)
     }
 
-    // NostrService for relay connections (shared instance)
-    val nostrService = remember { NostrService(context) }
-
-    // Settings manager
+    // Settings manager (created first to get custom relays)
     val settingsManager = remember { SettingsManager(context) }
+
+    // NostrService for relay connections (uses custom relays from settings)
+    val nostrService = remember { NostrService(context, settingsManager.getEffectiveRelays()) }
+
+    // Vehicle repository for multi-vehicle support
+    val vehicleRepository = remember { VehicleRepository.getInstance(context) }
 
     // Tile management (singleton to share with ViewModels)
     val tileManager = remember { TileManager.getInstance(context) }
@@ -104,9 +123,6 @@ fun DrivestrApp() {
         }
     }
 
-    // Navigation state
-    var currentScreen by remember { mutableStateOf(Screen.ONBOARDING) }
-
     // Current location for tile recommendations
     var currentLocation by remember { mutableStateOf<Location?>(null) }
 
@@ -114,6 +130,9 @@ fun DrivestrApp() {
     val connectionStates by nostrService.connectionStates.collectAsState()
     val recentEvents by nostrService.relayManager.events.collectAsState()
     val notices by nostrService.relayManager.notices.collectAsState()
+
+    // User profile (for lightning address in wallet)
+    var userProfile by remember { mutableStateOf<UserProfile?>(null) }
 
     // Check if location permission already granted
     val hasLocationPermission = remember {
@@ -129,7 +148,33 @@ fun DrivestrApp() {
     // Check if tiles are already downloaded (skip tile setup if so)
     val hasTilesDownloaded by tileManager.downloadedRegions.collectAsState()
 
-    // Check if already logged in on first composition
+    // Navigation state - start at MAIN if onboarding is complete to avoid flash
+    var currentScreen by remember {
+        val initialScreen = if (onboardingCompleted && uiState.isLoggedIn) {
+            Screen.MAIN
+        } else {
+            Screen.ONBOARDING
+        }
+        mutableStateOf(initialScreen)
+    }
+
+    // Connect to Nostr if starting at MAIN screen
+    LaunchedEffect(Unit) {
+        if (currentScreen == Screen.MAIN) {
+            nostrService.connect()
+        }
+    }
+
+    // Subscribe to own profile for lightning address
+    LaunchedEffect(uiState.isLoggedIn) {
+        if (uiState.isLoggedIn) {
+            nostrService.subscribeToOwnProfile { profile ->
+                userProfile = profile
+            }
+        }
+    }
+
+    // Check if already logged in on first composition (only if not already at MAIN)
     LaunchedEffect(uiState.isLoggedIn, uiState.isProfileCompleted) {
         if (uiState.isLoggedIn && currentScreen == Screen.ONBOARDING) {
             nostrService.connect()
@@ -173,12 +218,33 @@ fun DrivestrApp() {
 
             Screen.PROFILE_SETUP -> {
                 val profileViewModel: ProfileViewModel = viewModel()
+                val hasVehicles = vehicleRepository.vehicles.collectAsState().value.isNotEmpty()
+
                 ProfileSetupScreen(
                     viewModel = profileViewModel,
                     onComplete = {
                         // Start tile discovery early (before location permission)
                         tileDiscoveryService.startDiscovery()
-                        // After profile, go to location permission
+                        // After profile, check if driver has vehicles
+                        currentScreen = if (hasVehicles) {
+                            Screen.LOCATION_PERMISSION
+                        } else {
+                            Screen.VEHICLE_SETUP
+                        }
+                    },
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
+
+            Screen.VEHICLE_SETUP -> {
+                VehicleSetupScreen(
+                    vehicleRepository = vehicleRepository,
+                    onComplete = {
+                        // After adding vehicle, continue to location permission
+                        currentScreen = Screen.LOCATION_PERMISSION
+                    },
+                    onSkip = {
+                        // Allow skipping vehicle setup (can add later)
                         currentScreen = Screen.LOCATION_PERMISSION
                     },
                     modifier = Modifier.padding(innerPadding)
@@ -247,10 +313,19 @@ fun DrivestrApp() {
             }
 
             Screen.MAIN -> {
+                // Ensure tile discovery is started for returning users who skip onboarding
+                LaunchedEffect(Unit) {
+                    if (!tileDiscoveryService.isDiscovering.value) {
+                        tileDiscoveryService.startDiscovery()
+                    }
+                }
+
                 MainScreen(
                     keyManager = onboardingViewModel.getKeyManager(),
                     connectionStates = connectionStates,
                     settingsManager = settingsManager,
+                    vehicleRepository = vehicleRepository,
+                    userProfile = userProfile,
                     onLogout = {
                         nostrService.disconnect()
                         onboardingViewModel.logout()
@@ -260,14 +335,17 @@ fun DrivestrApp() {
                     onOpenProfile = {
                         currentScreen = Screen.PROFILE_SETUP
                     },
-                    onOpenDebug = {
-                        currentScreen = Screen.DEBUG
-                    },
                     onOpenBackup = {
                         currentScreen = Screen.BACKUP_KEYS
                     },
-                    onOpenSettings = {
-                        currentScreen = Screen.SETTINGS
+                    onOpenTiles = {
+                        currentScreen = Screen.TILES
+                    },
+                    onOpenDevOptions = {
+                        currentScreen = Screen.DEV_OPTIONS
+                    },
+                    onOpenDebug = {
+                        currentScreen = Screen.DEBUG
                     },
                     modifier = Modifier.padding(innerPadding)
                 )
@@ -308,21 +386,22 @@ fun DrivestrApp() {
                 )
             }
 
-            Screen.SETTINGS -> {
-                SettingsScreen(
-                    settingsManager = settingsManager,
-                    onBack = { currentScreen = Screen.MAIN },
-                    onOpenTiles = { currentScreen = Screen.TILES },
-                    modifier = Modifier.padding(innerPadding)
-                )
-            }
-
             Screen.TILES -> {
                 TileManagementScreen(
                     tileManager = tileManager,
                     downloadService = tileDownloadService,
                     discoveryService = tileDiscoveryService,
-                    onBack = { currentScreen = Screen.SETTINGS },
+                    onBack = { currentScreen = Screen.MAIN },
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
+
+            Screen.DEV_OPTIONS -> {
+                DeveloperOptionsScreen(
+                    settingsManager = settingsManager,
+                    isDriverApp = true,
+                    onOpenDebug = { currentScreen = Screen.DEBUG },
+                    onBack = { currentScreen = Screen.MAIN },
                     modifier = Modifier.padding(innerPadding)
                 )
             }
@@ -330,90 +409,171 @@ fun DrivestrApp() {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
     keyManager: com.ridestr.common.nostr.keys.KeyManager,
     connectionStates: Map<String, RelayConnectionState>,
     settingsManager: SettingsManager,
+    vehicleRepository: VehicleRepository,
+    userProfile: UserProfile?,
     onLogout: () -> Unit,
     onOpenProfile: () -> Unit,
-    onOpenDebug: () -> Unit,
     onOpenBackup: () -> Unit,
-    onOpenSettings: () -> Unit,
+    onOpenTiles: () -> Unit,
+    onOpenDevOptions: () -> Unit,
+    onOpenDebug: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val connectedCount = connectionStates.values.count { it == RelayConnectionState.CONNECTED }
     val totalRelays = connectionStates.size
+    val isConnected = connectedCount > 0
 
-    Column(
-        modifier = modifier.fillMaxSize()
-    ) {
-        // Header card with identity and utilities
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp)
-        ) {
-            Column(
-                modifier = Modifier.padding(12.dp)
+    // Current tab state
+    var currentTab by remember { mutableStateOf(Tab.DRIVE) }
+
+    // Account bottom sheet state
+    var showAccountSheet by remember { mutableStateOf(false) }
+
+    // Vehicle repository state
+    val vehicles by vehicleRepository.vehicles.collectAsState()
+
+    // Driver ViewModel (persists across tab switches)
+    val driverViewModel: DriverViewModel = viewModel()
+    val driverUiState by driverViewModel.uiState.collectAsState()
+    val autoOpenNavigation by settingsManager.autoOpenNavigation.collectAsState()
+
+    // Ensure relay connections when app returns to foreground
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        driverViewModel.onResume()
+    }
+
+    Scaffold(
+        modifier = modifier,
+        topBar = {
+            // Compact header with dynamic title, signal bars, and account button
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                tonalElevation = 1.dp
             ) {
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = keyManager.getNpub()?.let { "${it.take(16)}..." } ?: "Unknown",
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-                        )
-                        Text(
-                            text = "Relays: $connectedCount/$totalRelays",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (connectedCount > 0) MaterialTheme.colorScheme.primary
-                                   else MaterialTheme.colorScheme.error
-                        )
-                    }
-                    Row {
-                        IconButton(onClick = onOpenBackup) {
-                            Icon(Icons.Default.Key, contentDescription = "Backup Keys")
-                        }
-                        IconButton(onClick = onOpenProfile) {
-                            Icon(Icons.Default.Person, contentDescription = "Edit Profile")
-                        }
-                        IconButton(onClick = onOpenSettings) {
-                            Icon(Icons.Default.Settings, contentDescription = "Settings")
-                        }
-                        IconButton(onClick = onOpenDebug) {
-                            Icon(Icons.Default.BugReport, contentDescription = "Debug")
-                        }
-                    }
-                }
+                    // Dynamic title based on current tab
+                    Text(
+                        text = when (currentTab) {
+                            Tab.DRIVE -> "Driver Mode"
+                            Tab.WALLET -> "Wallet"
+                            Tab.VEHICLES -> "Vehicles"
+                            Tab.SETTINGS -> "Settings"
+                        },
+                        style = MaterialTheme.typography.titleLarge
+                    )
 
-                TextButton(
-                    onClick = onLogout,
-                    modifier = Modifier.align(Alignment.End)
-                ) {
-                    Text("Logout", style = MaterialTheme.typography.labelSmall)
+                    // Right side: Signal indicator + Account button
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RelaySignalIndicator(
+                            connectedCount = connectedCount,
+                            totalRelays = totalRelays
+                        )
+                        IconButton(onClick = { showAccountSheet = true }) {
+                            Icon(Icons.Default.Person, contentDescription = "Account")
+                        }
+                    }
                 }
             }
+        },
+        bottomBar = {
+            NavigationBar {
+                NavigationBarItem(
+                    icon = { Icon(Icons.Default.DirectionsCar, contentDescription = null) },
+                    label = { Text("Drive") },
+                    selected = currentTab == Tab.DRIVE,
+                    onClick = { currentTab = Tab.DRIVE }
+                )
+                NavigationBarItem(
+                    icon = { Icon(Icons.Default.AccountBalanceWallet, contentDescription = null) },
+                    label = { Text("Wallet") },
+                    selected = currentTab == Tab.WALLET,
+                    onClick = { currentTab = Tab.WALLET }
+                )
+                NavigationBarItem(
+                    icon = { Icon(Icons.Default.DriveEta, contentDescription = null) },
+                    label = { Text("Vehicles") },
+                    selected = currentTab == Tab.VEHICLES,
+                    onClick = { currentTab = Tab.VEHICLES }
+                )
+                NavigationBarItem(
+                    icon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                    label = { Text("Settings") },
+                    selected = currentTab == Tab.SETTINGS,
+                    onClick = { currentTab = Tab.SETTINGS }
+                )
+            }
         }
-
-        // Driver mode content (no mode switching in this app)
-        val driverViewModel: DriverViewModel = viewModel()
-        val autoOpenNavigation by settingsManager.autoOpenNavigation.collectAsState()
-
-        // Ensure relay connections when app returns to foreground
-        LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
-            driverViewModel.onResume()
+    ) { innerPadding ->
+        // Tab content
+        when (currentTab) {
+            Tab.DRIVE -> {
+                DriverModeScreen(
+                    viewModel = driverViewModel,
+                    settingsManager = settingsManager,
+                    vehicleRepository = vehicleRepository,
+                    autoOpenNavigation = autoOpenNavigation,
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
+            Tab.WALLET -> {
+                WalletScreen(
+                    lightningAddress = userProfile?.lud16,
+                    onEditLightningAddress = onOpenProfile,
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
+            Tab.VEHICLES -> {
+                val alwaysAskVehicle by settingsManager.alwaysAskVehicle.collectAsState()
+                val activeVehicleId by settingsManager.activeVehicleId.collectAsState()
+                VehiclesScreen(
+                    vehicles = vehicles,
+                    alwaysAskVehicle = alwaysAskVehicle,
+                    activeVehicleId = activeVehicleId,
+                    driverStage = driverUiState.stage,
+                    onAddVehicle = { vehicleRepository.addVehicle(it) },
+                    onUpdateVehicle = { vehicleRepository.updateVehicle(it) },
+                    onDeleteVehicle = { vehicleRepository.deleteVehicle(it) },
+                    onSetPrimary = { vehicleRepository.setPrimaryVehicle(it) },
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
+            Tab.SETTINGS -> {
+                SettingsContent(
+                    settingsManager = settingsManager,
+                    hasMultipleVehicles = vehicles.size > 1,
+                    driverStage = driverUiState.stage,
+                    onOpenTiles = onOpenTiles,
+                    onOpenDevOptions = onOpenDevOptions,
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
         }
+    }
 
-        DriverModeScreen(
-            viewModel = driverViewModel,
-            settingsManager = settingsManager,
-            autoOpenNavigation = autoOpenNavigation,
-            modifier = Modifier.weight(1f)
+    // Account bottom sheet
+    if (showAccountSheet) {
+        AccountBottomSheet(
+            npub = keyManager.getNpub(),
+            relayStatus = "$connectedCount/$totalRelays relays",
+            isConnected = isConnected,
+            onEditProfile = onOpenProfile,
+            onBackupKeys = onOpenBackup,
+            onLogout = onLogout,
+            onDismiss = { showAccountSheet = false }
         )
     }
 }

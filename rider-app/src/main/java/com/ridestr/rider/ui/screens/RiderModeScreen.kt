@@ -63,6 +63,7 @@ private const val TAG = "RiderModeScreen"
 fun RiderModeScreen(
     viewModel: RiderViewModel,
     settingsManager: SettingsManager,
+    onOpenTiles: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -110,19 +111,16 @@ fun RiderModeScreen(
             .fillMaxSize()
             .padding(16.dp)
     ) {
-        // Header
-        Text(
-            text = "Rider Mode",
-            style = MaterialTheme.typography.headlineMedium,
-            fontWeight = FontWeight.Bold
-        )
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // Error message
+        // Error message - tappable for routing errors, with X to dismiss
         uiState.error?.let { error ->
+            val isRoutingError = error.contains("routing data", ignoreCase = true)
             Card(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .then(
+                        if (isRoutingError) Modifier.clickable { onOpenTiles() }
+                        else Modifier
+                    ),
                 colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.errorContainer
                 )
@@ -130,16 +128,29 @@ fun RiderModeScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(16.dp),
+                        .padding(start = 16.dp, top = 8.dp, bottom = 8.dp, end = 4.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = error,
-                        color = MaterialTheme.colorScheme.onErrorContainer
-                    )
-                    TextButton(onClick = { viewModel.clearError() }) {
-                        Text("Dismiss")
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = if (isRoutingError) "No routing data for this area" else error,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                        if (isRoutingError) {
+                            Text(
+                                text = "Tap to download routing tiles",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.7f)
+                            )
+                        }
+                    }
+                    IconButton(onClick = { viewModel.clearError() }) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Dismiss",
+                            tint = MaterialTheme.colorScheme.onErrorContainer
+                        )
                     }
                 }
             }
@@ -219,6 +230,14 @@ fun RiderModeScreen(
             }
             RideStage.RIDE_CONFIRMED -> {
                 DriverOnTheWayContent(
+                    uiState = uiState,
+                    onOpenChat = { showChatSheet = true },
+                    onCancel = { viewModel.clearRide() },
+                    chatMessageCount = uiState.chatMessages.size
+                )
+            }
+            RideStage.DRIVER_ARRIVED -> {
+                DriverArrivedContent(
                     uiState = uiState,
                     onOpenChat = { showChatSheet = true },
                     onCancel = { viewModel.clearRide() },
@@ -1097,8 +1116,8 @@ private fun DriverCard(
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold
                 )
-                // Show car info if available
-                profile?.carDescription()?.let { car ->
+                // Show car info if available - prefer from availability event, fallback to profile
+                (driver.vehicleDescription() ?: profile?.carDescription())?.let { car ->
                     Text(
                         text = car,
                         style = MaterialTheme.typography.bodySmall,
@@ -1155,7 +1174,8 @@ private fun RequestRideCard(
                 text = "Driver: ${driverProfile?.bestName() ?: driver.driverPubKey.take(12) + "..."}",
                 style = MaterialTheme.typography.bodyMedium
             )
-            driverProfile?.carDescription()?.let { car ->
+            // Prefer vehicle info from availability event, fallback to profile
+            (driver.vehicleDescription() ?: driverProfile?.carDescription())?.let { car ->
                 Text(
                     text = "Vehicle: $car",
                     style = MaterialTheme.typography.bodySmall,
@@ -1823,9 +1843,14 @@ private fun DriverOnTheWayContent(
                 .padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Get driver profile from acceptance
+            // Get driver info from acceptance
             val driverPubKey = uiState.acceptance?.driverPubKey
             val driverProfile = driverPubKey?.let { uiState.driverProfiles[it] }
+            // Find driver availability data for vehicle info
+            val driverAvailability = driverPubKey?.let { pk ->
+                uiState.selectedDriver?.takeIf { it.driverPubKey == pk }
+                    ?: uiState.availableDrivers.find { it.driverPubKey == pk }
+            }
 
             Icon(
                 Icons.Default.DirectionsCar,
@@ -1843,8 +1868,8 @@ private fun DriverOnTheWayContent(
                 fontWeight = FontWeight.Bold
             )
 
-            // Car description (color, year, make, model)
-            driverProfile?.carDescription()?.let { carInfo ->
+            // Car description - prefer from availability event, fallback to profile
+            (driverAvailability?.vehicleDescription() ?: driverProfile?.carDescription())?.let { carInfo ->
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = carInfo,
@@ -1901,6 +1926,157 @@ private fun DriverOnTheWayContent(
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = "Tell this PIN to your driver at pickup",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // Chat button
+            OutlinedButton(
+                onClick = onOpenChat,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(
+                    Icons.Default.Chat,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Chat with Driver")
+                if (chatMessageCount > 0) {
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Badge {
+                        Text(chatMessageCount.toString())
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Cancel button
+            TextButton(
+                onClick = onCancel,
+                colors = ButtonDefaults.textButtonColors(
+                    contentColor = MaterialTheme.colorScheme.error
+                )
+            ) {
+                Text("Cancel Ride")
+            }
+        }
+    }
+}
+
+@Composable
+private fun DriverArrivedContent(
+    uiState: RiderUiState,
+    onOpenChat: () -> Unit,
+    onCancel: () -> Unit,
+    chatMessageCount: Int
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // Get driver info from acceptance
+            val driverPubKey = uiState.acceptance?.driverPubKey
+            val driverProfile = driverPubKey?.let { uiState.driverProfiles[it] }
+            // Find driver availability data for vehicle info
+            val driverAvailability = driverPubKey?.let { pk ->
+                uiState.selectedDriver?.takeIf { it.driverPubKey == pk }
+                    ?: uiState.availableDrivers.find { it.driverPubKey == pk }
+            }
+
+            Icon(
+                Icons.Default.LocationOn,
+                contentDescription = null,
+                modifier = Modifier.size(48.dp),
+                tint = MaterialTheme.colorScheme.primary
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Text(
+                text = "Your driver has arrived!",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Car description - show prominently so rider knows what to look for
+            val carInfo = driverAvailability?.vehicleDescription() ?: driverProfile?.carDescription()
+            if (carInfo != null) {
+                Text(
+                    text = "Look for the $carInfo",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    textAlign = TextAlign.Center
+                )
+            }
+
+            // Driver name
+            driverProfile?.bestName()?.let { name ->
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Driver: $name",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+            }
+
+            // Display pickup PIN prominently
+            uiState.pickupPin?.let { pin ->
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.Pin,
+                                contentDescription = null,
+                                modifier = Modifier.size(20.dp),
+                                tint = MaterialTheme.colorScheme.secondary
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Your Pickup PIN",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = pin,
+                            style = MaterialTheme.typography.headlineLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            letterSpacing = 8.sp
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Tell this PIN to your driver",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSecondaryContainer,
                             textAlign = TextAlign.Center

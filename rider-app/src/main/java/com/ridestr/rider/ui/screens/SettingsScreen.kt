@@ -2,10 +2,12 @@ package com.ridestr.rider.ui.screens
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -15,12 +17,16 @@ import com.ridestr.common.settings.DisplayCurrency
 import com.ridestr.common.settings.DistanceUnit
 import com.ridestr.common.settings.SettingsManager
 
+/**
+ * Settings screen with back navigation (for modal use).
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     settingsManager: SettingsManager,
     onBack: () -> Unit,
     onOpenTiles: () -> Unit,
+    onOpenDevOptions: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Scaffold(
@@ -39,15 +45,36 @@ fun SettingsScreen(
         },
         modifier = modifier
     ) { padding ->
-        val displayCurrency by settingsManager.displayCurrency.collectAsState()
-        val distanceUnit by settingsManager.distanceUnit.collectAsState()
+        SettingsContent(
+            settingsManager = settingsManager,
+            onOpenTiles = onOpenTiles,
+            onOpenDevOptions = onOpenDevOptions,
+            modifier = Modifier.padding(padding)
+        )
+    }
+}
 
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .padding(16.dp)
-        ) {
+/**
+ * Settings content without Scaffold - for use as a tab in bottom navigation.
+ */
+@Composable
+fun SettingsContent(
+    settingsManager: SettingsManager,
+    onOpenTiles: () -> Unit,
+    onOpenDevOptions: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val displayCurrency by settingsManager.displayCurrency.collectAsState()
+    val distanceUnit by settingsManager.distanceUnit.collectAsState()
+    val notificationSoundEnabled by settingsManager.notificationSoundEnabled.collectAsState()
+    val notificationVibrationEnabled by settingsManager.notificationVibrationEnabled.collectAsState()
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp)
+    ) {
             // Display Currency Setting
             SettingsSwitchRow(
                 title = "Display Currency",
@@ -78,6 +105,32 @@ fun SettingsScreen(
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
+            // Notifications Section Header
+            Text(
+                text = "Notifications",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(vertical = 8.dp)
+            )
+
+            // Notification Sound Setting
+            SettingsSwitchRow(
+                title = "Sound",
+                description = "Play sound for ride updates",
+                checked = notificationSoundEnabled,
+                onCheckedChange = { settingsManager.setNotificationSoundEnabled(it) }
+            )
+
+            // Notification Vibration Setting
+            SettingsSwitchRow(
+                title = "Vibration",
+                description = "Vibrate for ride updates",
+                checked = notificationVibrationEnabled,
+                onCheckedChange = { settingsManager.setNotificationVibrationEnabled(it) }
+            )
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
             // Routing Tiles Navigation
             SettingsNavigationRow(
                 title = "Routing Tiles",
@@ -86,7 +139,15 @@ fun SettingsScreen(
                 onClick = onOpenTiles
             )
 
-        }
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+            // Developer Options Navigation
+            SettingsNavigationRow(
+                title = "Developer Options",
+                description = "Debug tools and advanced settings",
+                icon = Icons.Default.Code,
+                onClick = onOpenDevOptions
+            )
     }
 }
 
@@ -186,7 +247,7 @@ private fun SettingsNavigationRow(
             }
         }
         Icon(
-            imageVector = Icons.Default.ChevronRight,
+            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
             contentDescription = "Navigate",
             tint = MaterialTheme.colorScheme.onSurfaceVariant
         )

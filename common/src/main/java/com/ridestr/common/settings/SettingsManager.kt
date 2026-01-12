@@ -42,9 +42,30 @@ class SettingsManager(context: Context) {
         private const val KEY_MANUAL_DRIVER_LAT = "manual_driver_lat"
         private const val KEY_MANUAL_DRIVER_LON = "manual_driver_lon"
 
+        // Custom relays (stored as comma-separated URLs)
+        private const val KEY_CUSTOM_RELAYS = "custom_relays"
+
+        // Notification settings
+        private const val KEY_NOTIFICATION_SOUND = "notification_sound"
+        private const val KEY_NOTIFICATION_VIBRATION = "notification_vibration"
+
+        // Vehicle selection settings (driver app only)
+        private const val KEY_ALWAYS_ASK_VEHICLE = "always_ask_vehicle"
+        private const val KEY_ACTIVE_VEHICLE_ID = "active_vehicle_id"
+
         // Default manual location: Las Vegas (Fremont St)
         private const val DEFAULT_MANUAL_LAT = 36.1699
         private const val DEFAULT_MANUAL_LON = -115.1398
+
+        // Default relays (copied from RelayConfig for convenience)
+        val DEFAULT_RELAYS = listOf(
+            "wss://relay.damus.io",
+            "wss://nos.lol",
+            "wss://relay.nostr.band"
+        )
+
+        // Maximum number of relays allowed
+        const val MAX_RELAYS = 10
     }
 
     private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -66,6 +87,77 @@ class SettingsManager(context: Context) {
      */
     fun toggleAutoOpenNavigation() {
         setAutoOpenNavigation(!_autoOpenNavigation.value)
+    }
+
+    // Notification sound setting (default: true)
+    private val _notificationSoundEnabled = MutableStateFlow(prefs.getBoolean(KEY_NOTIFICATION_SOUND, true))
+    val notificationSoundEnabled: StateFlow<Boolean> = _notificationSoundEnabled.asStateFlow()
+
+    /**
+     * Set whether notification sounds are enabled.
+     */
+    fun setNotificationSoundEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_NOTIFICATION_SOUND, enabled).apply()
+        _notificationSoundEnabled.value = enabled
+    }
+
+    /**
+     * Toggle notification sound on/off.
+     */
+    fun toggleNotificationSound() {
+        setNotificationSoundEnabled(!_notificationSoundEnabled.value)
+    }
+
+    // Notification vibration setting (default: true)
+    private val _notificationVibrationEnabled = MutableStateFlow(prefs.getBoolean(KEY_NOTIFICATION_VIBRATION, true))
+    val notificationVibrationEnabled: StateFlow<Boolean> = _notificationVibrationEnabled.asStateFlow()
+
+    /**
+     * Set whether notification vibration is enabled.
+     */
+    fun setNotificationVibrationEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_NOTIFICATION_VIBRATION, enabled).apply()
+        _notificationVibrationEnabled.value = enabled
+    }
+
+    /**
+     * Toggle notification vibration on/off.
+     */
+    fun toggleNotificationVibration() {
+        setNotificationVibrationEnabled(!_notificationVibrationEnabled.value)
+    }
+
+    // ===================
+    // VEHICLE SELECTION (Driver App)
+    // ===================
+
+    // "Always ask which vehicle when going online" toggle (default: true)
+    private val _alwaysAskVehicle = MutableStateFlow(prefs.getBoolean(KEY_ALWAYS_ASK_VEHICLE, true))
+    val alwaysAskVehicle: StateFlow<Boolean> = _alwaysAskVehicle.asStateFlow()
+
+    /**
+     * Set whether to always ask which vehicle when going online.
+     * When true and user has multiple vehicles, shows a vehicle picker dialog.
+     */
+    fun setAlwaysAskVehicle(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_ALWAYS_ASK_VEHICLE, enabled).apply()
+        _alwaysAskVehicle.value = enabled
+    }
+
+    // Active vehicle ID - the vehicle currently being used for driving
+    private val _activeVehicleId = MutableStateFlow<String?>(prefs.getString(KEY_ACTIVE_VEHICLE_ID, null))
+    val activeVehicleId: StateFlow<String?> = _activeVehicleId.asStateFlow()
+
+    /**
+     * Set the active vehicle ID (the one being used for the current driving session).
+     */
+    fun setActiveVehicleId(vehicleId: String?) {
+        if (vehicleId == null) {
+            prefs.edit().remove(KEY_ACTIVE_VEHICLE_ID).apply()
+        } else {
+            prefs.edit().putString(KEY_ACTIVE_VEHICLE_ID, vehicleId).apply()
+        }
+        _activeVehicleId.value = vehicleId
     }
 
     // Currency display setting (default: USD)
@@ -223,5 +315,102 @@ class SettingsManager(context: Context) {
      */
     fun resetOnboarding() {
         prefs.edit().putBoolean(KEY_ONBOARDING_COMPLETED, false).apply()
+    }
+
+    // ===================
+    // RELAY MANAGEMENT
+    // ===================
+
+    // Custom relays (empty means use defaults)
+    private val _customRelays = MutableStateFlow(loadRelays())
+    val customRelays: StateFlow<List<String>> = _customRelays.asStateFlow()
+
+    /**
+     * Load relays from SharedPreferences.
+     * Returns empty list if no custom relays are set (meaning use defaults).
+     */
+    private fun loadRelays(): List<String> {
+        val relaysString = prefs.getString(KEY_CUSTOM_RELAYS, null)
+        return if (relaysString.isNullOrBlank()) {
+            emptyList() // Use defaults
+        } else {
+            relaysString.split(",").filter { it.isNotBlank() }
+        }
+    }
+
+    /**
+     * Save relays to SharedPreferences.
+     */
+    private fun saveRelays(relays: List<String>) {
+        if (relays.isEmpty()) {
+            prefs.edit().remove(KEY_CUSTOM_RELAYS).apply()
+        } else {
+            prefs.edit().putString(KEY_CUSTOM_RELAYS, relays.joinToString(",")).apply()
+        }
+        _customRelays.value = relays
+    }
+
+    /**
+     * Get the effective relay list (custom if set, otherwise defaults).
+     */
+    fun getEffectiveRelays(): List<String> {
+        val custom = _customRelays.value
+        return if (custom.isEmpty()) DEFAULT_RELAYS else custom
+    }
+
+    /**
+     * Add a relay URL. Auto-prepends wss:// if not present.
+     * Initializes from defaults if this is the first custom relay.
+     * Maximum 10 relays allowed.
+     */
+    fun addRelay(url: String) {
+        var trimmedUrl = url.trim()
+        if (trimmedUrl.isBlank()) return
+
+        // Auto-prepend wss:// if missing
+        if (!trimmedUrl.startsWith("wss://") && !trimmedUrl.startsWith("ws://")) {
+            trimmedUrl = "wss://$trimmedUrl"
+        }
+
+        val current = _customRelays.value.toMutableList()
+        // If empty (using defaults), initialize with defaults first
+        if (current.isEmpty()) {
+            current.addAll(DEFAULT_RELAYS)
+        }
+        // Enforce max 10 relay limit
+        if (current.size >= MAX_RELAYS) return
+
+        if (!current.contains(trimmedUrl)) {
+            current.add(trimmedUrl)
+            saveRelays(current)
+        }
+    }
+
+    /**
+     * Remove a relay URL.
+     */
+    fun removeRelay(url: String) {
+        val current = _customRelays.value.toMutableList()
+        // If empty (using defaults), initialize with defaults first
+        if (current.isEmpty()) {
+            current.addAll(DEFAULT_RELAYS)
+        }
+        if (current.remove(url)) {
+            saveRelays(current)
+        }
+    }
+
+    /**
+     * Reset to default relays.
+     */
+    fun resetRelaysToDefault() {
+        saveRelays(emptyList())
+    }
+
+    /**
+     * Check if using custom relays (vs defaults).
+     */
+    fun isUsingCustomRelays(): Boolean {
+        return _customRelays.value.isNotEmpty()
     }
 }

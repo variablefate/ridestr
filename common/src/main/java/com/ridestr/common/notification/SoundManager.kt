@@ -27,48 +27,78 @@ object SoundManager {
 
     /**
      * Play notification sound and vibrate for a new ride request.
+     * @param soundEnabled If false, skip playing sound (respects user settings)
+     * @param vibrationEnabled If false, skip vibration (respects user settings)
      */
-    fun playRideRequestAlert(context: Context) {
-        Log.d(TAG, "Playing ride request alert")
-        playNotificationSoundIfAllowed(context)
-        vibrateIfAllowed(context, VIBRATION_RIDE_REQUEST)
+    fun playRideRequestAlert(
+        context: Context,
+        soundEnabled: Boolean = true,
+        vibrationEnabled: Boolean = true
+    ) {
+        Log.d(TAG, "Playing ride request alert (sound=$soundEnabled, vibration=$vibrationEnabled)")
+        if (soundEnabled) playNotificationSoundIfAllowed(context)
+        if (vibrationEnabled) vibrateIfAllowed(context, VIBRATION_RIDE_REQUEST)
     }
 
     /**
      * Play notification sound and vibrate for ride confirmation.
+     * @param soundEnabled If false, skip playing sound (respects user settings)
+     * @param vibrationEnabled If false, skip vibration (respects user settings)
      */
-    fun playConfirmationAlert(context: Context) {
-        Log.d(TAG, "Playing confirmation alert")
-        playNotificationSoundIfAllowed(context)
-        vibrateIfAllowed(context, VIBRATION_CONFIRMATION)
+    fun playConfirmationAlert(
+        context: Context,
+        soundEnabled: Boolean = true,
+        vibrationEnabled: Boolean = true
+    ) {
+        Log.d(TAG, "Playing confirmation alert (sound=$soundEnabled, vibration=$vibrationEnabled)")
+        if (soundEnabled) playNotificationSoundIfAllowed(context)
+        if (vibrationEnabled) vibrateIfAllowed(context, VIBRATION_CONFIRMATION)
     }
 
     /**
      * Play notification sound and vibrate for ride cancellation.
      * Uses normal notification sound (not alarm).
+     * @param soundEnabled If false, skip playing sound (respects user settings)
+     * @param vibrationEnabled If false, skip vibration (respects user settings)
      */
-    fun playCancellationAlert(context: Context) {
-        Log.d(TAG, "Playing cancellation alert")
-        playNotificationSoundIfAllowed(context)
-        vibrateIfAllowed(context, VIBRATION_ALERT)
+    fun playCancellationAlert(
+        context: Context,
+        soundEnabled: Boolean = true,
+        vibrationEnabled: Boolean = true
+    ) {
+        Log.d(TAG, "Playing cancellation alert (sound=$soundEnabled, vibration=$vibrationEnabled)")
+        if (soundEnabled) playNotificationSoundIfAllowed(context)
+        if (vibrationEnabled) vibrateIfAllowed(context, VIBRATION_ALERT)
     }
 
     /**
      * Play notification sound for a chat message.
+     * @param soundEnabled If false, skip playing sound (respects user settings)
+     * @param vibrationEnabled If false, skip vibration (respects user settings)
      */
-    fun playChatMessageAlert(context: Context) {
-        Log.d(TAG, "Playing chat message alert")
-        playNotificationSoundIfAllowed(context)
-        vibrateIfAllowed(context, VIBRATION_MESSAGE)
+    fun playChatMessageAlert(
+        context: Context,
+        soundEnabled: Boolean = true,
+        vibrationEnabled: Boolean = true
+    ) {
+        Log.d(TAG, "Playing chat message alert (sound=$soundEnabled, vibration=$vibrationEnabled)")
+        if (soundEnabled) playNotificationSoundIfAllowed(context)
+        if (vibrationEnabled) vibrateIfAllowed(context, VIBRATION_MESSAGE)
     }
 
     /**
      * Play notification sound when driver arrives.
+     * @param soundEnabled If false, skip playing sound (respects user settings)
+     * @param vibrationEnabled If false, skip vibration (respects user settings)
      */
-    fun playDriverArrivedAlert(context: Context) {
-        Log.d(TAG, "Playing driver arrived alert")
-        playNotificationSoundIfAllowed(context)
-        vibrateIfAllowed(context, VIBRATION_CONFIRMATION)
+    fun playDriverArrivedAlert(
+        context: Context,
+        soundEnabled: Boolean = true,
+        vibrationEnabled: Boolean = true
+    ) {
+        Log.d(TAG, "Playing driver arrived alert (sound=$soundEnabled, vibration=$vibrationEnabled)")
+        if (soundEnabled) playNotificationSoundIfAllowed(context)
+        if (vibrationEnabled) vibrateIfAllowed(context, VIBRATION_CONFIRMATION)
     }
 
     /**

@@ -31,10 +31,13 @@ import com.drivestr.app.viewmodels.DriverViewModel
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.gms.tasks.CancellationTokenSource
+import com.ridestr.common.data.Vehicle
+import com.ridestr.common.data.VehicleRepository
 import com.ridestr.common.nostr.events.BroadcastRideOfferData
 import com.ridestr.common.nostr.events.Location
 import com.ridestr.common.nostr.events.RideOfferData
 import com.ridestr.common.nostr.events.RideshareChatData
+import com.ridestr.common.location.GeocodingService
 import com.ridestr.common.routing.RouteResult
 import com.ridestr.common.settings.DisplayCurrency
 import com.ridestr.common.settings.DistanceUnit
@@ -55,6 +58,7 @@ private const val DEMO_DRIVER_LON = -108.8817009
 fun DriverModeScreen(
     viewModel: DriverViewModel,
     settingsManager: SettingsManager,
+    vehicleRepository: VehicleRepository,
     autoOpenNavigation: Boolean = true,
     modifier: Modifier = Modifier
 ) {
@@ -62,6 +66,13 @@ fun DriverModeScreen(
     val scope = rememberCoroutineScope()
     val uiState by viewModel.uiState.collectAsState()
     var showChatSheet by remember { mutableStateOf(false) }
+
+    // Vehicle picker state
+    val vehicles by vehicleRepository.vehicles.collectAsState()
+    val alwaysAskVehicle by settingsManager.alwaysAskVehicle.collectAsState()
+    val activeVehicleId by settingsManager.activeVehicleId.collectAsState()
+    var showVehiclePickerDialog by remember { mutableStateOf(false) }
+    var pendingLocationForGoOnline by remember { mutableStateOf<Location?>(null) }
 
     // Demo location fallback
     val demoLocation = remember { Location(lat = DEMO_DRIVER_LAT, lon = DEMO_DRIVER_LON) }
@@ -275,6 +286,13 @@ fun DriverModeScreen(
         }
     }
 
+    // Track if user is viewing ride request list (suppress popup notifications)
+    val isViewingRideRequests = uiState.stage == DriverStage.AVAILABLE &&
+            (uiState.pendingBroadcastRequests.isNotEmpty() || uiState.pendingOffers.isNotEmpty())
+    LaunchedEffect(isViewingRideRequests) {
+        viewModel.setViewingRideRequests(isViewingRideRequests)
+    }
+
     // Chat bottom sheet
     ChatBottomSheet(
         showSheet = showChatSheet,
@@ -293,14 +311,6 @@ fun DriverModeScreen(
             .fillMaxSize()
             .padding(16.dp)
     ) {
-        Text(
-            text = "Driver Mode",
-            style = MaterialTheme.typography.headlineMedium,
-            fontWeight = FontWeight.Bold
-        )
-
-        Spacer(modifier = Modifier.height(16.dp))
-
         // Error message
         uiState.error?.let { error ->
             Card(
@@ -328,6 +338,26 @@ fun DriverModeScreen(
             Spacer(modifier = Modifier.height(16.dp))
         }
 
+        // Vehicle picker dialog
+        if (showVehiclePickerDialog) {
+            VehiclePickerDialog(
+                vehicles = vehicles,
+                lastUsedVehicleId = activeVehicleId,
+                onSelect = { vehicle ->
+                    showVehiclePickerDialog = false
+                    settingsManager.setActiveVehicleId(vehicle.id)
+                    pendingLocationForGoOnline?.let { location ->
+                        viewModel.goOnline(location, vehicle)
+                    }
+                    pendingLocationForGoOnline = null
+                },
+                onDismiss = {
+                    showVehiclePickerDialog = false
+                    pendingLocationForGoOnline = null
+                }
+            )
+        }
+
         // Main content based on driver stage
         when (uiState.stage) {
             DriverStage.OFFLINE -> {
@@ -339,7 +369,18 @@ fun DriverModeScreen(
                         // Request notification permission first (Android 13+)
                         requestNotificationPermissionIfNeeded()
                         // Then proceed with location and going online
-                        withCurrentLocation { location -> viewModel.toggleAvailability(location) }
+                        withCurrentLocation { location ->
+                            // Check if we need to show vehicle picker
+                            val shouldShowPicker = alwaysAskVehicle && vehicles.size > 1
+                            if (shouldShowPicker) {
+                                pendingLocationForGoOnline = location
+                                showVehiclePickerDialog = true
+                            } else {
+                                // Use primary/active vehicle automatically
+                                val vehicle = vehicleRepository.getActiveVehicle(activeVehicleId)
+                                viewModel.goOnline(location, vehicle)
+                            }
+                        }
                     }
                 )
             }
@@ -347,7 +388,7 @@ fun DriverModeScreen(
             DriverStage.AVAILABLE -> {
                 AvailableContent(
                     uiState = uiState,
-                    onGoOffline = { withCurrentLocation { location -> viewModel.toggleAvailability(location) } },
+                    onGoOffline = { viewModel.goOffline() },
                     onToggleExpandedSearch = { viewModel.toggleExpandedSearch() },
                     onAcceptBroadcastRequest = { viewModel.acceptBroadcastRequest(it) },
                     onDeclineBroadcastRequest = { viewModel.declineBroadcastRequest(it) },
@@ -377,7 +418,9 @@ fun DriverModeScreen(
                     onArrived = { viewModel.arrivedAtPickup() },
                     onCancel = { viewModel.cancelRide() },
                     onOpenChat = { showChatSheet = true },
-                    chatMessageCount = uiState.chatMessages.size
+                    chatMessageCount = uiState.chatMessages.size,
+                    settingsManager = settingsManager,
+                    priceService = viewModel.bitcoinPriceService
                 )
             }
 
@@ -685,6 +728,16 @@ private fun RideAcceptedContent(
     val context = LocalContext.current
     val offer = uiState.acceptedOffer ?: return
 
+    // Geocoding for addresses
+    val geocodingService = remember { GeocodingService(context) }
+    var pickupAddress by remember { mutableStateOf<String?>(null) }
+    var destinationAddress by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(offer.approxPickup, offer.destination) {
+        pickupAddress = geocodingService.reverseGeocode(offer.approxPickup.lat, offer.approxPickup.lon)
+        destinationAddress = geocodingService.reverseGeocode(offer.destination.lat, offer.destination.lon)
+    }
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -730,26 +783,32 @@ private fun RideAcceptedContent(
                 )
             ) {
                 Column(modifier = Modifier.padding(12.dp)) {
-                    Text(
-                        text = "Pickup Location",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Text(
-                        text = "${offer.approxPickup.lat}, ${offer.approxPickup.lon}",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "Destination",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.error
-                    )
-                    Text(
-                        text = "${offer.destination.lat}, ${offer.destination.lon}",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
+                    // Pickup location (only show if geocoded)
+                    pickupAddress?.let { address ->
+                        Text(
+                            text = "Pickup Location",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = address,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+                    // Destination (only show if geocoded)
+                    destinationAddress?.let { address ->
+                        Text(
+                            text = "Destination",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                        Text(
+                            text = address,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
                     FareDisplay(
                         satsAmount = offer.fareEstimate,
                         settingsManager = settingsManager,
@@ -819,10 +878,20 @@ private fun EnRouteContent(
     onArrived: () -> Unit,
     onCancel: () -> Unit,
     onOpenChat: () -> Unit,
-    chatMessageCount: Int
+    chatMessageCount: Int,
+    settingsManager: SettingsManager,
+    priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
     val context = LocalContext.current
     val offer = uiState.acceptedOffer ?: return
+
+    // Geocoding for pickup address
+    val geocodingService = remember { GeocodingService(context) }
+    var pickupAddress by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(offer.approxPickup) {
+        pickupAddress = geocodingService.reverseGeocode(offer.approxPickup.lat, offer.approxPickup.lon)
+    }
 
     // Auto-navigation countdown (only if enabled)
     var countdown by remember { mutableStateOf(if (autoOpenNavigation) 3 else 0) }
@@ -879,10 +948,23 @@ private fun EnRouteContent(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            Text(
-                text = "Driving to: ${offer.approxPickup.lat}, ${offer.approxPickup.lon}",
-                style = MaterialTheme.typography.bodyMedium,
-                textAlign = TextAlign.Center
+            // Show pickup address if available (hide if geocoding failed)
+            pickupAddress?.let { address ->
+                Text(
+                    text = "Driving to: $address",
+                    style = MaterialTheme.typography.bodyMedium,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
+            // Fare display
+            FareDisplay(
+                satsAmount = offer.fareEstimate,
+                settingsManager = settingsManager,
+                priceService = priceService,
+                style = MaterialTheme.typography.titleMedium,
+                prefix = "Fare: "
             )
 
             // Auto-navigation countdown indicator (only show if enabled)
@@ -1136,6 +1218,14 @@ private fun InRideContent(
     val context = LocalContext.current
     val offer = uiState.acceptedOffer ?: return
 
+    // Geocoding for destination address
+    val geocodingService = remember { GeocodingService(context) }
+    var destinationAddress by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(offer.destination) {
+        destinationAddress = geocodingService.reverseGeocode(offer.destination.lat, offer.destination.lon)
+    }
+
     // Auto-navigation countdown (only if enabled)
     var countdown by remember { mutableStateOf(if (autoOpenNavigation) 3 else 0) }
     var navigationOpened by remember { mutableStateOf(!autoOpenNavigation) }
@@ -1185,11 +1275,14 @@ private fun InRideContent(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            Text(
-                text = "Destination: ${offer.destination.lat}, ${offer.destination.lon}",
-                style = MaterialTheme.typography.bodyMedium,
-                textAlign = TextAlign.Center
-            )
+            // Show destination address if available (hide if geocoding failed)
+            destinationAddress?.let { address ->
+                Text(
+                    text = "Destination: $address",
+                    style = MaterialTheme.typography.bodyMedium,
+                    textAlign = TextAlign.Center
+                )
+            }
 
             FareDisplay(
                 satsAmount = offer.fareEstimate,
@@ -1363,6 +1456,9 @@ private fun RideOfferCard(
     settingsManager: SettingsManager,
     priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
+    val context = LocalContext.current
+    val geocodingService = remember { GeocodingService(context) }
+
     // Update relative time every second
     var relativeTime by remember { mutableStateOf(formatRelativeTime(offer.createdAt)) }
     LaunchedEffect(offer.createdAt) {
@@ -1370,6 +1466,15 @@ private fun RideOfferCard(
             relativeTime = formatRelativeTime(offer.createdAt)
             kotlinx.coroutines.delay(1000)
         }
+    }
+
+    // Geocode pickup and destination addresses
+    var pickupAddress by remember { mutableStateOf<String?>(null) }
+    var destinationAddress by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(offer.approxPickup, offer.destination) {
+        pickupAddress = geocodingService.reverseGeocode(offer.approxPickup.lat, offer.approxPickup.lon)
+        destinationAddress = geocodingService.reverseGeocode(offer.destination.lat, offer.destination.lon)
     }
 
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -1401,34 +1506,39 @@ private fun RideOfferCard(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    Icons.Default.LocationOn,
-                    contentDescription = null,
-                    modifier = Modifier.size(16.dp),
-                    tint = MaterialTheme.colorScheme.primary
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = "Pickup: ${String.format("%.4f", offer.approxPickup.lat)}, ${String.format("%.4f", offer.approxPickup.lon)}",
-                    style = MaterialTheme.typography.bodySmall
-                )
+            // Only show pickup if geocoding succeeded
+            pickupAddress?.let { address ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Default.LocationOn,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "Pickup: $address",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                Spacer(modifier = Modifier.height(4.dp))
             }
 
-            Spacer(modifier = Modifier.height(4.dp))
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    Icons.Default.Flag,
-                    contentDescription = null,
-                    modifier = Modifier.size(16.dp),
-                    tint = MaterialTheme.colorScheme.error
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = "Dest: ${String.format("%.4f", offer.destination.lat)}, ${String.format("%.4f", offer.destination.lon)}",
-                    style = MaterialTheme.typography.bodySmall
-                )
+            // Only show destination if geocoding succeeded
+            destinationAddress?.let { address ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Default.Flag,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.error
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "Dest: $address",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(4.dp))

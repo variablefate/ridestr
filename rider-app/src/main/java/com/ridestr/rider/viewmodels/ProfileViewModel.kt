@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ridestr.common.nostr.NostrService
 import com.ridestr.common.nostr.events.UserProfile
+import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -59,6 +60,11 @@ class ProfileViewModel(application: Application) : AndroidViewModel(application)
     fun updatePicture(picture: String) {
         _uiState.value = _uiState.value.copy(picture = picture)
     }
+
+    /**
+     * Get the NostrSigner for Blossom upload/delete operations.
+     */
+    fun getSigner(): NostrSigner? = nostrService.getSigner()
 
     fun updateLightningAddress(lud16: String) {
         _uiState.value = _uiState.value.copy(lightningAddress = lud16)

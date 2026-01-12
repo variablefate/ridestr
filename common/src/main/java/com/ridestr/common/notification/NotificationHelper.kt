@@ -48,15 +48,16 @@ object NotificationHelper {
                 setShowBadge(false)
             }
 
-            // Channel 2: Ride requests (high priority, sound)
+            // Channel 2: Ride requests (high priority, but sound disabled - SoundManager handles audio)
             val requestChannel = NotificationChannel(
                 CHANNEL_RIDE_REQUEST,
                 "Ride Requests",
                 NotificationManager.IMPORTANCE_HIGH
             ).apply {
                 description = "Notifications for incoming ride requests"
-                enableVibration(true)
-                vibrationPattern = longArrayOf(0, 500, 200, 500)
+                // Sound/vibration handled by SoundManager to avoid double alerts
+                setSound(null, null)
+                enableVibration(false)
             }
 
             // Channel 3: Ride updates (default priority)
@@ -68,14 +69,16 @@ object NotificationHelper {
                 description = "Updates about your current ride"
             }
 
-            // Channel 4: Cancellations (high priority)
+            // Channel 4: Cancellations (high priority, but sound disabled - SoundManager handles audio)
             val cancelledChannel = NotificationChannel(
                 CHANNEL_RIDE_CANCELLED,
                 "Ride Cancelled",
                 NotificationManager.IMPORTANCE_HIGH
             ).apply {
                 description = "Notifications when a ride is cancelled"
-                enableVibration(true)
+                // Sound/vibration handled by SoundManager to avoid double alerts
+                setSound(null, null)
+                enableVibration(false)
             }
 
             notificationManager.createNotificationChannels(
@@ -102,15 +105,16 @@ object NotificationHelper {
                 setShowBadge(false)
             }
 
-            // Channel 2: Driver updates (high priority, sound)
+            // Channel 2: Driver updates (high priority, but sound disabled - SoundManager handles audio)
             val requestChannel = NotificationChannel(
                 CHANNEL_RIDE_REQUEST,
                 "Driver Responses",
                 NotificationManager.IMPORTANCE_HIGH
             ).apply {
                 description = "Notifications when a driver accepts your ride"
-                enableVibration(true)
-                vibrationPattern = longArrayOf(0, 500, 200, 500)
+                // Sound/vibration handled by SoundManager to avoid double alerts
+                setSound(null, null)
+                enableVibration(false)
             }
 
             // Channel 3: Ride updates (default priority)
@@ -122,14 +126,16 @@ object NotificationHelper {
                 description = "Updates about your current ride"
             }
 
-            // Channel 4: Cancellations (high priority)
+            // Channel 4: Cancellations (high priority, but sound disabled - SoundManager handles audio)
             val cancelledChannel = NotificationChannel(
                 CHANNEL_RIDE_CANCELLED,
                 "Ride Cancelled",
                 NotificationManager.IMPORTANCE_HIGH
             ).apply {
                 description = "Notifications when your ride is cancelled"
-                enableVibration(true)
+                // Sound/vibration handled by SoundManager to avoid double alerts
+                setSound(null, null)
+                enableVibration(false)
             }
 
             notificationManager.createNotificationChannels(

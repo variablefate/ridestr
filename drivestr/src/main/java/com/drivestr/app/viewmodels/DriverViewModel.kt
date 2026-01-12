@@ -10,6 +10,7 @@ import androidx.lifecycle.viewModelScope
 import com.drivestr.app.MainActivity
 import com.drivestr.app.service.DriverOnlineService
 import com.ridestr.common.bitcoin.BitcoinPriceService
+import com.ridestr.common.data.Vehicle
 import com.ridestr.common.notification.NotificationHelper
 import com.ridestr.common.notification.SoundManager
 import com.ridestr.common.nostr.NostrService
@@ -90,7 +91,22 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     private var lastBroadcastLocation: Location? = null
     private var lastBroadcastTimeMs: Long = 0L
 
+    // Track if user is viewing ride requests (suppress popup notifications when true)
+    private var isViewingRideRequests = false
+
+    /**
+     * Set whether the user is currently viewing the ride request screen.
+     * When true, popup notifications for new ride requests are suppressed
+     * (requests still appear in the list).
+     */
+    fun setViewingRideRequests(viewing: Boolean) {
+        isViewingRideRequests = viewing
+    }
+
     private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    // Settings manager for user preferences
+    private val settingsManager = com.ridestr.common.settings.SettingsManager(application)
 
     private val nostrService = NostrService(application)
 
@@ -402,52 +418,83 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun toggleAvailability(location: Location) {
+    /**
+     * Go online with a specific vehicle.
+     * This is the new preferred method for going online, allowing vehicle selection.
+     */
+    fun goOnline(location: Location, vehicle: Vehicle?) {
         val currentState = _uiState.value
         val context = getApplication<Application>()
 
-        if (currentState.stage == DriverStage.AVAILABLE) {
-            // Go offline
-            viewModelScope.launch {
-                val lastLocation = currentState.currentLocation ?: location
+        if (currentState.stage != DriverStage.OFFLINE) return
+
+        // Set location and vehicle FIRST so route calculations work
+        _uiState.value = currentState.copy(
+            stage = DriverStage.AVAILABLE,
+            currentLocation = location,
+            activeVehicle = vehicle,
+            statusMessage = "You are now available for rides"
+        )
+        // Initialize cache location tracker
+        lastCacheDriverLocation = location
+
+        // Start the foreground service to keep app alive
+        DriverOnlineService.start(context)
+
+        // Now start subscriptions (location is already set for route calculations)
+        startBroadcasting(location)
+        subscribeToBroadcastRequests(location)
+        // Also subscribe to direct offers (legacy/advanced mode)
+        subscribeToOffers()
+    }
+
+    /**
+     * Go offline.
+     */
+    fun goOffline() {
+        val currentState = _uiState.value
+        val context = getApplication<Application>()
+
+        if (currentState.stage != DriverStage.AVAILABLE) return
+
+        viewModelScope.launch {
+            val lastLocation = currentState.currentLocation
+            if (lastLocation != null) {
                 val eventId = nostrService.broadcastOffline(lastLocation)
                 if (eventId != null) {
                     Log.d(TAG, "Broadcast offline status: $eventId")
                 }
-                deleteAllAvailabilityEvents()
             }
-            stopBroadcasting()
-            closeOfferSubscription()
-            // Reset throttle tracking for next time driver goes online
-            lastBroadcastLocation = null
-            lastBroadcastTimeMs = 0L
+            deleteAllAvailabilityEvents()
+        }
+        stopBroadcasting()
+        closeOfferSubscription()
+        // Reset throttle tracking for next time driver goes online
+        lastBroadcastLocation = null
+        lastBroadcastTimeMs = 0L
 
-            // Stop the foreground service
-            DriverOnlineService.stop(context)
+        // Stop the foreground service
+        DriverOnlineService.stop(context)
 
-            _uiState.value = currentState.copy(
-                stage = DriverStage.OFFLINE,
-                currentLocation = null,
-                statusMessage = "You are now offline"
-            )
+        _uiState.value = currentState.copy(
+            stage = DriverStage.OFFLINE,
+            currentLocation = null,
+            activeVehicle = null,
+            statusMessage = "You are now offline"
+        )
+    }
+
+    /**
+     * Legacy method for toggling availability.
+     * Prefer using goOnline(location, vehicle) and goOffline() directly.
+     */
+    fun toggleAvailability(location: Location, vehicle: Vehicle? = null) {
+        val currentState = _uiState.value
+
+        if (currentState.stage == DriverStage.AVAILABLE) {
+            goOffline()
         } else if (currentState.stage == DriverStage.OFFLINE) {
-            // Go online - set location FIRST so route calculations work
-            _uiState.value = currentState.copy(
-                stage = DriverStage.AVAILABLE,
-                currentLocation = location,
-                statusMessage = "You are now available for rides"
-            )
-            // Initialize cache location tracker
-            lastCacheDriverLocation = location
-
-            // Start the foreground service to keep app alive
-            DriverOnlineService.start(context)
-
-            // Now start subscriptions (location is already set for route calculations)
-            startBroadcasting(location)
-            subscribeToBroadcastRequests(location)
-            // Also subscribe to direct offers (legacy/advanced mode)
-            subscribeToOffers()
+            goOnline(location, vehicle)
         }
         // Don't allow toggling during a ride
     }
@@ -563,6 +610,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 nostrService.deleteEvent(acceptanceId, "ride cancelled")
             }
         }
+
+        // Stop the foreground service
+        DriverOnlineService.stop(getApplication())
 
         // Return to offline state
         _uiState.value = state.copy(
@@ -877,6 +927,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             chatRefreshJob?.cancel()
             chatRefreshJob = null
 
+            // Stop the foreground service
+            DriverOnlineService.stop(getApplication())
+
             // Reset state
             _uiState.value = _uiState.value.copy(
                 stage = DriverStage.OFFLINE,
@@ -953,6 +1006,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 chatSubscriptionId = null
                 cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
                 cancellationSubscriptionId = null
+
+                // Stop the foreground service
+                val context = getApplication<Application>()
+                DriverOnlineService.stop(context)
 
                 _uiState.value = _uiState.value.copy(
                     stage = DriverStage.OFFLINE,
@@ -1052,7 +1109,11 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
             // Play confirmation sound
             val context = getApplication<Application>()
-            SoundManager.playConfirmationAlert(context)
+            SoundManager.playConfirmationAlert(
+                context,
+                settingsManager.notificationSoundEnabled.value,
+                settingsManager.notificationVibrationEnabled.value
+            )
 
             // Store confirmation data
             _uiState.value = _uiState.value.copy(
@@ -1126,7 +1187,11 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 val myPubKey = nostrService.getPubKeyHex() ?: ""
                 if (chatData.senderPubKey != myPubKey) {
                     val context = getApplication<Application>()
-                    SoundManager.playChatMessageAlert(context)
+                    SoundManager.playChatMessageAlert(
+                        context,
+                        settingsManager.notificationSoundEnabled.value,
+                        settingsManager.notificationVibrationEnabled.value
+                    )
 
                     val notification = NotificationHelper.buildChatMessageNotification(
                         context = context,
@@ -1208,7 +1273,11 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         val context = getApplication<Application>()
 
         // Play cancellation alert
-        SoundManager.playCancellationAlert(context)
+        SoundManager.playCancellationAlert(
+            context,
+            settingsManager.notificationSoundEnabled.value,
+            settingsManager.notificationVibrationEnabled.value
+        )
 
         // Show cancellation notification
         val contentIntent = PendingIntent.getActivity(
@@ -1245,6 +1314,11 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
         // Return to available state (if they were online) or offline
         val newStage = if (state.currentLocation != null) DriverStage.AVAILABLE else DriverStage.OFFLINE
+
+        // Stop the foreground service if going offline
+        if (newStage == DriverStage.OFFLINE) {
+            DriverOnlineService.stop(context)
+        }
 
         _uiState.value = state.copy(
             stage = newStage,
@@ -1386,6 +1460,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         availabilityJob = viewModelScope.launch {
             while (isActive) {
                 val currentLocation = _uiState.value.currentLocation ?: location
+                val activeVehicle = _uiState.value.activeVehicle
 
                 // Track this broadcast for throttling
                 lastBroadcastLocation = currentLocation
@@ -1397,7 +1472,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     Log.d(TAG, "Requested deletion of previous availability: $previousEventId")
                 }
 
-                val eventId = nostrService.broadcastAvailability(currentLocation)
+                val eventId = nostrService.broadcastAvailability(currentLocation, activeVehicle)
 
                 if (eventId != null) {
                     Log.d(TAG, "Broadcast availability: $eventId")
@@ -1716,10 +1791,15 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             if (isNewRequest) {
                 val context = getApplication<Application>()
 
-                // Play sound and vibrate for NEW requests (not fare boosts which are updates)
-                if (!isFareBoost) {
-                    Log.d(TAG, "NEW ride request - playing alert")
-                    SoundManager.playRideRequestAlert(context)
+                // Play sound and show popup for NEW requests (not fare boosts)
+                // Skip popup notification if user is already viewing the ride request screen
+                if (!isFareBoost && !isViewingRideRequests) {
+                    Log.d(TAG, "NEW ride request - playing alert and showing notification")
+                    SoundManager.playRideRequestAlert(
+                        context,
+                        settingsManager.notificationSoundEnabled.value,
+                        settingsManager.notificationVibrationEnabled.value
+                    )
 
                     // Show notification
                     val fareDisplay = "${request.fareEstimate.toInt()} sats"
@@ -1747,7 +1827,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     // Update foreground service notification with request count
                     DriverOnlineService.updateRequestCount(context, currentRequests.size + 1)
                 } else {
-                    Log.d(TAG, "Fare boost from same rider - updating silently")
+                    Log.d(TAG, "Skipping notification - fare boost: $isFareBoost, viewing requests: $isViewingRideRequests")
                 }
                 // Filter out stale requests and any previous requests from the same rider
                 // (handles fare boosts - new request replaces old one from same rider)
@@ -1968,6 +2048,8 @@ data class DriverUiState(
     val stage: DriverStage = DriverStage.OFFLINE,
     val currentLocation: Location? = null,
     val lastBroadcastTime: Long? = null,
+    // Active vehicle for this driving session (shown to riders)
+    val activeVehicle: Vehicle? = null,
     // Search settings - default to expanded (20+ mile radius) for better coverage
     val expandedSearch: Boolean = true,
 

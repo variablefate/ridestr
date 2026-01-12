@@ -9,10 +9,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.BugReport
-import androidx.compose.material.icons.filled.Key
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -26,15 +23,20 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.google.android.gms.location.LocationServices
 import com.ridestr.rider.ui.screens.DebugScreen
 import com.ridestr.rider.ui.screens.RiderModeScreen
+import com.ridestr.rider.ui.screens.HistoryScreen
 import com.ridestr.rider.ui.screens.KeyBackupScreen
 import com.ridestr.rider.ui.screens.OnboardingScreen
 import com.ridestr.rider.ui.screens.ProfileSetupScreen
-import com.ridestr.rider.ui.screens.SettingsScreen
+import com.ridestr.rider.ui.screens.SettingsContent
+import com.ridestr.rider.ui.screens.WalletScreen
 import com.ridestr.common.routing.NostrTileDiscoveryService
 import com.ridestr.common.routing.TileDownloadService
 import com.ridestr.common.routing.TileManager
 import com.ridestr.common.routing.ValhallaRoutingService
 import com.ridestr.common.settings.SettingsManager
+import com.ridestr.common.ui.AccountBottomSheet
+import com.ridestr.common.ui.DeveloperOptionsScreen
+import com.ridestr.common.ui.RelaySignalIndicator
 import com.ridestr.common.ui.LocationPermissionScreen
 import com.ridestr.common.ui.TileManagementScreen
 import com.ridestr.common.ui.TileSetupScreen
@@ -42,24 +44,35 @@ import com.ridestr.rider.viewmodels.RiderViewModel
 import com.ridestr.rider.viewmodels.OnboardingViewModel
 import com.ridestr.rider.viewmodels.ProfileViewModel
 import com.ridestr.common.nostr.NostrService
+import com.ridestr.common.nostr.events.UserProfile
 import com.ridestr.common.nostr.relay.RelayConnectionState
 import com.ridestr.common.notification.NotificationHelper
 import com.ridestr.common.ui.theme.RidestrTheme
 import kotlinx.coroutines.tasks.await
 
 /**
- * App navigation screens.
+ * Bottom navigation tabs for the main screen.
+ */
+enum class Tab {
+    RIDE,       // Main rider mode
+    WALLET,     // Payment info
+    HISTORY,    // Ride history
+    SETTINGS    // Settings & developer options
+}
+
+/**
+ * App navigation screens (for modals and onboarding).
  */
 enum class Screen {
     ONBOARDING,
     PROFILE_SETUP,
     LOCATION_PERMISSION,
     TILE_SETUP,
-    MAIN,
+    MAIN,           // Shows bottom navigation with tabs
     DEBUG,
     BACKUP_KEYS,
-    SETTINGS,
-    TILES
+    TILES,
+    DEV_OPTIONS
 }
 
 class MainActivity : ComponentActivity() {
@@ -85,11 +98,11 @@ fun RidestrApp() {
         NotificationHelper.createRiderChannels(context)
     }
 
-    // NostrService for relay connections (shared instance)
-    val nostrService = remember { NostrService(context) }
-
-    // Settings manager
+    // Settings manager (created first to get custom relays)
     val settingsManager = remember { SettingsManager(context) }
+
+    // NostrService for relay connections (uses custom relays from settings)
+    val nostrService = remember { NostrService(context, settingsManager.getEffectiveRelays()) }
 
     // Tile management (singleton to share with ViewModels)
     val tileManager = remember { TileManager.getInstance(context) }
@@ -109,9 +122,6 @@ fun RidestrApp() {
     // Routing service
     val routingService = remember { ValhallaRoutingService(context) }
 
-    // Navigation state
-    var currentScreen by remember { mutableStateOf(Screen.ONBOARDING) }
-
     // Current location for tile recommendations
     var currentLocation by remember { mutableStateOf<Location?>(null) }
 
@@ -119,6 +129,9 @@ fun RidestrApp() {
     val connectionStates by nostrService.connectionStates.collectAsState()
     val recentEvents by nostrService.relayManager.events.collectAsState()
     val notices by nostrService.relayManager.notices.collectAsState()
+
+    // User profile (for lightning address in wallet)
+    var userProfile by remember { mutableStateOf<UserProfile?>(null) }
 
     // Check if location permission already granted
     val hasLocationPermission = remember {
@@ -134,7 +147,33 @@ fun RidestrApp() {
     // Check if tiles are already downloaded (skip tile setup if so)
     val hasTilesDownloaded by tileManager.downloadedRegions.collectAsState()
 
-    // Check if already logged in on first composition
+    // Navigation state - start at MAIN if onboarding is complete to avoid flash
+    var currentScreen by remember {
+        val initialScreen = if (onboardingCompleted && uiState.isLoggedIn) {
+            Screen.MAIN
+        } else {
+            Screen.ONBOARDING
+        }
+        mutableStateOf(initialScreen)
+    }
+
+    // Connect to Nostr if starting at MAIN screen
+    LaunchedEffect(Unit) {
+        if (currentScreen == Screen.MAIN) {
+            nostrService.connect()
+        }
+    }
+
+    // Subscribe to own profile for lightning address
+    LaunchedEffect(uiState.isLoggedIn) {
+        if (uiState.isLoggedIn) {
+            nostrService.subscribeToOwnProfile { profile ->
+                userProfile = profile
+            }
+        }
+    }
+
+    // Check if already logged in on first composition (only if not already at MAIN)
     LaunchedEffect(uiState.isLoggedIn, uiState.isProfileCompleted) {
         if (uiState.isLoggedIn && currentScreen == Screen.ONBOARDING) {
             nostrService.connect()
@@ -252,10 +291,18 @@ fun RidestrApp() {
             }
 
             Screen.MAIN -> {
+                // Ensure tile discovery is started for returning users who skip onboarding
+                LaunchedEffect(Unit) {
+                    if (!tileDiscoveryService.isDiscovering.value) {
+                        tileDiscoveryService.startDiscovery()
+                    }
+                }
+
                 MainScreen(
                     keyManager = onboardingViewModel.getKeyManager(),
                     connectionStates = connectionStates,
                     settingsManager = settingsManager,
+                    userProfile = userProfile,
                     onLogout = {
                         nostrService.disconnect()
                         onboardingViewModel.logout()
@@ -265,14 +312,17 @@ fun RidestrApp() {
                     onOpenProfile = {
                         currentScreen = Screen.PROFILE_SETUP
                     },
-                    onOpenDebug = {
-                        currentScreen = Screen.DEBUG
-                    },
                     onOpenBackup = {
                         currentScreen = Screen.BACKUP_KEYS
                     },
-                    onOpenSettings = {
-                        currentScreen = Screen.SETTINGS
+                    onOpenTiles = {
+                        currentScreen = Screen.TILES
+                    },
+                    onOpenDevOptions = {
+                        currentScreen = Screen.DEV_OPTIONS
+                    },
+                    onOpenDebug = {
+                        currentScreen = Screen.DEBUG
                     },
                     modifier = Modifier.padding(innerPadding)
                 )
@@ -306,21 +356,22 @@ fun RidestrApp() {
                 )
             }
 
-            Screen.SETTINGS -> {
-                SettingsScreen(
-                    settingsManager = settingsManager,
-                    onBack = { currentScreen = Screen.MAIN },
-                    onOpenTiles = { currentScreen = Screen.TILES },
-                    modifier = Modifier.padding(innerPadding)
-                )
-            }
-
             Screen.TILES -> {
                 TileManagementScreen(
                     tileManager = tileManager,
                     downloadService = tileDownloadService,
                     discoveryService = tileDiscoveryService,
-                    onBack = { currentScreen = Screen.SETTINGS },
+                    onBack = { currentScreen = Screen.MAIN },
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
+
+            Screen.DEV_OPTIONS -> {
+                DeveloperOptionsScreen(
+                    settingsManager = settingsManager,
+                    isDriverApp = false,
+                    onOpenDebug = { currentScreen = Screen.DEBUG },
+                    onBack = { currentScreen = Screen.MAIN },
                     modifier = Modifier.padding(innerPadding)
                 )
             }
@@ -328,88 +379,152 @@ fun RidestrApp() {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
     keyManager: com.ridestr.common.nostr.keys.KeyManager,
     connectionStates: Map<String, RelayConnectionState>,
     settingsManager: SettingsManager,
+    userProfile: UserProfile?,
     onLogout: () -> Unit,
     onOpenProfile: () -> Unit,
-    onOpenDebug: () -> Unit,
     onOpenBackup: () -> Unit,
-    onOpenSettings: () -> Unit,
+    onOpenTiles: () -> Unit,
+    onOpenDevOptions: () -> Unit,
+    onOpenDebug: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val connectedCount = connectionStates.values.count { it == RelayConnectionState.CONNECTED }
     val totalRelays = connectionStates.size
+    val isConnected = connectedCount > 0
 
-    Column(
-        modifier = modifier.fillMaxSize()
-    ) {
-        // Header card with identity and utilities
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp)
-        ) {
-            Column(
-                modifier = Modifier.padding(12.dp)
+    // Current tab state
+    var currentTab by remember { mutableStateOf(Tab.RIDE) }
+
+    // Account bottom sheet state
+    var showAccountSheet by remember { mutableStateOf(false) }
+
+    // Rider ViewModel (persists across tab switches)
+    val riderViewModel: RiderViewModel = viewModel()
+
+    // Ensure relay connections when app returns to foreground
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        riderViewModel.onResume()
+    }
+
+    Scaffold(
+        modifier = modifier,
+        topBar = {
+            // Compact header with dynamic title, signal bars, and account button
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                tonalElevation = 1.dp
             ) {
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = keyManager.getNpub()?.let { "${it.take(16)}..." } ?: "Unknown",
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-                        )
-                        Text(
-                            text = "Relays: $connectedCount/$totalRelays",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (connectedCount > 0) MaterialTheme.colorScheme.primary
-                                   else MaterialTheme.colorScheme.error
-                        )
-                    }
-                    Row {
-                        IconButton(onClick = onOpenBackup) {
-                            Icon(Icons.Default.Key, contentDescription = "Backup Keys")
-                        }
-                        IconButton(onClick = onOpenProfile) {
-                            Icon(Icons.Default.Person, contentDescription = "Edit Profile")
-                        }
-                        IconButton(onClick = onOpenSettings) {
-                            Icon(Icons.Default.Settings, contentDescription = "Settings")
-                        }
-                        IconButton(onClick = onOpenDebug) {
-                            Icon(Icons.Default.BugReport, contentDescription = "Debug")
-                        }
-                    }
-                }
+                    // Dynamic title based on current tab
+                    Text(
+                        text = when (currentTab) {
+                            Tab.RIDE -> "Rider Mode"
+                            Tab.WALLET -> "Wallet"
+                            Tab.HISTORY -> "History"
+                            Tab.SETTINGS -> "Settings"
+                        },
+                        style = MaterialTheme.typography.titleLarge
+                    )
 
-                TextButton(
-                    onClick = onLogout,
-                    modifier = Modifier.align(Alignment.End)
-                ) {
-                    Text("Logout", style = MaterialTheme.typography.labelSmall)
+                    // Right side: Signal indicator + Account button
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RelaySignalIndicator(
+                            connectedCount = connectedCount,
+                            totalRelays = totalRelays
+                        )
+                        IconButton(onClick = { showAccountSheet = true }) {
+                            Icon(Icons.Default.Person, contentDescription = "Account")
+                        }
+                    }
                 }
             }
+        },
+        bottomBar = {
+            NavigationBar {
+                NavigationBarItem(
+                    icon = { Icon(Icons.Default.LocationOn, contentDescription = null) },
+                    label = { Text("Ride") },
+                    selected = currentTab == Tab.RIDE,
+                    onClick = { currentTab = Tab.RIDE }
+                )
+                NavigationBarItem(
+                    icon = { Icon(Icons.Default.AccountBalanceWallet, contentDescription = null) },
+                    label = { Text("Wallet") },
+                    selected = currentTab == Tab.WALLET,
+                    onClick = { currentTab = Tab.WALLET }
+                )
+                NavigationBarItem(
+                    icon = { Icon(Icons.Default.History, contentDescription = null) },
+                    label = { Text("History") },
+                    selected = currentTab == Tab.HISTORY,
+                    onClick = { currentTab = Tab.HISTORY }
+                )
+                NavigationBarItem(
+                    icon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                    label = { Text("Settings") },
+                    selected = currentTab == Tab.SETTINGS,
+                    onClick = { currentTab = Tab.SETTINGS }
+                )
+            }
         }
-
-        // Rider mode content (no mode switching in this app)
-        val riderViewModel: RiderViewModel = viewModel()
-
-        // Ensure relay connections when app returns to foreground
-        LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
-            riderViewModel.onResume()
+    ) { innerPadding ->
+        // Tab content
+        when (currentTab) {
+            Tab.RIDE -> {
+                RiderModeScreen(
+                    viewModel = riderViewModel,
+                    settingsManager = settingsManager,
+                    onOpenTiles = onOpenTiles,
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
+            Tab.WALLET -> {
+                WalletScreen(
+                    lightningAddress = userProfile?.lud16,
+                    onEditLightningAddress = onOpenProfile,
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
+            Tab.HISTORY -> {
+                HistoryScreen(
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
+            Tab.SETTINGS -> {
+                SettingsContent(
+                    settingsManager = settingsManager,
+                    onOpenTiles = onOpenTiles,
+                    onOpenDevOptions = onOpenDevOptions,
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
         }
+    }
 
-        RiderModeScreen(
-            viewModel = riderViewModel,
-            settingsManager = settingsManager,
-            modifier = Modifier.weight(1f)
+    // Account bottom sheet
+    if (showAccountSheet) {
+        AccountBottomSheet(
+            npub = keyManager.getNpub(),
+            relayStatus = "$connectedCount/$totalRelays relays",
+            isConnected = isConnected,
+            onEditProfile = onOpenProfile,
+            onBackupKeys = onOpenBackup,
+            onLogout = onLogout,
+            onDismiss = { showAccountSheet = false }
         )
     }
 }

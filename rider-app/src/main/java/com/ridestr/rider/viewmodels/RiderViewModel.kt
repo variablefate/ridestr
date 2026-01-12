@@ -367,6 +367,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             RideStage.WAITING_FOR_ACCEPTANCE -> "Waiting for driver to accept..."
             RideStage.DRIVER_ACCEPTED -> "Driver accepted! Confirming ride..."
             RideStage.RIDE_CONFIRMED -> "Ride confirmed! Tell driver PIN: ${pin ?: "N/A"}"
+            RideStage.DRIVER_ARRIVED -> "Driver has arrived at pickup!"
             RideStage.IN_PROGRESS -> "PIN verified! Ride in progress."
             RideStage.COMPLETED -> "Ride completed!"
         }
@@ -1380,6 +1381,10 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 pinSubmissionSubscriptionId?.let { nostrService.closeSubscription(it) }
                 pinSubmissionSubscriptionId = null
 
+                // Clear arrival notification now that ride is starting
+                val context = getApplication<Application>()
+                NotificationHelper.cancelNotification(context, NotificationHelper.NOTIFICATION_ID_RIDE_UPDATE)
+
                 _uiState.value = state.copy(
                     pinAttempts = newAttempts,
                     pinVerified = true,
@@ -1647,6 +1652,10 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         // Stop foreground service
         RiderActiveService.stop(getApplication())
 
+        // Clear all ride notifications
+        val context = getApplication<Application>()
+        NotificationHelper.cancelNotification(context, NotificationHelper.NOTIFICATION_ID_RIDE_UPDATE)
+
         // Clear persisted ride state
         clearSavedRideState()
 
@@ -1711,6 +1720,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         // Play driver arrived alert sound
         SoundManager.playDriverArrivedAlert(context)
 
+        // Clear any previous ride update notification before showing new one
+        NotificationHelper.cancelNotification(context, NotificationHelper.NOTIFICATION_ID_RIDE_UPDATE)
+
         // Show notification
         val contentIntent = android.app.PendingIntent.getActivity(
             context,
@@ -1730,8 +1742,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         // Update foreground service notification
         RiderActiveService.updateMessage(context, "Driver has arrived!")
 
-        // Update UI state
+        // Update UI state - change stage to DRIVER_ARRIVED
         _uiState.value = _uiState.value.copy(
+            rideStage = RideStage.DRIVER_ARRIVED,
             statusMessage = "Driver has arrived at pickup!"
         )
 
@@ -1929,7 +1942,8 @@ enum class RideStage {
     WAITING_FOR_ACCEPTANCE, // Direct offer sent, waiting for specific driver (legacy/advanced)
     DRIVER_ACCEPTED,        // Driver accepted, need to confirm
     RIDE_CONFIRMED,         // Ride confirmed, driver on the way
-    IN_PROGRESS,            // Currently in the ride
+    DRIVER_ARRIVED,         // Driver has arrived at pickup location
+    IN_PROGRESS,            // Currently in the ride (PIN verified)
     COMPLETED               // Ride completed
 }
 

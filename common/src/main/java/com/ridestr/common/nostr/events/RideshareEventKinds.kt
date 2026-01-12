@@ -54,6 +54,15 @@ object RideshareEventKinds {
     const val RIDE_CONFIRMATION = 3175
 
     /**
+     * Kind 3179: Precise Location Reveal Event (Regular)
+     * Sent by riders when driver is close (~1 mile) to share precise pickup/destination.
+     * Contains NIP-44 encrypted precise location.
+     * This enables progressive privacy - approximate location shared first,
+     * precise location only when driver is nearby.
+     */
+    const val PRECISE_LOCATION_REVEAL = 3179
+
+    /**
      * Kind 3180: Driver Status Event (Regular)
      * Sent by drivers during the ride to update status.
      * Can include: en_route_pickup, arrived, in_progress, completed.

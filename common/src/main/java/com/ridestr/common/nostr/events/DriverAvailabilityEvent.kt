@@ -1,6 +1,7 @@
 package com.ridestr.common.nostr.events
 
 import android.util.Log
+import com.ridestr.common.data.Vehicle
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
 import org.json.JSONObject
@@ -25,21 +26,30 @@ object DriverAvailabilityEvent {
 
     /**
      * Create and sign a driver availability event.
-     * Includes geohash tags for geographic filtering.
+     * Includes geohash tags for geographic filtering and optional vehicle info.
      *
      * @param signer The NostrSigner to sign the event
      * @param location Current driver location
      * @param status Driver status (STATUS_AVAILABLE or STATUS_OFFLINE)
+     * @param vehicle Optional vehicle info to include in the event
      */
     suspend fun create(
         signer: NostrSigner,
         location: Location,
-        status: String = STATUS_AVAILABLE
+        status: String = STATUS_AVAILABLE,
+        vehicle: Vehicle? = null
     ): Event {
         val approxLocation = location.approximate()
         val content = JSONObject().apply {
             put("approx_location", approxLocation.toJson())
             put("status", status)
+            // Include vehicle info if provided
+            vehicle?.let {
+                put("car_make", it.make)
+                put("car_model", it.model)
+                put("car_color", it.color)
+                put("car_year", it.year.toString())
+            }
         }.toString()
 
         // Generate geohash tags at different precision levels
@@ -81,7 +91,7 @@ object DriverAvailabilityEvent {
     }
 
     /**
-     * Parse a driver availability event to extract the location and status.
+     * Parse a driver availability event to extract the location, status, and vehicle info.
      */
     fun parse(event: Event): DriverAvailabilityData? {
         if (event.kind != RideshareEventKinds.DRIVER_AVAILABILITY) return null
@@ -93,13 +103,23 @@ object DriverAvailabilityEvent {
             // Default to "available" for backwards compatibility
             val status = json.optString("status", STATUS_AVAILABLE)
 
+            // Extract vehicle info if present
+            val carMake = json.optString("car_make", null)
+            val carModel = json.optString("car_model", null)
+            val carColor = json.optString("car_color", null)
+            val carYear = json.optString("car_year", null)
+
             location?.let {
                 DriverAvailabilityData(
                     eventId = event.id,
                     driverPubKey = event.pubKey,
                     approxLocation = it,
                     createdAt = event.createdAt,
-                    status = status
+                    status = status,
+                    carMake = carMake,
+                    carModel = carModel,
+                    carColor = carColor,
+                    carYear = carYear
                 )
             }
         } catch (e: Exception) {
@@ -116,7 +136,12 @@ data class DriverAvailabilityData(
     val driverPubKey: String,
     val approxLocation: Location,
     val createdAt: Long,
-    val status: String = DriverAvailabilityEvent.STATUS_AVAILABLE
+    val status: String = DriverAvailabilityEvent.STATUS_AVAILABLE,
+    // Vehicle info (may be null for older events without vehicle data)
+    val carMake: String? = null,
+    val carModel: String? = null,
+    val carColor: String? = null,
+    val carYear: String? = null
 ) {
     /** Returns true if the driver is available */
     val isAvailable: Boolean
@@ -125,4 +150,15 @@ data class DriverAvailabilityData(
     /** Returns true if the driver is offline */
     val isOffline: Boolean
         get() = status == DriverAvailabilityEvent.STATUS_OFFLINE
+
+    /** Returns true if vehicle info is present */
+    val hasVehicleInfo: Boolean
+        get() = carMake != null && carModel != null
+
+    /** Returns a formatted vehicle description like "White 2024 Toyota Camry" */
+    fun vehicleDescription(): String? {
+        if (!hasVehicleInfo) return null
+        val parts = listOfNotNull(carColor, carYear, carMake, carModel)
+        return if (parts.isNotEmpty()) parts.joinToString(" ") else null
+    }
 }
