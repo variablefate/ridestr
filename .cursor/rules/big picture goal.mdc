@@ -17,7 +17,7 @@ The implementation is built around **NIP-014173**, a Nostr Implementation Possib
 
 ## Key Components Implemented
 
-1. **Ten Custom Event Types** (using "173" base from NIP-014173 to avoid conflicts):
+1. **Eleven Custom Event Types** (using "173" base from NIP-014173 to avoid conflicts):
    - DriverAvailabilityEvent (Kind 30173): Broadcasts driver location and availability (parameterized replaceable, d-tag: "rideshare-availability")
    - RideOfferEvent (Kind 3173): Riders respond to available drivers with fare estimates
    - RideAcceptanceEvent (Kind 3174): Drivers accept ride offers
@@ -28,6 +28,7 @@ The implementation is built around **NIP-014173**, a Nostr Implementation Possib
    - RideCancellationEvent (Kind 3179): Either party cancels an active ride
    - DriverStatusEvent (Kind 3180): Drivers update status and request payment upon completion (regular)
    - PreciseLocationRevealEvent (Kind 3181): Riders share precise pickup/destination when driver is nearby
+   - RideHistoryEvent (Kind 30174): Encrypted backup of ride history (parameterized replaceable) - not yet integrated
 
 2. **UI Implementation**:
    - Dedicated RideshareScreen with both driver and rider modes

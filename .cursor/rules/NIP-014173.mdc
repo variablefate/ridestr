@@ -21,11 +21,11 @@ Precise Location: Exact coordinates and address, shared only after mutual agreem
 Handshake: A mutual agreement process before exchanging sensitive data.
 
 Specification
-This NIP defines ten custom event kinds using the "173" base (from NIP-014173) to avoid conflicts with other NIPs:
+This NIP defines eleven custom event kinds using the "173" base (from NIP-014173) to avoid conflicts with other NIPs:
 
 Event Kind Ranges:
 - Regular events (stored by relays): 3173-3181
-- Parameterized replaceable (latest per d-tag): 30173
+- Parameterized replaceable (latest per d-tag): 30173, 30174
 
 Kind Overview:
 | Kind  | Name                    | Type                      |
@@ -40,6 +40,7 @@ Kind Overview:
 | 3179  | Ride Cancellation       | Regular                   |
 | 3180  | Driver Status           | Regular                   |
 | 3181  | Precise Location Reveal | Regular                   |
+| 30174 | Ride History Backup     | Parameterized Replaceable |
 
 All events conform to the standard Nostr event structure as defined in NIP-01:
 id: 32-byte lowercase hex-encoded SHA256 hash of the serialized event data.
@@ -619,7 +620,7 @@ Notes:
 - Relays SHOULD honor deletion requests from the original event author
 - Clients should not rely on deletions being permanent (some relays may ignore)
 - Driver status events (Kind 3180) are regular events and stored by relays (critical for completion events)
-- Parameterized replaceable events (Kind 30173) automatically keep only the latest version per d-tag
+- Parameterized replaceable events (Kind 30173, 30174) automatically keep only the latest version per d-tag
 - Ride cancellation events (Kind 3179) have NIP-40 expiration and cleanup should be excluded from normal deletion flows
 
 Offline Availability Events:

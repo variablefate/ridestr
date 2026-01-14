@@ -100,8 +100,16 @@ object RideshareEventKinds {
      */
     const val RIDE_CANCELLATION = 3179
 
-    // Kind 30174 (RIDE_HISTORY_BACKUP) removed - was dead code, never integrated
-    // Can be re-added when ride history feature is actually built
+    /**
+     * Kind 30174: Ride History Backup Event (Parameterized Replaceable)
+     * Encrypted backup of user's ride history and statistics.
+     * Content is NIP-44 encrypted to self.
+     * Parameterized replaceable: only the latest backup per user is kept.
+     * Uses d-tag "rideshare-history" for identification.
+     *
+     * Note: Not yet integrated - placeholder for future ride history feature.
+     */
+    const val RIDE_HISTORY_BACKUP = 30174
 }
 
 /**
