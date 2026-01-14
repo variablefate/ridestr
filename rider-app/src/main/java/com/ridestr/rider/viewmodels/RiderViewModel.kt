@@ -1543,7 +1543,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     private fun subscribeToPinSubmissions(confirmationEventId: String, driverPubKey: String) {
         pinSubmissionSubscriptionId?.let { nostrService.closeSubscription(it) }
 
-        pinSubmissionSubscriptionId = nostrService.subscribeToPinSubmissions(confirmationEventId) { submission ->
+        pinSubmissionSubscriptionId = nostrService.subscribeToPinSubmissions(confirmationEventId, viewModelScope) { submission ->
             Log.d(TAG, "Received PIN submission from driver: ${submission.submittedPin}")
             verifyPinSubmission(submission, driverPubKey)
         }
@@ -1637,7 +1637,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         val oldSubscriptionId = chatSubscriptionId
 
         // Create new subscription FIRST (before closing old one to avoid gaps)
-        chatSubscriptionId = nostrService.subscribeToChatMessages(confirmationEventId) { chatData ->
+        chatSubscriptionId = nostrService.subscribeToChatMessages(confirmationEventId, viewModelScope) { chatData ->
             Log.d(TAG, "Received chat message from ${chatData.senderPubKey.take(8)}: ${chatData.message}")
 
             // Add to chat messages list

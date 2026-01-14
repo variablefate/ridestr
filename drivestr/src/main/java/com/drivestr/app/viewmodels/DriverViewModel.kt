@@ -1199,7 +1199,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Start confirmation timeout - if no confirmation arrives, rider may have cancelled
         startConfirmationTimeout()
 
-        confirmationSubscriptionId = nostrService.subscribeToConfirmation(acceptanceEventId) { confirmation ->
+        confirmationSubscriptionId = nostrService.subscribeToConfirmation(acceptanceEventId, viewModelScope) { confirmation ->
             Log.d(TAG, "Received ride confirmation: ${confirmation.eventId}")
             Log.d(TAG, "Precise pickup: ${confirmation.precisePickup.lat}, ${confirmation.precisePickup.lon}")
 
@@ -1345,7 +1345,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         val oldSubscriptionId = chatSubscriptionId
 
         // Create new subscription FIRST (before closing old one to avoid gaps)
-        chatSubscriptionId = nostrService.subscribeToChatMessages(confirmationEventId) { chatData ->
+        chatSubscriptionId = nostrService.subscribeToChatMessages(confirmationEventId, viewModelScope) { chatData ->
             Log.d(TAG, "Received chat message from ${chatData.senderPubKey.take(8)}: ${chatData.message}")
 
             // Add to chat messages list
@@ -1435,7 +1435,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
         Log.d(TAG, "Subscribing to precise location reveals for confirmation: ${confirmationEventId.take(8)}")
 
-        val newSubId = nostrService.subscribeToPreciseLocationReveals(confirmationEventId) { revealData ->
+        val newSubId = nostrService.subscribeToPreciseLocationReveals(confirmationEventId, viewModelScope) { revealData ->
             Log.d(TAG, "Received precise location reveal: ${revealData.locationType}")
             Log.d(TAG, "Precise location: ${revealData.preciseLocation.lat}, ${revealData.preciseLocation.lon}")
 
@@ -1698,7 +1698,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     private fun subscribeToOffers() {
         offerSubscriptionId?.let { nostrService.closeSubscription(it) }
 
-        offerSubscriptionId = nostrService.subscribeToOffers { offer ->
+        offerSubscriptionId = nostrService.subscribeToOffers(viewModelScope) { offer ->
             Log.d(TAG, "Received ride offer from ${offer.riderPubKey.take(8)}...")
 
             // Filter out offers we've already accepted (prevents duplicates after ride completion)

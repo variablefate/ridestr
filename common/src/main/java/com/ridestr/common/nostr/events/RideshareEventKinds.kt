@@ -100,14 +100,8 @@ object RideshareEventKinds {
      */
     const val RIDE_CANCELLATION = 3179
 
-    /**
-     * Kind 30174: Ride History Backup Event (Parameterized Replaceable)
-     * Encrypted backup of user's ride history and statistics.
-     * Content is NIP-44 encrypted to self.
-     * Parameterized replaceable: only the latest backup per user is kept.
-     * Uses d-tag "rideshare-history" for identification.
-     */
-    const val RIDE_HISTORY_BACKUP = 30174
+    // Kind 30174 (RIDE_HISTORY_BACKUP) removed - was dead code, never integrated
+    // Can be re-added when ride history feature is actually built
 }
 
 /**
@@ -155,8 +149,6 @@ object RideshareExpiration {
 
     // Post-ride: 24 hours (for dispute resolution)
     const val RIDE_CANCELLATION_HOURS = 24
-
-    // RIDE_HISTORY_BACKUP - no expiration (permanent personal backup)
 
     // Helper functions to calculate expiration timestamp
     fun minutesFromNow(minutes: Int): Long =

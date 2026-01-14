@@ -8,12 +8,13 @@ import com.ridestr.common.nostr.keys.KeyManager
 import com.ridestr.common.nostr.relay.RelayConfig
 import com.ridestr.common.nostr.relay.RelayConnectionState
 import com.ridestr.common.nostr.relay.RelayManager
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+// GlobalScope removed - all decrypt coroutines now use caller-provided scope
 
 /**
  * High-level facade for all Nostr operations in the rideshare app.
@@ -220,7 +221,6 @@ class NostrService(
             // EXCLUDED: RIDE_CANCELLATION (3179) - expires in 24h, both apps need it for state
             RideshareEventKinds.DRIVER_STATUS,        // 3180
             RideshareEventKinds.PRECISE_LOCATION_REVEAL, // 3181
-            RideshareEventKinds.RIDE_HISTORY_BACKUP,  // 30174 - included here for full account wipe
             // Legacy rideshare-specific kinds (may have old events on relays)
             20173   // Old ephemeral driver status (changed to 3180)
             // Note: NOT including 1059/1060 (Gift Wrap/Seal) - those are standard
@@ -349,7 +349,6 @@ class NostrService(
             RideshareEventKinds.RIDE_CANCELLATION,    // 3179
             RideshareEventKinds.DRIVER_STATUS,        // 3180
             RideshareEventKinds.PRECISE_LOCATION_REVEAL, // 3181
-            RideshareEventKinds.RIDE_HISTORY_BACKUP,  // 30174
             // Legacy rideshare-specific kinds (may have old events on relays)
             20173   // Old ephemeral driver status (changed to 3180)
             // Note: NOT including 1059/1060 (Gift Wrap/Seal) - those are standard
@@ -410,7 +409,6 @@ class NostrService(
             RideshareEventKinds.RIDE_CANCELLATION,
             RideshareEventKinds.DRIVER_STATUS,
             RideshareEventKinds.PRECISE_LOCATION_REVEAL,
-            RideshareEventKinds.RIDE_HISTORY_BACKUP,
             20173  // Legacy ephemeral driver status
         )
 
@@ -442,7 +440,6 @@ class NostrService(
 
     /**
      * Background cleanup of ALL rideshare events on connected relays.
-     * Excludes RIDE_HISTORY_BACKUP (kind 30174) which is the user's permanent record.
      * Runs asynchronously and does NOT block the caller - designed to be launched
      * from viewModelScope.launch {} without awaiting.
      *
@@ -460,7 +457,6 @@ class NostrService(
         }
 
         // All rideshare kinds EXCEPT:
-        // - RIDE_HISTORY_BACKUP (30174) - user's permanent encrypted record
         // - RIDE_CANCELLATION (3179) - expires naturally, needed for state consistency
         val kindsToClean = listOf(
             RideshareEventKinds.DRIVER_AVAILABILITY,     // 30173
@@ -1010,10 +1006,12 @@ class NostrService(
      * Subscribe to ride offers for the current user (as driver).
      * Direct offers are now NIP-44 encrypted for privacy.
      * Only returns offers from the last 10 minutes to avoid stale requests.
+     * @param scope CoroutineScope for async decryption (use viewModelScope in ViewModels)
      * @param onOffer Called when a ride offer is received (after decryption)
      * @return Subscription ID for closing later, null if not logged in
      */
     fun subscribeToOffers(
+        scope: CoroutineScope,
         onOffer: (RideOfferData) -> Unit
     ): String? {
         val myPubKey = keyManager.getPubKeyHex() ?: return null
@@ -1029,7 +1027,7 @@ class NostrService(
         ) { event, _ ->
             // Direct offers are now encrypted - parse and decrypt
             RideOfferEvent.parseEncrypted(event)?.let { encryptedData ->
-                GlobalScope.launch {
+                scope.launch {
                     RideOfferEvent.decrypt(signer, encryptedData)?.let { data ->
                         Log.d(TAG, "Decrypted direct offer from ${data.riderPubKey.take(8)}")
                         onOffer(data)
@@ -1063,11 +1061,13 @@ class NostrService(
      * Subscribe to ride confirmations for a specific acceptance (driver listens for rider's confirmation).
      * Automatically decrypts the precise pickup location.
      * @param acceptanceEventId The acceptance event ID to watch
+     * @param scope CoroutineScope for async decryption (use viewModelScope in ViewModels)
      * @param onConfirmation Called when confirmation is received (with decrypted location)
      * @return Subscription ID for closing later
      */
     fun subscribeToConfirmation(
         acceptanceEventId: String,
+        scope: CoroutineScope,
         onConfirmation: (RideConfirmationData) -> Unit
     ): String {
         return relayManager.subscribe(
@@ -1079,7 +1079,7 @@ class NostrService(
                 // Decrypt using driver's key
                 val signer = keyManager.getSigner()
                 if (signer != null) {
-                    GlobalScope.launch {
+                    scope.launch {
                         RideConfirmationEvent.decrypt(signer, encryptedData)?.let { data ->
                             onConfirmation(data)
                         }
@@ -1093,11 +1093,13 @@ class NostrService(
      * Subscribe to PIN submissions for a confirmed ride (rider listens for driver's PIN).
      * Automatically decrypts the PIN using the rider's key.
      * @param confirmationEventId The confirmation event ID to watch
+     * @param scope CoroutineScope for async decryption (use viewModelScope in ViewModels)
      * @param onPinSubmission Called when PIN is submitted (with decrypted PIN)
      * @return Subscription ID for closing later
      */
     fun subscribeToPinSubmissions(
         confirmationEventId: String,
+        scope: CoroutineScope,
         onPinSubmission: (PinSubmissionData) -> Unit
     ): String {
         return relayManager.subscribe(
@@ -1109,7 +1111,7 @@ class NostrService(
                 // Decrypt using rider's key
                 val signer = keyManager.getSigner()
                 if (signer != null) {
-                    GlobalScope.launch {
+                    scope.launch {
                         PinSubmissionEvent.decrypt(signer, encryptedData)?.let { data ->
                             onPinSubmission(data)
                         }
@@ -1282,11 +1284,13 @@ class NostrService(
      * Automatically decrypts the location data.
      *
      * @param confirmationEventId The confirmation event ID to watch
+     * @param scope CoroutineScope for async decryption (use viewModelScope in ViewModels)
      * @param onReveal Called when a precise location is revealed (with decrypted location)
      * @return Subscription ID for closing later, or null if not logged in
      */
     fun subscribeToPreciseLocationReveals(
         confirmationEventId: String,
+        scope: CoroutineScope,
         onReveal: (PreciseLocationRevealData) -> Unit
     ): String? {
         val myPubKey = keyManager.getPubKeyHex() ?: return null
@@ -1303,7 +1307,7 @@ class NostrService(
             // Decrypt the location data
             val signer = keyManager.getSigner()
             if (signer != null) {
-                GlobalScope.launch {
+                scope.launch {
                     try {
                         PreciseLocationRevealEvent.parseEncrypted(event)?.let { encryptedData ->
                             PreciseLocationRevealEvent.decrypt(signer, encryptedData)?.let { data ->
@@ -1372,11 +1376,13 @@ class NostrService(
      * Automatically decrypts NIP-44 encrypted messages.
      *
      * @param confirmationEventId The ride confirmation event ID to filter by (optional)
+     * @param scope CoroutineScope for async decryption (use viewModelScope in ViewModels)
      * @param onMessage Called when a chat message is received (decrypted)
      * @return Subscription ID for closing later
      */
     fun subscribeToChatMessages(
         confirmationEventId: String? = null,
+        scope: CoroutineScope,
         onMessage: (RideshareChatData) -> Unit
     ): String? {
         val myPubKey = keyManager.getPubKeyHex() ?: return null
@@ -1391,7 +1397,7 @@ class NostrService(
             // Decrypt the message
             val signer = keyManager.getSigner()
             if (signer != null) {
-                GlobalScope.launch {
+                scope.launch {
                     try {
                         RideshareChatEvent.parseAndDecrypt(signer, event)?.let { chatData ->
                             // Filter by confirmation event if specified

@@ -1,3 +1,17 @@
+/**
+ * DEPRECATED MODULE
+ *
+ * This app module is deprecated and not maintained.
+ * It uses outdated event kinds and is missing critical features:
+ * - Uses Kind 20173 (ephemeral) instead of Kind 3180 (regular) for driver status
+ * - Missing event kinds: 3179 (cancellation), 3180 (driver status), 3181 (precise location)
+ * - Missing k-tag support in deletion events (NIP-09)
+ *
+ * For production builds, use:
+ * - drivestr/ - Driver app
+ * - rider-app/ - Rider app
+ */
+
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {

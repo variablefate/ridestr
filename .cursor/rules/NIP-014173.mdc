@@ -21,11 +21,11 @@ Precise Location: Exact coordinates and address, shared only after mutual agreem
 Handshake: A mutual agreement process before exchanging sensitive data.
 
 Specification
-This NIP defines eleven custom event kinds using the "173" base (from NIP-014173) to avoid conflicts with other NIPs:
+This NIP defines ten custom event kinds using the "173" base (from NIP-014173) to avoid conflicts with other NIPs:
 
 Event Kind Ranges:
 - Regular events (stored by relays): 3173-3181
-- Parameterized replaceable (latest per d-tag): 30173-30174
+- Parameterized replaceable (latest per d-tag): 30173
 
 Kind Overview:
 | Kind  | Name                    | Type                      |
@@ -40,7 +40,6 @@ Kind Overview:
 | 3179  | Ride Cancellation       | Regular                   |
 | 3180  | Driver Status           | Regular                   |
 | 3181  | Precise Location Reveal | Regular                   |
-| 30174 | Ride History Backup     | Parameterized Replaceable |
 
 All events conform to the standard Nostr event structure as defined in NIP-01:
 id: 32-byte lowercase hex-encoded SHA256 hash of the serialized event data.
@@ -431,62 +430,6 @@ Privacy Notes:
 - Only sent when driver is within ~1 mile to reduce tracking risk
 - Content is NIP-44 encrypted so only the driver can read it
 
-Kind 30174: Ride History Backup (Parameterized Replaceable)
-Description: Encrypted backup of user's ride history and statistics. Content is NIP-44 encrypted to self (user's own pubkey). As a parameterized replaceable event with d-tag "rideshare-history", only the latest backup per user is kept by relays.
-
-This allows users to:
-- Backup their ride history across devices
-- Restore history after reinstalling the app
-- Maintain aggregate statistics (total rides, total distance, etc.)
-
-Fields:
-id: Unique event identifier.
-
-pubkey: User's public key.
-
-created_at: Unix timestamp of event creation.
-
-kind: 30174.
-
-tags: [["d", "rideshare-history"], ["t", "rideshare"]].
-
-content: NIP-44 encrypted to self, JSON object with rides array and stats.
-
-Decrypted content structure:
-json
-
-{
-  "rides": [
-    {
-      "ride_id": "<kind-3175-event-id>",
-      "timestamp": 1698765600,
-      "role": "rider",
-      "counterparty": "<driver-pubkey>",
-      "pickup_lat": 37.7749,
-      "pickup_lon": -122.4194,
-      "dropoff_lat": 37.79,
-      "dropoff_lon": -122.39,
-      "distance_miles": 2.5,
-      "duration_minutes": 12,
-      "fare_sats": 500,
-      "status": "completed"
-    }
-  ],
-  "stats": {
-    "total_rides_rider": 15,
-    "total_rides_driver": 0,
-    "total_distance_miles": 45.2,
-    "total_duration_minutes": 180,
-    "total_fare_earned": 0,
-    "total_fare_paid": 7500,
-    "completed_rides": 14,
-    "cancelled_rides": 1
-  },
-  "updated_at": 1698765700
-}
-
-sig: Signature of the event's SHA256 hash.
-
 Dependencies
 NIP-01: Defines the standard event structure.
 
@@ -676,7 +619,7 @@ Notes:
 - Relays SHOULD honor deletion requests from the original event author
 - Clients should not rely on deletions being permanent (some relays may ignore)
 - Driver status events (Kind 3180) are regular events and stored by relays (critical for completion events)
-- Parameterized replaceable events (Kind 30173, 30174) automatically keep only the latest version
+- Parameterized replaceable events (Kind 30173) automatically keep only the latest version per d-tag
 - Ride cancellation events (Kind 3179) have NIP-40 expiration and cleanup should be excluded from normal deletion flows
 
 Offline Availability Events:

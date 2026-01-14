@@ -62,6 +62,9 @@ object DriverAvailabilityEvent {
         Log.d(TAG, "Geohash tags: $geohashTags")
 
         val tags = mutableListOf(
+            // d-tag required for parameterized replaceable events (Kind 30xxx)
+            // Relays use this to identify which event to replace per author
+            arrayOf("d", "rideshare-availability"),
             arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG)
         )
 

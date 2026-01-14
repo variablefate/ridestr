@@ -303,7 +303,6 @@ fun AccountSafetyScreen(
                         EventTypeRow("Ride Cancellations", RideshareEventKinds.RIDE_CANCELLATION, kindCounts?.get(RideshareEventKinds.RIDE_CANCELLATION))
                         EventTypeRow("Driver Status", RideshareEventKinds.DRIVER_STATUS, kindCounts?.get(RideshareEventKinds.DRIVER_STATUS))
                         EventTypeRow("Location Reveals", RideshareEventKinds.PRECISE_LOCATION_REVEAL, kindCounts?.get(RideshareEventKinds.PRECISE_LOCATION_REVEAL))
-                        EventTypeRow("Ride History Backup", RideshareEventKinds.RIDE_HISTORY_BACKUP, kindCounts?.get(RideshareEventKinds.RIDE_HISTORY_BACKUP))
                     }
 
                     Spacer(modifier = Modifier.height(16.dp))
