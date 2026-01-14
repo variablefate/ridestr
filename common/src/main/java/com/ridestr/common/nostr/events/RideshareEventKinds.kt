@@ -130,4 +130,38 @@ object RideshareTags {
     const val HASHTAG = "t"
     const val GEOHASH = "g"
     const val RIDESHARE_TAG = "rideshare"
+    const val EXPIRATION = "expiration"  // NIP-40
+}
+
+/**
+ * NIP-40 expiration durations for rideshare events.
+ * Events include expiration tags to enable automatic relay cleanup.
+ */
+object RideshareExpiration {
+    // Pre-ride events: short TTL (stale if not acted on quickly)
+    const val DRIVER_AVAILABILITY_MINUTES = 30
+    const val RIDE_OFFER_MINUTES = 15
+    const val RIDE_ACCEPTANCE_MINUTES = 10
+
+    // During-ride events: 8 hours (covers long rides + buffer)
+    const val RIDE_CONFIRMATION_HOURS = 8
+    const val DRIVER_STATUS_HOURS = 8
+    const val RIDESHARE_CHAT_HOURS = 8
+    const val PRECISE_LOCATION_HOURS = 8
+
+    // Pickup verification: 30 minutes (happens quickly)
+    const val PIN_SUBMISSION_MINUTES = 30
+    const val PICKUP_VERIFICATION_MINUTES = 30
+
+    // Post-ride: 24 hours (for dispute resolution)
+    const val RIDE_CANCELLATION_HOURS = 24
+
+    // RIDE_HISTORY_BACKUP - no expiration (permanent personal backup)
+
+    // Helper functions to calculate expiration timestamp
+    fun minutesFromNow(minutes: Int): Long =
+        (System.currentTimeMillis() / 1000) + (minutes * 60L)
+
+    fun hoursFromNow(hours: Int): Long =
+        (System.currentTimeMillis() / 1000) + (hours * 60L * 60L)
 }

@@ -49,10 +49,14 @@ object RideshareChatEvent {
         // Encrypt with NIP-44 to recipient
         val encryptedContent = signer.nip44Encrypt(plaintext, recipientPubKey)
 
+        // Add NIP-40 expiration (8 hours)
+        val expiration = RideshareExpiration.hoursFromNow(RideshareExpiration.RIDESHARE_CHAT_HOURS)
+
         val tags = arrayOf(
             arrayOf(RideshareTags.PUBKEY_REF, recipientPubKey),
             arrayOf(RideshareTags.EVENT_REF, confirmationEventId),
-            arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG)
+            arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG),
+            arrayOf(RideshareTags.EXPIRATION, expiration.toString())
         )
 
         return signer.sign<Event>(

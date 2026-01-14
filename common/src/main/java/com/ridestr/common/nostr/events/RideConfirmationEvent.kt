@@ -29,10 +29,14 @@ object RideConfirmationEvent {
         // Encrypt using NIP-44
         val encryptedContent = signer.nip44Encrypt(plaintext, driverPubKey)
 
+        // Add NIP-40 expiration (8 hours)
+        val expiration = RideshareExpiration.hoursFromNow(RideshareExpiration.RIDE_CONFIRMATION_HOURS)
+
         val tags = arrayOf(
             arrayOf(RideshareTags.EVENT_REF, acceptanceEventId),
             arrayOf(RideshareTags.PUBKEY_REF, driverPubKey),
-            arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG)
+            arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG),
+            arrayOf(RideshareTags.EXPIRATION, expiration.toString())
         )
 
         return signer.sign<Event>(

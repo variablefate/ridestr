@@ -32,6 +32,7 @@ fun AccountSafetyScreen(
     var deleteResult by remember { mutableStateOf<DeleteResult?>(null) }
     var isCheckingEvents by remember { mutableStateOf(false) }
     var eventCount by remember { mutableStateOf<Int?>(null) }
+    var kindCounts by remember { mutableStateOf<Map<Int, Int>?>(null) }
     val scope = rememberCoroutineScope()
 
     // Confirmation dialog
@@ -224,8 +225,11 @@ fun AccountSafetyScreen(
                             scope.launch {
                                 isCheckingEvents = true
                                 eventCount = null
+                                kindCounts = null
                                 try {
-                                    eventCount = nostrService.countRideshareEvents()
+                                    val counts = nostrService.countRideshareEventsByKind()
+                                    kindCounts = counts
+                                    eventCount = counts.values.sum()
                                 } catch (e: Exception) {
                                     eventCount = -1 // Error indicator
                                 }
@@ -283,23 +287,23 @@ fun AccountSafetyScreen(
 
                     // Event types that will be deleted
                     Text(
-                        text = "Event types included:",
+                        text = if (kindCounts != null) "Event types found:" else "Event types included:",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Column(modifier = Modifier.padding(start = 8.dp)) {
-                        EventTypeRow("Driver Availability", RideshareEventKinds.DRIVER_AVAILABILITY)
-                        EventTypeRow("Ride Offers", RideshareEventKinds.RIDE_OFFER)
-                        EventTypeRow("Ride Acceptances", RideshareEventKinds.RIDE_ACCEPTANCE)
-                        EventTypeRow("Ride Confirmations", RideshareEventKinds.RIDE_CONFIRMATION)
-                        EventTypeRow("PIN Submissions", RideshareEventKinds.PIN_SUBMISSION)
-                        EventTypeRow("Pickup Verifications", RideshareEventKinds.PICKUP_VERIFICATION)
-                        EventTypeRow("Chat Messages", RideshareEventKinds.RIDESHARE_CHAT)
-                        EventTypeRow("Ride Cancellations", RideshareEventKinds.RIDE_CANCELLATION)
-                        EventTypeRow("Driver Status", RideshareEventKinds.DRIVER_STATUS)
-                        EventTypeRow("Location Reveals", RideshareEventKinds.PRECISE_LOCATION_REVEAL)
-                        EventTypeRow("Ride History Backup", RideshareEventKinds.RIDE_HISTORY_BACKUP)
+                        EventTypeRow("Driver Availability", RideshareEventKinds.DRIVER_AVAILABILITY, kindCounts?.get(RideshareEventKinds.DRIVER_AVAILABILITY))
+                        EventTypeRow("Ride Offers", RideshareEventKinds.RIDE_OFFER, kindCounts?.get(RideshareEventKinds.RIDE_OFFER))
+                        EventTypeRow("Ride Acceptances", RideshareEventKinds.RIDE_ACCEPTANCE, kindCounts?.get(RideshareEventKinds.RIDE_ACCEPTANCE))
+                        EventTypeRow("Ride Confirmations", RideshareEventKinds.RIDE_CONFIRMATION, kindCounts?.get(RideshareEventKinds.RIDE_CONFIRMATION))
+                        EventTypeRow("PIN Submissions", RideshareEventKinds.PIN_SUBMISSION, kindCounts?.get(RideshareEventKinds.PIN_SUBMISSION))
+                        EventTypeRow("Pickup Verifications", RideshareEventKinds.PICKUP_VERIFICATION, kindCounts?.get(RideshareEventKinds.PICKUP_VERIFICATION))
+                        EventTypeRow("Chat Messages", RideshareEventKinds.RIDESHARE_CHAT, kindCounts?.get(RideshareEventKinds.RIDESHARE_CHAT))
+                        EventTypeRow("Ride Cancellations", RideshareEventKinds.RIDE_CANCELLATION, kindCounts?.get(RideshareEventKinds.RIDE_CANCELLATION))
+                        EventTypeRow("Driver Status", RideshareEventKinds.DRIVER_STATUS, kindCounts?.get(RideshareEventKinds.DRIVER_STATUS))
+                        EventTypeRow("Location Reveals", RideshareEventKinds.PRECISE_LOCATION_REVEAL, kindCounts?.get(RideshareEventKinds.PRECISE_LOCATION_REVEAL))
+                        EventTypeRow("Ride History Backup", RideshareEventKinds.RIDE_HISTORY_BACKUP, kindCounts?.get(RideshareEventKinds.RIDE_HISTORY_BACKUP))
                     }
 
                     Spacer(modifier = Modifier.height(16.dp))
@@ -314,6 +318,147 @@ fun AccountSafetyScreen(
                         Icon(Icons.Default.Delete, contentDescription = null)
                         Spacer(modifier = Modifier.width(8.dp))
                         Text("Delete All Events")
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Advanced Cleanup - Granular per-kind deletion
+            var showAdvancedCleanup by remember { mutableStateOf(false) }
+            var isDeletingKind by remember { mutableStateOf<Int?>(null) }
+            var kindDeleteResult by remember { mutableStateOf<Pair<Int, DeleteResult>?>(null) }
+
+            Card(
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Default.Build,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.secondary
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text(
+                                    text = "Advanced Cleanup",
+                                    style = MaterialTheme.typography.bodyLarge
+                                )
+                                Text(
+                                    text = "Delete specific event types only",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        IconButton(onClick = { showAdvancedCleanup = !showAdvancedCleanup }) {
+                            Icon(
+                                imageVector = if (showAdvancedCleanup) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                                contentDescription = if (showAdvancedCleanup) "Collapse" else "Expand"
+                            )
+                        }
+                    }
+
+                    if (showAdvancedCleanup) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        HorizontalDivider()
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        // Per-kind deletion buttons
+                        val kindOptions = listOf(
+                            Triple("Availability Events", RideshareEventKinds.DRIVER_AVAILABILITY, "Stale online status from crashed sessions"),
+                            Triple("Status Updates", RideshareEventKinds.DRIVER_STATUS, "EN_ROUTE, ARRIVED, IN_PROGRESS, etc."),
+                            Triple("Chat Messages", RideshareEventKinds.RIDESHARE_CHAT, "In-ride messages"),
+                            Triple("PIN Submissions", RideshareEventKinds.PIN_SUBMISSION, "Pickup verification attempts"),
+                            Triple("Ride Cancellations", RideshareEventKinds.RIDE_CANCELLATION, "Cancelled ride notices"),
+                            Triple("Ride Acceptances", RideshareEventKinds.RIDE_ACCEPTANCE, "Your accepted rides"),
+                            Triple("Location Reveals", RideshareEventKinds.PRECISE_LOCATION_REVEAL, "Encrypted precise locations")
+                        )
+
+                        kindOptions.forEach { (name, kind, description) ->
+                            OutlinedButton(
+                                onClick = {
+                                    scope.launch {
+                                        isDeletingKind = kind
+                                        kindDeleteResult = null
+                                        try {
+                                            val count = nostrService.deleteMyEventsByKind(kind, "manual cleanup")
+                                            kindDeleteResult = kind to DeleteResult.Success(count)
+                                        } catch (e: Exception) {
+                                            kindDeleteResult = kind to DeleteResult.Error(e.message ?: "Unknown error")
+                                        }
+                                        isDeletingKind = null
+                                    }
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp),
+                                enabled = isDeletingKind == null
+                            ) {
+                                if (isDeletingKind == kind) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(16.dp),
+                                        strokeWidth = 2.dp
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                }
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    horizontalAlignment = Alignment.Start
+                                ) {
+                                    Text(
+                                        text = "$name (kind $kind)",
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                    Text(
+                                        text = description,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+
+                            // Show result for this kind
+                            kindDeleteResult?.let { (resultKind, result) ->
+                                if (resultKind == kind) {
+                                    Row(
+                                        modifier = Modifier.padding(start = 8.dp, bottom = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            imageVector = when (result) {
+                                                is DeleteResult.Success -> Icons.Default.CheckCircle
+                                                is DeleteResult.Error -> Icons.Default.Warning
+                                            },
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp),
+                                            tint = when (result) {
+                                                is DeleteResult.Success -> MaterialTheme.colorScheme.primary
+                                                is DeleteResult.Error -> MaterialTheme.colorScheme.error
+                                            }
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            text = when (result) {
+                                                is DeleteResult.Success -> "Deleted ${result.count} events"
+                                                is DeleteResult.Error -> "Error: ${result.message}"
+                                            },
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = when (result) {
+                                                is DeleteResult.Success -> MaterialTheme.colorScheme.primary
+                                                is DeleteResult.Error -> MaterialTheme.colorScheme.error
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -401,7 +546,7 @@ fun AccountSafetyScreen(
 }
 
 @Composable
-private fun EventTypeRow(name: String, kind: Int) {
+private fun EventTypeRow(name: String, kind: Int, count: Int? = null) {
     Row(
         modifier = Modifier.padding(vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -413,9 +558,17 @@ private fun EventTypeRow(name: String, kind: Int) {
         )
         Spacer(modifier = Modifier.width(8.dp))
         Text(
-            text = "$name (kind $kind)",
+            text = if (count != null && count > 0) {
+                "$name ($count)"
+            } else {
+                name
+            },
             style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = if (count != null && count > 0) {
+                MaterialTheme.colorScheme.error
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            }
         )
     }
 }

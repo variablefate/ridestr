@@ -132,6 +132,28 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     // First-acceptance-wins flag for broadcast mode
     private var hasAcceptedDriver: Boolean = false
 
+    // ALL events I publish during a ride (for NIP-09 deletion on completion/cancellation)
+    private val myRideEventIds = mutableListOf<String>()
+
+    /**
+     * Clean up all ride events in background (NIP-09 deletion).
+     * NON-BLOCKING - launches cleanup in separate coroutine so UI transitions immediately.
+     *
+     * Uses the same query-then-delete approach as Account Safety which is proven to work.
+     * Excludes RIDE_HISTORY_BACKUP (30174) and RIDE_CANCELLATION (3179).
+     */
+    private fun cleanupRideEventsInBackground(reason: String) {
+        // Clear tracked IDs synchronously
+        myRideEventIds.clear()
+
+        // Launch cleanup in background - does NOT block caller
+        viewModelScope.launch {
+            Log.d(TAG, "=== BACKGROUND CLEANUP START: $reason ===")
+            val deletedCount = nostrService.backgroundCleanupRideshareEvents(reason)
+            Log.d(TAG, "=== BACKGROUND CLEANUP DONE: Deleted $deletedCount rider events ===")
+        }
+    }
+
     init {
         // Connect to relays and subscribe to drivers
         nostrService.connect()
@@ -423,7 +445,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.value = _uiState.value.copy(
             availableDrivers = emptyList(),
             selectedDriver = null,
-            driverProfiles = emptyMap()
+            driverProfiles = emptyMap(),
+            nearbyDriverCount = 0  // Reset counter - will be updated by new subscription callbacks
         )
 
         // Close profile subscriptions
@@ -753,6 +776,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
             if (eventId != null) {
                 Log.d(TAG, "Sent ride offer: $eventId")
+                myRideEventIds.add(eventId)  // Track for cleanup
                 // Subscribe to acceptance for this offer
                 subscribeToAcceptance(eventId)
                 // Start timeout for acceptance
@@ -777,32 +801,31 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      * Cancel the pending ride offer.
      */
     fun cancelOffer() {
-        val state = _uiState.value
-
         // Cancel the acceptance timeout
         cancelAcceptanceTimeout()
 
         acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
         acceptanceSubscriptionId = null
 
-        // Clean up our offer event (NIP-09)
         viewModelScope.launch {
-            state.pendingOfferEventId?.let { offerId ->
-                Log.d(TAG, "Requesting deletion of offer event: $offerId")
-                nostrService.deleteEvent(offerId, "offer cancelled")
-            }
+            // Clean up all our ride events (NIP-09) - AWAIT before state reset
+            cleanupRideEventsInBackground("offer cancelled")
+
+            // THEN update state after deletion completes
+            _uiState.value = _uiState.value.copy(
+                pendingOfferEventId = null,
+                rideStage = RideStage.IDLE,
+                acceptanceTimeoutStartMs = null,
+                directOfferBoostSats = 0.0,
+                statusMessage = "Offer cancelled"
+            )
+
+            // Resubscribe to get fresh driver list
+            resubscribeToDrivers()
+
+            // Clear persisted ride state (in case any was saved)
+            clearSavedRideState()
         }
-
-        _uiState.value = state.copy(
-            pendingOfferEventId = null,
-            rideStage = RideStage.IDLE,
-            acceptanceTimeoutStartMs = null,
-            directOfferBoostSats = 0.0,
-            statusMessage = "Offer cancelled"
-        )
-
-        // Clear persisted ride state (in case any was saved)
-        clearSavedRideState()
     }
 
     /**
@@ -868,6 +891,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
             if (eventId != null) {
                 Log.d(TAG, "Sent boosted ride offer: $eventId")
+                myRideEventIds.add(eventId)  // Track for cleanup
                 subscribeToAcceptance(eventId)
                 startAcceptanceTimeout()
                 _uiState.value = _uiState.value.copy(
@@ -935,6 +959,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
             if (eventId != null) {
                 Log.d(TAG, "Broadcast ride request: $eventId")
+                myRideEventIds.add(eventId)  // Track for cleanup
                 // Reset first-acceptance flag
                 hasAcceptedDriver = false
                 // Subscribe to acceptances from any driver
@@ -1008,8 +1033,6 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      * Cancel the broadcast ride request.
      */
     fun cancelBroadcastRequest() {
-        val state = _uiState.value
-
         // Cancel the timeout
         cancelBroadcastTimeout()
 
@@ -1020,24 +1043,25 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         // Stop foreground service
         RiderActiveService.stop(getApplication())
 
-        // Delete the offer event (NIP-09)
         viewModelScope.launch {
-            state.pendingOfferEventId?.let { offerId ->
-                Log.d(TAG, "Deleting cancelled broadcast request: $offerId")
-                nostrService.deleteEvent(offerId, "request cancelled")
-            }
+            // Clean up all our ride events (NIP-09) - AWAIT before state reset
+            cleanupRideEventsInBackground("request cancelled")
+
+            // THEN update state after deletion completes
+            _uiState.value = _uiState.value.copy(
+                pendingOfferEventId = null,
+                rideStage = RideStage.IDLE,
+                broadcastStartTimeMs = null,
+                totalBoostSats = 0.0,
+                statusMessage = "Request cancelled"
+            )
+
+            // Resubscribe to get fresh driver list
+            resubscribeToDrivers()
+
+            // Clear persisted ride state
+            clearSavedRideState()
         }
-
-        _uiState.value = state.copy(
-            pendingOfferEventId = null,
-            rideStage = RideStage.IDLE,
-            broadcastStartTimeMs = null,
-            totalBoostSats = 0.0,
-            statusMessage = "Request cancelled"
-        )
-
-        // Clear persisted ride state
-        clearSavedRideState()
     }
 
     /**
@@ -1156,6 +1180,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
             if (eventId != null) {
                 Log.d(TAG, "Confirmed ride: $eventId")
+                myRideEventIds.add(eventId)  // Track for cleanup
 
                 // Close acceptance subscription - we don't need it anymore
                 // This prevents duplicate acceptance events from affecting state
@@ -1167,7 +1192,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
                 _uiState.value = _uiState.value.copy(
                     isConfirmingRide = false,
-                    confirmationEventId = eventId,  // Track for cleanup later
+                    confirmationEventId = eventId,
                     rideStage = RideStage.RIDE_CONFIRMED,
                     statusMessage = "Ride confirmed! Driver is on the way."
                 )
@@ -1207,57 +1232,47 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         // Stop foreground service
         RiderActiveService.stop(getApplication())
 
-        // If we have an active confirmed ride, notify the driver of cancellation
+        // Capture state values before launching coroutine
         val confirmationId = state.confirmationEventId
         val driverPubKey = state.acceptance?.driverPubKey
-        if (confirmationId != null && driverPubKey != null &&
-            state.rideStage in listOf(RideStage.RIDE_CONFIRMED, RideStage.DRIVER_ARRIVED, RideStage.IN_PROGRESS)) {
-            viewModelScope.launch {
+        val wasConfirmedRide = state.rideStage in listOf(RideStage.RIDE_CONFIRMED, RideStage.DRIVER_ARRIVED, RideStage.IN_PROGRESS)
+
+        viewModelScope.launch {
+            // If we have an active confirmed ride, notify the driver of cancellation
+            if (confirmationId != null && driverPubKey != null && wasConfirmedRide) {
                 Log.d(TAG, "Publishing ride cancellation to driver")
-                nostrService.publishRideCancellation(
+                val cancellationEventId = nostrService.publishRideCancellation(
                     confirmationEventId = confirmationId,
                     otherPartyPubKey = driverPubKey,
                     reason = "Rider cancelled"
                 )
+                cancellationEventId?.let { myRideEventIds.add(it) }
             }
+
+            // Clean up all our ride events (NIP-09) - AWAIT before state reset
+            cleanupRideEventsInBackground("ride cancelled")
+
+            // THEN update state after deletion completes
+            _uiState.value = _uiState.value.copy(
+                selectedDriver = null,
+                pendingOfferEventId = null,
+                acceptance = null,
+                confirmationEventId = null,
+                pickupPin = null,
+                pinAttempts = 0,
+                pinVerified = false,
+                chatMessages = emptyList(),
+                isSendingMessage = false,
+                rideStage = RideStage.IDLE,
+                statusMessage = "Ready to book a ride"
+            )
+
+            // Resubscribe to get fresh driver list (clears stale data from previous ride)
+            resubscribeToDrivers()
+
+            // Clear persisted ride state
+            clearSavedRideState()
         }
-
-        // Clean up our events (NIP-09): ride events and our sent chat messages
-        viewModelScope.launch {
-            val eventsToDelete = mutableListOf<String>()
-            val myPubKey = nostrService.getPubKeyHex() ?: ""
-
-            // Add ride events
-            state.pendingOfferEventId?.let { eventsToDelete.add(it) }
-            state.confirmationEventId?.let { eventsToDelete.add(it) }
-
-            // Add chat messages we sent (only delete our own)
-            state.chatMessages
-                .filter { it.senderPubKey == myPubKey }
-                .forEach { eventsToDelete.add(it.eventId) }
-
-            if (eventsToDelete.isNotEmpty()) {
-                Log.d(TAG, "Requesting deletion of ${eventsToDelete.size} events (ride + chat)")
-                nostrService.deleteEvents(eventsToDelete, "ride cancelled")
-            }
-        }
-
-        _uiState.value = state.copy(
-            selectedDriver = null,
-            pendingOfferEventId = null,
-            acceptance = null,
-            confirmationEventId = null,
-            pickupPin = null,
-            pinAttempts = 0,
-            pinVerified = false,
-            chatMessages = emptyList(),
-            isSendingMessage = false,
-            rideStage = RideStage.IDLE,
-            statusMessage = "Ready to book a ride"
-        )
-
-        // Clear persisted ride state
-        clearSavedRideState()
     }
 
     /**
@@ -1322,9 +1337,15 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
+            // Validate selectedDriver is still in the updated list
+            val currentSelected = _uiState.value.selectedDriver
+            val selectedStillValid = currentSelected == null ||
+                currentDrivers.any { it.driverPubKey == currentSelected.driverPubKey }
+
             _uiState.value = _uiState.value.copy(
                 availableDrivers = currentDrivers,
-                nearbyDriverCount = currentDrivers.size
+                nearbyDriverCount = currentDrivers.size,
+                selectedDriver = if (selectedStillValid) currentSelected else null
             )
         }
     }
@@ -1472,6 +1493,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
             if (eventId != null) {
                 Log.d(TAG, "Auto-confirmed ride: $eventId")
+                myRideEventIds.add(eventId)  // Track for cleanup
 
                 // Close acceptance subscription - we don't need it anymore
                 acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
@@ -1540,12 +1562,13 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             // Send verification response
-            nostrService.sendPinVerification(
+            val verificationEventId = nostrService.sendPinVerification(
                 pinSubmissionEventId = submission.eventId,
                 driverPubKey = driverPubKey,
                 verified = isCorrect,
                 attemptNumber = newAttempts
             )
+            verificationEventId?.let { myRideEventIds.add(it) }  // Track for cleanup
 
             if (isCorrect) {
                 Log.d(TAG, "PIN verified successfully!")
@@ -1590,6 +1613,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     // Clean up events
                     state.confirmationEventId?.let { nostrService.deleteEvent(it, "security cancellation") }
                     state.pendingOfferEventId?.let { nostrService.deleteEvent(it, "security cancellation") }
+
+                    // Resubscribe to get fresh driver list
+                    resubscribeToDrivers()
 
                     // Clear persisted ride state
                     clearSavedRideState()
@@ -1846,6 +1872,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
             if (eventId != null) {
                 Log.d(TAG, "Revealed precise pickup: $eventId")
+                myRideEventIds.add(eventId)  // Track for cleanup
                 _uiState.value = _uiState.value.copy(
                     precisePickupShared = true,
                     statusMessage = "Precise pickup shared with driver"
@@ -1878,6 +1905,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
             if (eventId != null) {
                 Log.d(TAG, "Revealed precise destination: $eventId")
+                myRideEventIds.add(eventId)  // Track for cleanup
                 _uiState.value = _uiState.value.copy(
                     preciseDestinationShared = true
                 )
@@ -1910,12 +1938,19 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         // Clear persisted ride state
         clearSavedRideState()
 
+        // Capture fare info before launching coroutine
         val fareMessage = statusData.finalFare?.let { " Fare: ${it.toInt()} sats" } ?: ""
 
-        _uiState.value = _uiState.value.copy(
-            rideStage = RideStage.COMPLETED,
-            statusMessage = "Ride completed!$fareMessage"
-        )
+        viewModelScope.launch {
+            // Clean up all our ride events (NIP-09) - AWAIT before state reset
+            cleanupRideEventsInBackground("ride completed")
+
+            // THEN update state after deletion completes
+            _uiState.value = _uiState.value.copy(
+                rideStage = RideStage.COMPLETED,
+                statusMessage = "Ride completed!$fareMessage"
+            )
+        }
     }
 
     /**
@@ -1945,20 +1980,32 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         // Clear persisted ride state
         clearSavedRideState()
 
-        _uiState.value = _uiState.value.copy(
-            selectedDriver = null,
-            pendingOfferEventId = null,
-            acceptance = null,
-            confirmationEventId = null,
-            pickupPin = null,
-            pinAttempts = 0,
-            pinVerified = false,
-            chatMessages = emptyList(),
-            isSendingMessage = false,
-            rideStage = RideStage.IDLE,
-            statusMessage = "Driver cancelled the ride",
-            error = reason ?: "Driver cancelled the ride"
-        )
+        // Capture reason before launching coroutine
+        val errorMessage = reason ?: "Driver cancelled the ride"
+
+        viewModelScope.launch {
+            // Clean up all our ride events (NIP-09) - AWAIT before state reset
+            cleanupRideEventsInBackground("driver cancelled")
+
+            // THEN update state after deletion completes
+            _uiState.value = _uiState.value.copy(
+                selectedDriver = null,
+                pendingOfferEventId = null,
+                acceptance = null,
+                confirmationEventId = null,
+                pickupPin = null,
+                pinAttempts = 0,
+                pinVerified = false,
+                chatMessages = emptyList(),
+                isSendingMessage = false,
+                rideStage = RideStage.IDLE,
+                statusMessage = "Driver cancelled the ride",
+                error = errorMessage
+            )
+
+            // Resubscribe to get fresh driver list
+            resubscribeToDrivers()
+        }
     }
 
     /**
@@ -2013,6 +2060,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
             if (eventId != null) {
                 Log.d(TAG, "Sent chat message: $eventId")
+                myRideEventIds.add(eventId)  // Track for cleanup
                 // Note: We'll see our own message when we receive it via subscription
                 // due to how gift wrapping works (addressed to recipient, not sender)
                 // For immediate feedback, add it to local state

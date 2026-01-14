@@ -70,6 +70,10 @@ object DriverAvailabilityEvent {
             tags.add(arrayOf(RideshareTags.GEOHASH, geohash))
         }
 
+        // Add NIP-40 expiration (30 minutes)
+        val expiration = RideshareExpiration.minutesFromNow(RideshareExpiration.DRIVER_AVAILABILITY_MINUTES)
+        tags.add(arrayOf(RideshareTags.EXPIRATION, expiration.toString()))
+
         return signer.sign<Event>(
             createdAt = System.currentTimeMillis() / 1000,
             kind = RideshareEventKinds.DRIVER_AVAILABILITY,

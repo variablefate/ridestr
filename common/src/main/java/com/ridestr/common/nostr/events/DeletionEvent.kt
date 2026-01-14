@@ -22,22 +22,31 @@ object DeletionEvent {
      * @param signer The NostrSigner to sign the event
      * @param eventIds List of event IDs to request deletion of
      * @param reason Optional reason for deletion
+     * @param kinds Optional list of kinds being deleted (for NIP-09 k-tags)
      * @return Signed deletion event
      */
     suspend fun create(
         signer: NostrSigner,
         eventIds: List<String>,
-        reason: String = ""
+        reason: String = "",
+        kinds: List<Int>? = null
     ): Event {
+        val tags = mutableListOf<Array<String>>()
+
         // Each event to delete gets an "e" tag
-        val tags = eventIds.map { eventId ->
-            arrayOf(RideshareTags.EVENT_REF, eventId)
-        }.toTypedArray()
+        eventIds.forEach { eventId ->
+            tags.add(arrayOf(RideshareTags.EVENT_REF, eventId))
+        }
+
+        // Add k-tags for each kind (NIP-09 recommendation for relay-side filtering)
+        kinds?.distinct()?.forEach { kind ->
+            tags.add(arrayOf("k", kind.toString()))
+        }
 
         return signer.sign<Event>(
             createdAt = System.currentTimeMillis() / 1000,
             kind = KIND,
-            tags = tags,
+            tags = tags.toTypedArray(),
             content = reason
         )
     }
@@ -48,13 +57,15 @@ object DeletionEvent {
      * @param signer The NostrSigner to sign the event
      * @param eventId The event ID to request deletion of
      * @param reason Optional reason for deletion
+     * @param kind Optional kind of the event being deleted (for NIP-09 k-tag)
      * @return Signed deletion event
      */
     suspend fun createSingle(
         signer: NostrSigner,
         eventId: String,
-        reason: String = ""
+        reason: String = "",
+        kind: Int? = null
     ): Event {
-        return create(signer, listOf(eventId), reason)
+        return create(signer, listOf(eventId), reason, kind?.let { listOf(it) })
     }
 }

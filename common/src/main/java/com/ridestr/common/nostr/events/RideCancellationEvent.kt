@@ -33,10 +33,14 @@ object RideCancellationEvent {
             reason?.let { put("reason", it) }
         }.toString()
 
+        // Add NIP-40 expiration (24 hours)
+        val expiration = RideshareExpiration.hoursFromNow(RideshareExpiration.RIDE_CANCELLATION_HOURS)
+
         val tags = arrayOf(
             arrayOf(RideshareTags.EVENT_REF, confirmationEventId),
             arrayOf(RideshareTags.PUBKEY_REF, otherPartyPubKey),
-            arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG)
+            arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG),
+            arrayOf(RideshareTags.EXPIRATION, expiration.toString())
         )
 
         return signer.sign<Event>(

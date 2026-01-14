@@ -570,7 +570,10 @@ fun MainScreen(
                     onAddVehicle = { vehicleRepository.addVehicle(it) },
                     onUpdateVehicle = { vehicleRepository.updateVehicle(it) },
                     onDeleteVehicle = { vehicleRepository.deleteVehicle(it) },
-                    onSetPrimary = { vehicleRepository.setPrimaryVehicle(it) },
+                    onSetPrimary = {
+                        vehicleRepository.setPrimaryVehicle(it)
+                        settingsManager.setActiveVehicleId(it)  // Keep activeVehicleId in sync
+                    },
                     modifier = Modifier.padding(innerPadding)
                 )
             }

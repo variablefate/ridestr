@@ -21,25 +21,26 @@ Precise Location: Exact coordinates and address, shared only after mutual agreem
 Handshake: A mutual agreement process before exchanging sensitive data.
 
 Specification
-This NIP defines ten custom event kinds using the "173" base (from NIP-014173) to avoid conflicts with other NIPs:
+This NIP defines eleven custom event kinds using the "173" base (from NIP-014173) to avoid conflicts with other NIPs:
 
 Event Kind Ranges:
-- Regular events (stored by relays): 3173-3180
+- Regular events (stored by relays): 3173-3181
 - Parameterized replaceable (latest per d-tag): 30173-30174
 
 Kind Overview:
-| Kind  | Name                  | Type                      |
-|-------|-----------------------|---------------------------|
-| 30173 | Driver Availability   | Parameterized Replaceable |
-| 3173  | Ride Offer            | Regular                   |
-| 3174  | Ride Acceptance       | Regular                   |
-| 3175  | Ride Confirmation     | Regular                   |
-| 3176  | PIN Submission        | Regular                   |
-| 3177  | Pickup Verification   | Regular                   |
-| 3178  | Rideshare Chat        | Regular                   |
-| 3179  | Ride Cancellation     | Regular                   |
-| 3180  | Driver Status         | Regular                   |
-| 30174 | Ride History Backup   | Parameterized Replaceable |
+| Kind  | Name                    | Type                      |
+|-------|-------------------------|---------------------------|
+| 30173 | Driver Availability     | Parameterized Replaceable |
+| 3173  | Ride Offer              | Regular                   |
+| 3174  | Ride Acceptance         | Regular                   |
+| 3175  | Ride Confirmation       | Regular                   |
+| 3176  | PIN Submission          | Regular                   |
+| 3177  | Pickup Verification     | Regular                   |
+| 3178  | Rideshare Chat          | Regular                   |
+| 3179  | Ride Cancellation       | Regular                   |
+| 3180  | Driver Status           | Regular                   |
+| 3181  | Precise Location Reveal | Regular                   |
+| 30174 | Ride History Backup     | Parameterized Replaceable |
 
 All events conform to the standard Nostr event structure as defined in NIP-01:
 id: 32-byte lowercase hex-encoded SHA256 hash of the serialized event data.
@@ -390,6 +391,46 @@ sig: Signature of the event's SHA256 hash.
 
 Note: Kind 3179 is distinct from the "cancelled" status in Kind 3180 (Driver Status). Kind 3179 is an explicit cancellation event that can be sent by either party, while Kind 3180 with status "cancelled" is specifically a driver-initiated status update.
 
+Kind 3181: Precise Location Reveal
+Description: Sent by riders to share precise pickup or destination location when the driver is close (approximately 1 mile away). This enables progressive privacy - approximate location is shared initially, with precise location only revealed when the driver is nearby.
+
+Fields:
+id: Unique event identifier.
+
+pubkey: Rider's public key.
+
+created_at: Unix timestamp of event creation.
+
+kind: 3181.
+
+tags: [["e", "<kind-3175-event-id>"], ["p", "<driver-pubkey>"], ["t", "rideshare"], ["expiration", "<timestamp>"]].
+- The "e" tag references the ride confirmation event
+- The "p" tag references the driver
+- The "expiration" tag sets NIP-40 expiration (5 minutes for privacy)
+
+content: NIP-44 encrypted JSON object with location_type and precise coordinates.
+
+Decrypted content structure:
+json
+
+{
+  "location_type": "pickup",
+  "lat": 37.7749,
+  "lon": -122.4194,
+  "address": "123 Main St, San Francisco, CA"
+}
+
+location_type values:
+- "pickup": Precise pickup location (sent when driver is en route)
+- "destination": Precise destination (sent after pickup verification)
+
+sig: Signature of the event's SHA256 hash.
+
+Privacy Notes:
+- This event has a short expiration (5 minutes) to minimize location exposure
+- Only sent when driver is within ~1 mile to reduce tracking risk
+- Content is NIP-44 encrypted so only the driver can read it
+
 Kind 30174: Ride History Backup (Parameterized Replaceable)
 Description: Encrypted backup of user's ride history and statistics. Content is NIP-44 encrypted to self (user's own pubkey). As a parameterized replaceable event with d-tag "rideshare-history", only the latest backup per user is kept by relays.
 
@@ -610,7 +651,7 @@ Event Cleanup (NIP-09)
 To prevent relay spam and maintain privacy, events SHOULD be deleted via NIP-09 deletion requests (Kind 5) when no longer needed:
 
 Driver Responsibilities:
-- Kind 30173 (Availability): Automatically replaced when status changes (parameterized replaceable)
+- Kind 30173 (Availability): When going offline, broadcast an "offline" status event (serves as signal to riders)
 - Kind 3174 (Acceptance): Delete when ride completes or is cancelled
 
 Rider Responsibilities:
@@ -623,15 +664,33 @@ json
   "kind": 5,
   "tags": [
     ["e", "<event-id-to-delete>"],
-    ["e", "<another-event-id>"]
+    ["e", "<another-event-id>"],
+    ["k", "3174"]
   ],
   "content": "ride completed"
 }
+
+The "k" tag indicates the kind(s) of events being deleted, enabling relay-side filtering of deletion events.
 
 Notes:
 - Relays SHOULD honor deletion requests from the original event author
 - Clients should not rely on deletions being permanent (some relays may ignore)
 - Driver status events (Kind 3180) are regular events and stored by relays (critical for completion events)
 - Parameterized replaceable events (Kind 30173, 30174) automatically keep only the latest version
-- Ride cancellation events (Kind 3179) should be cleaned up after a reasonable period
+- Ride cancellation events (Kind 3179) have NIP-40 expiration and cleanup should be excluded from normal deletion flows
+
+Offline Availability Events:
+When a driver goes offline, they broadcast a Kind 30173 event with status "offline". This event:
+- Serves as a signal to rider apps that the driver is no longer available
+- Should NOT be deleted immediately - let it persist for riders to discover
+- Has NIP-40 expiration (30 minutes) so it will naturally expire
+- Account safety/data cleanup tools should exclude offline availability events from deletion
+
+Retry Logic:
+Since not all relays honor NIP-09 deletion requests, clients SHOULD:
+1. Request deletion of events
+2. Wait a few seconds for relay propagation
+3. Re-query for the same event IDs
+4. Retry deletion for any events that persisted
+5. Only retry for original event IDs (don't delete new events if user went back online)
 

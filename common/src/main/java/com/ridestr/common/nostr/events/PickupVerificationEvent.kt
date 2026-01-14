@@ -32,10 +32,14 @@ object PickupVerificationEvent {
             put("attempt", attemptNumber)
         }.toString()
 
+        // Add NIP-40 expiration (30 minutes)
+        val expiration = RideshareExpiration.minutesFromNow(RideshareExpiration.PICKUP_VERIFICATION_MINUTES)
+
         val tags = arrayOf(
             arrayOf(RideshareTags.EVENT_REF, pinSubmissionEventId),
             arrayOf(RideshareTags.PUBKEY_REF, driverPubKey),
-            arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG)
+            arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG),
+            arrayOf(RideshareTags.EXPIRATION, expiration.toString())
         )
 
         return signer.sign<Event>(

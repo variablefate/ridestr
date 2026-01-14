@@ -142,10 +142,37 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     private val takenOfferEventIds = mutableSetOf<String>()
     // Track offer IDs that the driver has declined/passed on
     private val declinedOfferEventIds = mutableSetOf<String>()
-    // Track status update event IDs for cleanup on ride completion
-    private val statusEventIds = mutableListOf<String>()
-    // Track PIN submission event ID for cleanup on ride completion
-    private var pinSubmissionEventId: String? = null
+    // Unified tracker: ALL events I publish during a ride (for cleanup on completion/cancellation)
+    // Includes: acceptance, status updates, PIN submission, chat messages
+    // Thread-safe list since events are added from multiple coroutines
+    private val myRideEventIds = java.util.Collections.synchronizedList(mutableListOf<String>())
+
+    /** Track an event for cleanup with diagnostic logging */
+    private fun trackEventForCleanup(eventId: String, eventType: String) {
+        myRideEventIds.add(eventId)
+        Log.d(TAG, "TRACKED $eventType: $eventId (total: ${myRideEventIds.size})")
+    }
+
+    /**
+     * Clean up all ride events in background (NIP-09 deletion).
+     * NON-BLOCKING - launches cleanup in separate coroutine so UI transitions immediately.
+     *
+     * Uses the same query-then-delete approach as Account Safety which is proven to work.
+     * Excludes RIDE_HISTORY_BACKUP (30174) and RIDE_CANCELLATION (3179).
+     */
+    private fun cleanupRideEventsInBackground(reason: String) {
+        // Clear tracked IDs synchronously
+        synchronized(myRideEventIds) {
+            myRideEventIds.clear()
+        }
+
+        // Launch cleanup in background - does NOT block caller
+        viewModelScope.launch {
+            Log.d(TAG, "=== BACKGROUND CLEANUP START: $reason ===")
+            val deletedCount = nostrService.backgroundCleanupRideshareEvents(reason)
+            Log.d(TAG, "=== BACKGROUND CLEANUP DONE: Deleted $deletedCount events ===")
+        }
+    }
     // Cleanup timer for pruning stale requests
     private var staleRequestCleanupJob: kotlinx.coroutines.Job? = null
 
@@ -292,10 +319,19 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     messagesArray.put(msgJson)
                 }
                 put("chatMessages", messagesArray)
+
+                // Event IDs for cleanup (NIP-09 deletion on completion/cancellation)
+                val eventIdsArray = org.json.JSONArray()
+                synchronized(myRideEventIds) {
+                    for (eventId in myRideEventIds) {
+                        eventIdsArray.put(eventId)
+                    }
+                }
+                put("myRideEventIds", eventIdsArray)
             }
 
             prefs.edit().putString(KEY_RIDE_STATE, json.toString()).apply()
-            Log.d(TAG, "Saved ride state: stage=${state.stage}, messages=${state.chatMessages.size}")
+            Log.d(TAG, "Saved ride state: stage=${state.stage}, messages=${state.chatMessages.size}, eventIds=${myRideEventIds.size}")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to save ride state", e)
         }
@@ -374,7 +410,18 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 }
             }
 
-            Log.d(TAG, "Restoring ride state: stage=$stage, confirmationId=$confirmationEventId, messages=${chatMessages.size}")
+            // Restore event IDs for cleanup (NIP-09 deletion on completion/cancellation)
+            if (data.has("myRideEventIds")) {
+                val eventIdsArray = data.getJSONArray("myRideEventIds")
+                synchronized(myRideEventIds) {
+                    myRideEventIds.clear()
+                    for (i in 0 until eventIdsArray.length()) {
+                        myRideEventIds.add(eventIdsArray.getString(i))
+                    }
+                }
+            }
+
+            Log.d(TAG, "Restoring ride state: stage=$stage, confirmationId=$confirmationEventId, messages=${chatMessages.size}, eventIds=${myRideEventIds.size}")
 
             // Restore state
             _uiState.value = _uiState.value.copy(
@@ -471,31 +518,51 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
         if (currentState.stage != DriverStage.AVAILABLE) return
 
+        // Stop broadcasting and subscriptions first
+        stopBroadcasting()
+        closeOfferSubscription()
+
+        // Capture location before launching coroutine
+        val lastLocation = currentState.currentLocation
+
         viewModelScope.launch {
-            val lastLocation = currentState.currentLocation
+            // Broadcast offline status - let it remain on relays as signal to riders
+            // (expires in 30 min via NIP-40, giving riders time to receive and remove driver)
             if (lastLocation != null) {
                 val eventId = nostrService.broadcastOffline(lastLocation)
                 if (eventId != null) {
                     Log.d(TAG, "Broadcast offline status: $eventId")
+                    // Don't add to publishedAvailabilityEventIds - we want this to persist
+                    // so riders see the offline signal before it expires naturally
                 }
             }
+
+            // Delete all availability events - AWAIT before state reset
             deleteAllAvailabilityEvents()
+
+            // Reset throttle tracking for next time driver goes online
+            lastBroadcastLocation = null
+            lastBroadcastTimeMs = 0L
+
+            // Stop the foreground service
+            DriverOnlineService.stop(context)
+
+            // THEN update state after deletion completes
+            _uiState.value = _uiState.value.copy(
+                stage = DriverStage.OFFLINE,
+                currentLocation = null,
+                activeVehicle = null,
+                statusMessage = "You are now offline"
+            )
+
+            // Background sweep for any stragglers - doesn't block UI
+            viewModelScope.launch {
+                val cleaned = nostrService.backgroundCleanupRideshareEvents("driver went offline")
+                if (cleaned > 0) {
+                    Log.d(TAG, "Background cleanup removed $cleaned stray events")
+                }
+            }
         }
-        stopBroadcasting()
-        closeOfferSubscription()
-        // Reset throttle tracking for next time driver goes online
-        lastBroadcastLocation = null
-        lastBroadcastTimeMs = 0L
-
-        // Stop the foreground service
-        DriverOnlineService.stop(context)
-
-        _uiState.value = currentState.copy(
-            stage = DriverStage.OFFLINE,
-            currentLocation = null,
-            activeVehicle = null,
-            statusMessage = "You are now offline"
-        )
     }
 
     /**
@@ -598,87 +665,66 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         preciseLocationSubscriptionId?.let { nostrService.closeSubscription(it) }
         preciseLocationSubscriptionId = null
 
-        viewModelScope.launch {
-            // Send cancelled status if we have a confirmation
-            state.confirmationEventId?.let { confId ->
-                state.acceptedOffer?.riderPubKey?.let { riderPubKey ->
-                    // Send cancellation event so rider gets notified
-                    Log.d(TAG, "Publishing ride cancellation to rider")
-                    nostrService.publishRideCancellation(
-                        confirmationEventId = confId,
-                        otherPartyPubKey = riderPubKey,
-                        reason = "Driver cancelled"
-                    )
-
-                    // Also send status update
-                    nostrService.sendStatusUpdate(
-                        confirmationEventId = confId,
-                        riderPubKey = riderPubKey,
-                        status = DriverStatusType.CANCELLED,
-                        location = state.currentLocation
-                    )
-                }
-            }
-
-            // Clean up events (NIP-09): acceptance, status updates, PIN submission
-            val eventsToDelete = mutableListOf<String>()
-
-            // Add acceptance event
-            state.acceptanceEventId?.let { eventsToDelete.add(it) }
-
-            // Add status update events (EN_ROUTE, ARRIVED, etc.)
-            eventsToDelete.addAll(statusEventIds)
-
-            // Add PIN submission event
-            pinSubmissionEventId?.let { eventsToDelete.add(it) }
-
-            // Add chat messages we sent (only delete our own)
-            val myPubKey = state.myPubKey
-            state.chatMessages
-                .filter { it.senderPubKey == myPubKey }
-                .forEach { eventsToDelete.add(it.eventId) }
-
-            if (eventsToDelete.isNotEmpty()) {
-                Log.d(TAG, "Requesting deletion of ${eventsToDelete.size} events (acceptance + status + PIN + chat)")
-                nostrService.deleteEvents(eventsToDelete, "ride cancelled")
-            }
-
-            // Clear tracking lists
-            statusEventIds.clear()
-            pinSubmissionEventId = null
-        }
-
         // Stop the foreground service
         DriverOnlineService.stop(getApplication())
 
-        // Return to offline state
-        _uiState.value = state.copy(
-            stage = DriverStage.OFFLINE,
-            acceptedOffer = null,
-            acceptedBroadcastRequest = null,
-            acceptanceEventId = null,
-            confirmationEventId = null,
-            precisePickupLocation = null,
-            pinAttempts = 0,
-            isAwaitingPinVerification = false,
-            lastPinSubmissionEventId = null,
-            chatMessages = emptyList(),
-            isSendingMessage = false,
-            pendingOffers = emptyList(),
-            pendingBroadcastRequests = emptyList(),
-            statusMessage = "Ride cancelled. Tap to go online."
-        )
+        // Capture state values before launching coroutine
+        val confId = state.confirmationEventId
+        val riderPubKey = state.acceptedOffer?.riderPubKey
+        val currentLoc = state.currentLocation
 
-        // Clear persisted ride state
-        clearSavedRideState()
+        viewModelScope.launch {
+            // Send cancelled status if we have a confirmation
+            if (confId != null && riderPubKey != null) {
+                // Send cancellation event so rider gets notified
+                Log.d(TAG, "Publishing ride cancellation to rider")
+                val cancellationEventId = nostrService.publishRideCancellation(
+                    confirmationEventId = confId,
+                    otherPartyPubKey = riderPubKey,
+                    reason = "Driver cancelled"
+                )
+                cancellationEventId?.let { myRideEventIds.add(it) }
+
+                // Also send status update
+                val statusEventId = nostrService.sendStatusUpdate(
+                    confirmationEventId = confId,
+                    riderPubKey = riderPubKey,
+                    status = DriverStatusType.CANCELLED,
+                    location = currentLoc
+                )
+                statusEventId?.let { myRideEventIds.add(it) }
+            }
+
+            // Update state immediately (UI transition first)
+            _uiState.value = _uiState.value.copy(
+                stage = DriverStage.OFFLINE,
+                acceptedOffer = null,
+                acceptedBroadcastRequest = null,
+                acceptanceEventId = null,
+                confirmationEventId = null,
+                precisePickupLocation = null,
+                pinAttempts = 0,
+                isAwaitingPinVerification = false,
+                lastPinSubmissionEventId = null,
+                chatMessages = emptyList(),
+                isSendingMessage = false,
+                pendingOffers = emptyList(),
+                pendingBroadcastRequests = emptyList(),
+                statusMessage = "Ride cancelled. Tap to go online."
+            )
+
+            // Clear persisted ride state
+            clearSavedRideState()
+
+            // Clean up ride events in background (non-blocking)
+            cleanupRideEventsInBackground("ride cancelled")
+        }
     }
 
     /**
      * Return to available after completing a ride.
      */
     fun finishAndGoOnline(location: Location) {
-        val state = _uiState.value
-
         // Close subscriptions
         confirmationSubscriptionId?.let { nostrService.closeSubscription(it) }
         confirmationSubscriptionId = null
@@ -691,36 +737,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         preciseLocationSubscriptionId?.let { nostrService.closeSubscription(it) }
         preciseLocationSubscriptionId = null
 
-        // Clean up events (NIP-09): acceptance event, chat messages, status events, and PIN submission
-        viewModelScope.launch {
-            val myPubKey = state.myPubKey
-            val eventsToDelete = mutableListOf<String>()
-
-            // Add acceptance event
-            state.acceptanceEventId?.let { eventsToDelete.add(it) }
-
-            // Add chat messages we sent (only delete our own)
-            state.chatMessages
-                .filter { it.senderPubKey == myPubKey }
-                .forEach { eventsToDelete.add(it.eventId) }
-
-            // Add status update events (EN_ROUTE, ARRIVED, IN_PROGRESS, COMPLETED)
-            eventsToDelete.addAll(statusEventIds)
-
-            // Add PIN submission event
-            pinSubmissionEventId?.let { eventsToDelete.add(it) }
-
-            if (eventsToDelete.isNotEmpty()) {
-                Log.d(TAG, "Requesting deletion of ${eventsToDelete.size} events (acceptance + chat + status + PIN)")
-                nostrService.deleteEvents(eventsToDelete, "ride completed")
-            }
-
-            // Clear tracking lists
-            statusEventIds.clear()
-            pinSubmissionEventId = null
-        }
-
-        _uiState.value = state.copy(
+        // Update state immediately (UI transition first)
+        _uiState.value = _uiState.value.copy(
             stage = DriverStage.OFFLINE,
             acceptedOffer = null,
             acceptedBroadcastRequest = null,
@@ -740,7 +758,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Clear persisted ride state
         clearSavedRideState()
 
-        // Auto-toggle to go online
+        // Clean up ride events in background (non-blocking)
+        cleanupRideEventsInBackground("ride completed")
+
+        // Go online immediately - don't wait for cleanup
         toggleAvailability(location)
     }
 
@@ -781,6 +802,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
             if (eventId != null) {
                 Log.d(TAG, "Accepted ride offer: $eventId")
+                // Track for unified cleanup on ride completion
+                trackEventForCleanup(eventId, "ACCEPTANCE")
                 // Stop broadcasting availability but stay in "ride" mode, not offline
                 stopBroadcasting()
                 deleteAllAvailabilityEvents()
@@ -833,7 +856,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                         location = state.currentLocation
                     )
                     // Track for cleanup on ride completion
-                    eventId?.let { statusEventIds.add(it) }
+                    eventId?.let { trackEventForCleanup(it, "STATUS_EN_ROUTE") }
                 }
             }
 
@@ -862,7 +885,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                         location = state.currentLocation
                     )
                     // Track for cleanup on ride completion
-                    eventId?.let { statusEventIds.add(it) }
+                    eventId?.let { trackEventForCleanup(it, "STATUS_ARRIVED") }
                 }
             }
 
@@ -907,7 +930,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             if (eventId != null) {
                 Log.d(TAG, "Submitted PIN for verification: $eventId")
                 // Track for cleanup on ride completion
-                pinSubmissionEventId = eventId
+                trackEventForCleanup(eventId, "PIN_SUBMISSION")
                 _uiState.value = _uiState.value.copy(
                     lastPinSubmissionEventId = eventId,
                     statusMessage = "Waiting for rider to verify PIN..."
@@ -970,11 +993,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             // Send cancellation event if we have an active ride
             if (confirmationEventId != null && riderPubKey != null) {
-                nostrService.publishRideCancellation(
+                val cancellationEventId = nostrService.publishRideCancellation(
                     confirmationEventId = confirmationEventId,
                     otherPartyPubKey = riderPubKey,
                     reason = reason
                 )
+                cancellationEventId?.let { myRideEventIds.add(it) }  // Track for cleanup
                 Log.d(TAG, "Sent cancellation event for ride: $confirmationEventId")
             }
 
@@ -995,7 +1019,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             // Stop the foreground service
             DriverOnlineService.stop(getApplication())
 
-            // Reset state
+            // Update state immediately (UI transition first)
             _uiState.value = _uiState.value.copy(
                 stage = DriverStage.OFFLINE,
                 acceptedOffer = null,
@@ -1010,6 +1034,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 error = null,
                 statusMessage = "Ride cancelled"
             )
+
+            // Clean up ride events in background (non-blocking)
+            cleanupRideEventsInBackground("ride cancelled")
 
             // Clear persisted ride state
             clearSavedRideState()
@@ -1112,7 +1139,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                         location = state.currentLocation
                     )
                     // Track for cleanup on ride completion
-                    eventId?.let { statusEventIds.add(it) }
+                    eventId?.let { trackEventForCleanup(it, "STATUS_IN_PROGRESS") }
                 }
             }
 
@@ -1152,7 +1179,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     finalFare = offer.fareEstimate
                 )
                 // Track for cleanup on ride completion
-                eventId?.let { statusEventIds.add(it) }
+                eventId?.let { trackEventForCleanup(it, "STATUS_COMPLETED") }
             }
 
             _uiState.value = state.copy(
@@ -1294,7 +1321,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 location = state.currentLocation
             )
             // Track for cleanup on ride completion
-            eventId?.let { statusEventIds.add(it) }
+            eventId?.let { trackEventForCleanup(it, "STATUS_EN_ROUTE_AUTO") }
 
             // Notify service of status change (updates notification)
             val riderName: String? = null // RideOfferData doesn't contain rider name
@@ -1510,6 +1537,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
             if (eventId != null) {
                 Log.d(TAG, "Sent chat message: $eventId")
+                // Track for unified cleanup on ride completion
+                trackEventForCleanup(eventId, "CHAT")
                 // Add locally for immediate feedback
                 val myPubKey = nostrService.getPubKeyHex() ?: ""
 
@@ -1551,7 +1580,6 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     fun clearAcceptedOffer() {
         // Only clear if ride is completed
         if (_uiState.value.stage == DriverStage.RIDE_COMPLETED) {
-            val state = _uiState.value
             val context = getApplication<Application>()
 
             // Stop chat refresh job
@@ -1569,18 +1597,11 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             preciseLocationSubscriptionId?.let { nostrService.closeSubscription(it) }
             preciseLocationSubscriptionId = null
 
-            // Clean up our acceptance event (NIP-09)
-            viewModelScope.launch {
-                state.acceptanceEventId?.let { acceptanceId ->
-                    Log.d(TAG, "Requesting deletion of acceptance event: $acceptanceId")
-                    nostrService.deleteEvent(acceptanceId, "ride completed")
-                }
-            }
-
             // Stop the foreground service since driver is going offline
             DriverOnlineService.stop(context)
 
-            _uiState.value = state.copy(
+            // Update state immediately (UI transition first)
+            _uiState.value = _uiState.value.copy(
                 stage = DriverStage.OFFLINE,
                 acceptedOffer = null,
                 acceptedBroadcastRequest = null,
@@ -1598,6 +1619,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
             // Clear persisted ride state
             clearSavedRideState()
+
+            // Clean up ride events in background (non-blocking)
+            cleanupRideEventsInBackground("ride completed")
         }
     }
 
@@ -2233,6 +2257,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
             if (eventId != null) {
                 Log.d(TAG, "Accepted broadcast ride request: $eventId")
+                // Track for unified cleanup on ride completion
+                trackEventForCleanup(eventId, "BROADCAST_ACCEPTANCE")
                 // Stop broadcasting availability
                 stopBroadcasting()
                 deleteAllAvailabilityEvents()

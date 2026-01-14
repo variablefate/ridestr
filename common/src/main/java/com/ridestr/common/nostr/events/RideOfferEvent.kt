@@ -64,6 +64,10 @@ object RideOfferEvent {
         tagsList.add(arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG))
         tagsList.add(arrayOf(RideshareTags.HASHTAG, RIDE_REQUEST_TAG))
 
+        // Add NIP-40 expiration (15 minutes)
+        val expiration = RideshareExpiration.minutesFromNow(RideshareExpiration.RIDE_OFFER_MINUTES)
+        tagsList.add(arrayOf(RideshareTags.EXPIRATION, expiration.toString()))
+
         return signer.sign<Event>(
             createdAt = System.currentTimeMillis() / 1000,
             kind = RideshareEventKinds.RIDE_OFFER,
@@ -109,10 +113,14 @@ object RideOfferEvent {
         // Encrypt using NIP-44 so only the target driver can read it
         val encryptedContent = signer.nip44Encrypt(plaintext, driverPubKey)
 
+        // Add NIP-40 expiration (15 minutes)
+        val expiration = RideshareExpiration.minutesFromNow(RideshareExpiration.RIDE_OFFER_MINUTES)
+
         val tags = arrayOf(
             arrayOf(RideshareTags.EVENT_REF, driverAvailabilityEventId),
             arrayOf(RideshareTags.PUBKEY_REF, driverPubKey),
-            arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG)
+            arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG),
+            arrayOf(RideshareTags.EXPIRATION, expiration.toString())
         )
 
         return signer.sign<Event>(

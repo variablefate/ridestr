@@ -34,10 +34,14 @@ object PinSubmissionEvent {
         // Encrypt using NIP-44 so only the rider can verify
         val encryptedContent = signer.nip44Encrypt(plaintext, riderPubKey)
 
+        // Add NIP-40 expiration (30 minutes)
+        val expiration = RideshareExpiration.minutesFromNow(RideshareExpiration.PIN_SUBMISSION_MINUTES)
+
         val tags = arrayOf(
             arrayOf(RideshareTags.EVENT_REF, confirmationEventId),
             arrayOf(RideshareTags.PUBKEY_REF, riderPubKey),
-            arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG)
+            arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG),
+            arrayOf(RideshareTags.EXPIRATION, expiration.toString())
         )
 
         return signer.sign<Event>(

@@ -27,10 +27,14 @@ object RideAcceptanceEvent {
             put("status", "accepted")
         }.toString()
 
+        // Add NIP-40 expiration (10 minutes)
+        val expiration = RideshareExpiration.minutesFromNow(RideshareExpiration.RIDE_ACCEPTANCE_MINUTES)
+
         val tags = arrayOf(
             arrayOf(RideshareTags.EVENT_REF, offerEventId),
             arrayOf(RideshareTags.PUBKEY_REF, riderPubKey),
-            arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG)
+            arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG),
+            arrayOf(RideshareTags.EXPIRATION, expiration.toString())
         )
 
         return signer.sign<Event>(

@@ -154,9 +154,14 @@ class NostrService(
      *
      * @param eventIds List of event IDs to request deletion of
      * @param reason Optional reason for deletion
+     * @param kinds Optional list of kinds being deleted (for NIP-09 k-tags)
      * @return The deletion event ID if successful, null on failure
      */
-    suspend fun deleteEvents(eventIds: List<String>, reason: String = ""): String? {
+    suspend fun deleteEvents(
+        eventIds: List<String>,
+        reason: String = "",
+        kinds: List<Int>? = null
+    ): String? {
         if (eventIds.isEmpty()) return null
 
         val signer = keyManager.getSigner()
@@ -166,7 +171,7 @@ class NostrService(
         }
 
         return try {
-            val event = DeletionEvent.create(signer, eventIds, reason)
+            val event = DeletionEvent.create(signer, eventIds, reason, kinds)
             relayManager.publish(event)
             Log.d(TAG, "Requested deletion of ${eventIds.size} event(s): ${event.id}")
             event.id
@@ -181,10 +186,11 @@ class NostrService(
      *
      * @param eventId The event ID to request deletion of
      * @param reason Optional reason for deletion
+     * @param kind Optional kind of the event being deleted (for NIP-09 k-tag)
      * @return The deletion event ID if successful, null on failure
      */
-    suspend fun deleteEvent(eventId: String, reason: String = ""): String? {
-        return deleteEvents(listOf(eventId), reason)
+    suspend fun deleteEvent(eventId: String, reason: String = "", kind: Int? = null): String? {
+        return deleteEvents(listOf(eventId), reason, kind?.let { listOf(it) })
     }
 
     /**
@@ -200,7 +206,8 @@ class NostrService(
             return@withContext 0
         }
 
-        // All rideshare event kinds (current + legacy for thorough cleanup)
+        // All rideshare event kinds EXCEPT:
+        // - RIDE_CANCELLATION (3179) - expires naturally, needed for state consistency
         val rideshareKinds = listOf(
             // Current kinds (RideshareEventKinds)
             RideshareEventKinds.DRIVER_AVAILABILITY,  // 30173
@@ -210,10 +217,10 @@ class NostrService(
             RideshareEventKinds.PIN_SUBMISSION,       // 3176
             RideshareEventKinds.PICKUP_VERIFICATION,  // 3177
             RideshareEventKinds.RIDESHARE_CHAT,       // 3178
-            RideshareEventKinds.RIDE_CANCELLATION,    // 3179
+            // EXCLUDED: RIDE_CANCELLATION (3179) - expires in 24h, both apps need it for state
             RideshareEventKinds.DRIVER_STATUS,        // 3180
             RideshareEventKinds.PRECISE_LOCATION_REVEAL, // 3181
-            RideshareEventKinds.RIDE_HISTORY_BACKUP,  // 30174
+            RideshareEventKinds.RIDE_HISTORY_BACKUP,  // 30174 - included here for full account wipe
             // Legacy rideshare-specific kinds (may have old events on relays)
             20173   // Old ephemeral driver status (changed to 3180)
             // Note: NOT including 1059/1060 (Gift Wrap/Seal) - those are standard
@@ -227,6 +234,13 @@ class NostrService(
             authors = listOf(pubkey),
             limit = 1000
         ) { event, _ ->
+            // Skip offline driver availability events - they're signals, not active data
+            if (event.kind == RideshareEventKinds.DRIVER_AVAILABILITY) {
+                val parsed = DriverAvailabilityEvent.parse(event)
+                if (parsed?.isOffline == true) {
+                    return@subscribe  // Skip offline events
+                }
+            }
             synchronized(eventIds) {
                 eventIds.add(event.id)
             }
@@ -300,7 +314,7 @@ class NostrService(
         val batchSize = 50
         var deletedCount = 0
         eventIds.chunked(batchSize).forEach { batch ->
-            val result = deleteEvents(batch, reason)
+            val result = deleteEvents(batch, reason, listOf(kind))  // Pass kind for k-tag
             if (result != null) {
                 deletedCount += batch.size
             }
@@ -349,8 +363,18 @@ class NostrService(
             authors = listOf(pubkey),
             limit = 1000
         ) { event, _ ->
+            // Skip offline driver availability events - they're signals, not active data
+            if (event.kind == RideshareEventKinds.DRIVER_AVAILABILITY) {
+                val parsed = DriverAvailabilityEvent.parse(event)
+                Log.d(TAG, "countRideshareEvents: Availability event, parsed=${parsed != null}, isOffline=${parsed?.isOffline}, status=${parsed?.status}")
+                if (parsed?.isOffline == true) {
+                    Log.d(TAG, "countRideshareEvents: Skipping offline availability event")
+                    return@subscribe  // Skip offline events
+                }
+            }
             synchronized(eventIds) {
                 eventIds.add(event.id)
+                Log.d(TAG, "countRideshareEvents: Added event kind=${event.kind}")
             }
         }
 
@@ -362,6 +386,179 @@ class NostrService(
 
         Log.d(TAG, "Found ${eventIds.size} rideshare events")
         eventIds.size
+    }
+
+    /**
+     * Count rideshare events by kind.
+     * Returns a map of kind -> count for debugging which event types are persisting.
+     */
+    suspend fun countRideshareEventsByKind(): Map<Int, Int> = withContext(Dispatchers.IO) {
+        val pubkey = keyManager.getPubKeyHex()
+        if (pubkey == null) {
+            Log.e(TAG, "Cannot count events: Not logged in")
+            return@withContext emptyMap()
+        }
+
+        val rideshareKinds = listOf(
+            RideshareEventKinds.DRIVER_AVAILABILITY,
+            RideshareEventKinds.RIDE_OFFER,
+            RideshareEventKinds.RIDE_ACCEPTANCE,
+            RideshareEventKinds.RIDE_CONFIRMATION,
+            RideshareEventKinds.PIN_SUBMISSION,
+            RideshareEventKinds.PICKUP_VERIFICATION,
+            RideshareEventKinds.RIDESHARE_CHAT,
+            RideshareEventKinds.RIDE_CANCELLATION,
+            RideshareEventKinds.DRIVER_STATUS,
+            RideshareEventKinds.PRECISE_LOCATION_REVEAL,
+            RideshareEventKinds.RIDE_HISTORY_BACKUP,
+            20173  // Legacy ephemeral driver status
+        )
+
+        // Collect events with their kinds
+        val kindCounts = mutableMapOf<Int, Int>()
+        val subscriptionId = relayManager.subscribe(
+            kinds = rideshareKinds,
+            authors = listOf(pubkey),
+            limit = 1000
+        ) { event, _ ->
+            // Skip offline driver availability events - they're signals, not active data
+            if (event.kind == RideshareEventKinds.DRIVER_AVAILABILITY) {
+                val parsed = DriverAvailabilityEvent.parse(event)
+                if (parsed?.isOffline == true) {
+                    return@subscribe  // Skip offline events
+                }
+            }
+            synchronized(kindCounts) {
+                kindCounts[event.kind] = (kindCounts[event.kind] ?: 0) + 1
+            }
+        }
+
+        delay(2000)
+        relayManager.closeSubscription(subscriptionId)
+
+        Log.d(TAG, "Events by kind: $kindCounts")
+        kindCounts.toMap()
+    }
+
+    /**
+     * Background cleanup of ALL rideshare events on connected relays.
+     * Excludes RIDE_HISTORY_BACKUP (kind 30174) which is the user's permanent record.
+     * Runs asynchronously and does NOT block the caller - designed to be launched
+     * from viewModelScope.launch {} without awaiting.
+     *
+     * Use this after targeted cleanup (cleanupRideEvents) to catch any stragglers
+     * from crashed sessions or untracked events.
+     *
+     * @param reason Description of why cleanup is happening (for logs)
+     * @return Count of events for which deletion was requested
+     */
+    suspend fun backgroundCleanupRideshareEvents(reason: String): Int = withContext(Dispatchers.IO) {
+        val pubkey = keyManager.getPubKeyHex()
+        if (pubkey == null) {
+            Log.e(TAG, "Cannot do background cleanup: Not logged in")
+            return@withContext 0
+        }
+
+        // All rideshare kinds EXCEPT:
+        // - RIDE_HISTORY_BACKUP (30174) - user's permanent encrypted record
+        // - RIDE_CANCELLATION (3179) - expires naturally, needed for state consistency
+        val kindsToClean = listOf(
+            RideshareEventKinds.DRIVER_AVAILABILITY,     // 30173
+            RideshareEventKinds.RIDE_OFFER,              // 3173
+            RideshareEventKinds.RIDE_ACCEPTANCE,         // 3174
+            RideshareEventKinds.RIDE_CONFIRMATION,       // 3175
+            RideshareEventKinds.PIN_SUBMISSION,          // 3176
+            RideshareEventKinds.PICKUP_VERIFICATION,     // 3177
+            RideshareEventKinds.RIDESHARE_CHAT,          // 3178
+            // EXCLUDED: RIDE_CANCELLATION (3179) - expires in 24h, both apps need it for state
+            RideshareEventKinds.DRIVER_STATUS,           // 3180
+            RideshareEventKinds.PRECISE_LOCATION_REVEAL, // 3181
+            20173  // Legacy ephemeral driver status
+        )
+
+        Log.d(TAG, "=== BACKGROUND CLEANUP START: $reason ===")
+
+        // Collect event IDs from subscription (same approach as Account Safety)
+        val foundEventIds = mutableListOf<String>()
+        val subscriptionId = relayManager.subscribe(
+            kinds = kindsToClean,
+            authors = listOf(pubkey),
+            limit = 500  // High limit to catch stragglers
+        ) { event, _ ->
+            // Skip offline driver availability events - they're signals to riders
+            if (event.kind == RideshareEventKinds.DRIVER_AVAILABILITY) {
+                val parsed = DriverAvailabilityEvent.parse(event)
+                if (parsed?.isOffline == true) {
+                    return@subscribe  // Skip offline events
+                }
+            }
+            synchronized(foundEventIds) {
+                foundEventIds.add(event.id)
+                Log.d(TAG, "BACKGROUND CLEANUP found event: ${event.id} kind=${event.kind}")
+            }
+        }
+
+        // Wait for relay responses - same as Account Safety (2 seconds)
+        delay(2000)
+
+        // Close subscription
+        relayManager.closeSubscription(subscriptionId)
+
+        if (foundEventIds.isEmpty()) {
+            Log.d(TAG, "=== BACKGROUND CLEANUP: No stray events found ===")
+            return@withContext 0
+        }
+
+        // Store original IDs for retry check (don't delete new events if user goes back online)
+        val originalEventIds = foundEventIds.toSet()
+        Log.d(TAG, "=== BACKGROUND CLEANUP: Found ${originalEventIds.size} events to delete ===")
+
+        // Delete in batches of 50 (same as Account Safety)
+        var deletedCount = 0
+        foundEventIds.chunked(50).forEach { batch ->
+            val result = deleteEvents(batch, reason)
+            if (result != null) {
+                deletedCount += batch.size
+            }
+        }
+
+        Log.d(TAG, "=== BACKGROUND CLEANUP: Requested deletion of $deletedCount events ===")
+
+        // RETRY LOGIC: Wait and check if events persisted, re-delete if needed
+        // This runs in background and won't block - safe if user goes back online
+        delay(3000)  // Give relays time to process deletion
+
+        // Re-query to find any stubborn events that weren't deleted
+        val persistingEventIds = mutableListOf<String>()
+        val retrySubId = relayManager.subscribe(
+            kinds = kindsToClean,
+            authors = listOf(pubkey),
+            limit = 500
+        ) { event, _ ->
+            // Only track events from our ORIGINAL list (ignore new events if user went back online)
+            if (event.id in originalEventIds) {
+                synchronized(persistingEventIds) {
+                    if (event.id !in persistingEventIds) {
+                        persistingEventIds.add(event.id)
+                    }
+                }
+            }
+        }
+
+        delay(2000)
+        relayManager.closeSubscription(retrySubId)
+
+        if (persistingEventIds.isNotEmpty()) {
+            Log.d(TAG, "=== BACKGROUND CLEANUP RETRY: ${persistingEventIds.size} events persisted, retrying deletion ===")
+            persistingEventIds.chunked(50).forEach { batch ->
+                deleteEvents(batch, "$reason (retry)")
+            }
+            Log.d(TAG, "=== BACKGROUND CLEANUP RETRY: Done ===")
+        } else {
+            Log.d(TAG, "=== BACKGROUND CLEANUP: All events deleted successfully ===")
+        }
+
+        deletedCount
     }
 
     /**

@@ -32,10 +32,14 @@ object DriverStatusEvent {
             invoice?.let { put("invoice", it) }
         }.toString()
 
+        // Add NIP-40 expiration (8 hours)
+        val expiration = RideshareExpiration.hoursFromNow(RideshareExpiration.DRIVER_STATUS_HOURS)
+
         val tags = arrayOf(
             arrayOf(RideshareTags.EVENT_REF, confirmationEventId),
             arrayOf(RideshareTags.PUBKEY_REF, riderPubKey),
-            arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG)
+            arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG),
+            arrayOf(RideshareTags.EXPIRATION, expiration.toString())
         )
 
         return signer.sign<Event>(
