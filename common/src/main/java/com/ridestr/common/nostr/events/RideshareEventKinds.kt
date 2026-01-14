@@ -9,18 +9,16 @@ package com.ridestr.common.nostr.events
  * - 30000-39999: Parameterized replaceable events (latest per d-tag)
  *
  * Kind numbers use "173" base (from NIP-014173) to avoid conflicts:
- * - 30173: Parameterized replaceable (above NIP-51's 30030)
- * - 20173: Ephemeral (clear of 21000 Lightning.Pub)
- * - 3173-3178: Regular events (clear of 3000 NKBIP-03)
+ * - 30173, 30174, 30180, 30181: Parameterized replaceable (above NIP-51's 30030)
+ * - 3173-3179: Regular events (clear of 3000 NKBIP-03)
  *
- * These kinds define the different stages of a rideshare transaction:
- * 1. Driver broadcasts availability (parameterized replaceable)
- * 2. Rider sends offer to driver (regular)
- * 3. Driver accepts the offer (regular)
- * 4. Rider confirms with precise pickup location (regular, encrypted)
- * 5. Driver sends status updates during ride (ephemeral)
- * 6. PIN verification at pickup (regular)
- * 7. Private chat during ride (regular, encrypted)
+ * Protocol phases:
+ * 1. DISCOVERY: Driver broadcasts availability (30173)
+ * 2. HANDSHAKE: Offer (3173) → Accept (3174) → Confirm (3175) - separate events for notifications
+ * 3. RIDE: Driver state (30180) + Rider state (30181) - consolidated for efficiency
+ * 4. CHAT: Private messages (3178)
+ * 5. CANCELLATION: Either party (3179)
+ * 6. BACKUP: Ride history (30174)
  */
 object RideshareEventKinds {
     /**
@@ -36,6 +34,7 @@ object RideshareEventKinds {
      * Kind 3173: Ride Offer Event (Regular)
      * Sent by riders to request a ride from a specific driver.
      * References the driver's availability event.
+     * Content is NIP-44 encrypted.
      */
     const val RIDE_OFFER = 3173
 
@@ -54,37 +53,28 @@ object RideshareEventKinds {
     const val RIDE_CONFIRMATION = 3175
 
     /**
-     * Kind 3181: Precise Location Reveal Event (Regular)
-     * Sent by riders when driver is close (~1 mile) to share precise pickup/destination.
-     * Contains NIP-44 encrypted precise location.
-     * This enables progressive privacy - approximate location shared first,
-     * precise location only when driver is nearby.
-     * Note: Kind 3179 is reserved for RideCancellationEvent.
+     * Kind 30180: Driver Ride State Event (Parameterized Replaceable)
+     * Consolidates all driver actions during a ride with embedded history.
+     * Replaces Kind 3180 (Driver Status) and Kind 3176 (PIN Submission).
+     * Uses d-tag set to ride confirmation event ID.
+     *
+     * Actions in history:
+     * - "status": en_route_pickup, arrived, in_progress, completed, cancelled
+     * - "pin_submit": Encrypted PIN submission for pickup verification
      */
-    const val PRECISE_LOCATION_REVEAL = 3181
+    const val DRIVER_RIDE_STATE = 30180
 
     /**
-     * Kind 3180: Driver Status Event (Regular)
-     * Sent by drivers during the ride to update status.
-     * Can include: en_route_pickup, arrived, in_progress, completed.
-     * Regular (not ephemeral) so completion events can be fetched later
-     * if rider's app was offline when driver completed the ride.
+     * Kind 30181: Rider Ride State Event (Parameterized Replaceable)
+     * Consolidates all rider actions during a ride with embedded history.
+     * Replaces Kind 3177 (Pickup Verification) and Kind 3181 (Precise Location Reveal).
+     * Uses d-tag set to ride confirmation event ID.
+     *
+     * Actions in history:
+     * - "location_reveal": Encrypted precise pickup/destination location
+     * - "pin_verify": Verification result (verified/rejected) with attempt count
      */
-    const val DRIVER_STATUS = 3180
-
-    /**
-     * Kind 3176: PIN Submission Event (Regular)
-     * Sent by drivers when they arrive at pickup to submit the PIN
-     * the rider told them verbally. Content is NIP-44 encrypted.
-     */
-    const val PIN_SUBMISSION = 3176
-
-    /**
-     * Kind 3177: Pickup Verification Event (Regular)
-     * Sent by riders to verify the PIN submitted by the driver.
-     * Contains verification result (verified/rejected).
-     */
-    const val PICKUP_VERIFICATION = 3177
+    const val RIDER_RIDE_STATE = 30181
 
     /**
      * Kind 3178: Rideshare Chat Event (Regular)
@@ -113,7 +103,7 @@ object RideshareEventKinds {
 }
 
 /**
- * Status values for driver status updates (Kind 3180).
+ * Status values for driver ride state (Kind 30180).
  */
 object DriverStatusType {
     const val EN_ROUTE_PICKUP = "en_route_pickup"
@@ -147,11 +137,13 @@ object RideshareExpiration {
 
     // During-ride events: 8 hours (covers long rides + buffer)
     const val RIDE_CONFIRMATION_HOURS = 8
-    const val DRIVER_STATUS_HOURS = 8
+    const val DRIVER_RIDE_STATE_HOURS = 8
+    const val RIDER_RIDE_STATE_HOURS = 8
     const val RIDESHARE_CHAT_HOURS = 8
-    const val PRECISE_LOCATION_HOURS = 8
 
-    // Pickup verification: 30 minutes (happens quickly)
+    // Legacy constants (kept for compatibility during migration)
+    const val DRIVER_STATUS_HOURS = 8
+    const val PRECISE_LOCATION_HOURS = 8
     const val PIN_SUBMISSION_MINUTES = 30
     const val PICKUP_VERIFICATION_MINUTES = 30
 

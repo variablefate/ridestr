@@ -7,7 +7,7 @@
       </SelectionState>
       <SelectionState runConfigName="rider-app">
         <option name="selectionMode" value="DROPDOWN" />
-        <DropdownSelection timestamp="2026-01-11T17:10:55.898630600Z">
+        <DropdownSelection timestamp="2026-01-13T12:51:22.978763200Z">
           <Target type="DEFAULT_BOOT">
             <handle>
               <DeviceId pluginId="PhysicalDevice" identifier="serial=49011FDAP00005" />
@@ -18,7 +18,7 @@
       </SelectionState>
       <SelectionState runConfigName="drivestr">
         <option name="selectionMode" value="DROPDOWN" />
-        <DropdownSelection timestamp="2026-01-11T16:58:42.454777Z">
+        <DropdownSelection timestamp="2026-01-14T02:03:05.562136500Z">
           <Target type="DEFAULT_BOOT">
             <handle>
               <DeviceId pluginId="LocalEmulator" identifier="path=C:\Users\Iwill\.android\avd\Medium_Phone.avd" />

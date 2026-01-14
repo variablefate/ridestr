@@ -11,12 +11,15 @@ import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.data.Vehicle
 import com.ridestr.common.nostr.NostrService
 import com.ridestr.common.nostr.events.BroadcastRideOfferData
+import com.ridestr.common.nostr.events.DriverRideAction
+import com.ridestr.common.nostr.events.DriverRideStateEvent
 import com.ridestr.common.nostr.events.DriverStatusType
 import com.ridestr.common.nostr.events.Location
-import com.ridestr.common.nostr.events.PickupVerificationData
-import com.ridestr.common.nostr.events.PreciseLocationRevealEvent
 import com.ridestr.common.nostr.events.RideConfirmationData
 import com.ridestr.common.nostr.events.RideOfferData
+import com.ridestr.common.nostr.events.RiderRideAction
+import com.ridestr.common.nostr.events.RiderRideStateData
+import com.ridestr.common.nostr.events.RiderRideStateEvent
 import com.ridestr.common.nostr.events.RideshareChatData
 import com.ridestr.common.nostr.events.RideshareEventKinds
 import com.ridestr.common.routing.RouteResult
@@ -128,10 +131,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     private var offerSubscriptionId: String? = null                    // Direct offers (legacy/advanced)
     private var broadcastRequestSubscriptionId: String? = null         // Broadcast ride requests (new flow)
     private var confirmationSubscriptionId: String? = null
-    private var verificationSubscriptionId: String? = null
     private var chatSubscriptionId: String? = null
     private var cancellationSubscriptionId: String? = null
-    private var preciseLocationSubscriptionId: String? = null  // Progressive location reveals from rider
     private var deletionSubscriptionId: String? = null           // Watch for cancelled ride requests (NIP-09)
     private val publishedAvailabilityEventIds = mutableListOf<String>()
     // Track accepted offer IDs to filter out when resubscribing (avoids duplicate offers after ride completion)
@@ -146,6 +147,95 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     // Includes: acceptance, status updates, PIN submission, chat messages
     // Thread-safe list since events are added from multiple coroutines
     private val myRideEventIds = java.util.Collections.synchronizedList(mutableListOf<String>())
+
+    // Driver ride state history for consolidated Kind 30180 events
+    // This accumulates all driver actions during a ride (status changes, PIN submissions)
+    private val driverStateHistory = mutableListOf<DriverRideAction>()
+
+    // Track how many rider actions we've processed (to detect new actions)
+    private var lastProcessedRiderActionCount = 0
+
+    // Subscription ID for rider ride state (replaces verificationSubscriptionId and preciseLocationSubscriptionId)
+    private var riderRideStateSubscriptionId: String? = null
+
+    /**
+     * Helper to add a status action to history and publish driver ride state.
+     * @param status The new status (use DriverStatusType constants)
+     * @param location Optional approximate location for status
+     * @param finalFare Final fare in satoshis (for completed rides)
+     * @param invoice Lightning invoice (for completed rides)
+     * @return The event ID if successful, null on failure
+     */
+    private suspend fun updateDriverStatus(
+        confirmationEventId: String,
+        riderPubKey: String,
+        status: String,
+        location: Location? = null,
+        finalFare: Long? = null,
+        invoice: String? = null
+    ): String? {
+        // Add status action to history
+        val statusAction = DriverRideStateEvent.createStatusAction(
+            status = status,
+            location = location,
+            finalFare = finalFare,
+            invoice = invoice
+        )
+        driverStateHistory.add(statusAction)
+
+        // Publish consolidated driver ride state
+        return nostrService.publishDriverRideState(
+            confirmationEventId = confirmationEventId,
+            riderPubKey = riderPubKey,
+            currentStatus = status,
+            history = driverStateHistory.toList(),
+            finalFare = finalFare,
+            invoice = invoice
+        )
+    }
+
+    /**
+     * Helper to add a PIN submission action to history and publish driver ride state.
+     * @param pin The PIN submitted by the driver
+     * @return The event ID if successful, null on failure
+     */
+    private suspend fun submitPinToHistory(
+        confirmationEventId: String,
+        riderPubKey: String,
+        pin: String
+    ): String? {
+        // Encrypt the PIN for the rider
+        val encryptedPin = nostrService.encryptPinForDriverState(pin, riderPubKey)
+        if (encryptedPin == null) {
+            Log.e(TAG, "Failed to encrypt PIN")
+            return null
+        }
+
+        // Add PIN submission action to history
+        val pinAction = DriverRideStateEvent.createPinSubmitAction(encryptedPin)
+        driverStateHistory.add(pinAction)
+
+        // Get current status from the last status action in history
+        val currentStatus = driverStateHistory
+            .filterIsInstance<DriverRideAction.Status>()
+            .lastOrNull()?.status ?: DriverStatusType.ARRIVED
+
+        // Publish consolidated driver ride state
+        return nostrService.publishDriverRideState(
+            confirmationEventId = confirmationEventId,
+            riderPubKey = riderPubKey,
+            currentStatus = currentStatus,
+            history = driverStateHistory.toList()
+        )
+    }
+
+    /**
+     * Clear driver state history (called when ride ends or is cancelled).
+     */
+    private fun clearDriverStateHistory() {
+        driverStateHistory.clear()
+        lastProcessedRiderActionCount = 0
+    }
 
     /** Track an event for cleanup with diagnostic logging */
     private fun trackEventForCleanup(eventId: String, eventType: String) {
@@ -257,10 +347,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             // Restart the periodic chat refresh job
             startChatRefreshJob(confId)
 
-            // Restore PIN verification subscription if at pickup
-            if (state.stage == DriverStage.ARRIVED_AT_PICKUP) {
-                Log.d(TAG, "Refreshing verification subscription for ARRIVED_AT_PICKUP")
-                subscribeToVerifications()
+            // Restore rider ride state subscription (handles verification and location reveals)
+            state.acceptedOffer?.riderPubKey?.let { riderPubKey ->
+                Log.d(TAG, "Refreshing rider ride state subscription")
+                subscribeToRiderRideState(confId, riderPubKey)
             }
         }
     }
@@ -438,7 +528,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             // Re-subscribe to relevant events
             if (acceptanceEventId != null && stage == DriverStage.RIDE_ACCEPTED) {
                 subscribeToConfirmation(acceptanceEventId)
-                subscribeToVerifications()
+                // Note: We don't subscribe to rider ride state here yet - we do that after confirmation
             }
 
             if (confirmationEventId != null) {
@@ -446,9 +536,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 subscribeToCancellation(confirmationEventId)
                 // Start periodic chat refresh
                 startChatRefreshJob(confirmationEventId)
-                if (stage == DriverStage.ARRIVED_AT_PICKUP) {
-                    subscribeToVerifications()
-                }
+                // Subscribe to rider ride state (handles verification and location reveals)
+                subscribeToRiderRideState(confirmationEventId, offer.riderPubKey)
             }
 
         } catch (e: Exception) {
@@ -656,14 +745,15 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Close subscriptions
         confirmationSubscriptionId?.let { nostrService.closeSubscription(it) }
         confirmationSubscriptionId = null
-        verificationSubscriptionId?.let { nostrService.closeSubscription(it) }
-        verificationSubscriptionId = null
+        riderRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
+        riderRideStateSubscriptionId = null
         chatSubscriptionId?.let { nostrService.closeSubscription(it) }
         chatSubscriptionId = null
         cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
         cancellationSubscriptionId = null
-        preciseLocationSubscriptionId?.let { nostrService.closeSubscription(it) }
-        preciseLocationSubscriptionId = null
+
+        // Clear driver state history
+        clearDriverStateHistory()
 
         // Stop the foreground service
         DriverOnlineService.stop(getApplication())
@@ -685,8 +775,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 )
                 cancellationEventId?.let { myRideEventIds.add(it) }
 
-                // Also send status update
-                val statusEventId = nostrService.sendStatusUpdate(
+                // Also send cancelled status via driver ride state
+                val statusEventId = updateDriverStatus(
                     confirmationEventId = confId,
                     riderPubKey = riderPubKey,
                     status = DriverStatusType.CANCELLED,
@@ -728,14 +818,15 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Close subscriptions
         confirmationSubscriptionId?.let { nostrService.closeSubscription(it) }
         confirmationSubscriptionId = null
-        verificationSubscriptionId?.let { nostrService.closeSubscription(it) }
-        verificationSubscriptionId = null
+        riderRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
+        riderRideStateSubscriptionId = null
         chatSubscriptionId?.let { nostrService.closeSubscription(it) }
         chatSubscriptionId = null
         cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
         cancellationSubscriptionId = null
-        preciseLocationSubscriptionId?.let { nostrService.closeSubscription(it) }
-        preciseLocationSubscriptionId = null
+
+        // Clear driver state history
+        clearDriverStateHistory()
 
         // Update state immediately (UI transition first)
         _uiState.value = _uiState.value.copy(
@@ -825,9 +916,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 // Subscribe to rider's confirmation to get precise pickup location
                 // Note: Confirmation references our acceptance event ID, not the offer ID
                 subscribeToConfirmation(eventId)
-
-                // Subscribe to PIN verification responses
-                subscribeToVerifications()
+                // Note: We'll subscribe to rider ride state after receiving confirmation
             } else {
                 _uiState.value = _uiState.value.copy(
                     isProcessingOffer = false,
@@ -846,17 +935,17 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         if (state.stage != DriverStage.RIDE_ACCEPTED) return
 
         viewModelScope.launch {
-            // Send status update to rider
+            // Send status update to rider via driver ride state
             state.confirmationEventId?.let { confId ->
                 state.acceptedOffer?.riderPubKey?.let { riderPubKey ->
-                    val eventId = nostrService.sendStatusUpdate(
+                    val eventId = updateDriverStatus(
                         confirmationEventId = confId,
                         riderPubKey = riderPubKey,
                         status = DriverStatusType.EN_ROUTE_PICKUP,
                         location = state.currentLocation
                     )
                     // Track for cleanup on ride completion
-                    eventId?.let { trackEventForCleanup(it, "STATUS_EN_ROUTE") }
+                    eventId?.let { trackEventForCleanup(it, "DRIVER_RIDE_STATE") }
                 }
             }
 
@@ -878,14 +967,14 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             state.confirmationEventId?.let { confId ->
                 state.acceptedOffer?.riderPubKey?.let { riderPubKey ->
-                    val eventId = nostrService.sendStatusUpdate(
+                    val eventId = updateDriverStatus(
                         confirmationEventId = confId,
                         riderPubKey = riderPubKey,
                         status = DriverStatusType.ARRIVED,
                         location = state.currentLocation
                     )
                     // Track for cleanup on ride completion
-                    eventId?.let { trackEventForCleanup(it, "STATUS_ARRIVED") }
+                    eventId?.let { trackEventForCleanup(it, "DRIVER_RIDE_STATE") }
                 }
             }
 
@@ -921,16 +1010,17 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 statusMessage = "Verifying PIN..."
             )
 
-            val eventId = nostrService.submitPin(
+            // Submit PIN via driver ride state (adds to history)
+            val eventId = submitPinToHistory(
                 confirmationEventId = confirmationEventId,
                 riderPubKey = riderPubKey,
-                submittedPin = enteredPin
+                pin = enteredPin
             )
 
             if (eventId != null) {
-                Log.d(TAG, "Submitted PIN for verification: $eventId")
+                Log.d(TAG, "Submitted PIN via driver ride state: $eventId")
                 // Track for cleanup on ride completion
-                trackEventForCleanup(eventId, "PIN_SUBMISSION")
+                trackEventForCleanup(eventId, "DRIVER_RIDE_STATE")
                 _uiState.value = _uiState.value.copy(
                     lastPinSubmissionEventId = eventId,
                     statusMessage = "Waiting for rider to verify PIN..."
@@ -1005,16 +1095,17 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             // Clean up all subscriptions
             confirmationSubscriptionId?.let { nostrService.closeSubscription(it) }
             confirmationSubscriptionId = null
-            verificationSubscriptionId?.let { nostrService.closeSubscription(it) }
-            verificationSubscriptionId = null
+            riderRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
+            riderRideStateSubscriptionId = null
             chatSubscriptionId?.let { nostrService.closeSubscription(it) }
             chatSubscriptionId = null
             cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
             cancellationSubscriptionId = null
-            preciseLocationSubscriptionId?.let { nostrService.closeSubscription(it) }
-            preciseLocationSubscriptionId = null
             chatRefreshJob?.cancel()
             chatRefreshJob = null
+
+            // Clear driver state history
+            clearDriverStateHistory()
 
             // Stop the foreground service
             DriverOnlineService.stop(getApplication())
@@ -1044,21 +1135,61 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /**
-     * Subscribe to PIN verification responses from the rider.
+     * Subscribe to rider ride state (Kind 30181) for PIN verification and precise location reveals.
+     * This unified subscription replaces both subscribeToVerifications and subscribeToPreciseLocationReveals.
      */
-    private fun subscribeToVerifications() {
-        verificationSubscriptionId?.let { nostrService.closeSubscription(it) }
+    private fun subscribeToRiderRideState(confirmationEventId: String, riderPubKey: String) {
+        riderRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
 
-        verificationSubscriptionId = nostrService.subscribeToPinVerifications { verification ->
-            Log.d(TAG, "Received PIN verification: verified=${verification.verified}, attempt=${verification.attemptNumber}")
-            handlePinVerification(verification)
+        Log.d(TAG, "Subscribing to rider ride state for confirmation: ${confirmationEventId.take(8)}")
+
+        riderRideStateSubscriptionId = nostrService.subscribeToRiderRideState(
+            confirmationEventId = confirmationEventId,
+            riderPubKey = riderPubKey
+        ) { riderState ->
+            handleRiderRideState(riderState)
+        }
+
+        if (riderRideStateSubscriptionId != null) {
+            Log.d(TAG, "Rider ride state subscription created: $riderRideStateSubscriptionId")
+        } else {
+            Log.e(TAG, "Failed to create rider ride state subscription - not logged in?")
         }
     }
 
     /**
-     * Handle a PIN verification response from the rider.
+     * Handle updates to rider ride state - processes new actions in history.
      */
-    private fun handlePinVerification(verification: PickupVerificationData) {
+    private fun handleRiderRideState(riderState: RiderRideStateData) {
+        Log.d(TAG, "Received rider ride state: phase=${riderState.currentPhase}, actions=${riderState.history.size}")
+
+        // Process only NEW actions (ones we haven't seen yet)
+        val newActions = riderState.history.drop(lastProcessedRiderActionCount)
+        lastProcessedRiderActionCount = riderState.history.size
+
+        if (newActions.isEmpty()) {
+            Log.d(TAG, "No new actions to process")
+            return
+        }
+
+        Log.d(TAG, "Processing ${newActions.size} new rider actions")
+
+        newActions.forEach { action ->
+            when (action) {
+                is RiderRideAction.PinVerify -> {
+                    handlePinVerification(action.verified, action.attempt)
+                }
+                is RiderRideAction.LocationReveal -> {
+                    handleLocationReveal(action)
+                }
+            }
+        }
+    }
+
+    /**
+     * Handle a PIN verification action from the rider.
+     */
+    private fun handlePinVerification(verified: Boolean, attempt: Int) {
         // Cancel timeout job since we received a response
         pinVerificationTimeoutJob?.cancel()
         pinVerificationTimeoutJob = null
@@ -1076,34 +1207,37 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
 
+        Log.d(TAG, "Processing PIN verification: verified=$verified, attempt=$attempt")
+
         _uiState.value = state.copy(
             isAwaitingPinVerification = false,
             pinVerificationTimedOut = false,
-            pinAttempts = verification.attemptNumber
+            pinAttempts = attempt
         )
 
-        if (verification.verified) {
+        if (verified) {
             Log.d(TAG, "PIN verified! Starting ride.")
             startRide()
         } else {
-            Log.w(TAG, "PIN rejected! Attempt ${verification.attemptNumber}")
-            val remainingAttempts = 3 - verification.attemptNumber
+            Log.w(TAG, "PIN rejected! Attempt $attempt")
+            val remainingAttempts = 3 - attempt
             if (remainingAttempts <= 0) {
                 // Rider cancelled due to brute force protection
                 confirmationSubscriptionId?.let { nostrService.closeSubscription(it) }
                 confirmationSubscriptionId = null
-                verificationSubscriptionId?.let { nostrService.closeSubscription(it) }
-                verificationSubscriptionId = null
+                riderRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
+                riderRideStateSubscriptionId = null
                 chatSubscriptionId?.let { nostrService.closeSubscription(it) }
                 chatSubscriptionId = null
                 cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
                 cancellationSubscriptionId = null
-                preciseLocationSubscriptionId?.let { nostrService.closeSubscription(it) }
-                preciseLocationSubscriptionId = null
 
                 // Stop the foreground service
                 val context = getApplication<Application>()
                 DriverOnlineService.stop(context)
+
+                // Clear driver state history
+                clearDriverStateHistory()
 
                 _uiState.value = _uiState.value.copy(
                     stage = DriverStage.OFFLINE,
@@ -1123,6 +1257,45 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /**
+     * Handle a location reveal action from the rider.
+     */
+    private fun handleLocationReveal(reveal: RiderRideAction.LocationReveal) {
+        val state = _uiState.value
+        val riderPubKey = state.acceptedOffer?.riderPubKey ?: return
+
+        viewModelScope.launch {
+            // Decrypt the location
+            val location = nostrService.decryptLocationFromRiderState(reveal.locationEncrypted, riderPubKey)
+            if (location == null) {
+                Log.e(TAG, "Failed to decrypt location reveal")
+                return@launch
+            }
+
+            Log.d(TAG, "Decrypted ${reveal.locationType} location: ${location.lat}, ${location.lon}")
+
+            when (reveal.locationType) {
+                RiderRideStateEvent.LocationType.PICKUP -> {
+                    Log.d(TAG, "Updating navigation to precise pickup location")
+                    _uiState.value = _uiState.value.copy(
+                        precisePickupLocation = location,
+                        statusMessage = "Received precise pickup location"
+                    )
+                }
+                RiderRideStateEvent.LocationType.DESTINATION -> {
+                    Log.d(TAG, "Received precise destination location")
+                    _uiState.value = _uiState.value.copy(
+                        preciseDestinationLocation = location,
+                        statusMessage = "Received precise destination"
+                    )
+                }
+                else -> {
+                    Log.w(TAG, "Unknown location type: ${reveal.locationType}")
+                }
+            }
+        }
+    }
+
+    /**
      * Start the ride (rider is in vehicle).
      */
     private fun startRide() {
@@ -1132,14 +1305,14 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             state.confirmationEventId?.let { confId ->
                 state.acceptedOffer?.riderPubKey?.let { riderPubKey ->
-                    val eventId = nostrService.sendStatusUpdate(
+                    val eventId = updateDriverStatus(
                         confirmationEventId = confId,
                         riderPubKey = riderPubKey,
                         status = DriverStatusType.IN_PROGRESS,
                         location = state.currentLocation
                     )
                     // Track for cleanup on ride completion
-                    eventId?.let { trackEventForCleanup(it, "STATUS_IN_PROGRESS") }
+                    eventId?.let { trackEventForCleanup(it, "DRIVER_RIDE_STATE") }
                 }
             }
 
@@ -1171,15 +1344,15 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
         viewModelScope.launch {
             state.confirmationEventId?.let { confId ->
-                val eventId = nostrService.sendStatusUpdate(
+                val eventId = updateDriverStatus(
                     confirmationEventId = confId,
                     riderPubKey = offer.riderPubKey,
                     status = DriverStatusType.COMPLETED,
                     location = state.currentLocation,
-                    finalFare = offer.fareEstimate
+                    finalFare = offer.fareEstimate.toLong()
                 )
                 // Track for cleanup on ride completion
-                eventId?.let { trackEventForCleanup(it, "STATUS_COMPLETED") }
+                eventId?.let { trackEventForCleanup(it, "DRIVER_RIDE_STATE") }
             }
 
             _uiState.value = state.copy(
@@ -1234,8 +1407,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             // Subscribe to cancellation events from rider
             subscribeToCancellation(confirmation.eventId)
 
-            // Subscribe to precise location reveals (rider shares precise pickup/destination when close)
-            subscribeToPreciseLocationReveals(confirmation.eventId)
+            // Subscribe to rider ride state (handles verification and location reveals)
+            _uiState.value.acceptedOffer?.riderPubKey?.let { riderPubKey ->
+                subscribeToRiderRideState(confirmation.eventId, riderPubKey)
+            }
 
             // Auto-transition to EN_ROUTE_TO_PICKUP (skip the intermediate screen)
             autoStartRouteToPickup(confirmation.eventId)
@@ -1282,8 +1457,11 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Close subscriptions
         confirmationSubscriptionId?.let { nostrService.closeSubscription(it) }
         confirmationSubscriptionId = null
-        verificationSubscriptionId?.let { nostrService.closeSubscription(it) }
-        verificationSubscriptionId = null
+        riderRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
+        riderRideStateSubscriptionId = null
+
+        // Clear driver state history
+        clearDriverStateHistory()
 
         // Return to available state
         _uiState.value = _uiState.value.copy(
@@ -1313,15 +1491,15 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         val context = getApplication<Application>()
 
         viewModelScope.launch {
-            // Send status update to rider
-            val eventId = nostrService.sendStatusUpdate(
+            // Send status update to rider via driver ride state
+            val eventId = updateDriverStatus(
                 confirmationEventId = confirmationEventId,
                 riderPubKey = riderPubKey,
                 status = DriverStatusType.EN_ROUTE_PICKUP,
                 location = state.currentLocation
             )
             // Track for cleanup on ride completion
-            eventId?.let { trackEventForCleanup(it, "STATUS_EN_ROUTE_AUTO") }
+            eventId?.let { trackEventForCleanup(it, "DRIVER_RIDE_STATE") }
 
             // Notify service of status change (updates notification)
             val riderName: String? = null // RideOfferData doesn't contain rider name
@@ -1426,49 +1604,6 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /**
-     * Subscribe to precise location reveals from rider.
-     * Rider sends precise pickup when driver is close (~1 mile),
-     * and precise destination after PIN is verified.
-     */
-    private fun subscribeToPreciseLocationReveals(confirmationEventId: String) {
-        preciseLocationSubscriptionId?.let { nostrService.closeSubscription(it) }
-
-        Log.d(TAG, "Subscribing to precise location reveals for confirmation: ${confirmationEventId.take(8)}")
-
-        val newSubId = nostrService.subscribeToPreciseLocationReveals(confirmationEventId, viewModelScope) { revealData ->
-            Log.d(TAG, "Received precise location reveal: ${revealData.locationType}")
-            Log.d(TAG, "Precise location: ${revealData.preciseLocation.lat}, ${revealData.preciseLocation.lon}")
-
-            when (revealData.locationType) {
-                PreciseLocationRevealEvent.LOCATION_TYPE_PICKUP -> {
-                    Log.d(TAG, "Updating navigation to precise pickup location")
-                    _uiState.value = _uiState.value.copy(
-                        precisePickupLocation = revealData.preciseLocation,
-                        statusMessage = "Received precise pickup location"
-                    )
-                }
-                PreciseLocationRevealEvent.LOCATION_TYPE_DESTINATION -> {
-                    Log.d(TAG, "Received precise destination location")
-                    _uiState.value = _uiState.value.copy(
-                        preciseDestinationLocation = revealData.preciseLocation,
-                        statusMessage = "Received precise destination"
-                    )
-                }
-                else -> {
-                    Log.w(TAG, "Unknown location type: ${revealData.locationType}")
-                }
-            }
-        }
-
-        if (newSubId != null) {
-            preciseLocationSubscriptionId = newSubId
-            Log.d(TAG, "Precise location reveal subscription created: $newSubId")
-        } else {
-            Log.e(TAG, "Failed to create precise location reveal subscription - not logged in?")
-        }
-    }
-
-    /**
      * Handle ride cancellation from rider.
      */
     private fun handleRideCancellation(reason: String?) {
@@ -1482,14 +1617,15 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Close active subscriptions
         confirmationSubscriptionId?.let { nostrService.closeSubscription(it) }
         confirmationSubscriptionId = null
-        verificationSubscriptionId?.let { nostrService.closeSubscription(it) }
-        verificationSubscriptionId = null
+        riderRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
+        riderRideStateSubscriptionId = null
         chatSubscriptionId?.let { nostrService.closeSubscription(it) }
         chatSubscriptionId = null
         cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
         cancellationSubscriptionId = null
-        preciseLocationSubscriptionId?.let { nostrService.closeSubscription(it) }
-        preciseLocationSubscriptionId = null
+
+        // Clear driver state history
+        clearDriverStateHistory()
 
         // Clear persisted ride state
         clearSavedRideState()
@@ -1588,14 +1724,15 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             // Close subscriptions
             confirmationSubscriptionId?.let { nostrService.closeSubscription(it) }
             confirmationSubscriptionId = null
-            verificationSubscriptionId?.let { nostrService.closeSubscription(it) }
-            verificationSubscriptionId = null
+            riderRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
+            riderRideStateSubscriptionId = null
             chatSubscriptionId?.let { nostrService.closeSubscription(it) }
             chatSubscriptionId = null
             cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
             cancellationSubscriptionId = null
-            preciseLocationSubscriptionId?.let { nostrService.closeSubscription(it) }
-            preciseLocationSubscriptionId = null
+
+            // Clear driver state history
+            clearDriverStateHistory()
 
             // Stop the foreground service since driver is going offline
             DriverOnlineService.stop(context)
@@ -2294,9 +2431,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
                 // Subscribe to rider's confirmation
                 subscribeToConfirmation(eventId)
-
-                // Subscribe to PIN verification responses
-                subscribeToVerifications()
+                // Note: We'll subscribe to rider ride state after receiving confirmation
             } else {
                 _uiState.value = _uiState.value.copy(
                     isProcessingOffer = false,
@@ -2406,10 +2541,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         deletionSubscriptionId?.let { nostrService.closeSubscription(it) }
         requestAcceptanceSubscriptionIds.values.forEach { nostrService.closeSubscription(it) }
         confirmationSubscriptionId?.let { nostrService.closeSubscription(it) }
-        verificationSubscriptionId?.let { nostrService.closeSubscription(it) }
+        riderRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
         chatSubscriptionId?.let { nostrService.closeSubscription(it) }
         cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
-        preciseLocationSubscriptionId?.let { nostrService.closeSubscription(it) }
         nostrService.disconnect()
         // Clean up Bitcoin price service
         bitcoinPriceService.cleanup()

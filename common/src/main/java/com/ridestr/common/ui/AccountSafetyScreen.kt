@@ -297,12 +297,10 @@ fun AccountSafetyScreen(
                         EventTypeRow("Ride Offers", RideshareEventKinds.RIDE_OFFER, kindCounts?.get(RideshareEventKinds.RIDE_OFFER))
                         EventTypeRow("Ride Acceptances", RideshareEventKinds.RIDE_ACCEPTANCE, kindCounts?.get(RideshareEventKinds.RIDE_ACCEPTANCE))
                         EventTypeRow("Ride Confirmations", RideshareEventKinds.RIDE_CONFIRMATION, kindCounts?.get(RideshareEventKinds.RIDE_CONFIRMATION))
-                        EventTypeRow("PIN Submissions", RideshareEventKinds.PIN_SUBMISSION, kindCounts?.get(RideshareEventKinds.PIN_SUBMISSION))
-                        EventTypeRow("Pickup Verifications", RideshareEventKinds.PICKUP_VERIFICATION, kindCounts?.get(RideshareEventKinds.PICKUP_VERIFICATION))
+                        EventTypeRow("Driver Ride State", RideshareEventKinds.DRIVER_RIDE_STATE, kindCounts?.get(RideshareEventKinds.DRIVER_RIDE_STATE))
+                        EventTypeRow("Rider Ride State", RideshareEventKinds.RIDER_RIDE_STATE, kindCounts?.get(RideshareEventKinds.RIDER_RIDE_STATE))
                         EventTypeRow("Chat Messages", RideshareEventKinds.RIDESHARE_CHAT, kindCounts?.get(RideshareEventKinds.RIDESHARE_CHAT))
                         EventTypeRow("Ride Cancellations", RideshareEventKinds.RIDE_CANCELLATION, kindCounts?.get(RideshareEventKinds.RIDE_CANCELLATION))
-                        EventTypeRow("Driver Status", RideshareEventKinds.DRIVER_STATUS, kindCounts?.get(RideshareEventKinds.DRIVER_STATUS))
-                        EventTypeRow("Location Reveals", RideshareEventKinds.PRECISE_LOCATION_REVEAL, kindCounts?.get(RideshareEventKinds.PRECISE_LOCATION_REVEAL))
                     }
 
                     Spacer(modifier = Modifier.height(16.dp))
@@ -372,12 +370,11 @@ fun AccountSafetyScreen(
                         // Per-kind deletion buttons
                         val kindOptions = listOf(
                             Triple("Availability Events", RideshareEventKinds.DRIVER_AVAILABILITY, "Stale online status from crashed sessions"),
-                            Triple("Status Updates", RideshareEventKinds.DRIVER_STATUS, "EN_ROUTE, ARRIVED, IN_PROGRESS, etc."),
+                            Triple("Driver Ride State", RideshareEventKinds.DRIVER_RIDE_STATE, "Status + PIN submissions (consolidated)"),
+                            Triple("Rider Ride State", RideshareEventKinds.RIDER_RIDE_STATE, "Verifications + locations (consolidated)"),
                             Triple("Chat Messages", RideshareEventKinds.RIDESHARE_CHAT, "In-ride messages"),
-                            Triple("PIN Submissions", RideshareEventKinds.PIN_SUBMISSION, "Pickup verification attempts"),
                             Triple("Ride Cancellations", RideshareEventKinds.RIDE_CANCELLATION, "Cancelled ride notices"),
-                            Triple("Ride Acceptances", RideshareEventKinds.RIDE_ACCEPTANCE, "Your accepted rides"),
-                            Triple("Location Reveals", RideshareEventKinds.PRECISE_LOCATION_REVEAL, "Encrypted precise locations")
+                            Triple("Ride Acceptances", RideshareEventKinds.RIDE_ACCEPTANCE, "Your accepted rides")
                         )
 
                         kindOptions.forEach { (name, kind, description) ->

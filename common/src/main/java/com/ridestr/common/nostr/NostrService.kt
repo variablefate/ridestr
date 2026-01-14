@@ -215,13 +215,11 @@ class NostrService(
             RideshareEventKinds.RIDE_OFFER,           // 3173
             RideshareEventKinds.RIDE_ACCEPTANCE,      // 3174
             RideshareEventKinds.RIDE_CONFIRMATION,    // 3175
-            RideshareEventKinds.PIN_SUBMISSION,       // 3176
-            RideshareEventKinds.PICKUP_VERIFICATION,  // 3177
+            RideshareEventKinds.DRIVER_RIDE_STATE,    // 30180 (consolidated)
+            RideshareEventKinds.RIDER_RIDE_STATE,     // 30181 (consolidated)
             RideshareEventKinds.RIDESHARE_CHAT,       // 3178
             // EXCLUDED: RIDE_CANCELLATION (3179) - expires in 24h, both apps need it for state
-            RideshareEventKinds.DRIVER_STATUS,        // 3180
-            RideshareEventKinds.PRECISE_LOCATION_REVEAL, // 3181
-            // Legacy rideshare-specific kinds (may have old events on relays)
+            // Legacy kinds (may have old events on relays)
             20173   // Old ephemeral driver status (changed to 3180)
             // Note: NOT including 1059/1060 (Gift Wrap/Seal) - those are standard
             // NIP-17 kinds used by other apps, would delete user's other DMs!
@@ -343,12 +341,10 @@ class NostrService(
             RideshareEventKinds.RIDE_OFFER,           // 3173
             RideshareEventKinds.RIDE_ACCEPTANCE,      // 3174
             RideshareEventKinds.RIDE_CONFIRMATION,    // 3175
-            RideshareEventKinds.PIN_SUBMISSION,       // 3176
-            RideshareEventKinds.PICKUP_VERIFICATION,  // 3177
+            RideshareEventKinds.DRIVER_RIDE_STATE,    // 30180 (consolidated)
+            RideshareEventKinds.RIDER_RIDE_STATE,     // 30181 (consolidated)
             RideshareEventKinds.RIDESHARE_CHAT,       // 3178
             RideshareEventKinds.RIDE_CANCELLATION,    // 3179
-            RideshareEventKinds.DRIVER_STATUS,        // 3180
-            RideshareEventKinds.PRECISE_LOCATION_REVEAL, // 3181
             // Legacy rideshare-specific kinds (may have old events on relays)
             20173   // Old ephemeral driver status (changed to 3180)
             // Note: NOT including 1059/1060 (Gift Wrap/Seal) - those are standard
@@ -403,12 +399,10 @@ class NostrService(
             RideshareEventKinds.RIDE_OFFER,
             RideshareEventKinds.RIDE_ACCEPTANCE,
             RideshareEventKinds.RIDE_CONFIRMATION,
-            RideshareEventKinds.PIN_SUBMISSION,
-            RideshareEventKinds.PICKUP_VERIFICATION,
+            RideshareEventKinds.DRIVER_RIDE_STATE,
+            RideshareEventKinds.RIDER_RIDE_STATE,
             RideshareEventKinds.RIDESHARE_CHAT,
             RideshareEventKinds.RIDE_CANCELLATION,
-            RideshareEventKinds.DRIVER_STATUS,
-            RideshareEventKinds.PRECISE_LOCATION_REVEAL,
             20173  // Legacy ephemeral driver status
         )
 
@@ -463,12 +457,10 @@ class NostrService(
             RideshareEventKinds.RIDE_OFFER,              // 3173
             RideshareEventKinds.RIDE_ACCEPTANCE,         // 3174
             RideshareEventKinds.RIDE_CONFIRMATION,       // 3175
-            RideshareEventKinds.PIN_SUBMISSION,          // 3176
-            RideshareEventKinds.PICKUP_VERIFICATION,     // 3177
+            RideshareEventKinds.DRIVER_RIDE_STATE,       // 30180 (consolidated)
+            RideshareEventKinds.RIDER_RIDE_STATE,        // 30181 (consolidated)
             RideshareEventKinds.RIDESHARE_CHAT,          // 3178
             // EXCLUDED: RIDE_CANCELLATION (3179) - expires in 24h, both apps need it for state
-            RideshareEventKinds.DRIVER_STATUS,           // 3180
-            RideshareEventKinds.PRECISE_LOCATION_REVEAL, // 3181
             20173  // Legacy ephemeral driver status
         )
 
@@ -510,9 +502,10 @@ class NostrService(
         Log.d(TAG, "=== BACKGROUND CLEANUP: Found ${originalEventIds.size} events to delete ===")
 
         // Delete in batches of 50 (same as Account Safety)
+        // Include k-tags for better relay processing
         var deletedCount = 0
         foundEventIds.chunked(50).forEach { batch ->
-            val result = deleteEvents(batch, reason)
+            val result = deleteEvents(batch, reason, kindsToClean)  // Pass k-tags
             if (result != null) {
                 deletedCount += batch.size
             }
@@ -547,7 +540,7 @@ class NostrService(
         if (persistingEventIds.isNotEmpty()) {
             Log.d(TAG, "=== BACKGROUND CLEANUP RETRY: ${persistingEventIds.size} events persisted, retrying deletion ===")
             persistingEventIds.chunked(50).forEach { batch ->
-                deleteEvents(batch, "$reason (retry)")
+                deleteEvents(batch, "$reason (retry)", kindsToClean)  // Pass k-tags on retry
             }
             Log.d(TAG, "=== BACKGROUND CLEANUP RETRY: Done ===")
         } else {
@@ -585,117 +578,223 @@ class NostrService(
         }
     }
 
+    // ==================== Driver Ride State (Kind 30180) ====================
+
     /**
-     * Submit a PIN for verification (driver submits PIN heard from rider).
-     * Content is NIP-44 encrypted so only the rider can verify.
-     * @param confirmationEventId The ride confirmation event ID
+     * Publish or update driver ride state.
+     * This is a parameterized replaceable event - only the latest state per ride is kept.
+     *
+     * @param confirmationEventId The ride confirmation event ID (used as d-tag)
      * @param riderPubKey The rider's public key
-     * @param submittedPin The PIN the driver heard from the rider
+     * @param currentStatus Current status (use DriverStatusType constants)
+     * @param history List of all actions in chronological order
+     * @param finalFare Final fare in satoshis (for completed rides)
+     * @param invoice Lightning invoice (for completed rides)
      * @return The event ID if successful, null on failure
      */
-    suspend fun submitPin(
+    suspend fun publishDriverRideState(
         confirmationEventId: String,
         riderPubKey: String,
-        submittedPin: String
-    ): String? {
-        val signer = keyManager.getSigner()
-        if (signer == null) {
-            Log.e(TAG, "Cannot submit PIN: Not logged in")
-            return null
-        }
-
-        return try {
-            val event = PinSubmissionEvent.create(
-                signer = signer,
-                confirmationEventId = confirmationEventId,
-                riderPubKey = riderPubKey,
-                submittedPin = submittedPin
-            )
-            relayManager.publish(event)
-            Log.d(TAG, "Submitted PIN for verification: ${event.id}")
-            event.id
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to submit PIN", e)
-            null
-        }
-    }
-
-    /**
-     * Send a PIN verification response (rider verifies driver's PIN submission).
-     * @param pinSubmissionEventId The PIN submission event ID being verified
-     * @param driverPubKey The driver's public key
-     * @param verified True if PIN was correct, false if rejected
-     * @param attemptNumber The current attempt number (for brute force tracking)
-     * @return The event ID if successful, null on failure
-     */
-    suspend fun sendPinVerification(
-        pinSubmissionEventId: String,
-        driverPubKey: String,
-        verified: Boolean,
-        attemptNumber: Int
-    ): String? {
-        val signer = keyManager.getSigner()
-        if (signer == null) {
-            Log.e(TAG, "Cannot send PIN verification: Not logged in")
-            return null
-        }
-
-        return try {
-            val event = PickupVerificationEvent.create(
-                signer = signer,
-                pinSubmissionEventId = pinSubmissionEventId,
-                driverPubKey = driverPubKey,
-                verified = verified,
-                attemptNumber = attemptNumber
-            )
-            relayManager.publish(event)
-            Log.d(TAG, "Sent PIN verification: ${event.id} (verified=$verified, attempt=$attemptNumber)")
-            event.id
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to send PIN verification", e)
-            null
-        }
-    }
-
-    /**
-     * Send a driver status update.
-     * @param confirmationEventId The ride confirmation event ID
-     * @param riderPubKey The rider's public key
-     * @param status Current status (use DriverStatusType constants)
-     * @param location Current location (optional)
-     * @param finalFare Final fare for completed rides (optional)
-     * @param invoice Lightning invoice for payment (optional)
-     * @return The event ID if successful, null on failure
-     */
-    suspend fun sendStatusUpdate(
-        confirmationEventId: String,
-        riderPubKey: String,
-        status: String,
-        location: Location? = null,
-        finalFare: Double? = null,
+        currentStatus: String,
+        history: List<DriverRideAction>,
+        finalFare: Long? = null,
         invoice: String? = null
     ): String? {
         val signer = keyManager.getSigner()
         if (signer == null) {
-            Log.e(TAG, "Cannot send status update: Not logged in")
+            Log.e(TAG, "Cannot publish driver ride state: Not logged in")
             return null
         }
 
         return try {
-            val event = DriverStatusEvent.create(
+            val event = DriverRideStateEvent.create(
                 signer = signer,
                 confirmationEventId = confirmationEventId,
                 riderPubKey = riderPubKey,
-                status = status,
-                location = location,
+                currentStatus = currentStatus,
+                history = history,
                 finalFare = finalFare,
                 invoice = invoice
             )
             relayManager.publish(event)
-            Log.d(TAG, "Sent status update: ${event.id} ($status)")
+            Log.d(TAG, "Published driver ride state: ${event.id} ($currentStatus, ${history.size} actions)")
             event.id
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to send status update", e)
+            Log.e(TAG, "Failed to publish driver ride state", e)
+            null
+        }
+    }
+
+    /**
+     * Subscribe to driver ride state updates for a confirmed ride.
+     * @param confirmationEventId The confirmation event ID to watch
+     * @param driverPubKey The driver's public key (to filter by author)
+     * @param onState Called when state update is received
+     * @return Subscription ID for closing later, or null if not logged in
+     */
+    fun subscribeToDriverRideState(
+        confirmationEventId: String,
+        driverPubKey: String,
+        onState: (DriverRideStateData) -> Unit
+    ): String? {
+        val myPubKey = keyManager.getPubKeyHex() ?: return null
+
+        // Subscribe to Kind 30180 events from the driver for this ride
+        // d-tag is the confirmation event ID
+        return relayManager.subscribe(
+            kinds = listOf(RideshareEventKinds.DRIVER_RIDE_STATE),
+            authors = listOf(driverPubKey),
+            tags = mapOf("d" to listOf(confirmationEventId))
+        ) { event, _ ->
+            Log.d(TAG, "Received driver ride state ${event.id} from ${event.pubKey.take(8)}")
+            DriverRideStateEvent.parse(event)?.let { data ->
+                onState(data)
+            }
+        }
+    }
+
+    // ==================== Rider Ride State (Kind 30181) ====================
+
+    /**
+     * Publish or update rider ride state.
+     * This is a parameterized replaceable event - only the latest state per ride is kept.
+     *
+     * @param confirmationEventId The ride confirmation event ID (used as d-tag)
+     * @param driverPubKey The driver's public key
+     * @param currentPhase Current phase (use RiderRideStateEvent.Phase constants)
+     * @param history List of all actions in chronological order
+     * @return The event ID if successful, null on failure
+     */
+    suspend fun publishRiderRideState(
+        confirmationEventId: String,
+        driverPubKey: String,
+        currentPhase: String,
+        history: List<RiderRideAction>
+    ): String? {
+        val signer = keyManager.getSigner()
+        if (signer == null) {
+            Log.e(TAG, "Cannot publish rider ride state: Not logged in")
+            return null
+        }
+
+        return try {
+            val event = RiderRideStateEvent.create(
+                signer = signer,
+                confirmationEventId = confirmationEventId,
+                driverPubKey = driverPubKey,
+                currentPhase = currentPhase,
+                history = history
+            )
+            relayManager.publish(event)
+            Log.d(TAG, "Published rider ride state: ${event.id} ($currentPhase, ${history.size} actions)")
+            event.id
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to publish rider ride state", e)
+            null
+        }
+    }
+
+    /**
+     * Subscribe to rider ride state updates for a confirmed ride.
+     * @param confirmationEventId The confirmation event ID to watch
+     * @param riderPubKey The rider's public key (to filter by author)
+     * @param onState Called when state update is received
+     * @return Subscription ID for closing later, or null if not logged in
+     */
+    fun subscribeToRiderRideState(
+        confirmationEventId: String,
+        riderPubKey: String,
+        onState: (RiderRideStateData) -> Unit
+    ): String? {
+        val myPubKey = keyManager.getPubKeyHex() ?: return null
+
+        // Subscribe to Kind 30181 events from the rider for this ride
+        // d-tag is the confirmation event ID
+        return relayManager.subscribe(
+            kinds = listOf(RideshareEventKinds.RIDER_RIDE_STATE),
+            authors = listOf(riderPubKey),
+            tags = mapOf("d" to listOf(confirmationEventId))
+        ) { event, _ ->
+            Log.d(TAG, "Received rider ride state ${event.id} from ${event.pubKey.take(8)}")
+            RiderRideStateEvent.parse(event)?.let { data ->
+                onState(data)
+            }
+        }
+    }
+
+    /**
+     * Encrypt a location for inclusion in rider ride state history.
+     * @param location The location to encrypt
+     * @param driverPubKey The driver's public key (recipient)
+     * @return Encrypted location string, or null on failure
+     */
+    suspend fun encryptLocationForRiderState(
+        location: Location,
+        driverPubKey: String
+    ): String? {
+        val signer = keyManager.getSigner() ?: return null
+        return try {
+            signer.nip44Encrypt(location.toJson().toString(), driverPubKey)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to encrypt location", e)
+            null
+        }
+    }
+
+    /**
+     * Decrypt a location from rider ride state history.
+     * @param encryptedLocation The encrypted location string
+     * @param riderPubKey The rider's public key (sender)
+     * @return Decrypted location, or null on failure
+     */
+    suspend fun decryptLocationFromRiderState(
+        encryptedLocation: String,
+        riderPubKey: String
+    ): Location? {
+        val signer = keyManager.getSigner() ?: return null
+        return try {
+            val decrypted = signer.nip44Decrypt(encryptedLocation, riderPubKey)
+            Location.fromJson(org.json.JSONObject(decrypted))
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to decrypt location", e)
+            null
+        }
+    }
+
+    /**
+     * Encrypt a PIN for inclusion in driver ride state history.
+     * @param pin The PIN to encrypt
+     * @param riderPubKey The rider's public key (recipient)
+     * @return Encrypted PIN string, or null on failure
+     */
+    suspend fun encryptPinForDriverState(
+        pin: String,
+        riderPubKey: String
+    ): String? {
+        val signer = keyManager.getSigner() ?: return null
+        return try {
+            signer.nip44Encrypt(pin, riderPubKey)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to encrypt PIN", e)
+            null
+        }
+    }
+
+    /**
+     * Decrypt a PIN from driver ride state history.
+     * @param encryptedPin The encrypted PIN string
+     * @param driverPubKey The driver's public key (sender)
+     * @return Decrypted PIN, or null on failure
+     */
+    suspend fun decryptPinFromDriverState(
+        encryptedPin: String,
+        driverPubKey: String
+    ): String? {
+        val signer = keyManager.getSigner() ?: return null
+        return try {
+            signer.nip44Decrypt(encryptedPin, driverPubKey)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to decrypt PIN", e)
             null
         }
     }
@@ -1090,93 +1189,6 @@ class NostrService(
     }
 
     /**
-     * Subscribe to PIN submissions for a confirmed ride (rider listens for driver's PIN).
-     * Automatically decrypts the PIN using the rider's key.
-     * @param confirmationEventId The confirmation event ID to watch
-     * @param scope CoroutineScope for async decryption (use viewModelScope in ViewModels)
-     * @param onPinSubmission Called when PIN is submitted (with decrypted PIN)
-     * @return Subscription ID for closing later
-     */
-    fun subscribeToPinSubmissions(
-        confirmationEventId: String,
-        scope: CoroutineScope,
-        onPinSubmission: (PinSubmissionData) -> Unit
-    ): String {
-        return relayManager.subscribe(
-            kinds = listOf(RideshareEventKinds.PIN_SUBMISSION),
-            tags = mapOf("e" to listOf(confirmationEventId))
-        ) { event, _ ->
-            // Parse encrypted submission
-            PinSubmissionEvent.parseEncrypted(event)?.let { encryptedData ->
-                // Decrypt using rider's key
-                val signer = keyManager.getSigner()
-                if (signer != null) {
-                    scope.launch {
-                        PinSubmissionEvent.decrypt(signer, encryptedData)?.let { data ->
-                            onPinSubmission(data)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /**
-     * Subscribe to PIN verification responses (driver listens for rider's verification).
-     * @param pinSubmissionEventId The PIN submission event ID to watch (optional, if null watches all)
-     * @param onVerification Called when verification is received
-     * @return Subscription ID for closing later
-     */
-    fun subscribeToPinVerifications(
-        pinSubmissionEventId: String? = null,
-        onVerification: (PickupVerificationData) -> Unit
-    ): String {
-        val tags = mutableMapOf<String, List<String>>()
-        pinSubmissionEventId?.let { tags["e"] = listOf(it) }
-
-        // Also filter by driver's pubkey to only see verifications for us
-        val myPubKey = keyManager.getPubKeyHex()
-        myPubKey?.let { tags["p"] = listOf(it) }
-
-        return relayManager.subscribe(
-            kinds = listOf(RideshareEventKinds.PICKUP_VERIFICATION),
-            tags = tags
-        ) { event, _ ->
-            PickupVerificationEvent.parse(event)?.let { data ->
-                onVerification(data)
-            }
-        }
-    }
-
-    /**
-     * Subscribe to driver status updates for a confirmed ride.
-     * @param confirmationEventId The confirmation event ID to watch
-     * @param onStatus Called when status update is received
-     * @return Subscription ID for closing later, or null if not logged in
-     */
-    fun subscribeToStatusUpdates(
-        confirmationEventId: String,
-        onStatus: (DriverStatusData) -> Unit
-    ): String? {
-        val myPubKey = keyManager.getPubKeyHex() ?: return null
-
-        // Subscribe to Kind 3180 events addressed to us for this ride
-        // Filter by both p tag (recipient) and e tag (confirmation) for reliable delivery
-        return relayManager.subscribe(
-            kinds = listOf(RideshareEventKinds.DRIVER_STATUS),
-            tags = mapOf(
-                "p" to listOf(myPubKey),
-                "e" to listOf(confirmationEventId)
-            )
-        ) { event, _ ->
-            Log.d(TAG, "Received status event ${event.id} from ${event.pubKey.take(8)}")
-            DriverStatusEvent.parse(event)?.let { data ->
-                onStatus(data)
-            }
-        }
-    }
-
-    /**
      * Publish a ride cancellation event.
      * @param confirmationEventId The ride confirmation event ID being cancelled
      * @param otherPartyPubKey The other party's public key (to notify them)
@@ -1234,91 +1246,6 @@ class NostrService(
             Log.d(TAG, "Received cancellation event ${event.id} from ${event.pubKey.take(8)}")
             RideCancellationEvent.parse(event)?.let { data ->
                 onCancellation(data)
-            }
-        }
-    }
-
-    // ==================== Progressive Location Reveal ====================
-
-    /**
-     * Send a precise location reveal to the driver.
-     * Used when driver is close (~1 mile) to share precise pickup or destination.
-     *
-     * @param confirmationEventId The ride confirmation event ID
-     * @param driverPubKey The driver's public key
-     * @param locationType Either "pickup" or "destination"
-     * @param preciseLocation The precise coordinates to share
-     * @return The event ID if successful, null on failure
-     */
-    suspend fun sendPreciseLocationReveal(
-        confirmationEventId: String,
-        driverPubKey: String,
-        locationType: String,
-        preciseLocation: Location
-    ): String? {
-        val signer = keyManager.getSigner()
-        if (signer == null) {
-            Log.e(TAG, "Cannot send precise location reveal: Not logged in")
-            return null
-        }
-
-        return try {
-            val event = PreciseLocationRevealEvent.create(
-                signer = signer,
-                confirmationEventId = confirmationEventId,
-                driverPubKey = driverPubKey,
-                locationType = locationType,
-                preciseLocation = preciseLocation
-            )
-            relayManager.publish(event)
-            Log.d(TAG, "Sent precise location reveal ($locationType): ${event.id}")
-            event.id
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to send precise location reveal", e)
-            null
-        }
-    }
-
-    /**
-     * Subscribe to precise location reveals for an active ride (driver side).
-     * Automatically decrypts the location data.
-     *
-     * @param confirmationEventId The confirmation event ID to watch
-     * @param scope CoroutineScope for async decryption (use viewModelScope in ViewModels)
-     * @param onReveal Called when a precise location is revealed (with decrypted location)
-     * @return Subscription ID for closing later, or null if not logged in
-     */
-    fun subscribeToPreciseLocationReveals(
-        confirmationEventId: String,
-        scope: CoroutineScope,
-        onReveal: (PreciseLocationRevealData) -> Unit
-    ): String? {
-        val myPubKey = keyManager.getPubKeyHex() ?: return null
-
-        return relayManager.subscribe(
-            kinds = listOf(RideshareEventKinds.PRECISE_LOCATION_REVEAL),
-            tags = mapOf(
-                "p" to listOf(myPubKey),
-                "e" to listOf(confirmationEventId)
-            )
-        ) { event, _ ->
-            Log.d(TAG, "Received precise location reveal ${event.id} from ${event.pubKey.take(8)}")
-
-            // Decrypt the location data
-            val signer = keyManager.getSigner()
-            if (signer != null) {
-                scope.launch {
-                    try {
-                        PreciseLocationRevealEvent.parseEncrypted(event)?.let { encryptedData ->
-                            PreciseLocationRevealEvent.decrypt(signer, encryptedData)?.let { data ->
-                                Log.d(TAG, "Decrypted precise location reveal: ${data.locationType}")
-                                onReveal(data)
-                            }
-                        }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed to decrypt precise location reveal", e)
-                    }
-                }
             }
         }
     }
