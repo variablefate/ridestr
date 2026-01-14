@@ -49,6 +49,7 @@ import com.ridestr.common.nostr.events.UserProfile
 import com.ridestr.common.nostr.relay.RelayConnectionState
 import com.ridestr.common.notification.NotificationHelper
 import com.ridestr.common.ui.theme.RidestrTheme
+import com.ridestr.rider.service.RiderActiveService
 import kotlinx.coroutines.tasks.await
 
 /**
@@ -422,9 +423,13 @@ fun MainScreen(
     // Rider ViewModel (persists across tab switches)
     val riderViewModel: RiderViewModel = viewModel()
 
+    val context = LocalContext.current
+
     // Ensure relay connections when app returns to foreground
+    // Also clear any stacked notification alerts
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
         riderViewModel.onResume()
+        RiderActiveService.clearAlerts(context)
     }
 
     Scaffold(

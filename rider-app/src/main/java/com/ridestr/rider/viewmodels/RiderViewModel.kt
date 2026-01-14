@@ -27,6 +27,7 @@ import com.ridestr.common.nostr.events.UserProfile
 import com.ridestr.common.nostr.events.geohash
 import com.ridestr.rider.service.RiderActiveService
 import com.ridestr.rider.service.RiderStatus
+import com.ridestr.rider.service.StackableAlert
 import kotlin.random.Random
 import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.routing.RouteResult
@@ -1864,18 +1865,15 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 // Persist messages for app restart
                 saveRideState()
 
-                // Notify service of chat message (plays sound, updates notification temporarily)
+                // Notify service of chat message (plays sound, adds to alert stack)
                 val myPubKey = nostrService.getPubKeyHex() ?: ""
                 if (chatData.senderPubKey != myPubKey) {
                     val context = getApplication<Application>()
-                    RiderActiveService.updateStatus(
+                    RiderActiveService.addAlert(
                         context,
-                        RiderStatus.ChatReceived(
-                            preview = chatData.message,
-                            previousStatus = RiderStatus.RideInProgress(null) // Service tracks actual status
-                        )
+                        StackableAlert.Chat(chatData.message)
                     )
-                    Log.d(TAG, "Chat message received - notified service")
+                    Log.d(TAG, "Chat message received - added to alert stack")
                 }
             }
         }

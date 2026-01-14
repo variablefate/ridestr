@@ -51,6 +51,7 @@ import com.ridestr.common.nostr.events.UserProfile
 import com.ridestr.common.nostr.relay.RelayConnectionState
 import com.ridestr.common.notification.NotificationHelper
 import com.ridestr.common.ui.theme.RidestrTheme
+import com.drivestr.app.service.DriverOnlineService
 
 /**
  * Bottom navigation tabs for the main screen.
@@ -460,9 +461,13 @@ fun MainScreen(
     val driverUiState by driverViewModel.uiState.collectAsState()
     val autoOpenNavigation by settingsManager.autoOpenNavigation.collectAsState()
 
+    val context = LocalContext.current
+
     // Ensure relay connections when app returns to foreground
+    // Also clear any stacked notification alerts
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
         driverViewModel.onResume()
+        DriverOnlineService.clearAlerts(context)
     }
 
     Scaffold(

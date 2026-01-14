@@ -6,6 +6,7 @@ import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.drivestr.app.service.DriverOnlineService
+import com.drivestr.app.service.DriverStackableAlert
 import com.drivestr.app.service.DriverStatus
 import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.data.Vehicle
@@ -1537,18 +1538,15 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 // Persist messages for app restart
                 saveRideState()
 
-                // Notify service of chat message (plays sound, updates notification temporarily)
+                // Notify service of chat message (plays sound, adds to alert stack)
                 val myPubKey = nostrService.getPubKeyHex() ?: ""
                 if (chatData.senderPubKey != myPubKey) {
                     val context = getApplication<Application>()
-                    DriverOnlineService.updateStatus(
+                    DriverOnlineService.addAlert(
                         context,
-                        DriverStatus.ChatReceived(
-                            preview = chatData.message,
-                            previousStatus = DriverStatus.RideInProgress(null) // Service tracks actual status
-                        )
+                        DriverStackableAlert.Chat(chatData.message)
                     )
-                    Log.d(TAG, "Chat message received - notified service")
+                    Log.d(TAG, "Chat message received - added to alert stack")
                 }
             }
         }

@@ -12,11 +12,8 @@ import com.ridestr.common.notification.NotificationHelper
 import com.ridestr.common.notification.SoundManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import java.io.Serializable
 
 private const val TAG = "RiderActiveService"
@@ -31,22 +28,38 @@ sealed class RiderStatus : Serializable {
     data class DriverEnRoute(val driverName: String?) : RiderStatus()
     data class DriverArrived(val driverName: String?) : RiderStatus()
     data class RideInProgress(val driverName: String?) : RiderStatus()
-    data class ChatReceived(val preview: String, val previousStatus: RiderStatus) : RiderStatus()
     object Cancelled : RiderStatus()
+}
+
+/**
+ * Stackable alerts that persist until the app comes to foreground.
+ * Multiple alerts can be stacked and displayed together in the notification.
+ */
+sealed class StackableAlert : Serializable {
+    data class Chat(val preview: String) : StackableAlert()
+    data class DriverAccepted(val driverName: String?) : StackableAlert()
+    data class DriverEnRoute(val driverName: String?) : StackableAlert()
+    data class Arrived(val driverName: String?) : StackableAlert()
 }
 
 /**
  * Foreground service that keeps the rider app alive when backgrounded.
  * Shows a single persistent notification that updates based on ride status.
  * Plays sounds for important events (driver arrived, chat, cancellation).
+ *
+ * Alerts (chat messages, driver arrived) are stacked and persist until
+ * the user brings the app to foreground via clearAlerts().
  */
 class RiderActiveService : Service() {
 
     companion object {
         private const val ACTION_START_SEARCHING = "com.ridestr.rider.service.START_SEARCHING"
         private const val ACTION_UPDATE_STATUS = "com.ridestr.rider.service.UPDATE_STATUS"
+        private const val ACTION_ADD_ALERT = "com.ridestr.rider.service.ADD_ALERT"
+        private const val ACTION_CLEAR_ALERTS = "com.ridestr.rider.service.CLEAR_ALERTS"
         private const val ACTION_STOP = "com.ridestr.rider.service.STOP"
         private const val EXTRA_STATUS = "status"
+        private const val EXTRA_ALERT = "alert"
 
         /**
          * Start the foreground service in searching mode.
@@ -64,7 +77,8 @@ class RiderActiveService : Service() {
         }
 
         /**
-         * Update the notification status and optionally play sounds.
+         * Update the base notification status.
+         * This does NOT clear the alert stack - alerts persist until clearAlerts() is called.
          */
         fun updateStatus(context: Context, status: RiderStatus) {
             Log.d(TAG, "Updating rider status: $status")
@@ -72,7 +86,39 @@ class RiderActiveService : Service() {
                 action = ACTION_UPDATE_STATUS
                 putExtra(EXTRA_STATUS, status)
             }
-            // Use startForegroundService to ensure service is running
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        }
+
+        /**
+         * Add a stackable alert (chat message or driver arrived).
+         * Alerts persist until clearAlerts() is called (when app comes to foreground).
+         */
+        fun addAlert(context: Context, alert: StackableAlert) {
+            Log.d(TAG, "Adding alert: $alert")
+            val intent = Intent(context, RiderActiveService::class.java).apply {
+                action = ACTION_ADD_ALERT
+                putExtra(EXTRA_ALERT, alert)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        }
+
+        /**
+         * Clear all stacked alerts and revert to base status notification.
+         * Call this when the app comes to foreground.
+         */
+        fun clearAlerts(context: Context) {
+            Log.d(TAG, "Clearing alerts")
+            val intent = Intent(context, RiderActiveService::class.java).apply {
+                action = ACTION_CLEAR_ALERTS
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {
@@ -92,12 +138,14 @@ class RiderActiveService : Service() {
         }
     }
 
-    // Current base status (not chat - chat is temporary overlay)
+    // Current base status (the underlying ride state)
     private var currentStatus: RiderStatus = RiderStatus.Searching
 
-    // Coroutine scope for chat message revert
+    // Stacked alerts that persist until cleared (when app comes to foreground)
+    private val alertStack = mutableListOf<StackableAlert>()
+
+    // Coroutine scope for any async work
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-    private var chatRevertJob: Job? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -108,14 +156,13 @@ class RiderActiveService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // Always ensure we're in foreground mode when started via startForegroundService()
-        // This prevents ForegroundServiceDidNotStartInTimeException if service was killed and restarted
         ensureForeground()
 
         when (intent?.action) {
             ACTION_START_SEARCHING -> {
                 Log.d(TAG, "Received START_SEARCHING action")
                 currentStatus = RiderStatus.Searching
-                chatRevertJob?.cancel()
+                alertStack.clear()
                 updateNotification()
             }
             ACTION_UPDATE_STATUS -> {
@@ -124,9 +171,20 @@ class RiderActiveService : Service() {
                     handleStatusUpdate(status)
                 }
             }
+            ACTION_ADD_ALERT -> {
+                val alert = intent.getSerializableExtra(EXTRA_ALERT) as? StackableAlert
+                if (alert != null) {
+                    handleAddAlert(alert)
+                }
+            }
+            ACTION_CLEAR_ALERTS -> {
+                Log.d(TAG, "Clearing alert stack")
+                alertStack.clear()
+                updateNotification()
+            }
             ACTION_STOP -> {
                 Log.d(TAG, "Received STOP action")
-                chatRevertJob?.cancel()
+                alertStack.clear()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
@@ -136,7 +194,7 @@ class RiderActiveService : Service() {
 
     private fun ensureForeground() {
         try {
-            val notification = buildNotificationForStatus(currentStatus)
+            val notification = buildNotification()
             startForeground(NotificationHelper.NOTIFICATION_ID_RIDER_ACTIVE, notification)
         } catch (e: Exception) {
             Log.e(TAG, "Error ensuring foreground", e)
@@ -155,68 +213,91 @@ class RiderActiveService : Service() {
         when (status) {
             is RiderStatus.Searching -> {
                 currentStatus = status
-                chatRevertJob?.cancel()
+                alertStack.clear()  // Clear alerts when starting fresh search
                 updateNotification()
             }
             is RiderStatus.DriverAccepted -> {
                 currentStatus = status
-                chatRevertJob?.cancel()
                 // Play confirmation sound
                 SoundManager.playConfirmationAlert(this)
+                // Add to alert stack so it persists in notification when backgrounded
+                alertStack.add(StackableAlert.DriverAccepted(status.driverName))
                 updateNotification()
             }
             is RiderStatus.DriverEnRoute -> {
                 currentStatus = status
-                chatRevertJob?.cancel()
+                // Replace accepted alert with en route alert
+                alertStack.removeAll { it is StackableAlert.DriverAccepted }
+                alertStack.add(StackableAlert.DriverEnRoute(status.driverName))
                 updateNotification()
             }
             is RiderStatus.DriverArrived -> {
+                // Update base status AND add to alert stack
                 currentStatus = status
-                chatRevertJob?.cancel()
                 // Play driver arrived sound
                 SoundManager.playDriverArrivedAlert(this)
+                // Replace en route alert with arrived alert
+                alertStack.removeAll { it is StackableAlert.DriverEnRoute }
+                alertStack.add(StackableAlert.Arrived(status.driverName))
                 updateNotification()
             }
             is RiderStatus.RideInProgress -> {
                 currentStatus = status
-                chatRevertJob?.cancel()
+                // Clear ride status alerts when ride starts (keep chat messages)
+                alertStack.removeAll { it is StackableAlert.Arrived || it is StackableAlert.DriverEnRoute || it is StackableAlert.DriverAccepted }
                 updateNotification()
-            }
-            is RiderStatus.ChatReceived -> {
-                // Don't update currentStatus - chat is temporary
-                handleChatReceived(status)
             }
             is RiderStatus.Cancelled -> {
                 // Play cancellation sound
                 SoundManager.playCancellationAlert(this)
-                updateNotificationForStatus(status)
-                // Service will be stopped by ViewModel
+                currentStatus = status
+                alertStack.clear()
+                updateNotification()
             }
         }
     }
 
-    private fun handleChatReceived(status: RiderStatus.ChatReceived) {
-        // Play chat sound
-        SoundManager.playChatMessageAlert(this)
+    private fun handleAddAlert(alert: StackableAlert) {
+        Log.d(TAG, "Adding alert to stack: $alert")
 
-        // Show chat preview notification temporarily
-        updateNotificationForStatus(status)
-
-        // Schedule revert to previous status after 5 seconds
-        chatRevertJob?.cancel()
-        chatRevertJob = serviceScope.launch {
-            delay(5000L)
-            Log.d(TAG, "Reverting from chat preview to: $currentStatus")
-            updateNotification()
+        when (alert) {
+            is StackableAlert.Chat -> {
+                // Play chat sound
+                SoundManager.playChatMessageAlert(this)
+                // Add to stack (allow multiple chat messages)
+                alertStack.add(alert)
+            }
+            is StackableAlert.DriverAccepted -> {
+                // Play confirmation sound
+                SoundManager.playConfirmationAlert(this)
+                // Only add if not already present
+                if (alertStack.none { it is StackableAlert.DriverAccepted }) {
+                    alertStack.add(alert)
+                }
+            }
+            is StackableAlert.DriverEnRoute -> {
+                // Replace accepted with en route
+                alertStack.removeAll { it is StackableAlert.DriverAccepted }
+                if (alertStack.none { it is StackableAlert.DriverEnRoute }) {
+                    alertStack.add(alert)
+                }
+            }
+            is StackableAlert.Arrived -> {
+                // Play driver arrived sound
+                SoundManager.playDriverArrivedAlert(this)
+                // Replace en route with arrived
+                alertStack.removeAll { it is StackableAlert.DriverEnRoute }
+                if (alertStack.none { it is StackableAlert.Arrived }) {
+                    alertStack.add(alert)
+                }
+            }
         }
+
+        updateNotification()
     }
 
     private fun updateNotification() {
-        updateNotificationForStatus(currentStatus)
-    }
-
-    private fun updateNotificationForStatus(status: RiderStatus) {
-        val notification = buildNotificationForStatus(status)
+        val notification = buildNotification()
         NotificationHelper.showNotification(
             context = this,
             notificationId = NotificationHelper.NOTIFICATION_ID_RIDER_ACTIVE,
@@ -224,14 +305,13 @@ class RiderActiveService : Service() {
         )
     }
 
-    private fun buildNotificationForStatus(status: RiderStatus): android.app.Notification {
-        val (title, content) = getNotificationText(status)
+    private fun buildNotification(): android.app.Notification {
+        val (title, content) = getNotificationText()
 
-        // Use high priority for important events that need user attention
-        val isHighPriority = when (status) {
+        // Use high priority when there are alerts or important status changes
+        val isHighPriority = alertStack.isNotEmpty() || when (currentStatus) {
             is RiderStatus.DriverAccepted,
             is RiderStatus.DriverArrived,
-            is RiderStatus.ChatReceived,
             is RiderStatus.Cancelled -> true
             else -> false
         }
@@ -245,7 +325,65 @@ class RiderActiveService : Service() {
         )
     }
 
-    private fun getNotificationText(status: RiderStatus): Pair<String, String> {
+    private fun getNotificationText(): Pair<String, String> {
+        // If we have stacked alerts, show them
+        if (alertStack.isNotEmpty()) {
+            // Sort alerts: Chat messages first (most visible at top), then ride status alerts
+            val sortedAlerts = alertStack.sortedBy { alert ->
+                when (alert) {
+                    is StackableAlert.Chat -> 0  // Chat at top
+                    is StackableAlert.Arrived -> 1
+                    is StackableAlert.DriverEnRoute -> 2
+                    is StackableAlert.DriverAccepted -> 3
+                }
+            }
+
+            // Title is based on most important alert type present
+            val hasChat = sortedAlerts.any { it is StackableAlert.Chat }
+            val hasArrived = sortedAlerts.any { it is StackableAlert.Arrived }
+            val hasEnRoute = sortedAlerts.any { it is StackableAlert.DriverEnRoute }
+            val hasAccepted = sortedAlerts.any { it is StackableAlert.DriverAccepted }
+
+            val title = when {
+                hasChat && hasArrived -> "Driver arrived + Message"
+                hasChat && hasEnRoute -> "Driver on the way + Message"
+                hasChat && hasAccepted -> "Driver found + Message"
+                hasArrived -> "Driver has arrived!"
+                hasEnRoute -> "Driver on the way!"
+                hasAccepted -> "Driver found!"
+                hasChat -> "Message from Driver"
+                else -> "Alert"
+            }
+
+            // Content shows all stacked alerts (chat first)
+            val content = sortedAlerts.joinToString("\n") { alert ->
+                when (alert) {
+                    is StackableAlert.Chat -> {
+                        "Message: ${alert.preview.take(40)}"
+                    }
+                    is StackableAlert.Arrived -> {
+                        val name = alert.driverName ?: "Your driver"
+                        "$name is waiting at pickup"
+                    }
+                    is StackableAlert.DriverEnRoute -> {
+                        val name = alert.driverName ?: "Your driver"
+                        "$name is heading to you"
+                    }
+                    is StackableAlert.DriverAccepted -> {
+                        val name = alert.driverName ?: "A driver"
+                        "$name accepted your ride"
+                    }
+                }
+            }
+
+            return title to content
+        }
+
+        // No alerts - show base status
+        return getBaseStatusText(currentStatus)
+    }
+
+    private fun getBaseStatusText(status: RiderStatus): Pair<String, String> {
         return when (status) {
             is RiderStatus.Searching -> {
                 "Looking for a ride" to "Searching for drivers..."
@@ -264,9 +402,6 @@ class RiderActiveService : Service() {
             }
             is RiderStatus.RideInProgress -> {
                 "Ride in progress" to "On the way to destination"
-            }
-            is RiderStatus.ChatReceived -> {
-                "Message from Driver" to status.preview.take(50)
             }
             is RiderStatus.Cancelled -> {
                 "Ride cancelled" to "Your ride was cancelled"
