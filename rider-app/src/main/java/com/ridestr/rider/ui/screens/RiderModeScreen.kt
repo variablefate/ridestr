@@ -6,11 +6,17 @@ import android.os.Build
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -29,6 +35,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -46,19 +53,33 @@ import com.ridestr.common.routing.RouteResult
 import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.location.GeocodingResult
 import com.ridestr.common.settings.DisplayCurrency
+import com.ridestr.common.settings.DistanceUnit
 import com.ridestr.common.settings.SettingsManager
+import com.ridestr.common.data.SavedLocation
 import com.ridestr.common.ui.ChatBottomSheet
 import com.ridestr.common.ui.ChatButton
 import com.ridestr.common.ui.FareDisplay
+import com.ridestr.common.ui.FavoritesSection
 import com.ridestr.common.ui.formatFare
 import com.ridestr.common.ui.LocationSearchField
 import com.ridestr.common.ui.ManualCoordinateInput
+import com.ridestr.common.ui.RecentsSection
 import com.ridestr.rider.viewmodels.RideStage
 import com.ridestr.rider.viewmodels.RiderUiState
 import com.ridestr.rider.viewmodels.RiderViewModel
 
 private const val TAG = "RiderModeScreen"
 
+/**
+ * Mode for the unified RideWaitingContent component.
+ * Determines text messaging and which ViewModel state to use.
+ */
+private enum class WaitingMode {
+    BROADCAST,  // Public broadcast - waiting for any driver to accept
+    DIRECT      // Direct offer - waiting for specific driver to respond
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RiderModeScreen(
     viewModel: RiderViewModel,
@@ -69,6 +90,10 @@ fun RiderModeScreen(
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsState()
     var showChatSheet by remember { mutableStateOf(false) }
+
+    // Driver selection sheet state - lifted to RiderModeScreen level
+    // so it can be opened from WAITING_FOR_ACCEPTANCE stage
+    var showDriverSelectionSheet by remember { mutableStateOf(false) }
 
     // Notification permission launcher (Android 13+)
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
@@ -105,6 +130,33 @@ fun RiderModeScreen(
             viewModel.sendChatMessage(message)
         }
     )
+
+    // Driver selection bottom sheet - at RiderModeScreen level so it can be opened from any stage
+    if (showDriverSelectionSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showDriverSelectionSheet = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ) {
+            DriverSelectionSheetContent(
+                uiState = uiState,
+                onSelectDriver = viewModel::selectDriver,
+                onSendOffer = {
+                    viewModel.sendRideOffer()
+                    showDriverSelectionSheet = false
+                },
+                onClearDriver = viewModel::clearSelectedDriver,
+                onExpandSearch = viewModel::toggleExpandedSearch,
+                onBroadcastRequest = {
+                    viewModel.broadcastRideRequest()
+                    showDriverSelectionSheet = false
+                },
+                showBroadcastOption = false,  // Don't show broadcast when switching drivers
+                onToggleBroadcastOption = { },
+                settingsManager = settingsManager,
+                priceService = viewModel.bitcoinPriceService
+            )
+        }
+    }
 
     Column(
         modifier = modifier
@@ -199,14 +251,22 @@ fun RiderModeScreen(
                     },
                     onToggleExpandedSearch = viewModel::toggleExpandedSearch,
                     settingsManager = settingsManager,
-                    priceService = viewModel.bitcoinPriceService
+                    priceService = viewModel.bitcoinPriceService,
+                    favorites = viewModel.getFavorites(),
+                    recents = viewModel.getRecents(),
+                    onPinWithNickname = viewModel::pinWithNickname,
+                    onUpdateNickname = viewModel::updateFavoriteNickname,
+                    onUnpinFavorite = viewModel::unpinFavorite,
+                    onDeleteSavedLocation = viewModel::removeSavedLocation,
+                    onSwapAddresses = viewModel::swapAddresses
                 )
             }
             RideStage.BROADCASTING_REQUEST -> {
                 // Broadcast waiting screen with 2-minute countdown
-                BroadcastWaitingContent(
+                RideWaitingContent(
+                    mode = WaitingMode.BROADCAST,
                     uiState = uiState,
-                    onBoostFare = viewModel::boostFare,
+                    onBoostFare = viewModel::boostFare,  // BROADCAST boost - creates public event
                     onContinueWaiting = viewModel::continueWaiting,
                     onCancel = viewModel::cancelBroadcastRequest,
                     settingsManager = settingsManager,
@@ -214,9 +274,19 @@ fun RiderModeScreen(
                 )
             }
             RideStage.WAITING_FOR_ACCEPTANCE -> {
-                WaitingForAcceptanceContent(
+                // Direct offer waiting screen with same UI but different callbacks
+                RideWaitingContent(
+                    mode = WaitingMode.DIRECT,
                     uiState = uiState,
-                    onCancel = viewModel::cancelOffer
+                    onBoostFare = viewModel::boostDirectOffer,  // DIRECT boost - sends to SAME driver
+                    onContinueWaiting = viewModel::continueWaitingDirect,
+                    onCancel = viewModel::cancelOffer,
+                    onRequestAnotherDriver = {
+                        viewModel.cancelOffer()         // Cancel current offer (deletes event, closes subscription)
+                        showDriverSelectionSheet = true // Reopen driver list with same route
+                    },
+                    settingsManager = settingsManager,
+                    priceService = viewModel.bitcoinPriceService
                 )
             }
             RideStage.DRIVER_ACCEPTED -> {
@@ -261,6 +331,7 @@ fun RiderModeScreen(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun IdleContent(
     uiState: RiderUiState,
@@ -287,10 +358,86 @@ private fun IdleContent(
     onBroadcastRequest: () -> Unit,
     onToggleExpandedSearch: () -> Unit,
     settingsManager: SettingsManager,
-    priceService: BitcoinPriceService
+    priceService: BitcoinPriceService,
+    favorites: List<SavedLocation>,
+    recents: List<SavedLocation>,
+    onPinWithNickname: (String, String?) -> Unit,
+    onUpdateNickname: (String, String?) -> Unit,
+    onUnpinFavorite: (String) -> Unit,
+    onDeleteSavedLocation: (String) -> Unit,
+    onSwapAddresses: () -> Unit
 ) {
-    // Track whether advanced driver selection is expanded
-    var showAdvancedDriverSelection by remember { mutableStateOf(false) }
+    // Track whether driver selection sheet is shown
+    var showDriverSelectionSheet by remember { mutableStateOf(false) }
+    // Track whether advanced broadcast option is expanded (in the sheet)
+    var showBroadcastOption by remember { mutableStateOf(false) }
+    // Privacy warning dialog state
+    var showPrivacyWarningDialog by remember { mutableStateOf(false) }
+
+    // Driver Selection Bottom Sheet
+    if (showDriverSelectionSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showDriverSelectionSheet = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ) {
+            DriverSelectionSheetContent(
+                uiState = uiState,
+                onSelectDriver = onSelectDriver,
+                onSendOffer = {
+                    onSendOffer()
+                    showDriverSelectionSheet = false
+                },
+                onClearDriver = onClearDriver,
+                onExpandSearch = onToggleExpandedSearch,
+                onBroadcastRequest = { showPrivacyWarningDialog = true },
+                showBroadcastOption = showBroadcastOption,
+                onToggleBroadcastOption = { showBroadcastOption = !showBroadcastOption },
+                settingsManager = settingsManager,
+                priceService = priceService
+            )
+        }
+    }
+
+    // Privacy warning dialog for broadcast
+    if (showPrivacyWarningDialog) {
+        AlertDialog(
+            onDismissRequest = { showPrivacyWarningDialog = false },
+            icon = {
+                Icon(
+                    Icons.Default.Warning,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error
+                )
+            },
+            title = { Text("Privacy Warning") },
+            text = {
+                Text(
+                    "Broadcasting will share your approximate location (~1km) publicly " +
+                    "with all Nostr users. This can reveal patterns about where you " +
+                    "frequently request rides (e.g., your home location).\n\n" +
+                    "For better privacy, select a specific driver instead."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showPrivacyWarningDialog = false
+                        onBroadcastRequest()
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error
+                    )
+                ) {
+                    Text("Broadcast Anyway")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showPrivacyWarningDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
 
     LazyColumn(
         verticalArrangement = Arrangement.spacedBy(16.dp)
@@ -319,12 +466,19 @@ private fun IdleContent(
                     onStopUsingCurrentLocation = onStopUsingCurrentLocation,
                     onClearPickup = onClearPickup,
                     onClearDest = onClearDest,
-                    onBroadcastRequest = onBroadcastRequest,
                     expandedSearch = uiState.expandedSearch,
                     nearbyDriverCount = uiState.nearbyDriverCount,
                     onToggleExpandedSearch = onToggleExpandedSearch,
                     settingsManager = settingsManager,
-                    priceService = priceService
+                    priceService = priceService,
+                    onRequestRide = { showDriverSelectionSheet = true },
+                    favorites = favorites,
+                    recents = recents,
+                    onPinWithNickname = onPinWithNickname,
+                    onUpdateNickname = onUpdateNickname,
+                    onUnpinFavorite = onUnpinFavorite,
+                    onDeleteSavedLocation = onDeleteSavedLocation,
+                    onSwapAddresses = onSwapAddresses
                 )
             } else {
                 ManualLocationInputCard(
@@ -335,93 +489,14 @@ private fun IdleContent(
                 )
             }
         }
-
-        // Show advanced driver selection after route is calculated
-        if (uiState.routeResult != null && uiState.fareEstimate != null) {
-            // Advanced: Select specific driver (collapsible)
-            item {
-                TextButton(
-                    onClick = { showAdvancedDriverSelection = !showAdvancedDriverSelection },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Icon(
-                        if (showAdvancedDriverSelection) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = if (showAdvancedDriverSelection) "Hide driver list" else "Select specific driver (advanced)",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-            }
-
-            // Driver list (only shown if expanded)
-            if (showAdvancedDriverSelection) {
-                item {
-                    Text(
-                        text = "Available Drivers (${uiState.availableDrivers.size})",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
-                if (uiState.availableDrivers.isEmpty()) {
-                    item {
-                        Card(
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(24.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally
-                            ) {
-                                Text(
-                                    text = "No drivers found yet...",
-                                    textAlign = TextAlign.Center,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-                    }
-                } else {
-                    items(uiState.availableDrivers) { driver ->
-                        DriverCard(
-                            driver = driver,
-                            profile = uiState.driverProfiles[driver.driverPubKey],
-                            isSelected = uiState.selectedDriver?.driverPubKey == driver.driverPubKey,
-                            onSelect = { onSelectDriver(driver) }
-                        )
-                    }
-                }
-
-                // Direct request card (for specific driver)
-                if (uiState.selectedDriver != null && uiState.pickupLocation != null &&
-                    uiState.destination != null) {
-                    item {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        RequestRideCard(
-                            driver = uiState.selectedDriver,
-                            driverProfile = uiState.driverProfiles[uiState.selectedDriver.driverPubKey],
-                            fareEstimate = uiState.fareEstimate,
-                            isSending = uiState.isSendingOffer,
-                            onRequest = onSendOffer,
-                            onCancel = onClearDriver,
-                            settingsManager = settingsManager,
-                            priceService = priceService
-                        )
-                    }
-                }
-            }
-        }
     }
 }
 
 /**
  * Geocoding-based location input with address search.
  * Pickup defaults to "Use current location" with a checkbox to switch to search.
+ * After locations are set and route is calculated, displays route info summary.
+ * Driver selection and request buttons are handled in the parent IdleContent.
  */
 @Composable
 private fun GeocodingLocationInputCard(
@@ -445,12 +520,19 @@ private fun GeocodingLocationInputCard(
     onStopUsingCurrentLocation: () -> Unit,
     onClearPickup: () -> Unit,
     onClearDest: () -> Unit,
-    onBroadcastRequest: () -> Unit,
     expandedSearch: Boolean,
     nearbyDriverCount: Int,
     onToggleExpandedSearch: () -> Unit,
     settingsManager: SettingsManager,
-    priceService: BitcoinPriceService
+    priceService: BitcoinPriceService,
+    onRequestRide: () -> Unit,
+    favorites: List<SavedLocation>,
+    recents: List<SavedLocation>,
+    onPinWithNickname: (String, String?) -> Unit,
+    onUpdateNickname: (String, String?) -> Unit,
+    onUnpinFavorite: (String) -> Unit,
+    onDeleteSavedLocation: (String) -> Unit,
+    onSwapAddresses: () -> Unit
 ) {
     val context = LocalContext.current
     var pickupQuery by rememberSaveable { mutableStateOf("") }
@@ -561,10 +643,11 @@ private fun GeocodingLocationInputCard(
         }
     }
 
-    // Auto-use current location on first load if not already set
+    // Auto-fetch GPS location on first load ONLY if user prefers GPS for pickup
+    // This respects the saved preference - if user unchecked the box, don't auto-request
     LaunchedEffect(Unit) {
-        if (pickupLocation == null && !usingCurrentLocationForPickup) {
-            // Default to using current location
+        if (pickupLocation == null && usingCurrentLocationForPickup) {
+            // User prefers GPS for pickup - fetch current location
             requestCurrentLocation()
         }
     }
@@ -573,93 +656,103 @@ private fun GeocodingLocationInputCard(
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
-            modifier = Modifier.padding(16.dp)
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
         ) {
+            // Header
             Text(
                 text = "Where are you going?",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
-            // Pickup section with checkbox
+            // Pickup section - compact header with toggle
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(bottom = 8.dp)
+                modifier = Modifier.fillMaxWidth()
             ) {
                 Icon(
                     Icons.Default.Place,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(20.dp)
+                    modifier = Modifier.size(18.dp)
                 )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("Pickup", style = MaterialTheme.typography.labelMedium)
-            }
-
-            // "Use current location" checkbox row
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable {
-                        if (usingCurrentLocationForPickup) {
-                            onStopUsingCurrentLocation()
-                        } else {
-                            requestCurrentLocation()
-                        }
-                    }
-                    .padding(vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Checkbox(
-                    checked = usingCurrentLocationForPickup,
-                    onCheckedChange = { checked ->
-                        if (checked) {
-                            requestCurrentLocation()
-                        } else {
-                            onStopUsingCurrentLocation()
-                        }
-                    }
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    "Pickup",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold
                 )
-                Spacer(modifier = Modifier.width(8.dp))
-                Column(modifier = Modifier.weight(1f)) {
+                Spacer(modifier = Modifier.weight(1f))
+                // Compact toggle for current location
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clickable {
+                            if (usingCurrentLocationForPickup) {
+                                onStopUsingCurrentLocation()
+                            } else {
+                                requestCurrentLocation()
+                            }
+                        }
+                        .padding(vertical = 4.dp)
+                ) {
+                    Checkbox(
+                        checked = usingCurrentLocationForPickup,
+                        onCheckedChange = { checked ->
+                            if (checked) requestCurrentLocation() else onStopUsingCurrentLocation()
+                        },
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
                     Text(
-                        text = "Use current location",
-                        style = MaterialTheme.typography.bodyMedium
+                        text = "My location",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    if (usingCurrentLocationForPickup && pickupLocation != null) {
-                        Text(
-                            text = pickupLocation.getDisplayString(),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1
-                        )
-                    } else if (isFetchingLocation) {
-                        Text(
-                            text = "Getting location...",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                    if (isFetchingLocation) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(14.dp),
+                            strokeWidth = 1.5.dp
                         )
                     }
                 }
-                if (isFetchingLocation) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp
-                    )
-                }
             }
 
-            // Show search field only when not using current location
-            if (!usingCurrentLocationForPickup) {
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Pickup field or current location display
+            if (usingCurrentLocationForPickup) {
+                // Show current location in a styled box
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                            RoundedCornerShape(8.dp)
+                        )
+                        .clickable { onStopUsingCurrentLocation() }
+                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                ) {
+                    Text(
+                        text = pickupLocation?.getDisplayString() ?: "Getting location...",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (pickupLocation != null)
+                            MaterialTheme.colorScheme.onSurface
+                        else
+                            MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            } else {
                 LocationSearchField(
                     value = pickupQuery,
                     onValueChange = { newValue ->
                         pickupQuery = newValue
-                        if (newValue.isEmpty()) {
-                            onClearPickup()
-                        }
+                        if (newValue.isEmpty()) onClearPickup()
                     },
                     selectedLocation = pickupLocation,
                     onLocationSelected = { result ->
@@ -675,30 +768,56 @@ private fun GeocodingLocationInputCard(
                 )
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            // Swap button row
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 2.dp),
+                horizontalArrangement = Arrangement.Center
+            ) {
+                if (pickupLocation != null || destination != null) {
+                    IconButton(
+                        onClick = onSwapAddresses,
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.SwapVert,
+                            contentDescription = "Swap pickup and destination",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                } else {
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+            }
 
-            // Destination search
+            // Destination section
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(bottom = 4.dp)
+                modifier = Modifier.fillMaxWidth()
             ) {
                 Icon(
                     Icons.Default.LocationOn,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.size(20.dp)
+                    modifier = Modifier.size(18.dp)
                 )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("Destination", style = MaterialTheme.typography.labelMedium)
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    "Destination",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
             }
+
+            Spacer(modifier = Modifier.height(6.dp))
 
             LocationSearchField(
                 value = destQuery,
                 onValueChange = { newValue ->
                     destQuery = newValue
-                    if (newValue.isEmpty()) {
-                        onClearDest()
-                    }
+                    if (newValue.isEmpty()) onClearDest()
                 },
                 selectedLocation = destination,
                 onLocationSelected = { result ->
@@ -713,7 +832,54 @@ private fun GeocodingLocationInputCard(
                 onUseMyLocation = null
             )
 
-            // Show Request Ride button when both locations are selected
+            // Show saved locations when <2 addresses are set
+            val showSavedLocations = pickupLocation == null || destination == null
+            if (showSavedLocations && (favorites.isNotEmpty() || recents.isNotEmpty())) {
+                Spacer(modifier = Modifier.height(16.dp))
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Determine which field to populate when tapping
+                // Fill pickup only if:
+                // - pickup field is empty AND
+                // - we're NOT using GPS for pickup
+                // This means: if GPS is being used for pickup, always fill destination
+                val populatePickup = pickupLocation == null && !usingCurrentLocationForPickup
+
+                if (favorites.isNotEmpty()) {
+                    FavoritesSection(
+                        favorites = favorites,
+                        onLocationSelected = { location ->
+                            if (populatePickup) {
+                                onSelectPickupFromSearch(location.toGeocodingResult())
+                            } else {
+                                onSelectDestFromSearch(location.toGeocodingResult())
+                            }
+                        },
+                        onUpdateNickname = onUpdateNickname,
+                        onUnpin = onUnpinFavorite,
+                        onDelete = onDeleteSavedLocation
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                }
+
+                if (recents.isNotEmpty()) {
+                    RecentsSection(
+                        recents = recents,
+                        onLocationSelected = { location ->
+                            if (populatePickup) {
+                                onSelectPickupFromSearch(location.toGeocodingResult())
+                            } else {
+                                onSelectDestFromSearch(location.toGeocodingResult())
+                            }
+                        },
+                        onPinWithNickname = onPinWithNickname,
+                        onDelete = onDeleteSavedLocation
+                    )
+                }
+            }
+
+            // Show route info summary when both locations are selected
             if (pickupLocation != null && destination != null) {
                 Spacer(modifier = Modifier.height(16.dp))
                 HorizontalDivider()
@@ -814,9 +980,9 @@ private fun GeocodingLocationInputCard(
 
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    // Request Ride button
+                    // Request Ride button - opens driver selection sheet
                     Button(
-                        onClick = onBroadcastRequest,
+                        onClick = onRequestRide,
                         enabled = !isSendingOffer,
                         modifier = Modifier.fillMaxWidth()
                     ) {
@@ -1078,13 +1244,174 @@ private fun RouteInfoCard(
     }
 }
 
+/**
+ * Swipeable driver card that reveals request/dismiss actions on swipe or tap.
+ */
+@Composable
+private fun SwipeableDriverCard(
+    driver: DriverAvailabilityData,
+    profile: UserProfile?,
+    pickupLocation: Location?,
+    onRequestRide: () -> Unit,
+    settingsManager: SettingsManager
+) {
+    val distanceUnit by settingsManager.distanceUnit.collectAsState()
+    var isRevealed by remember { mutableStateOf(false) }
+    var offsetX by remember { mutableFloatStateOf(0f) }
+
+    // Animate offset
+    val animatedOffset by animateFloatAsState(
+        targetValue = if (isRevealed) -140f else 0f,
+        animationSpec = tween(200),
+        label = "swipeOffset"
+    )
+
+    val actualOffset = if (isRevealed) animatedOffset else offsetX
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(80.dp)
+    ) {
+        // Background actions (revealed when swiping)
+        Row(
+            modifier = Modifier
+                .fillMaxHeight()
+                .align(Alignment.CenterEnd)
+                .padding(end = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Dismiss button (red X)
+            IconButton(
+                onClick = {
+                    isRevealed = false
+                    offsetX = 0f
+                },
+                modifier = Modifier
+                    .size(56.dp)
+                    .background(
+                        MaterialTheme.colorScheme.errorContainer,
+                        RoundedCornerShape(12.dp)
+                    )
+            ) {
+                Icon(
+                    Icons.Default.Close,
+                    contentDescription = "Dismiss",
+                    tint = MaterialTheme.colorScheme.onErrorContainer
+                )
+            }
+
+            // Request button (green check)
+            IconButton(
+                onClick = {
+                    onRequestRide()
+                    isRevealed = false
+                    offsetX = 0f
+                },
+                modifier = Modifier
+                    .size(56.dp)
+                    .background(
+                        Color(0xFF4CAF50), // Green
+                        RoundedCornerShape(12.dp)
+                    )
+            ) {
+                Icon(
+                    Icons.Default.Check,
+                    contentDescription = "Request Ride",
+                    tint = Color.White
+                )
+            }
+        }
+
+        // Main card content
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .offset(x = actualOffset.dp)
+                .pointerInput(Unit) {
+                    detectHorizontalDragGestures(
+                        onDragEnd = {
+                            // Snap to revealed or hidden based on threshold
+                            isRevealed = offsetX < -70f
+                            offsetX = 0f
+                        },
+                        onHorizontalDrag = { _, dragAmount ->
+                            if (!isRevealed) {
+                                offsetX = (offsetX + dragAmount).coerceIn(-140f, 0f)
+                            }
+                        }
+                    )
+                }
+                .clickable {
+                    // Toggle reveal on tap
+                    isRevealed = !isRevealed
+                    offsetX = 0f
+                },
+            colors = CardDefaults.cardColors()
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    Icons.Default.DirectionsCar,
+                    contentDescription = null,
+                    modifier = Modifier.size(40.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(modifier = Modifier.width(12.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = profile?.bestName() ?: "Driver ${driver.driverPubKey.take(8)}...",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    (driver.vehicleDescription() ?: profile?.carDescription())?.let { car ->
+                        Text(
+                            text = car,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    val distanceText = pickupLocation?.let { pickup ->
+                        val distanceKm = driver.approxLocation.distanceToKm(pickup)
+                        formatDriverDistance(distanceKm, distanceUnit)
+                    } ?: "Nearby"
+                    Text(
+                        text = distanceText,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                // Hint icon for swipe
+                Icon(
+                    Icons.Default.ChevronLeft,
+                    contentDescription = "Swipe for options",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun DriverCard(
     driver: DriverAvailabilityData,
     profile: UserProfile?,
+    pickupLocation: Location?,
     isSelected: Boolean,
-    onSelect: () -> Unit
+    onSelect: () -> Unit,
+    settingsManager: SettingsManager
 ) {
+    val distanceUnit by settingsManager.distanceUnit.collectAsState()
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = if (isSelected) {
@@ -1124,8 +1451,13 @@ private fun DriverCard(
                         color = MaterialTheme.colorScheme.primary
                     )
                 }
+                // Show distance from pickup location
+                val distanceText = pickupLocation?.let { pickup ->
+                    val distanceKm = driver.approxLocation.distanceToKm(pickup)
+                    formatDriverDistance(distanceKm, distanceUnit)
+                } ?: "Nearby"
                 Text(
-                    text = "Near: ${String.format("%.4f", driver.approxLocation.lat)}, ${String.format("%.4f", driver.approxLocation.lon)}",
+                    text = distanceText,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -1137,6 +1469,314 @@ private fun DriverCard(
                     contentDescription = "Selected",
                     tint = MaterialTheme.colorScheme.primary
                 )
+            }
+        }
+    }
+}
+
+/**
+ * Format distance for driver card display.
+ */
+private fun formatDriverDistance(distanceKm: Double, unit: DistanceUnit): String {
+    return when (unit) {
+        DistanceUnit.MILES -> {
+            val miles = distanceKm * 0.621371
+            when {
+                miles < 0.1 -> "${(miles * 5280).toInt()} ft away"
+                miles < 10 -> String.format("%.1f mi away", miles)
+                else -> String.format("%.0f mi away", miles)
+            }
+        }
+        DistanceUnit.KILOMETERS -> {
+            when {
+                distanceKm < 1 -> "${(distanceKm * 1000).toInt()} m away"
+                distanceKm < 10 -> String.format("%.1f km away", distanceKm)
+                else -> String.format("%.0f km away", distanceKm)
+            }
+        }
+    }
+}
+
+/**
+ * Full-screen driver selection content shown in a bottom sheet.
+ * Shows available drivers immediately when opened, with privacy indicator.
+ */
+@Composable
+private fun DriverSelectionSheetContent(
+    uiState: RiderUiState,
+    onSelectDriver: (DriverAvailabilityData) -> Unit,
+    onSendOffer: () -> Unit,
+    onClearDriver: () -> Unit,
+    onExpandSearch: () -> Unit,
+    onBroadcastRequest: () -> Unit,
+    showBroadcastOption: Boolean,
+    onToggleBroadcastOption: () -> Unit,
+    settingsManager: SettingsManager,
+    priceService: BitcoinPriceService
+) {
+    val drivers = uiState.availableDrivers
+    val selectedDriver = uiState.selectedDriver
+    val driverProfiles = uiState.driverProfiles
+    val isSending = uiState.isSendingOffer
+    val pickupLocation = uiState.pickupLocation
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .padding(bottom = 32.dp)
+    ) {
+        // Header with privacy indicator
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Select a Driver",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold
+            )
+            // Privacy indicator
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .background(
+                        MaterialTheme.colorScheme.primaryContainer,
+                        RoundedCornerShape(8.dp)
+                    )
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+            ) {
+                Icon(
+                    Icons.Default.Lock,
+                    contentDescription = null,
+                    modifier = Modifier.size(14.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = "Encrypted",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text(
+            text = "Your request will be sent privately using encrypted messages",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        if (drivers.isEmpty()) {
+            // No drivers available - show waiting state
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(32.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(48.dp),
+                    strokeWidth = 3.dp
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = "Waiting for available drivers...",
+                    style = MaterialTheme.typography.bodyLarge,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Drivers will appear here as they become available",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Expand search button
+                OutlinedButton(onClick = onExpandSearch) {
+                    Icon(
+                        Icons.Default.ZoomOutMap,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(if (uiState.expandedSearch) "Search Area Expanded" else "Expand Search Area")
+                }
+            }
+        } else {
+            // Hint text
+            Text(
+                text = "Tap or swipe left on a driver to send request",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+
+            // Driver list with swipeable cards
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 350.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(drivers, key = { it.driverPubKey }) { driver ->
+                    SwipeableDriverCard(
+                        driver = driver,
+                        profile = driverProfiles[driver.driverPubKey],
+                        pickupLocation = pickupLocation,
+                        onRequestRide = {
+                            // Select driver and send offer in one action
+                            onSelectDriver(driver)
+                            onSendOffer()
+                        },
+                        settingsManager = settingsManager
+                    )
+                }
+            }
+
+            // Show sending indicator if offer in progress
+            if (isSending) {
+                Spacer(modifier = Modifier.height(16.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Sending request...", style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Expand search area option
+            if (!uiState.expandedSearch) {
+                TextButton(
+                    onClick = onExpandSearch,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        Icons.Default.ZoomIn,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Expand Search Area")
+                }
+            } else {
+                // Show expanded search indicator
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Default.ZoomOutMap,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        "Wide area search active",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+        }
+
+        // Advanced: Broadcast option (with privacy warning)
+        Spacer(modifier = Modifier.height(16.dp))
+        HorizontalDivider()
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onToggleBroadcastOption() }
+                .padding(vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.SettingsInputAntenna,
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Advanced: Public Broadcast",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Icon(
+                if (showBroadcastOption) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        if (showBroadcastOption) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)
+                )
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Default.Warning,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Reduced Privacy",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Broadcasting shares your approximate location publicly with all Nostr users.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = onBroadcastRequest,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error
+                        )
+                    ) {
+                        Icon(
+                            Icons.Default.SettingsInputAntenna,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Broadcast Request")
+                    }
+                }
             }
         }
     }
@@ -1221,140 +1861,54 @@ private fun RequestRideCard(
     }
 }
 
+/**
+ * Unified ride waiting content - used for both broadcast and direct request flows.
+ * Provides consistent UI with mode-specific text and callbacks.
+ */
 @Composable
-private fun WaitingForAcceptanceContent(
-    uiState: RiderUiState,
-    onCancel: () -> Unit
-) {
-    // Calculate progress based on timeout
-    val startTime = uiState.acceptanceTimeoutStartMs
-    val duration = uiState.acceptanceTimeoutDurationMs
-
-    // Animated progress state
-    var progress by remember { mutableFloatStateOf(0f) }
-    var remainingSeconds by remember { mutableIntStateOf((duration / 1000).toInt()) }
-
-    // Update progress every 100ms
-    LaunchedEffect(startTime) {
-        if (startTime != null) {
-            while (true) {
-                val elapsed = System.currentTimeMillis() - startTime
-                progress = (elapsed.toFloat() / duration).coerceIn(0f, 1f)
-                remainingSeconds = ((duration - elapsed) / 1000).toInt().coerceAtLeast(0)
-                delay(100)
-            }
-        }
-    }
-
-    Card(
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(24.dp)
-        ) {
-            // Circular countdown timer in top-right corner
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .size(48.dp)
-            ) {
-                val primaryColor = MaterialTheme.colorScheme.primary
-                val surfaceVariant = MaterialTheme.colorScheme.surfaceVariant
-
-                Canvas(modifier = Modifier.fillMaxSize()) {
-                    val strokeWidth = 4.dp.toPx()
-                    val radius = (size.minDimension - strokeWidth) / 2
-                    val center = Offset(size.width / 2, size.height / 2)
-
-                    // Background circle
-                    drawCircle(
-                        color = surfaceVariant,
-                        radius = radius,
-                        center = center,
-                        style = Stroke(width = strokeWidth)
-                    )
-
-                    // Progress arc (fills clockwise as time runs out)
-                    drawArc(
-                        color = primaryColor,
-                        startAngle = -90f,
-                        sweepAngle = 360f * progress,
-                        useCenter = false,
-                        topLeft = Offset(
-                            center.x - radius,
-                            center.y - radius
-                        ),
-                        size = Size(radius * 2, radius * 2),
-                        style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
-                    )
-                }
-
-                // Seconds remaining in center
-                Text(
-                    text = "$remainingSeconds",
-                    style = MaterialTheme.typography.labelMedium,
-                    modifier = Modifier.align(Alignment.Center)
-                )
-            }
-
-            // Main content centered
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 16.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                CircularProgressIndicator()
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                Text(
-                    text = uiState.statusMessage,
-                    style = MaterialTheme.typography.titleMedium,
-                    textAlign = TextAlign.Center
-                )
-
-                Spacer(modifier = Modifier.height(24.dp))
-
-                OutlinedButton(onClick = onCancel) {
-                    Text("Cancel Request")
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun BroadcastWaitingContent(
+private fun RideWaitingContent(
+    mode: WaitingMode,
     uiState: RiderUiState,
     onBoostFare: () -> Unit,
     onContinueWaiting: () -> Unit,
     onCancel: () -> Unit,
+    onRequestAnotherDriver: (() -> Unit)? = null,  // Only for DIRECT mode
     settingsManager: SettingsManager,
-    priceService: com.ridestr.common.bitcoin.BitcoinPriceService
+    priceService: BitcoinPriceService
 ) {
-    // Calculate progress based on broadcast timeout (2 minutes)
-    val startTime = uiState.broadcastStartTimeMs
-    val duration = uiState.broadcastTimeoutDurationMs
+    // Mode-specific values
+    val startTime = when (mode) {
+        WaitingMode.BROADCAST -> uiState.broadcastStartTimeMs
+        WaitingMode.DIRECT -> uiState.acceptanceTimeoutStartMs
+    }
+    val duration = when (mode) {
+        WaitingMode.BROADCAST -> uiState.broadcastTimeoutDurationMs
+        WaitingMode.DIRECT -> uiState.acceptanceTimeoutDurationMs
+    }
+    val timedOut = when (mode) {
+        WaitingMode.BROADCAST -> uiState.broadcastTimedOut
+        WaitingMode.DIRECT -> uiState.directOfferTimedOut
+    }
+    val totalBoostSats = when (mode) {
+        WaitingMode.BROADCAST -> uiState.totalBoostSats
+        WaitingMode.DIRECT -> uiState.directOfferBoostSats
+    }
+    val driverCount = uiState.nearbyDriverCount
+    val driverName = uiState.selectedDriver?.let {
+        uiState.driverProfiles[it.driverPubKey]?.bestName()
+    } ?: "driver"
 
     // Animated progress state
     var progress by remember { mutableFloatStateOf(0f) }
     var remainingSeconds by remember { mutableIntStateOf((duration / 1000).toInt()) }
-    var timedOut by remember { mutableStateOf(false) }
 
-    // Update progress every 100ms
+    // Update progress every 100ms (only when timer is running)
     LaunchedEffect(startTime) {
         if (startTime != null) {
-            timedOut = false
             while (true) {
                 val elapsed = System.currentTimeMillis() - startTime
                 progress = (elapsed.toFloat() / duration).coerceIn(0f, 1f)
                 remainingSeconds = ((duration - elapsed) / 1000).toInt().coerceAtLeast(0)
-                if (remainingSeconds <= 0 && !timedOut) {
-                    timedOut = true
-                }
                 delay(100)
             }
         }
@@ -1362,7 +1916,6 @@ private fun BroadcastWaitingContent(
 
     // Get currency setting for boost display
     val displayCurrency by settingsManager.displayCurrency.collectAsState()
-    val driverCount = uiState.nearbyDriverCount
 
     // State for price info dialog
     var showPriceInfoDialog by remember { mutableStateOf(false) }
@@ -1399,14 +1952,12 @@ private fun BroadcastWaitingContent(
     ) {
         Box(modifier = Modifier.fillMaxWidth()) {
             // Boost badge in top-right corner (shows total boost in user's currency)
-            // Tapping toggles currency setting
-            if (uiState.totalBoostSats > 0) {
+            if (totalBoostSats > 0) {
                 val boostBadgeText = if (displayCurrency == DisplayCurrency.USD) {
-                    // Convert sats to USD for display
-                    val usdString = priceService.satsToUsdString(uiState.totalBoostSats.toLong())
-                    "+${usdString ?: "${uiState.totalBoostSats.toInt()} sats"}"
+                    val usdString = priceService.satsToUsdString(totalBoostSats.toLong())
+                    "+${usdString ?: "${totalBoostSats.toInt()} sats"}"
                 } else {
-                    "+${uiState.totalBoostSats.toInt()} sats"
+                    "+${totalBoostSats.toInt()} sats"
                 }
                 Badge(
                     modifier = Modifier
@@ -1456,19 +2007,30 @@ private fun BroadcastWaitingContent(
 
                     Spacer(modifier = Modifier.height(16.dp))
 
+                    // Mode-specific timeout message
+                    val timeoutTitle = when (mode) {
+                        WaitingMode.BROADCAST -> if (driverCount > 0) "No driver accepted yet" else "No drivers nearby"
+                        WaitingMode.DIRECT -> "No response from $driverName yet"
+                    }
                     Text(
-                        text = if (driverCount > 0) "No driver accepted yet" else "No drivers nearby",
+                        text = timeoutTitle,
                         style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center
                     )
 
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    Text(
-                        text = if (driverCount > 0)
+                    // Mode-specific explanation
+                    val timeoutExplanation = when (mode) {
+                        WaitingMode.BROADCAST -> if (driverCount > 0)
                             "There are $driverCount driver${if (driverCount != 1) "s" else ""} in your area. Try boosting the fare to get their attention!"
                         else
-                            "Try again later or expand your search area.",
+                            "Try again later or expand your search area."
+                        WaitingMode.DIRECT -> "You can boost your fare to get their attention, or try a different driver."
+                    }
+                    Text(
+                        text = timeoutExplanation,
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = TextAlign.Center
@@ -1494,8 +2056,12 @@ private fun BroadcastWaitingContent(
 
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    // Show boost option if drivers are available
-                    if (driverCount > 0) {
+                    // Show boost option (always for direct, only if drivers available for broadcast)
+                    val showBoostButton = when (mode) {
+                        WaitingMode.BROADCAST -> driverCount > 0
+                        WaitingMode.DIRECT -> true
+                    }
+                    if (showBoostButton) {
                         val boostText = if (displayCurrency == DisplayCurrency.USD) {
                             "Boost Fare (+$1)"
                         } else {
@@ -1517,6 +2083,23 @@ private fun BroadcastWaitingContent(
                         Spacer(modifier = Modifier.height(8.dp))
                     }
 
+                    // Request another driver button (DIRECT mode only)
+                    if (mode == WaitingMode.DIRECT && onRequestAnotherDriver != null) {
+                        OutlinedButton(
+                            onClick = onRequestAnotherDriver,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(
+                                Icons.Default.SwapHoriz,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Request Another Driver")
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+
                     // Cancel button
                     TextButton(
                         onClick = onCancel,
@@ -1528,8 +2111,7 @@ private fun BroadcastWaitingContent(
                         Text("Cancel Request")
                     }
                 } else {
-                    // Normal searching state
-                    // Circular countdown timer
+                    // Normal searching state - Circular countdown timer
                     Box(
                         modifier = Modifier.size(100.dp),
                         contentAlignment = Alignment.Center
@@ -1565,7 +2147,7 @@ private fun BroadcastWaitingContent(
                             )
                         }
 
-                        // Time remaining in center
+                        // Time remaining in center (mm:ss format)
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
@@ -1581,7 +2163,7 @@ private fun BroadcastWaitingContent(
 
                     Spacer(modifier = Modifier.height(20.dp))
 
-                    // Animated dots for "Searching"
+                    // Animated dots for status text
                     var dotCount by remember { mutableIntStateOf(0) }
                     LaunchedEffect(Unit) {
                         while (true) {
@@ -1591,20 +2173,29 @@ private fun BroadcastWaitingContent(
                     }
                     val dots = ".".repeat(dotCount)
 
+                    // Mode-specific status text
+                    val statusText = when (mode) {
+                        WaitingMode.BROADCAST -> "Searching for drivers$dots"
+                        WaitingMode.DIRECT -> "Waiting for $driverName$dots"
+                    }
                     Text(
-                        text = "Searching for drivers$dots",
+                        text = statusText,
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
 
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    // Show driver count instead of generic message
-                    Text(
-                        text = if (driverCount > 0)
+                    // Mode-specific subtitle
+                    val subtitleText = when (mode) {
+                        WaitingMode.BROADCAST -> if (driverCount > 0)
                             "There are currently $driverCount driver${if (driverCount != 1) "s" else ""} near you"
                         else
-                            "Looking for available drivers in your area",
+                            "Looking for available drivers in your area"
+                        WaitingMode.DIRECT -> "Your offer has been sent to the driver"
+                    }
+                    Text(
+                        text = subtitleText,
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = TextAlign.Center
@@ -1664,6 +2255,23 @@ private fun BroadcastWaitingContent(
 
                     Spacer(modifier = Modifier.height(8.dp))
 
+                    // Request another driver button (DIRECT mode only)
+                    if (mode == WaitingMode.DIRECT && onRequestAnotherDriver != null) {
+                        OutlinedButton(
+                            onClick = onRequestAnotherDriver,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(
+                                Icons.Default.SwapHoriz,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Request Another Driver")
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+
                     // Cancel button
                     TextButton(
                         onClick = onCancel,
@@ -1679,6 +2287,9 @@ private fun BroadcastWaitingContent(
         }
     }
 }
+
+// NOTE: Old WaitingForAcceptanceContent and BroadcastWaitingContent functions removed.
+// Both now use the unified RideWaitingContent component above.
 
 @Composable
 private fun DriverAcceptedContent(

@@ -8,10 +8,13 @@ import android.os.Build
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -45,6 +48,7 @@ import com.ridestr.common.settings.SettingsManager
 import com.ridestr.common.ui.ChatBottomSheet
 import com.ridestr.common.ui.FareDisplay
 import com.ridestr.common.ui.SlideToConfirm
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 
@@ -286,13 +290,6 @@ fun DriverModeScreen(
         }
     }
 
-    // Track if user is viewing ride request list (suppress popup notifications)
-    val isViewingRideRequests = uiState.stage == DriverStage.AVAILABLE &&
-            (uiState.pendingBroadcastRequests.isNotEmpty() || uiState.pendingOffers.isNotEmpty())
-    LaunchedEffect(isViewingRideRequests) {
-        viewModel.setViewingRideRequests(isViewingRideRequests)
-    }
-
     // Chat bottom sheet
     ChatBottomSheet(
         showSheet = showChatSheet,
@@ -311,8 +308,14 @@ fun DriverModeScreen(
             .fillMaxSize()
             .padding(16.dp)
     ) {
-        // Error message
+        // Error message with auto-dismiss after 10 seconds
         uiState.error?.let { error ->
+            // Auto-dismiss after 10 seconds
+            LaunchedEffect(error) {
+                delay(10_000L)
+                viewModel.clearError()
+            }
+
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
@@ -328,7 +331,8 @@ fun DriverModeScreen(
                 ) {
                     Text(
                         text = error,
-                        color = MaterialTheme.colorScheme.onErrorContainer
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.weight(1f)
                     )
                     TextButton(onClick = { viewModel.clearError() }) {
                         Text("Dismiss")
@@ -402,6 +406,7 @@ fun DriverModeScreen(
             DriverStage.RIDE_ACCEPTED -> {
                 RideAcceptedContent(
                     uiState = uiState,
+                    precisePickupLocation = uiState.precisePickupLocation,
                     onStartRoute = { viewModel.startRouteToPickup() },
                     onCancel = { viewModel.cancelRide() },
                     onOpenChat = { showChatSheet = true },
@@ -414,6 +419,7 @@ fun DriverModeScreen(
             DriverStage.EN_ROUTE_TO_PICKUP -> {
                 EnRouteContent(
                     uiState = uiState,
+                    precisePickupLocation = uiState.precisePickupLocation,
                     autoOpenNavigation = autoOpenNavigation,
                     onArrived = { viewModel.arrivedAtPickup() },
                     onCancel = { viewModel.cancelRide() },
@@ -552,8 +558,16 @@ private fun AvailableContent(
     settingsManager: SettingsManager,
     priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
-    // Total requests count (broadcast + direct)
-    val totalRequests = uiState.pendingBroadcastRequests.size + uiState.pendingOffers.size
+    // Filter out stale broadcast requests (older than 2 minutes)
+    // This is a UI-level safety net in addition to ViewModel cleanup
+    val currentTimeSeconds = System.currentTimeMillis() / 1000
+    val maxAgeSeconds = 2 * 60 // 2 minutes
+    val freshBroadcastRequests = uiState.pendingBroadcastRequests.filter { request ->
+        (currentTimeSeconds - request.createdAt) < maxAgeSeconds
+    }
+
+    // Total requests count (filtered broadcast + direct)
+    val totalRequests = freshBroadcastRequests.size + uiState.pendingOffers.size
 
     // Online status card
     Card(
@@ -678,7 +692,8 @@ private fun AvailableContent(
     } else {
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             // Show broadcast requests first (sorted by fare, highest first)
-            items(uiState.pendingBroadcastRequests) { request ->
+            // Using freshBroadcastRequests which filters out stale requests
+            items(freshBroadcastRequests) { request ->
                 BroadcastRideRequestCard(
                     request = request,
                     pickupRoute = uiState.pickupRoutes[request.eventId],
@@ -703,6 +718,8 @@ private fun AvailableContent(
                 items(uiState.pendingOffers) { offer ->
                     RideOfferCard(
                         offer = offer,
+                        pickupRoute = uiState.directOfferPickupRoutes[offer.eventId],
+                        rideRoute = uiState.directOfferRideRoutes[offer.eventId],
                         isProcessing = uiState.isProcessingOffer,
                         onAccept = { onAcceptOffer(offer) },
                         onDecline = { onDeclineOffer(offer) },
@@ -718,6 +735,7 @@ private fun AvailableContent(
 @Composable
 private fun RideAcceptedContent(
     uiState: DriverUiState,
+    precisePickupLocation: Location?,
     onStartRoute: () -> Unit,
     onCancel: () -> Unit,
     onOpenChat: () -> Unit,
@@ -728,15 +746,39 @@ private fun RideAcceptedContent(
     val context = LocalContext.current
     val offer = uiState.acceptedOffer ?: return
 
+    // Use precise pickup if available, otherwise fall back to approximate
+    val pickup = precisePickupLocation ?: offer.approxPickup
+
     // Geocoding for addresses
     val geocodingService = remember { GeocodingService(context) }
     var pickupAddress by remember { mutableStateOf<String?>(null) }
     var destinationAddress by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(offer.approxPickup, offer.destination) {
-        pickupAddress = geocodingService.reverseGeocode(offer.approxPickup.lat, offer.approxPickup.lon)
+    LaunchedEffect(pickup, offer.destination) {
+        pickupAddress = geocodingService.reverseGeocode(pickup.lat, pickup.lon)
         destinationAddress = geocodingService.reverseGeocode(offer.destination.lat, offer.destination.lon)
     }
+
+    // Confirmation countdown timer state
+    val startTime = uiState.confirmationWaitStartMs
+    val duration = uiState.confirmationWaitDurationMs
+    var progress by remember { mutableFloatStateOf(0f) }
+    var remainingSeconds by remember { mutableIntStateOf((duration / 1000).toInt()) }
+    val showTimer = startTime != null && uiState.precisePickupLocation == null
+
+    LaunchedEffect(startTime, showTimer) {
+        if (startTime != null && showTimer) {
+            while (true) {
+                val elapsed = System.currentTimeMillis() - startTime
+                progress = (elapsed.toFloat() / duration).coerceIn(0f, 1f)
+                remainingSeconds = ((duration - elapsed) / 1000).toInt().coerceAtLeast(0)
+                delay(100)
+            }
+        }
+    }
+
+    val timerColor = MaterialTheme.colorScheme.primary
+    val timerBgColor = MaterialTheme.colorScheme.surfaceVariant
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -744,34 +786,67 @@ private fun RideAcceptedContent(
             containerColor = MaterialTheme.colorScheme.secondaryContainer
         )
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(20.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Icon(
-                imageVector = Icons.Default.CheckCircle,
-                contentDescription = null,
-                modifier = Modifier.size(48.dp),
-                tint = MaterialTheme.colorScheme.secondary
-            )
+        Box(modifier = Modifier.fillMaxWidth()) {
+            // Confirmation timer in top-right corner (only shown while waiting)
+            if (showTimer) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(12.dp)
+                        .size(48.dp)
+                ) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        // Background circle
+                        drawCircle(
+                            color = timerBgColor,
+                            style = Stroke(width = 4.dp.toPx())
+                        )
+                        // Progress arc
+                        drawArc(
+                            color = timerColor,
+                            startAngle = -90f,
+                            sweepAngle = 360f * progress,
+                            useCenter = false,
+                            style = Stroke(width = 4.dp.toPx(), cap = StrokeCap.Round)
+                        )
+                    }
+                    Text(
+                        text = "${remainingSeconds}s",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.align(Alignment.Center)
+                    )
+                }
+            }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Icon(
+                    imageVector = Icons.Default.CheckCircle,
+                    contentDescription = null,
+                    modifier = Modifier.size(48.dp),
+                    tint = MaterialTheme.colorScheme.secondary
+                )
 
-            Text(
-                text = "RIDE ACCEPTED",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold
-            )
+                Spacer(modifier = Modifier.height(12.dp))
 
-            Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "RIDE ACCEPTED",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold
+                )
 
-            Text(
-                text = uiState.statusMessage,
-                style = MaterialTheme.typography.bodyMedium,
-                textAlign = TextAlign.Center
-            )
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Text(
+                    text = uiState.statusMessage,
+                    style = MaterialTheme.typography.bodyMedium,
+                    textAlign = TextAlign.Center
+                )
 
             Spacer(modifier = Modifier.height(16.dp))
 
@@ -840,7 +915,7 @@ private fun RideAcceptedContent(
             // Navigate button (opens external map)
             OutlinedButton(
                 onClick = {
-                    val geoUri = "geo:0,0?q=${offer.approxPickup.lat},${offer.approxPickup.lon}(Pickup)"
+                    val geoUri = "geo:0,0?q=${pickup.lat},${pickup.lon}(Pickup)"
                     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(geoUri))
                     context.startActivity(Intent.createChooser(intent, "Navigate to pickup"))
                 },
@@ -867,13 +942,15 @@ private fun RideAcceptedContent(
             TextButton(onClick = onCancel) {
                 Text("Cancel Ride", color = MaterialTheme.colorScheme.error)
             }
-        }
-    }
+            }  // Close Column
+        }  // Close Box
+    }  // Close Card
 }
 
 @Composable
 private fun EnRouteContent(
     uiState: DriverUiState,
+    precisePickupLocation: Location?,
     autoOpenNavigation: Boolean,
     onArrived: () -> Unit,
     onCancel: () -> Unit,
@@ -885,12 +962,15 @@ private fun EnRouteContent(
     val context = LocalContext.current
     val offer = uiState.acceptedOffer ?: return
 
+    // Use precise pickup if available, otherwise fall back to approximate
+    val pickup = precisePickupLocation ?: offer.approxPickup
+
     // Geocoding for pickup address
     val geocodingService = remember { GeocodingService(context) }
     var pickupAddress by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(offer.approxPickup) {
-        pickupAddress = geocodingService.reverseGeocode(offer.approxPickup.lat, offer.approxPickup.lon)
+    LaunchedEffect(pickup) {
+        pickupAddress = geocodingService.reverseGeocode(pickup.lat, pickup.lon)
     }
 
     // Auto-navigation countdown (only if enabled)
@@ -899,14 +979,14 @@ private fun EnRouteContent(
 
     // Auto-open navigation after 3 seconds (only if enabled)
     if (autoOpenNavigation) {
-        LaunchedEffect(Unit) {
+        LaunchedEffect(pickup) {
             while (countdown > 0) {
                 kotlinx.coroutines.delay(1000)
                 countdown--
             }
             if (!navigationOpened) {
                 navigationOpened = true
-                val geoUri = "geo:0,0?q=${offer.approxPickup.lat},${offer.approxPickup.lon}(Pickup)"
+                val geoUri = "geo:0,0?q=${pickup.lat},${pickup.lon}(Pickup)"
                 val intent = Intent(Intent.ACTION_VIEW, Uri.parse(geoUri))
                 context.startActivity(Intent.createChooser(intent, "Navigate to pickup"))
             }
@@ -999,7 +1079,7 @@ private fun EnRouteContent(
             OutlinedButton(
                 onClick = {
                     navigationOpened = true
-                    val geoUri = "geo:0,0?q=${offer.approxPickup.lat},${offer.approxPickup.lon}(Pickup)"
+                    val geoUri = "geo:0,0?q=${pickup.lat},${pickup.lon}(Pickup)"
                     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(geoUri))
                     context.startActivity(Intent.createChooser(intent, "Navigate to pickup"))
                 },
@@ -1218,12 +1298,15 @@ private fun InRideContent(
     val context = LocalContext.current
     val offer = uiState.acceptedOffer ?: return
 
+    // Use precise destination if available, otherwise fall back to approximate
+    val destination = uiState.preciseDestinationLocation ?: offer.destination
+
     // Geocoding for destination address
     val geocodingService = remember { GeocodingService(context) }
     var destinationAddress by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(offer.destination) {
-        destinationAddress = geocodingService.reverseGeocode(offer.destination.lat, offer.destination.lon)
+    LaunchedEffect(destination) {
+        destinationAddress = geocodingService.reverseGeocode(destination.lat, destination.lon)
     }
 
     // Auto-navigation countdown (only if enabled)
@@ -1239,7 +1322,7 @@ private fun InRideContent(
             }
             if (!navigationOpened) {
                 navigationOpened = true
-                val geoUri = "geo:0,0?q=${offer.destination.lat},${offer.destination.lon}(Destination)"
+                val geoUri = "geo:0,0?q=${destination.lat},${destination.lon}(Destination)"
                 val intent = Intent(Intent.ACTION_VIEW, Uri.parse(geoUri))
                 context.startActivity(Intent.createChooser(intent, "Navigate to destination"))
             }
@@ -1308,7 +1391,7 @@ private fun InRideContent(
             OutlinedButton(
                 onClick = {
                     navigationOpened = true
-                    val geoUri = "geo:0,0?q=${offer.destination.lat},${offer.destination.lon}(Destination)"
+                    val geoUri = "geo:0,0?q=${destination.lat},${destination.lon}(Destination)"
                     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(geoUri))
                     context.startActivity(Intent.createChooser(intent, "Navigate to destination"))
                 },
@@ -1450,6 +1533,8 @@ private fun formatRelativeTime(timestampSeconds: Long): String {
 @Composable
 private fun RideOfferCard(
     offer: RideOfferData,
+    pickupRoute: RouteResult?,
+    rideRoute: RouteResult?,
     isProcessing: Boolean,
     onAccept: () -> Unit,
     onDecline: () -> Unit,
@@ -1458,6 +1543,9 @@ private fun RideOfferCard(
 ) {
     val context = LocalContext.current
     val geocodingService = remember { GeocodingService(context) }
+    val distanceUnit by settingsManager.distanceUnit.collectAsState()
+    val displayCurrency by settingsManager.displayCurrency.collectAsState()
+    val btcPrice by priceService.btcPriceUsd.collectAsState()
 
     // Update relative time every second
     var relativeTime by remember { mutableStateOf(formatRelativeTime(offer.createdAt)) }
@@ -1477,77 +1565,159 @@ private fun RideOfferCard(
         destinationAddress = geocodingService.reverseGeocode(offer.destination.lat, offer.destination.lon)
     }
 
+    // Route info calculations
+    val pickupDistanceKm = pickupRoute?.distanceKm
+    val pickupDurationMin = pickupRoute?.let { it.durationSeconds / 60.0 }
+    val rideDistanceKm = rideRoute?.distanceKm
+    val rideDurationMin = rideRoute?.let { it.durationSeconds / 60.0 }
+
+    // Calculate earnings metrics (only if we have both routes)
+    val earningsPerHour: String?
+    val earningsPerDistance: String?
+
+    if (pickupRoute != null && rideRoute != null && pickupDurationMin != null && rideDurationMin != null) {
+        val totalTimeHours = (pickupDurationMin + rideDurationMin) / 60.0
+        val totalDistanceKm = (pickupDistanceKm ?: 0.0) + (rideDistanceKm ?: 0.0)
+        val totalDistanceForEarnings = if (distanceUnit == DistanceUnit.MILES) {
+            totalDistanceKm * 0.621371
+        } else {
+            totalDistanceKm
+        }
+
+        earningsPerHour = if (totalTimeHours > 0) {
+            formatEarnings(offer.fareEstimate / totalTimeHours, displayCurrency, btcPrice, "/hr")
+        } else null
+
+        earningsPerDistance = if (totalDistanceForEarnings > 0) {
+            val perDistanceUnit = if (distanceUnit == DistanceUnit.MILES) "/mi" else "/km"
+            formatEarnings(offer.fareEstimate / totalDistanceForEarnings, displayCurrency, btcPrice, perDistanceUnit)
+        } else null
+    } else {
+        earningsPerHour = null
+        earningsPerDistance = null
+    }
+
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
+            // Header: Fare + Time
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Default.Lock,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        FareDisplay(
+                            satsAmount = offer.fareEstimate,
+                            settingsManager = settingsManager,
+                            priceService = priceService,
+                            style = MaterialTheme.typography.headlineSmall
+                        )
+                    }
                     Text(
-                        text = "Ride Request",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = relativeTime,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        text = "Direct Request",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
                     )
                 }
-                FareDisplay(
-                    satsAmount = offer.fareEstimate,
-                    settingsManager = settingsManager,
-                    priceService = priceService,
-                    style = MaterialTheme.typography.titleMedium
+                Text(
+                    text = relativeTime,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Only show pickup if geocoding succeeded
-            pickupAddress?.let { address ->
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        Icons.Default.LocationOn,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp),
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
+            // Pickup route info
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.DirectionsCar,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                if (pickupDistanceKm != null && pickupDurationMin != null) {
                     Text(
-                        text = "Pickup: $address",
-                        style = MaterialTheme.typography.bodySmall
+                        text = "${formatDistance(pickupDistanceKm, distanceUnit)} away",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium
                     )
-                }
-                Spacer(modifier = Modifier.height(4.dp))
-            }
-
-            // Only show destination if geocoding succeeded
-            destinationAddress?.let { address ->
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        Icons.Default.Flag,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp),
-                        tint = MaterialTheme.colorScheme.error
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
                     Text(
-                        text = "Dest: $address",
-                        style = MaterialTheme.typography.bodySmall
+                        text = " • ${pickupDurationMin.toInt()} min to pickup",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    Text(
+                        text = "Calculating route...",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(4.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
-            Text(
-                text = "Rider: ${offer.riderPubKey.take(12)}...",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            // Ride route info
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.Place,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.tertiary
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                if (rideDistanceKm != null && rideDurationMin != null) {
+                    Text(
+                        text = "${formatDistance(rideDistanceKm, distanceUnit)} ride",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = " • ${rideDurationMin.toInt()} min",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    Text(
+                        text = "Calculating...",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            // Earnings metrics (if available)
+            if (earningsPerHour != null || earningsPerDistance != null) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    earningsPerHour?.let {
+                        Text(
+                            text = it,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    earningsPerDistance?.let {
+                        Text(
+                            text = it,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            }
 
             Spacer(modifier = Modifier.height(16.dp))
 

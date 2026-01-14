@@ -155,7 +155,7 @@ fun DeveloperOptionsScreen(
             // Debug Info Navigation
             SettingsNavigationRow(
                 title = "Debug Info",
-                description = "View relay status, events, and test routing",
+                description = "View relay status and Nostr events",
                 icon = Icons.Filled.Info,
                 onClick = onOpenDebug
             )

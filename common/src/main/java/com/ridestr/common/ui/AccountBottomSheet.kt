@@ -27,6 +27,7 @@ fun AccountBottomSheet(
     isConnected: Boolean,
     onEditProfile: () -> Unit,
     onBackupKeys: () -> Unit,
+    onAccountSafety: () -> Unit,
     onLogout: () -> Unit,
     onDismiss: () -> Unit,
     sheetState: SheetState = rememberModalBottomSheetState(),
@@ -103,6 +104,16 @@ fun AccountBottomSheet(
                 subtitle = "View and copy your Nostr keys",
                 onClick = {
                     onBackupKeys()
+                    onDismiss()
+                }
+            )
+
+            AccountMenuItem(
+                icon = Icons.Default.Delete,
+                title = "Account Safety",
+                subtitle = "Delete rideshare data from relays",
+                onClick = {
+                    onAccountSafety()
                     onDismiss()
                 }
             )

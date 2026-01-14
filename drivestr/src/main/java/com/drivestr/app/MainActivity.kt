@@ -15,6 +15,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
@@ -36,6 +37,7 @@ import com.ridestr.common.routing.TileDownloadService
 import com.ridestr.common.routing.TileManager
 import com.ridestr.common.settings.SettingsManager
 import com.ridestr.common.ui.AccountBottomSheet
+import com.ridestr.common.ui.AccountSafetyScreen
 import com.ridestr.common.ui.DeveloperOptionsScreen
 import com.ridestr.common.ui.RelaySignalIndicator
 import com.ridestr.common.ui.LocationPermissionScreen
@@ -73,7 +75,8 @@ enum class Screen {
     DEBUG,
     BACKUP_KEYS,
     TILES,
-    DEV_OPTIONS
+    DEV_OPTIONS,
+    ACCOUNT_SAFETY
 }
 
 class MainActivity : ComponentActivity() {
@@ -324,6 +327,7 @@ fun DrivestrApp() {
                     keyManager = onboardingViewModel.getKeyManager(),
                     connectionStates = connectionStates,
                     settingsManager = settingsManager,
+                    nostrService = nostrService,
                     vehicleRepository = vehicleRepository,
                     userProfile = userProfile,
                     onLogout = {
@@ -337,6 +341,9 @@ fun DrivestrApp() {
                     },
                     onOpenBackup = {
                         currentScreen = Screen.BACKUP_KEYS
+                    },
+                    onOpenAccountSafety = {
+                        currentScreen = Screen.ACCOUNT_SAFETY
                     },
                     onOpenTiles = {
                         currentScreen = Screen.TILES
@@ -405,6 +412,14 @@ fun DrivestrApp() {
                     modifier = Modifier.padding(innerPadding)
                 )
             }
+
+            Screen.ACCOUNT_SAFETY -> {
+                AccountSafetyScreen(
+                    nostrService = nostrService,
+                    onBack = { currentScreen = Screen.MAIN },
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
         }
     }
 }
@@ -415,11 +430,13 @@ fun MainScreen(
     keyManager: com.ridestr.common.nostr.keys.KeyManager,
     connectionStates: Map<String, RelayConnectionState>,
     settingsManager: SettingsManager,
+    nostrService: NostrService,
     vehicleRepository: VehicleRepository,
     userProfile: UserProfile?,
     onLogout: () -> Unit,
     onOpenProfile: () -> Unit,
     onOpenBackup: () -> Unit,
+    onOpenAccountSafety: () -> Unit,
     onOpenTiles: () -> Unit,
     onOpenDevOptions: () -> Unit,
     onOpenDebug: () -> Unit,
@@ -492,7 +509,13 @@ fun MainScreen(
         bottomBar = {
             NavigationBar {
                 NavigationBarItem(
-                    icon = { Icon(Icons.Default.DirectionsCar, contentDescription = null) },
+                    icon = {
+                        Icon(
+                            painterResource(R.drawable.ic_drive),
+                            contentDescription = null,
+                            modifier = Modifier.size(26.dp)
+                        )
+                    },
                     label = { Text("Drive") },
                     selected = currentTab == Tab.DRIVE,
                     onClick = { currentTab = Tab.DRIVE }
@@ -572,6 +595,7 @@ fun MainScreen(
             isConnected = isConnected,
             onEditProfile = onOpenProfile,
             onBackupKeys = onOpenBackup,
+            onAccountSafety = onOpenAccountSafety,
             onLogout = onLogout,
             onDismiss = { showAccountSheet = false }
         )

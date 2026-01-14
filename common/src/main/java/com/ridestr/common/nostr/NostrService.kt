@@ -8,9 +8,12 @@ import com.ridestr.common.nostr.keys.KeyManager
 import com.ridestr.common.nostr.relay.RelayConfig
 import com.ridestr.common.nostr.relay.RelayConnectionState
 import com.ridestr.common.nostr.relay.RelayManager
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * High-level facade for all Nostr operations in the rideshare app.
@@ -185,6 +188,183 @@ class NostrService(
     }
 
     /**
+     * Delete all rideshare events created by the current user.
+     * Queries relays for events authored by the user with rideshare kinds,
+     * then publishes NIP-09 deletion requests for each.
+     * @return Count of events for which deletion was requested
+     */
+    suspend fun deleteAllRideshareEvents(): Int = withContext(Dispatchers.IO) {
+        val pubkey = keyManager.getPubKeyHex()
+        if (pubkey == null) {
+            Log.e(TAG, "Cannot delete events: Not logged in")
+            return@withContext 0
+        }
+
+        // All rideshare event kinds (current + legacy for thorough cleanup)
+        val rideshareKinds = listOf(
+            // Current kinds (RideshareEventKinds)
+            RideshareEventKinds.DRIVER_AVAILABILITY,  // 30173
+            RideshareEventKinds.RIDE_OFFER,           // 3173
+            RideshareEventKinds.RIDE_ACCEPTANCE,      // 3174
+            RideshareEventKinds.RIDE_CONFIRMATION,    // 3175
+            RideshareEventKinds.PIN_SUBMISSION,       // 3176
+            RideshareEventKinds.PICKUP_VERIFICATION,  // 3177
+            RideshareEventKinds.RIDESHARE_CHAT,       // 3178
+            RideshareEventKinds.RIDE_CANCELLATION,    // 3179
+            RideshareEventKinds.DRIVER_STATUS,        // 3180
+            RideshareEventKinds.PRECISE_LOCATION_REVEAL, // 3181
+            RideshareEventKinds.RIDE_HISTORY_BACKUP,  // 30174
+            // Legacy rideshare-specific kinds (may have old events on relays)
+            20173   // Old ephemeral driver status (changed to 3180)
+            // Note: NOT including 1059/1060 (Gift Wrap/Seal) - those are standard
+            // NIP-17 kinds used by other apps, would delete user's other DMs!
+        )
+
+        // Collect event IDs from subscription
+        val eventIds = mutableListOf<String>()
+        val subscriptionId = relayManager.subscribe(
+            kinds = rideshareKinds,
+            authors = listOf(pubkey),
+            limit = 1000
+        ) { event, _ ->
+            synchronized(eventIds) {
+                eventIds.add(event.id)
+            }
+        }
+
+        // Wait for relays to respond (2 seconds should be enough for most events)
+        delay(2000)
+
+        // Close subscription
+        relayManager.closeSubscription(subscriptionId)
+
+        Log.d(TAG, "Found ${eventIds.size} rideshare events to delete")
+
+        if (eventIds.isEmpty()) {
+            return@withContext 0
+        }
+
+        // Delete in batches of 50 to avoid huge events
+        val batchSize = 50
+        var deletedCount = 0
+        eventIds.chunked(batchSize).forEach { batch ->
+            val result = deleteEvents(batch, "User requested account data deletion")
+            if (result != null) {
+                deletedCount += batch.size
+            }
+        }
+
+        Log.d(TAG, "Requested deletion of $deletedCount events")
+        deletedCount
+    }
+
+    /**
+     * Delete all events of a specific kind created by the current user.
+     * Useful for cleaning up stale events on app startup (e.g., old availability events).
+     * @param kind The event kind to delete
+     * @param reason Optional reason for deletion
+     * @return Count of events for which deletion was requested
+     */
+    suspend fun deleteMyEventsByKind(kind: Int, reason: String = "cleanup"): Int = withContext(Dispatchers.IO) {
+        val pubkey = keyManager.getPubKeyHex()
+        if (pubkey == null) {
+            Log.e(TAG, "Cannot delete events: Not logged in")
+            return@withContext 0
+        }
+
+        // Collect event IDs from subscription
+        val eventIds = mutableListOf<String>()
+        val subscriptionId = relayManager.subscribe(
+            kinds = listOf(kind),
+            authors = listOf(pubkey),
+            limit = 100
+        ) { event, _ ->
+            synchronized(eventIds) {
+                eventIds.add(event.id)
+            }
+        }
+
+        // Wait for relays to respond
+        delay(2000)
+
+        // Close subscription
+        relayManager.closeSubscription(subscriptionId)
+
+        Log.d(TAG, "Found ${eventIds.size} events of kind $kind to delete")
+
+        if (eventIds.isEmpty()) {
+            return@withContext 0
+        }
+
+        // Delete in batches of 50
+        val batchSize = 50
+        var deletedCount = 0
+        eventIds.chunked(batchSize).forEach { batch ->
+            val result = deleteEvents(batch, reason)
+            if (result != null) {
+                deletedCount += batch.size
+            }
+        }
+
+        Log.d(TAG, "Requested deletion of $deletedCount events of kind $kind")
+        deletedCount
+    }
+
+    /**
+     * Count all rideshare events created by the current user.
+     * Used to verify if deletion worked or see how many events exist.
+     * @return Count of rideshare events found on relays
+     */
+    suspend fun countRideshareEvents(): Int = withContext(Dispatchers.IO) {
+        val pubkey = keyManager.getPubKeyHex()
+        if (pubkey == null) {
+            Log.e(TAG, "Cannot count events: Not logged in")
+            return@withContext 0
+        }
+
+        // All rideshare event kinds (current + legacy for thorough counting)
+        val rideshareKinds = listOf(
+            // Current kinds (RideshareEventKinds)
+            RideshareEventKinds.DRIVER_AVAILABILITY,  // 30173
+            RideshareEventKinds.RIDE_OFFER,           // 3173
+            RideshareEventKinds.RIDE_ACCEPTANCE,      // 3174
+            RideshareEventKinds.RIDE_CONFIRMATION,    // 3175
+            RideshareEventKinds.PIN_SUBMISSION,       // 3176
+            RideshareEventKinds.PICKUP_VERIFICATION,  // 3177
+            RideshareEventKinds.RIDESHARE_CHAT,       // 3178
+            RideshareEventKinds.RIDE_CANCELLATION,    // 3179
+            RideshareEventKinds.DRIVER_STATUS,        // 3180
+            RideshareEventKinds.PRECISE_LOCATION_REVEAL, // 3181
+            RideshareEventKinds.RIDE_HISTORY_BACKUP,  // 30174
+            // Legacy rideshare-specific kinds (may have old events on relays)
+            20173   // Old ephemeral driver status (changed to 3180)
+            // Note: NOT including 1059/1060 (Gift Wrap/Seal) - those are standard
+            // NIP-17 kinds used by other apps, would delete user's other DMs!
+        )
+
+        // Collect event IDs from subscription
+        val eventIds = mutableListOf<String>()
+        val subscriptionId = relayManager.subscribe(
+            kinds = rideshareKinds,
+            authors = listOf(pubkey),
+            limit = 1000
+        ) { event, _ ->
+            synchronized(eventIds) {
+                eventIds.add(event.id)
+            }
+        }
+
+        // Wait for relays to respond (2 seconds should be enough for most events)
+        delay(2000)
+
+        // Close subscription
+        relayManager.closeSubscription(subscriptionId)
+
+        Log.d(TAG, "Found ${eventIds.size} rideshare events")
+        eventIds.size
+    }
+
+    /**
      * Accept a ride offer.
      * PIN is no longer included - the rider generates it and shares verbally.
      * @param offer The offer to accept
@@ -335,13 +515,21 @@ class NostrService(
      * @param pickup Pickup location
      * @param destination Destination location
      * @param fareEstimate Estimated fare in sats
+     * @param pickupRouteKm Pre-calculated driver→pickup distance in km (optional)
+     * @param pickupRouteMin Pre-calculated driver→pickup duration in minutes (optional)
+     * @param rideRouteKm Pre-calculated pickup→destination distance in km (optional)
+     * @param rideRouteMin Pre-calculated pickup→destination duration in minutes (optional)
      * @return The event ID if successful, null on failure
      */
     suspend fun sendRideOffer(
         driverAvailability: DriverAvailabilityData,
         pickup: Location,
         destination: Location,
-        fareEstimate: Double
+        fareEstimate: Double,
+        pickupRouteKm: Double? = null,
+        pickupRouteMin: Double? = null,
+        rideRouteKm: Double? = null,
+        rideRouteMin: Double? = null
     ): String? {
         val signer = keyManager.getSigner()
         if (signer == null) {
@@ -356,7 +544,11 @@ class NostrService(
                 driverPubKey = driverAvailability.driverPubKey,
                 pickup = pickup,
                 destination = destination,
-                fareEstimate = fareEstimate
+                fareEstimate = fareEstimate,
+                pickupRouteKm = pickupRouteKm,
+                pickupRouteMin = pickupRouteMin,
+                rideRouteKm = rideRouteKm,
+                rideRouteMin = rideRouteMin
             )
             relayManager.publish(event)
             Log.d(TAG, "Sent ride offer: ${event.id}")
@@ -484,6 +676,39 @@ class NostrService(
     }
 
     /**
+     * Subscribe to deletion events (NIP-09 Kind 5) for ride request event IDs.
+     * Used to detect when a rider cancels their broadcast request.
+     *
+     * @param eventIds List of ride request event IDs to watch for deletion
+     * @param onDeletion Called with the event ID that was deleted
+     * @return Subscription ID for closing later
+     */
+    fun subscribeToRideRequestDeletions(
+        eventIds: List<String>,
+        onDeletion: (String) -> Unit
+    ): String? {
+        if (eventIds.isEmpty()) return null
+
+        Log.d(TAG, "Subscribing to deletion events for ${eventIds.size} ride requests")
+
+        return relayManager.subscribe(
+            kinds = listOf(DeletionEvent.KIND),
+            tags = mapOf("e" to eventIds)
+        ) { event, _ ->
+            // Extract which event IDs are being deleted
+            for (tag in event.tags) {
+                if (tag.getOrNull(0) == "e") {
+                    val deletedEventId = tag.getOrNull(1)
+                    if (deletedEventId != null && deletedEventId in eventIds) {
+                        Log.d(TAG, "Ride request deleted: ${deletedEventId.take(8)}")
+                        onDeletion(deletedEventId)
+                    }
+                }
+            }
+        }
+    }
+
+    /**
      * Accept a broadcast ride request.
      * @param request The broadcast ride request to accept
      * @return The event ID if successful, null on failure
@@ -586,14 +811,16 @@ class NostrService(
 
     /**
      * Subscribe to ride offers for the current user (as driver).
+     * Direct offers are now NIP-44 encrypted for privacy.
      * Only returns offers from the last 10 minutes to avoid stale requests.
-     * @param onOffer Called when a ride offer is received
+     * @param onOffer Called when a ride offer is received (after decryption)
      * @return Subscription ID for closing later, null if not logged in
      */
     fun subscribeToOffers(
         onOffer: (RideOfferData) -> Unit
     ): String? {
         val myPubKey = keyManager.getPubKeyHex() ?: return null
+        val signer = keyManager.getSigner() ?: return null
 
         // Only get offers from last 10 minutes to avoid old requests
         val tenMinutesAgo = (System.currentTimeMillis() / 1000) - (10 * 60)
@@ -603,8 +830,14 @@ class NostrService(
             tags = mapOf("p" to listOf(myPubKey)),
             since = tenMinutesAgo
         ) { event, _ ->
-            RideOfferEvent.parse(event)?.let { data ->
-                onOffer(data)
+            // Direct offers are now encrypted - parse and decrypt
+            RideOfferEvent.parseEncrypted(event)?.let { encryptedData ->
+                GlobalScope.launch {
+                    RideOfferEvent.decrypt(signer, encryptedData)?.let { data ->
+                        Log.d(TAG, "Decrypted direct offer from ${data.riderPubKey.take(8)}")
+                        onOffer(data)
+                    }
+                }
             }
         }
     }
@@ -802,6 +1035,89 @@ class NostrService(
             Log.d(TAG, "Received cancellation event ${event.id} from ${event.pubKey.take(8)}")
             RideCancellationEvent.parse(event)?.let { data ->
                 onCancellation(data)
+            }
+        }
+    }
+
+    // ==================== Progressive Location Reveal ====================
+
+    /**
+     * Send a precise location reveal to the driver.
+     * Used when driver is close (~1 mile) to share precise pickup or destination.
+     *
+     * @param confirmationEventId The ride confirmation event ID
+     * @param driverPubKey The driver's public key
+     * @param locationType Either "pickup" or "destination"
+     * @param preciseLocation The precise coordinates to share
+     * @return The event ID if successful, null on failure
+     */
+    suspend fun sendPreciseLocationReveal(
+        confirmationEventId: String,
+        driverPubKey: String,
+        locationType: String,
+        preciseLocation: Location
+    ): String? {
+        val signer = keyManager.getSigner()
+        if (signer == null) {
+            Log.e(TAG, "Cannot send precise location reveal: Not logged in")
+            return null
+        }
+
+        return try {
+            val event = PreciseLocationRevealEvent.create(
+                signer = signer,
+                confirmationEventId = confirmationEventId,
+                driverPubKey = driverPubKey,
+                locationType = locationType,
+                preciseLocation = preciseLocation
+            )
+            relayManager.publish(event)
+            Log.d(TAG, "Sent precise location reveal ($locationType): ${event.id}")
+            event.id
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to send precise location reveal", e)
+            null
+        }
+    }
+
+    /**
+     * Subscribe to precise location reveals for an active ride (driver side).
+     * Automatically decrypts the location data.
+     *
+     * @param confirmationEventId The confirmation event ID to watch
+     * @param onReveal Called when a precise location is revealed (with decrypted location)
+     * @return Subscription ID for closing later, or null if not logged in
+     */
+    fun subscribeToPreciseLocationReveals(
+        confirmationEventId: String,
+        onReveal: (PreciseLocationRevealData) -> Unit
+    ): String? {
+        val myPubKey = keyManager.getPubKeyHex() ?: return null
+
+        return relayManager.subscribe(
+            kinds = listOf(RideshareEventKinds.PRECISE_LOCATION_REVEAL),
+            tags = mapOf(
+                "p" to listOf(myPubKey),
+                "e" to listOf(confirmationEventId)
+            )
+        ) { event, _ ->
+            Log.d(TAG, "Received precise location reveal ${event.id} from ${event.pubKey.take(8)}")
+
+            // Decrypt the location data
+            val signer = keyManager.getSigner()
+            if (signer != null) {
+                GlobalScope.launch {
+                    try {
+                        PreciseLocationRevealEvent.parseEncrypted(event)?.let { encryptedData ->
+                            PreciseLocationRevealEvent.decrypt(signer, encryptedData)?.let { data ->
+                                Log.d(TAG, "Decrypted precise location reveal: ${data.locationType}")
+                                onReveal(data)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to decrypt precise location reveal", e)
+                    }
+                }
             }
         }
     }

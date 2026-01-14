@@ -53,6 +53,9 @@ class SettingsManager(context: Context) {
         private const val KEY_ALWAYS_ASK_VEHICLE = "always_ask_vehicle"
         private const val KEY_ACTIVE_VEHICLE_ID = "active_vehicle_id"
 
+        // Rider pickup location preference
+        private const val KEY_USE_GPS_FOR_PICKUP = "use_gps_for_pickup"
+
         // Default manual location: Las Vegas (Fremont St)
         private const val DEFAULT_MANUAL_LAT = 36.1699
         private const val DEFAULT_MANUAL_LON = -115.1398
@@ -125,6 +128,22 @@ class SettingsManager(context: Context) {
      */
     fun toggleNotificationVibration() {
         setNotificationVibrationEnabled(!_notificationVibrationEnabled.value)
+    }
+
+    // ===================
+    // RIDER PICKUP LOCATION (Rider App)
+    // ===================
+
+    // "Use my location" checkbox preference (default: false)
+    private val _useGpsForPickup = MutableStateFlow(prefs.getBoolean(KEY_USE_GPS_FOR_PICKUP, false))
+    val useGpsForPickup: StateFlow<Boolean> = _useGpsForPickup.asStateFlow()
+
+    /**
+     * Set whether to use GPS for pickup location by default.
+     */
+    fun setUseGpsForPickup(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_USE_GPS_FOR_PICKUP, enabled).apply()
+        _useGpsForPickup.value = enabled
     }
 
     // ===================

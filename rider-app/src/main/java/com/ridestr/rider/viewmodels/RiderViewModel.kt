@@ -3,8 +3,13 @@ package com.ridestr.rider.viewmodels
 import android.app.Application
 import android.content.Context
 import android.util.Log
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.ridestr.common.data.SavedLocation
+import com.ridestr.common.data.SavedLocationRepository
 import com.ridestr.common.location.GeocodingResult
 import com.ridestr.common.location.GeocodingService
 import com.ridestr.common.nostr.NostrService
@@ -13,13 +18,13 @@ import com.ridestr.common.nostr.events.DriverStatusData
 import com.ridestr.common.nostr.events.Geohash
 import com.ridestr.common.nostr.events.Location
 import com.ridestr.common.nostr.events.PinSubmissionData
+import com.ridestr.common.nostr.events.PreciseLocationRevealEvent
 import com.ridestr.common.nostr.events.RideAcceptanceData
 import com.ridestr.common.nostr.events.RideshareChatData
 import com.ridestr.common.nostr.events.UserProfile
 import com.ridestr.common.nostr.events.geohash
-import com.ridestr.common.notification.NotificationHelper
-import com.ridestr.common.notification.SoundManager
 import com.ridestr.rider.service.RiderActiveService
+import com.ridestr.rider.service.RiderStatus
 import kotlin.random.Random
 import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.routing.RouteResult
@@ -67,8 +72,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         private const val KEY_RIDE_STATE = "active_ride"
         // Maximum age of persisted ride state (2 hours)
         private const val MAX_RIDE_STATE_AGE_MS = 2 * 60 * 60 * 1000L
-        // Time to wait for driver to accept direct offer before timeout (20 seconds)
-        private const val ACCEPTANCE_TIMEOUT_MS = 20_000L
+        // Time to wait for driver to accept direct offer before showing options (15 seconds)
+        private const val ACCEPTANCE_TIMEOUT_MS = 15_000L
         // Time to wait for any driver to accept broadcast request (2 minutes)
         private const val BROADCAST_TIMEOUT_MS = 120_000L
 
@@ -85,6 +90,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     private val routingService = ValhallaRoutingService(application)
     private val geocodingService = GeocodingService(application)
     private val tileManager = TileManager.getInstance(application)
+    private val savedLocationRepository = SavedLocationRepository.getInstance(application)
 
     // Track which tile region is currently loaded
     private var currentTileRegion: String? = null
@@ -161,6 +167,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         val acceptance = state.acceptance
         if (confId != null && state.rideStage in listOf(
                 RideStage.RIDE_CONFIRMED,
+                RideStage.DRIVER_ARRIVED,
                 RideStage.IN_PROGRESS
             )) {
             Log.d(TAG, "Refreshing subscriptions for confirmation: $confId")
@@ -218,8 +225,10 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 // Locations
                 put("pickupLat", pickup.lat)
                 put("pickupLon", pickup.lon)
+                put("pickupAddressLabel", pickup.addressLabel ?: "")
                 put("destLat", destination.lat)
                 put("destLon", destination.lon)
+                put("destAddressLabel", destination.addressLabel ?: "")
 
                 // Chat messages
                 val messagesArray = org.json.JSONArray()
@@ -280,14 +289,21 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 createdAt = data.getLong("acceptance_createdAt")
             )
 
-            // Reconstruct locations
+            // Reconstruct locations (with address labels if available)
+            val pickupAddressLabel: String? = if (data.has("pickupAddressLabel"))
+                data.getString("pickupAddressLabel").takeIf { it.isNotEmpty() } else null
+            val destAddressLabel: String? = if (data.has("destAddressLabel"))
+                data.getString("destAddressLabel").takeIf { it.isNotEmpty() } else null
+
             val pickup = Location(
                 lat = data.getDouble("pickupLat"),
-                lon = data.getDouble("pickupLon")
+                lon = data.getDouble("pickupLon"),
+                addressLabel = pickupAddressLabel
             )
             val destination = Location(
                 lat = data.getDouble("destLat"),
-                lon = data.getDouble("destLon")
+                lon = data.getDouble("destLon"),
+                addressLabel = destAddressLabel
             )
 
             val pendingOfferEventId: String? = if (data.has("pendingOfferEventId")) data.getString("pendingOfferEventId") else null
@@ -491,6 +507,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         )
         setPickupLocationWithAddress(location)
         _pickupSearchResults.value = emptyList()
+        // Auto-save to recents
+        savedLocationRepository.addRecent(result)
     }
 
     /**
@@ -504,6 +522,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         )
         setDestinationWithAddress(location)
         _destSearchResults.value = emptyList()
+        // Auto-save to recents
+        savedLocationRepository.addRecent(result)
     }
 
     /**
@@ -539,8 +559,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         calculateRouteIfReady()
     }
 
-    // Track if using current location for pickup
-    private val _usingCurrentLocationForPickup = MutableStateFlow(false)
+    // Track if using current location for pickup (initialized from saved preference)
+    private val _usingCurrentLocationForPickup = MutableStateFlow(settingsManager.useGpsForPickup.value)
     val usingCurrentLocationForPickup: StateFlow<Boolean> = _usingCurrentLocationForPickup.asStateFlow()
 
     // Track if we're fetching current location
@@ -558,6 +578,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _isFetchingLocation.value = true
             _usingCurrentLocationForPickup.value = true
+            settingsManager.setUseGpsForPickup(true)  // Persist preference
 
             Log.d(TAG, "useCurrentLocationForPickup: gpsLat=$gpsLat, gpsLon=$gpsLon")
 
@@ -566,6 +587,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 Log.w(TAG, "GPS unavailable - cannot use current location")
                 _isFetchingLocation.value = false
                 _usingCurrentLocationForPickup.value = false
+                settingsManager.setUseGpsForPickup(false)  // Revert preference on failure
                 return@launch
             }
 
@@ -601,6 +623,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun stopUsingCurrentLocationForPickup() {
         _usingCurrentLocationForPickup.value = false
+        settingsManager.setUseGpsForPickup(false)  // Persist preference
         clearPickupLocation()
     }
 
@@ -691,6 +714,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * Send a ride offer to the selected driver.
+     * Pre-calculates driver→pickup route so driver sees accurate metrics immediately.
      */
     fun sendRideOffer() {
         val state = _uiState.value
@@ -698,15 +722,33 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         val pickup = state.pickupLocation ?: return
         val destination = state.destination ?: return
         val fareEstimate = state.fareEstimate ?: return
+        val rideRoute = state.routeResult  // Already calculated pickup→destination route
 
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isSendingOffer = true)
+
+            // Calculate driver→pickup route for accurate metrics on driver's card
+            val pickupRoute = if (routingService.isReady()) {
+                routingService.calculateRoute(
+                    originLat = driver.approxLocation.lat,
+                    originLon = driver.approxLocation.lon,
+                    destLat = pickup.lat,
+                    destLon = pickup.lon
+                )
+            } else null
+
+            Log.d(TAG, "Pre-calculated routes for direct offer: " +
+                "pickup=${pickupRoute?.distanceKm}km, ride=${rideRoute?.distanceKm}km")
 
             val eventId = nostrService.sendRideOffer(
                 driverAvailability = driver,
                 pickup = pickup,
                 destination = destination,
-                fareEstimate = fareEstimate
+                fareEstimate = fareEstimate,
+                pickupRouteKm = pickupRoute?.distanceKm,
+                pickupRouteMin = pickupRoute?.let { it.durationSeconds / 60.0 },
+                rideRouteKm = rideRoute?.distanceKm,
+                rideRouteMin = rideRoute?.let { it.durationSeconds / 60.0 }
             )
 
             if (eventId != null) {
@@ -755,11 +797,110 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             pendingOfferEventId = null,
             rideStage = RideStage.IDLE,
             acceptanceTimeoutStartMs = null,
+            directOfferBoostSats = 0.0,
             statusMessage = "Offer cancelled"
         )
 
         // Clear persisted ride state (in case any was saved)
         clearSavedRideState()
+    }
+
+    /**
+     * Boost the fare on a direct offer and resend to the same driver.
+     * Includes pre-calculated route metrics.
+     */
+    fun boostDirectOffer() {
+        val state = _uiState.value
+        val driver = state.selectedDriver ?: return
+        val currentFare = state.fareEstimate ?: return
+        val pickup = state.pickupLocation ?: return
+        val destination = state.destination ?: return
+        val rideRoute = state.routeResult  // Already calculated pickup→destination route
+        val boostAmount = getBoostAmount()
+        val newFare = currentFare + boostAmount
+
+        viewModelScope.launch {
+            // Cancel current timeout
+            cancelAcceptanceTimeout()
+
+            // Delete old offer
+            state.pendingOfferEventId?.let { offerId ->
+                Log.d(TAG, "Deleting old direct offer before boost: $offerId")
+                nostrService.deleteEvent(offerId, "fare boosted")
+            }
+
+            // Close old acceptance subscription
+            acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
+            acceptanceSubscriptionId = null
+
+            // Update fare in state - reset timeout flag since we're boosting
+            _uiState.value = _uiState.value.copy(
+                fareEstimate = newFare,
+                directOfferBoostSats = state.directOfferBoostSats + boostAmount,
+                pendingOfferEventId = null,
+                directOfferTimedOut = false,
+                isSendingOffer = true
+            )
+
+            Log.d(TAG, "Boosting direct offer fare from $currentFare to $newFare sats (total boost: ${state.directOfferBoostSats + boostAmount} sats)")
+
+            // Calculate driver→pickup route for accurate metrics
+            val pickupRoute = if (routingService.isReady()) {
+                routingService.calculateRoute(
+                    originLat = driver.approxLocation.lat,
+                    originLon = driver.approxLocation.lon,
+                    destLat = pickup.lat,
+                    destLon = pickup.lon
+                )
+            } else null
+
+            // Resend offer to same driver with new fare and route metrics
+            val eventId = nostrService.sendRideOffer(
+                driverAvailability = driver,
+                pickup = pickup,
+                destination = destination,
+                fareEstimate = newFare,
+                pickupRouteKm = pickupRoute?.distanceKm,
+                pickupRouteMin = pickupRoute?.let { it.durationSeconds / 60.0 },
+                rideRouteKm = rideRoute?.distanceKm,
+                rideRouteMin = rideRoute?.let { it.durationSeconds / 60.0 }
+            )
+
+            if (eventId != null) {
+                Log.d(TAG, "Sent boosted ride offer: $eventId")
+                subscribeToAcceptance(eventId)
+                startAcceptanceTimeout()
+                _uiState.value = _uiState.value.copy(
+                    isSendingOffer = false,
+                    pendingOfferEventId = eventId,
+                    acceptanceTimeoutStartMs = System.currentTimeMillis(),
+                    statusMessage = "Waiting for driver to accept boosted offer..."
+                )
+            } else {
+                _uiState.value = _uiState.value.copy(
+                    isSendingOffer = false,
+                    error = "Failed to resend boosted offer"
+                )
+            }
+        }
+    }
+
+    /**
+     * Continue waiting for driver acceptance by resetting the timeout timer.
+     */
+    fun continueWaitingDirect() {
+        // Cancel old timeout and start fresh
+        cancelAcceptanceTimeout()
+        startAcceptanceTimeout()
+
+        // Reset the timer start and timeout flag
+        _uiState.value = _uiState.value.copy(
+            acceptanceTimeoutStartMs = System.currentTimeMillis(),
+            directOfferTimedOut = false,
+            statusMessage = "Continuing to wait for driver..."
+        )
+
+        Log.d(TAG, "Continue waiting for direct offer acceptance")
     }
 
     // ==================== Broadcast Ride Request (New Flow) ====================
@@ -778,9 +919,15 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isSendingOffer = true)
 
+            // Send APPROXIMATE locations for privacy in broadcast
+            // Precise locations revealed progressively when driver is close
+            val approxPickup = pickup.approximate()
+            val approxDestination = destination.approximate()
+            Log.d(TAG, "Broadcasting with approximate locations - pickup: ${approxPickup.lat},${approxPickup.lon}, dest: ${approxDestination.lat},${approxDestination.lon}")
+
             val eventId = nostrService.broadcastRideRequest(
-                pickup = pickup,
-                destination = destination,
+                pickup = approxPickup,
+                destination = approxDestination,
                 fareEstimate = fareEstimate,
                 routeDistanceKm = routeResult.distanceKm,
                 routeDurationMin = routeResult.durationSeconds / 60.0
@@ -803,6 +950,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     pendingOfferEventId = eventId,
                     rideStage = RideStage.BROADCASTING_REQUEST,
                     broadcastStartTimeMs = System.currentTimeMillis(),
+                    broadcastTimedOut = false,
                     statusMessage = "Searching for drivers..."
                 )
             } else {
@@ -840,10 +988,14 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             acceptanceSubscriptionId = null
 
             // Update fare in state - store actual sats boosted (not count)
+            // Reset broadcastTimedOut AND broadcastStartTimeMs to prevent race condition with UI
+            // The explicit null reset ensures LaunchedEffect properly restarts when new time is set
             _uiState.value = _uiState.value.copy(
                 fareEstimate = newFare,
                 totalBoostSats = state.totalBoostSats + boostAmount,
-                pendingOfferEventId = null
+                pendingOfferEventId = null,
+                broadcastTimedOut = false,
+                broadcastStartTimeMs = null  // Explicit reset for clean timer restart
             )
 
             // Re-broadcast with new fare
@@ -900,6 +1052,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
         _uiState.value = _uiState.value.copy(
             broadcastStartTimeMs = System.currentTimeMillis(),
+            broadcastTimedOut = false,
             statusMessage = "Searching for drivers..."
         )
     }
@@ -977,8 +1130,10 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         Log.d(TAG, "Broadcast timeout - no driver accepted. Total boost: ${state.totalBoostSats} sats")
 
         // Don't automatically delete the offer - let user decide to boost or cancel
+        // Set broadcastTimedOut = true so UI shows the options menu persistently
         _uiState.value = state.copy(
             broadcastStartTimeMs = null,
+            broadcastTimedOut = true,
             statusMessage = "No drivers responded. Boost fare or try again?"
         )
     }
@@ -1056,7 +1211,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         val confirmationId = state.confirmationEventId
         val driverPubKey = state.acceptance?.driverPubKey
         if (confirmationId != null && driverPubKey != null &&
-            state.rideStage in listOf(RideStage.RIDE_CONFIRMED, RideStage.IN_PROGRESS)) {
+            state.rideStage in listOf(RideStage.RIDE_CONFIRMED, RideStage.DRIVER_ARRIVED, RideStage.IN_PROGRESS)) {
             viewModelScope.launch {
                 Log.d(TAG, "Publishing ride cancellation to driver")
                 nostrService.publishRideCancellation(
@@ -1291,10 +1446,28 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         val pickupPin = String.format("%04d", Random.nextInt(10000))
         Log.d(TAG, "Generated pickup PIN: $pickupPin")
 
+        // Check if driver is already close (within 1 mile) - if so, send precise pickup immediately
+        // Look up driver's location from available drivers list
+        val driverLocation = _uiState.value.availableDrivers
+            .find { it.driverPubKey == acceptance.driverPubKey }
+            ?.approxLocation
+
+        val driverAlreadyClose = driverLocation?.let { pickup.isWithinMile(it) } == true
+
         viewModelScope.launch {
+            // Send APPROXIMATE pickup for privacy - precise location revealed when driver is close
+            // UNLESS driver is already within 1 mile, then send precise immediately
+            val pickupToSend = if (driverAlreadyClose) {
+                Log.d(TAG, "Driver already within 1 mile - sending precise pickup immediately")
+                pickup
+            } else {
+                pickup.approximate()
+            }
+            Log.d(TAG, "Sending pickup: ${pickupToSend.lat}, ${pickupToSend.lon} (precise: ${pickup.lat}, ${pickup.lon}, driver close: $driverAlreadyClose)")
+
             val eventId = nostrService.confirmRide(
                 acceptance = acceptance,
-                precisePickup = pickup
+                precisePickup = pickupToSend  // Send precise if driver is close, approximate otherwise
             )
 
             if (eventId != null) {
@@ -1304,16 +1477,15 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
                 acceptanceSubscriptionId = null
 
-                // Play confirmation sound
-                SoundManager.playConfirmationAlert(getApplication())
-
-                // Update foreground service to ride mode
-                RiderActiveService.startRide(getApplication(), null)
+                // Update service status - plays confirmation sound and updates notification
+                val driverName = _uiState.value.driverProfiles[acceptance.driverPubKey]?.bestName()
+                RiderActiveService.updateStatus(getApplication(), RiderStatus.DriverEnRoute(driverName))
 
                 _uiState.value = _uiState.value.copy(
                     confirmationEventId = eventId,
                     pickupPin = pickupPin,
                     pinAttempts = 0,
+                    precisePickupShared = driverAlreadyClose,  // Mark as shared if sent precise in confirmation
                     rideStage = RideStage.RIDE_CONFIRMED,
                     statusMessage = "Ride confirmed! Tell driver PIN: $pickupPin"
                 )
@@ -1381,9 +1553,11 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 pinSubmissionSubscriptionId?.let { nostrService.closeSubscription(it) }
                 pinSubmissionSubscriptionId = null
 
-                // Clear arrival notification now that ride is starting
+                // Update service status to in progress
                 val context = getApplication<Application>()
-                NotificationHelper.cancelNotification(context, NotificationHelper.NOTIFICATION_ID_RIDE_UPDATE)
+                val driverPubKey = state.acceptance?.driverPubKey
+                val driverName = driverPubKey?.let { _uiState.value.driverProfiles[it]?.bestName() }
+                RiderActiveService.updateStatus(context, RiderStatus.RideInProgress(driverName))
 
                 _uiState.value = state.copy(
                     pinAttempts = newAttempts,
@@ -1394,6 +1568,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
                 // Save ride state for persistence
                 saveRideState()
+
+                // Reveal precise destination to driver now that ride is starting
+                state.confirmationEventId?.let { revealPreciseDestination(it) }
             } else {
                 Log.w(TAG, "PIN incorrect! Attempt $newAttempts of $MAX_PIN_ATTEMPTS")
 
@@ -1448,30 +1625,18 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 // Persist messages for app restart
                 saveRideState()
 
-                // Play sound and show notification for messages from driver (not our own)
+                // Notify service of chat message (plays sound, updates notification temporarily)
                 val myPubKey = nostrService.getPubKeyHex() ?: ""
                 if (chatData.senderPubKey != myPubKey) {
                     val context = getApplication<Application>()
-                    SoundManager.playChatMessageAlert(context)
-
-                    val notification = NotificationHelper.buildChatMessageNotification(
-                        context = context,
-                        contentIntent = android.app.PendingIntent.getActivity(
-                            context,
-                            0,
-                            android.content.Intent(context, com.ridestr.rider.MainActivity::class.java).apply {
-                                flags = android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
-                            },
-                            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
-                        ),
-                        senderName = "Driver",
-                        messagePreview = chatData.message
-                    )
-                    NotificationHelper.showNotification(
+                    RiderActiveService.updateStatus(
                         context,
-                        NotificationHelper.NOTIFICATION_ID_CHAT_MESSAGE,
-                        notification
+                        RiderStatus.ChatReceived(
+                            preview = chatData.message,
+                            previousStatus = RiderStatus.RideInProgress(null) // Service tracks actual status
+                        )
                     )
+                    Log.d(TAG, "Chat message received - notified service")
                 }
             }
         }
@@ -1527,6 +1692,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * Handle acceptance timeout - driver didn't respond in time.
+     * Instead of auto-canceling, show timeout options so user can boost fare or keep waiting.
      */
     private fun handleAcceptanceTimeout() {
         val state = _uiState.value
@@ -1537,26 +1703,14 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        Log.d(TAG, "Acceptance timeout - driver did not respond")
+        Log.d(TAG, "Direct offer timeout - no response from driver")
 
-        // Close acceptance subscription
-        acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
-        acceptanceSubscriptionId = null
-
-        // Clean up our offer event (NIP-09)
-        viewModelScope.launch {
-            state.pendingOfferEventId?.let { offerId ->
-                Log.d(TAG, "Requesting deletion of timed-out offer: $offerId")
-                nostrService.deleteEvent(offerId, "offer timed out")
-            }
-        }
-
+        // Don't auto-cancel - let user decide (boost, keep waiting, or cancel)
+        // Keep acceptance subscription open in case driver responds late
         _uiState.value = state.copy(
-            pendingOfferEventId = null,
-            selectedDriver = null,
-            rideStage = RideStage.IDLE,
             acceptanceTimeoutStartMs = null,
-            statusMessage = "Driver did not respond. Try another driver."
+            directOfferTimedOut = true,
+            statusMessage = "No response from driver. Boost fare or try again?"
         )
     }
 
@@ -1602,6 +1756,14 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         val newSubId = nostrService.subscribeToStatusUpdates(confirmationEventId) { statusData ->
             Log.d(TAG, "Received driver status update: ${statusData.status}")
 
+            // Track driver location for progressive reveal
+            statusData.approxLocation?.let { driverLoc ->
+                _uiState.value = _uiState.value.copy(driverLocation = driverLoc)
+
+                // Check if we should reveal precise pickup
+                checkAndRevealPrecisePickup(confirmationEventId, driverLoc)
+            }
+
             when {
                 statusData.isCompleted() -> {
                     Log.d(TAG, "Driver completed the ride! Final fare: ${statusData.finalFare}")
@@ -1614,6 +1776,17 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 statusData.isArrived() -> {
                     Log.d(TAG, "Driver has arrived at pickup!")
                     handleDriverArrived()
+                }
+                statusData.isInProgress() -> {
+                    Log.d(TAG, "Ride is now in progress!")
+                    val context = getApplication<Application>()
+                    val driverPubKey = _uiState.value.acceptance?.driverPubKey
+                    val driverName = driverPubKey?.let { _uiState.value.driverProfiles[it]?.bestName() }
+                    RiderActiveService.updateStatus(context, RiderStatus.RideInProgress(driverName))
+                    _uiState.value = _uiState.value.copy(
+                        rideStage = RideStage.IN_PROGRESS,
+                        statusMessage = "Ride in progress"
+                    )
                 }
                 else -> {
                     Log.d(TAG, "Status update: ${statusData.status}")
@@ -1630,6 +1803,88 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
         // Now close old subscription (after new one is active)
         oldSubscriptionId?.let { nostrService.closeSubscription(it) }
+    }
+
+    // ==================== Progressive Location Reveal ====================
+
+    /**
+     * Check if driver is close enough to reveal precise pickup location.
+     * Called when driver status updates include location.
+     */
+    private fun checkAndRevealPrecisePickup(confirmationEventId: String, driverLocation: Location) {
+        val state = _uiState.value
+        val pickup = state.pickupLocation ?: return
+
+        // Already shared precise pickup, nothing to do
+        if (state.precisePickupShared) return
+
+        // Check if driver is within 1 mile (~1.6 km)
+        if (pickup.isWithinMile(driverLocation)) {
+            Log.d(TAG, "Driver is within 1 mile! Revealing precise pickup location.")
+            revealPrecisePickup(confirmationEventId)
+        } else {
+            val distanceKm = pickup.distanceToKm(driverLocation)
+            Log.d(TAG, "Driver is ${String.format("%.2f", distanceKm)} km away, waiting to reveal precise pickup.")
+        }
+    }
+
+    /**
+     * Send precise pickup location to driver.
+     */
+    private fun revealPrecisePickup(confirmationEventId: String) {
+        val state = _uiState.value
+        val pickup = state.pickupLocation ?: return
+        val driverPubKey = state.acceptance?.driverPubKey ?: return
+
+        viewModelScope.launch {
+            val eventId = nostrService.sendPreciseLocationReveal(
+                confirmationEventId = confirmationEventId,
+                driverPubKey = driverPubKey,
+                locationType = PreciseLocationRevealEvent.LOCATION_TYPE_PICKUP,
+                preciseLocation = pickup
+            )
+
+            if (eventId != null) {
+                Log.d(TAG, "Revealed precise pickup: $eventId")
+                _uiState.value = _uiState.value.copy(
+                    precisePickupShared = true,
+                    statusMessage = "Precise pickup shared with driver"
+                )
+            } else {
+                Log.e(TAG, "Failed to reveal precise pickup")
+            }
+        }
+    }
+
+    /**
+     * Send precise destination location to driver.
+     * Called after PIN is verified and ride begins.
+     */
+    private fun revealPreciseDestination(confirmationEventId: String) {
+        val state = _uiState.value
+        val destination = state.destination ?: return
+        val driverPubKey = state.acceptance?.driverPubKey ?: return
+
+        // Don't send if already shared
+        if (state.preciseDestinationShared) return
+
+        viewModelScope.launch {
+            val eventId = nostrService.sendPreciseLocationReveal(
+                confirmationEventId = confirmationEventId,
+                driverPubKey = driverPubKey,
+                locationType = PreciseLocationRevealEvent.LOCATION_TYPE_DESTINATION,
+                preciseLocation = destination
+            )
+
+            if (eventId != null) {
+                Log.d(TAG, "Revealed precise destination: $eventId")
+                _uiState.value = _uiState.value.copy(
+                    preciseDestinationShared = true
+                )
+            } else {
+                Log.e(TAG, "Failed to reveal precise destination")
+            }
+        }
     }
 
     /**
@@ -1649,12 +1904,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         statusSubscriptionId?.let { nostrService.closeSubscription(it) }
         statusSubscriptionId = null
 
-        // Stop foreground service
+        // Stop foreground service (this also clears the notification)
         RiderActiveService.stop(getApplication())
-
-        // Clear all ride notifications
-        val context = getApplication<Application>()
-        NotificationHelper.cancelNotification(context, NotificationHelper.NOTIFICATION_ID_RIDE_UPDATE)
 
         // Clear persisted ride state
         clearSavedRideState()
@@ -1686,11 +1937,10 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         statusSubscriptionId?.let { nostrService.closeSubscription(it) }
         statusSubscriptionId = null
 
-        // Stop foreground service
-        RiderActiveService.stop(getApplication())
-
-        // Play cancellation alert
-        SoundManager.playCancellationAlert(getApplication())
+        // Notify service of cancellation (plays sound) then stop
+        val context = getApplication<Application>()
+        RiderActiveService.updateStatus(context, RiderStatus.Cancelled)
+        RiderActiveService.stop(context)
 
         // Clear persisted ride state
         clearSavedRideState()
@@ -1715,40 +1965,31 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      * Handle driver arrived at pickup location.
      */
     private fun handleDriverArrived() {
+        // Reject stale events if we've already reached or passed DRIVER_ARRIVED stage
+        // This prevents Nostr relay cached events from reverting state after PIN verification
+        if (_uiState.value.rideStage in listOf(
+                RideStage.DRIVER_ARRIVED,
+                RideStage.IN_PROGRESS,
+                RideStage.COMPLETED
+            )) {
+            Log.d(TAG, "Stage already at or past DRIVER_ARRIVED (${_uiState.value.rideStage}), ignoring stale event")
+            return
+        }
+
         val context = getApplication<Application>()
+        val driverPubKey = _uiState.value.acceptance?.driverPubKey
+        val driverName = driverPubKey?.let { _uiState.value.driverProfiles[it]?.bestName() }
 
-        // Play driver arrived alert sound
-        SoundManager.playDriverArrivedAlert(context)
+        // Update service - handles notification update and sound
+        RiderActiveService.updateStatus(context, RiderStatus.DriverArrived(driverName))
 
-        // Clear any previous ride update notification before showing new one
-        NotificationHelper.cancelNotification(context, NotificationHelper.NOTIFICATION_ID_RIDE_UPDATE)
-
-        // Show notification
-        val contentIntent = android.app.PendingIntent.getActivity(
-            context,
-            0,
-            android.content.Intent(context, com.ridestr.rider.MainActivity::class.java).apply {
-                flags = android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP or android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
-            },
-            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
-        )
-        val notification = NotificationHelper.buildDriverArrivedNotification(context, contentIntent)
-        NotificationHelper.showNotification(
-            context,
-            NotificationHelper.NOTIFICATION_ID_RIDE_UPDATE,
-            notification
-        )
-
-        // Update foreground service notification
-        RiderActiveService.updateMessage(context, "Driver has arrived!")
-
-        // Update UI state - change stage to DRIVER_ARRIVED
+        // Update UI state
         _uiState.value = _uiState.value.copy(
             rideStage = RideStage.DRIVER_ARRIVED,
             statusMessage = "Driver has arrived at pickup!"
         )
 
-        Log.d(TAG, "Driver arrived notification shown and sound played")
+        Log.d(TAG, "Driver arrived - service notified")
     }
 
     /**
@@ -1931,6 +2172,75 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         // Clean up Bitcoin price service
         bitcoinPriceService.cleanup()
     }
+
+    // ============ Saved Locations (Favorites & Recents) ============
+
+    /**
+     * Get pinned favorite locations.
+     */
+    @Composable
+    fun getFavorites(): List<SavedLocation> {
+        val locations by savedLocationRepository.savedLocations.collectAsState()
+        return locations.filter { it.isPinned }.sortedBy { it.nickname ?: it.displayName }
+    }
+
+    /**
+     * Get recent (non-pinned) locations, sorted by most recent first.
+     */
+    @Composable
+    fun getRecents(): List<SavedLocation> {
+        val locations by savedLocationRepository.savedLocations.collectAsState()
+        return locations.filter { !it.isPinned }.sortedByDescending { it.timestampMs }
+    }
+
+    /**
+     * Pin a location as a favorite with optional nickname.
+     */
+    fun pinWithNickname(id: String, nickname: String?) {
+        savedLocationRepository.pinAsFavorite(id, nickname)
+    }
+
+    /**
+     * Update nickname for an already pinned favorite.
+     */
+    fun updateFavoriteNickname(id: String, nickname: String?) {
+        savedLocationRepository.pinAsFavorite(id, nickname)
+    }
+
+    /**
+     * Unpin a favorite (convert back to recent).
+     */
+    fun unpinFavorite(id: String) {
+        savedLocationRepository.unpinFavorite(id)
+    }
+
+    /**
+     * Remove a saved location entirely.
+     */
+    fun removeSavedLocation(id: String) {
+        savedLocationRepository.removeLocation(id)
+    }
+
+    /**
+     * Swap pickup and destination addresses.
+     */
+    fun swapAddresses() {
+        val current = _uiState.value
+        val newPickup = current.destination
+        val newDest = current.pickupLocation
+
+        _uiState.value = current.copy(
+            pickupLocation = newPickup,
+            destination = newDest,
+            routeResult = null,
+            fareEstimate = null
+        )
+
+        // Recalculate route if both addresses are now set
+        if (newPickup != null && newDest != null) {
+            calculateRouteIfReady()
+        }
+    }
 }
 
 /**
@@ -1977,11 +2287,14 @@ data class RiderUiState(
     // Broadcast mode (new flow)
     val broadcastStartTimeMs: Long? = null,       // When we started broadcasting
     val broadcastTimeoutDurationMs: Long = 120_000L, // How long to wait (2 minutes)
+    val broadcastTimedOut: Boolean = false,       // True when broadcast timer has expired (persist until user action)
     val totalBoostSats: Double = 0.0,              // Total sats added via boosts (stored in sats for accuracy)
 
     // Acceptance timeout tracking (for direct offers - legacy/advanced)
     val acceptanceTimeoutStartMs: Long? = null,   // When we started waiting for acceptance
-    val acceptanceTimeoutDurationMs: Long = 20_000L, // How long to wait
+    val acceptanceTimeoutDurationMs: Long = 15_000L, // How long before showing options (15 seconds)
+    val directOfferBoostSats: Double = 0.0,        // Total sats boosted on direct offer
+    val directOfferTimedOut: Boolean = false,      // True when direct offer timer has expired
 
     // PIN verification (rider generates PIN and verifies driver's submissions)
     val pickupPin: String? = null,                 // PIN generated locally by rider
@@ -1991,6 +2304,11 @@ data class RiderUiState(
     // Chat (NIP-17 style private messaging)
     val chatMessages: List<RideshareChatData> = emptyList(),
     val isSendingMessage: Boolean = false,
+
+    // Progressive location reveal (privacy feature)
+    val precisePickupShared: Boolean = false,      // True when precise pickup sent to driver
+    val preciseDestinationShared: Boolean = false, // True when precise destination sent to driver
+    val driverLocation: Location? = null,          // Driver's current location from status updates
 
     // User identity
     val myPubKey: String = "",

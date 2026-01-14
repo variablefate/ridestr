@@ -1,26 +1,24 @@
 package com.drivestr.app.viewmodels
 
 import android.app.Application
-import android.app.PendingIntent
 import android.content.Context
-import android.content.Intent
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.drivestr.app.MainActivity
 import com.drivestr.app.service.DriverOnlineService
+import com.drivestr.app.service.DriverStatus
 import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.data.Vehicle
-import com.ridestr.common.notification.NotificationHelper
-import com.ridestr.common.notification.SoundManager
 import com.ridestr.common.nostr.NostrService
 import com.ridestr.common.nostr.events.BroadcastRideOfferData
 import com.ridestr.common.nostr.events.DriverStatusType
 import com.ridestr.common.nostr.events.Location
 import com.ridestr.common.nostr.events.PickupVerificationData
+import com.ridestr.common.nostr.events.PreciseLocationRevealEvent
 import com.ridestr.common.nostr.events.RideConfirmationData
 import com.ridestr.common.nostr.events.RideOfferData
 import com.ridestr.common.nostr.events.RideshareChatData
+import com.ridestr.common.nostr.events.RideshareEventKinds
 import com.ridestr.common.routing.RouteResult
 import com.ridestr.common.routing.ValhallaRoutingService
 import kotlinx.coroutines.Job
@@ -58,6 +56,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         private const val CHAT_REFRESH_INTERVAL_MS = 15 * 1000L
         // Timeout for PIN verification response (30 seconds)
         private const val PIN_VERIFICATION_TIMEOUT_MS = 30 * 1000L
+        // Timeout for rider confirmation after accepting (15 seconds)
+        // If no confirmation arrives, the ride was likely cancelled
+        private const val CONFIRMATION_TIMEOUT_MS = 15 * 1000L
         // SharedPreferences keys for ride state persistence
         private const val PREFS_NAME = "drivestr_ride_state"
         private const val KEY_RIDE_STATE = "active_ride"
@@ -91,18 +92,6 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     private var lastBroadcastLocation: Location? = null
     private var lastBroadcastTimeMs: Long = 0L
 
-    // Track if user is viewing ride requests (suppress popup notifications when true)
-    private var isViewingRideRequests = false
-
-    /**
-     * Set whether the user is currently viewing the ride request screen.
-     * When true, popup notifications for new ride requests are suppressed
-     * (requests still appear in the list).
-     */
-    fun setViewingRideRequests(viewing: Boolean) {
-        isViewingRideRequests = viewing
-    }
-
     private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     // Settings manager for user preferences
@@ -135,12 +124,15 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     private var availabilityJob: Job? = null
     private var chatRefreshJob: Job? = null
     private var pinVerificationTimeoutJob: Job? = null
+    private var confirmationTimeoutJob: Job? = null  // Timeout for rider confirmation after acceptance
     private var offerSubscriptionId: String? = null                    // Direct offers (legacy/advanced)
     private var broadcastRequestSubscriptionId: String? = null         // Broadcast ride requests (new flow)
     private var confirmationSubscriptionId: String? = null
     private var verificationSubscriptionId: String? = null
     private var chatSubscriptionId: String? = null
     private var cancellationSubscriptionId: String? = null
+    private var preciseLocationSubscriptionId: String? = null  // Progressive location reveals from rider
+    private var deletionSubscriptionId: String? = null           // Watch for cancelled ride requests (NIP-09)
     private val publishedAvailabilityEventIds = mutableListOf<String>()
     // Track accepted offer IDs to filter out when resubscribing (avoids duplicate offers after ride completion)
     private val acceptedOfferEventIds = mutableSetOf<String>()
@@ -150,6 +142,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     private val takenOfferEventIds = mutableSetOf<String>()
     // Track offer IDs that the driver has declined/passed on
     private val declinedOfferEventIds = mutableSetOf<String>()
+    // Track status update event IDs for cleanup on ride completion
+    private val statusEventIds = mutableListOf<String>()
+    // Track PIN submission event ID for cleanup on ride completion
+    private var pinSubmissionEventId: String? = null
     // Cleanup timer for pruning stale requests
     private var staleRequestCleanupJob: kotlinx.coroutines.Job? = null
 
@@ -157,6 +153,18 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         nostrService.connect()
         // Start Bitcoin price auto-refresh (every 5 minutes)
         bitcoinPriceService.startAutoRefresh()
+
+        // Clean up any stale availability events from previous sessions
+        // This handles the case where app was killed while driver was online
+        viewModelScope.launch {
+            val deleted = nostrService.deleteMyEventsByKind(
+                RideshareEventKinds.DRIVER_AVAILABILITY,
+                "cleanup stale availability on app start"
+            )
+            if (deleted > 0) {
+                Log.d(TAG, "Cleaned up $deleted stale availability events from previous session")
+            }
+        }
 
         // Initialize Valhalla routing service
         viewModelScope.launch {
@@ -221,6 +229,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             subscribeToCancellation(confId)
             // Restart the periodic chat refresh job
             startChatRefreshJob(confId)
+
+            // Restore PIN verification subscription if at pickup
+            if (state.stage == DriverStage.ARRIVED_AT_PICKUP) {
+                Log.d(TAG, "Refreshing verification subscription for ARRIVED_AT_PICKUP")
+                subscribeToVerifications()
+            }
         }
     }
 
@@ -581,6 +595,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         chatSubscriptionId = null
         cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
         cancellationSubscriptionId = null
+        preciseLocationSubscriptionId?.let { nostrService.closeSubscription(it) }
+        preciseLocationSubscriptionId = null
 
         viewModelScope.launch {
             // Send cancelled status if we have a confirmation
@@ -604,11 +620,32 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 }
             }
 
-            // Clean up our acceptance event (NIP-09)
-            state.acceptanceEventId?.let { acceptanceId ->
-                Log.d(TAG, "Requesting deletion of acceptance event: $acceptanceId")
-                nostrService.deleteEvent(acceptanceId, "ride cancelled")
+            // Clean up events (NIP-09): acceptance, status updates, PIN submission
+            val eventsToDelete = mutableListOf<String>()
+
+            // Add acceptance event
+            state.acceptanceEventId?.let { eventsToDelete.add(it) }
+
+            // Add status update events (EN_ROUTE, ARRIVED, etc.)
+            eventsToDelete.addAll(statusEventIds)
+
+            // Add PIN submission event
+            pinSubmissionEventId?.let { eventsToDelete.add(it) }
+
+            // Add chat messages we sent (only delete our own)
+            val myPubKey = state.myPubKey
+            state.chatMessages
+                .filter { it.senderPubKey == myPubKey }
+                .forEach { eventsToDelete.add(it.eventId) }
+
+            if (eventsToDelete.isNotEmpty()) {
+                Log.d(TAG, "Requesting deletion of ${eventsToDelete.size} events (acceptance + status + PIN + chat)")
+                nostrService.deleteEvents(eventsToDelete, "ride cancelled")
             }
+
+            // Clear tracking lists
+            statusEventIds.clear()
+            pinSubmissionEventId = null
         }
 
         // Stop the foreground service
@@ -651,8 +688,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         chatSubscriptionId = null
         cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
         cancellationSubscriptionId = null
+        preciseLocationSubscriptionId?.let { nostrService.closeSubscription(it) }
+        preciseLocationSubscriptionId = null
 
-        // Clean up events (NIP-09): acceptance event and our sent chat messages
+        // Clean up events (NIP-09): acceptance event, chat messages, status events, and PIN submission
         viewModelScope.launch {
             val myPubKey = state.myPubKey
             val eventsToDelete = mutableListOf<String>()
@@ -665,10 +704,20 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 .filter { it.senderPubKey == myPubKey }
                 .forEach { eventsToDelete.add(it.eventId) }
 
+            // Add status update events (EN_ROUTE, ARRIVED, IN_PROGRESS, COMPLETED)
+            eventsToDelete.addAll(statusEventIds)
+
+            // Add PIN submission event
+            pinSubmissionEventId?.let { eventsToDelete.add(it) }
+
             if (eventsToDelete.isNotEmpty()) {
-                Log.d(TAG, "Requesting deletion of ${eventsToDelete.size} events (acceptance + chat)")
+                Log.d(TAG, "Requesting deletion of ${eventsToDelete.size} events (acceptance + chat + status + PIN)")
                 nostrService.deleteEvents(eventsToDelete, "ride completed")
             }
+
+            // Clear tracking lists
+            statusEventIds.clear()
+            pinSubmissionEventId = null
         }
 
         _uiState.value = state.copy(
@@ -743,6 +792,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     acceptanceEventId = eventId,  // Track for cleanup later
                     pendingOffers = emptyList(), // Clear all pending offers
                     pinAttempts = 0,
+                    confirmationWaitStartMs = System.currentTimeMillis(),  // Start confirmation timer
                     statusMessage = "Ride accepted! Waiting for rider confirmation..."
                 )
 
@@ -776,12 +826,14 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             // Send status update to rider
             state.confirmationEventId?.let { confId ->
                 state.acceptedOffer?.riderPubKey?.let { riderPubKey ->
-                    nostrService.sendStatusUpdate(
+                    val eventId = nostrService.sendStatusUpdate(
                         confirmationEventId = confId,
                         riderPubKey = riderPubKey,
                         status = DriverStatusType.EN_ROUTE_PICKUP,
                         location = state.currentLocation
                     )
+                    // Track for cleanup on ride completion
+                    eventId?.let { statusEventIds.add(it) }
                 }
             }
 
@@ -798,18 +850,25 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     fun arrivedAtPickup() {
         val state = _uiState.value
         if (state.stage != DriverStage.EN_ROUTE_TO_PICKUP) return
+        val context = getApplication<Application>()
 
         viewModelScope.launch {
             state.confirmationEventId?.let { confId ->
                 state.acceptedOffer?.riderPubKey?.let { riderPubKey ->
-                    nostrService.sendStatusUpdate(
+                    val eventId = nostrService.sendStatusUpdate(
                         confirmationEventId = confId,
                         riderPubKey = riderPubKey,
                         status = DriverStatusType.ARRIVED,
                         location = state.currentLocation
                     )
+                    // Track for cleanup on ride completion
+                    eventId?.let { statusEventIds.add(it) }
                 }
             }
+
+            // Notify service of arrival (updates notification)
+            val riderName: String? = null // RideOfferData doesn't contain rider name
+            DriverOnlineService.updateStatus(context, DriverStatus.ArrivedAtPickup(riderName))
 
             _uiState.value = state.copy(
                 stage = DriverStage.ARRIVED_AT_PICKUP,
@@ -847,6 +906,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
             if (eventId != null) {
                 Log.d(TAG, "Submitted PIN for verification: $eventId")
+                // Track for cleanup on ride completion
+                pinSubmissionEventId = eventId
                 _uiState.value = _uiState.value.copy(
                     lastPinSubmissionEventId = eventId,
                     statusMessage = "Waiting for rider to verify PIN..."
@@ -900,9 +961,11 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         val confirmationEventId = state.confirmationEventId
         val riderPubKey = state.acceptedOffer?.riderPubKey
 
-        // Cancel timeout job if running
+        // Cancel timeout jobs if running
         pinVerificationTimeoutJob?.cancel()
         pinVerificationTimeoutJob = null
+        confirmationTimeoutJob?.cancel()
+        confirmationTimeoutJob = null
 
         viewModelScope.launch {
             // Send cancellation event if we have an active ride
@@ -924,6 +987,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             chatSubscriptionId = null
             cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
             cancellationSubscriptionId = null
+            preciseLocationSubscriptionId?.let { nostrService.closeSubscription(it) }
+            preciseLocationSubscriptionId = null
             chatRefreshJob?.cancel()
             chatRefreshJob = null
 
@@ -1006,6 +1071,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 chatSubscriptionId = null
                 cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
                 cancellationSubscriptionId = null
+                preciseLocationSubscriptionId?.let { nostrService.closeSubscription(it) }
+                preciseLocationSubscriptionId = null
 
                 // Stop the foreground service
                 val context = getApplication<Application>()
@@ -1033,18 +1100,25 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      */
     private fun startRide() {
         val state = _uiState.value
+        val context = getApplication<Application>()
 
         viewModelScope.launch {
             state.confirmationEventId?.let { confId ->
                 state.acceptedOffer?.riderPubKey?.let { riderPubKey ->
-                    nostrService.sendStatusUpdate(
+                    val eventId = nostrService.sendStatusUpdate(
                         confirmationEventId = confId,
                         riderPubKey = riderPubKey,
                         status = DriverStatusType.IN_PROGRESS,
                         location = state.currentLocation
                     )
+                    // Track for cleanup on ride completion
+                    eventId?.let { statusEventIds.add(it) }
                 }
             }
+
+            // Notify service of ride in progress (updates notification)
+            val riderName: String? = null // RideOfferData doesn't contain rider name
+            DriverOnlineService.updateStatus(context, DriverStatus.RideInProgress(riderName))
 
             _uiState.value = state.copy(
                 stage = DriverStage.IN_RIDE,
@@ -1070,13 +1144,15 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
         viewModelScope.launch {
             state.confirmationEventId?.let { confId ->
-                nostrService.sendStatusUpdate(
+                val eventId = nostrService.sendStatusUpdate(
                     confirmationEventId = confId,
                     riderPubKey = offer.riderPubKey,
                     status = DriverStatusType.COMPLETED,
                     location = state.currentLocation,
                     finalFare = offer.fareEstimate
                 )
+                // Track for cleanup on ride completion
+                eventId?.let { statusEventIds.add(it) }
             }
 
             _uiState.value = state.copy(
@@ -1093,9 +1169,15 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     private fun subscribeToConfirmation(acceptanceEventId: String) {
         confirmationSubscriptionId?.let { nostrService.closeSubscription(it) }
 
+        // Start confirmation timeout - if no confirmation arrives, rider may have cancelled
+        startConfirmationTimeout()
+
         confirmationSubscriptionId = nostrService.subscribeToConfirmation(acceptanceEventId) { confirmation ->
             Log.d(TAG, "Received ride confirmation: ${confirmation.eventId}")
             Log.d(TAG, "Precise pickup: ${confirmation.precisePickup.lat}, ${confirmation.precisePickup.lon}")
+
+            // Cancel the confirmation timeout - we got a response
+            cancelConfirmationTimeout()
 
             val currentStage = _uiState.value.stage
 
@@ -1107,13 +1189,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 return@subscribeToConfirmation
             }
 
-            // Play confirmation sound
+            // Notify service of confirmation - this triggers EN_ROUTE status update
+            // Note: The actual service status update happens in autoStartRouteToPickup() below
             val context = getApplication<Application>()
-            SoundManager.playConfirmationAlert(
-                context,
-                settingsManager.notificationSoundEnabled.value,
-                settingsManager.notificationVibrationEnabled.value
-            )
 
             // Store confirmation data
             _uiState.value = _uiState.value.copy(
@@ -1129,8 +1207,72 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             // Subscribe to cancellation events from rider
             subscribeToCancellation(confirmation.eventId)
 
+            // Subscribe to precise location reveals (rider shares precise pickup/destination when close)
+            subscribeToPreciseLocationReveals(confirmation.eventId)
+
             // Auto-transition to EN_ROUTE_TO_PICKUP (skip the intermediate screen)
             autoStartRouteToPickup(confirmation.eventId)
+        }
+    }
+
+    /**
+     * Start the confirmation timeout.
+     * If rider doesn't confirm within the timeout, assume the ride was cancelled.
+     */
+    private fun startConfirmationTimeout() {
+        cancelConfirmationTimeout()
+        Log.d(TAG, "Starting confirmation timeout (${CONFIRMATION_TIMEOUT_MS / 1000}s)")
+
+        confirmationTimeoutJob = viewModelScope.launch {
+            kotlinx.coroutines.delay(CONFIRMATION_TIMEOUT_MS)
+
+            // Check if we're still waiting for confirmation
+            if (_uiState.value.stage == DriverStage.RIDE_ACCEPTED) {
+                Log.d(TAG, "Confirmation timeout - rider may have cancelled")
+                handleConfirmationTimeout()
+            }
+        }
+    }
+
+    /**
+     * Cancel the confirmation timeout.
+     */
+    private fun cancelConfirmationTimeout() {
+        confirmationTimeoutJob?.cancel()
+        confirmationTimeoutJob = null
+    }
+
+    /**
+     * Handle confirmation timeout - rider didn't confirm in time.
+     * This typically means the rider cancelled before we accepted.
+     */
+    private fun handleConfirmationTimeout() {
+        val context = getApplication<Application>()
+
+        // Notify service of cancellation (plays sound, updates notification)
+        DriverOnlineService.updateStatus(context, DriverStatus.Cancelled)
+
+        // Close subscriptions
+        confirmationSubscriptionId?.let { nostrService.closeSubscription(it) }
+        confirmationSubscriptionId = null
+        verificationSubscriptionId?.let { nostrService.closeSubscription(it) }
+        verificationSubscriptionId = null
+
+        // Return to available state
+        _uiState.value = _uiState.value.copy(
+            stage = DriverStage.AVAILABLE,
+            acceptedOffer = null,
+            acceptedBroadcastRequest = null,
+            acceptanceEventId = null,
+            confirmationEventId = null,
+            error = "Rider may have cancelled - no confirmation received",
+            statusMessage = "Ride cancelled - no response from rider"
+        )
+
+        // Restart availability broadcasts if we have a location
+        _uiState.value.currentLocation?.let { location ->
+            startBroadcasting(location)
+            subscribeToBroadcastRequests(location)
         }
     }
 
@@ -1141,15 +1283,22 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     private fun autoStartRouteToPickup(confirmationEventId: String) {
         val state = _uiState.value
         val riderPubKey = state.acceptedOffer?.riderPubKey ?: return
+        val context = getApplication<Application>()
 
         viewModelScope.launch {
             // Send status update to rider
-            nostrService.sendStatusUpdate(
+            val eventId = nostrService.sendStatusUpdate(
                 confirmationEventId = confirmationEventId,
                 riderPubKey = riderPubKey,
                 status = DriverStatusType.EN_ROUTE_PICKUP,
                 location = state.currentLocation
             )
+            // Track for cleanup on ride completion
+            eventId?.let { statusEventIds.add(it) }
+
+            // Notify service of status change (updates notification)
+            val riderName: String? = null // RideOfferData doesn't contain rider name
+            DriverOnlineService.updateStatus(context, DriverStatus.EnRouteToPickup(riderName))
 
             _uiState.value = _uiState.value.copy(
                 stage = DriverStage.EN_ROUTE_TO_PICKUP,
@@ -1183,34 +1332,18 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 // Persist messages for app restart
                 saveRideState()
 
-                // Play sound and show notification for messages from rider (not our own)
+                // Notify service of chat message (plays sound, updates notification temporarily)
                 val myPubKey = nostrService.getPubKeyHex() ?: ""
                 if (chatData.senderPubKey != myPubKey) {
                     val context = getApplication<Application>()
-                    SoundManager.playChatMessageAlert(
+                    DriverOnlineService.updateStatus(
                         context,
-                        settingsManager.notificationSoundEnabled.value,
-                        settingsManager.notificationVibrationEnabled.value
+                        DriverStatus.ChatReceived(
+                            preview = chatData.message,
+                            previousStatus = DriverStatus.RideInProgress(null) // Service tracks actual status
+                        )
                     )
-
-                    val notification = NotificationHelper.buildChatMessageNotification(
-                        context = context,
-                        contentIntent = android.app.PendingIntent.getActivity(
-                            context,
-                            0,
-                            android.content.Intent(context, com.drivestr.app.MainActivity::class.java).apply {
-                                flags = android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
-                            },
-                            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
-                        ),
-                        senderName = "Rider",
-                        messagePreview = chatData.message
-                    )
-                    NotificationHelper.showNotification(
-                        context,
-                        NotificationHelper.NOTIFICATION_ID_CHAT_MESSAGE,
-                        notification
-                    )
+                    Log.d(TAG, "Chat message received - notified service")
                 }
             }
         }
@@ -1266,38 +1399,58 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /**
+     * Subscribe to precise location reveals from rider.
+     * Rider sends precise pickup when driver is close (~1 mile),
+     * and precise destination after PIN is verified.
+     */
+    private fun subscribeToPreciseLocationReveals(confirmationEventId: String) {
+        preciseLocationSubscriptionId?.let { nostrService.closeSubscription(it) }
+
+        Log.d(TAG, "Subscribing to precise location reveals for confirmation: ${confirmationEventId.take(8)}")
+
+        val newSubId = nostrService.subscribeToPreciseLocationReveals(confirmationEventId) { revealData ->
+            Log.d(TAG, "Received precise location reveal: ${revealData.locationType}")
+            Log.d(TAG, "Precise location: ${revealData.preciseLocation.lat}, ${revealData.preciseLocation.lon}")
+
+            when (revealData.locationType) {
+                PreciseLocationRevealEvent.LOCATION_TYPE_PICKUP -> {
+                    Log.d(TAG, "Updating navigation to precise pickup location")
+                    _uiState.value = _uiState.value.copy(
+                        precisePickupLocation = revealData.preciseLocation,
+                        statusMessage = "Received precise pickup location"
+                    )
+                }
+                PreciseLocationRevealEvent.LOCATION_TYPE_DESTINATION -> {
+                    Log.d(TAG, "Received precise destination location")
+                    _uiState.value = _uiState.value.copy(
+                        preciseDestinationLocation = revealData.preciseLocation,
+                        statusMessage = "Received precise destination"
+                    )
+                }
+                else -> {
+                    Log.w(TAG, "Unknown location type: ${revealData.locationType}")
+                }
+            }
+        }
+
+        if (newSubId != null) {
+            preciseLocationSubscriptionId = newSubId
+            Log.d(TAG, "Precise location reveal subscription created: $newSubId")
+        } else {
+            Log.e(TAG, "Failed to create precise location reveal subscription - not logged in?")
+        }
+    }
+
+    /**
      * Handle ride cancellation from rider.
      */
     private fun handleRideCancellation(reason: String?) {
         val state = _uiState.value
         val context = getApplication<Application>()
 
-        // Play cancellation alert
-        SoundManager.playCancellationAlert(
-            context,
-            settingsManager.notificationSoundEnabled.value,
-            settingsManager.notificationVibrationEnabled.value
-        )
-
-        // Show cancellation notification
-        val contentIntent = PendingIntent.getActivity(
-            context,
-            0,
-            Intent(context, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            },
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val notification = NotificationHelper.buildRideCancelledNotification(
-            context = context,
-            contentIntent = contentIntent,
-            cancelledBy = "rider"
-        )
-        NotificationHelper.showNotification(
-            context,
-            NotificationHelper.NOTIFICATION_ID_RIDE_CANCELLED,
-            notification
-        )
+        // Notify service of cancellation (plays sound, updates notification)
+        DriverOnlineService.updateStatus(context, DriverStatus.Cancelled)
+        Log.d(TAG, "Ride cancelled - notified service")
 
         // Close active subscriptions
         confirmationSubscriptionId?.let { nostrService.closeSubscription(it) }
@@ -1308,6 +1461,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         chatSubscriptionId = null
         cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
         cancellationSubscriptionId = null
+        preciseLocationSubscriptionId?.let { nostrService.closeSubscription(it) }
+        preciseLocationSubscriptionId = null
 
         // Clear persisted ride state
         clearSavedRideState()
@@ -1411,6 +1566,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             chatSubscriptionId = null
             cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
             cancellationSubscriptionId = null
+            preciseLocationSubscriptionId?.let { nostrService.closeSubscription(it) }
+            preciseLocationSubscriptionId = null
 
             // Clean up our acceptance event (NIP-09)
             viewModelScope.launch {
@@ -1526,10 +1683,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 return@subscribeToOffers
             }
 
-            // Filter out offers older than 10 minutes (stale offers)
+            // Filter out offers older than 2 minutes (stale offers) - same as broadcast requests
             val currentTimeSeconds = System.currentTimeMillis() / 1000
             val offerAgeSeconds = currentTimeSeconds - offer.createdAt
-            val maxOfferAgeSeconds = 10 * 60 // 10 minutes
+            val maxOfferAgeSeconds = 2 * 60 // 2 minutes (was 10 minutes)
 
             if (offerAgeSeconds > maxOfferAgeSeconds) {
                 Log.d(TAG, "Ignoring stale offer (${offerAgeSeconds}s old)")
@@ -1537,16 +1694,46 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             }
 
             val currentOffers = _uiState.value.pendingOffers
-            if (currentOffers.none { it.eventId == offer.eventId }) {
-                // Also filter out any existing stale offers while adding the new one
-                val freshOffers = currentOffers.filter {
-                    (currentTimeSeconds - it.createdAt) <= maxOfferAgeSeconds
+            val isNewOffer = currentOffers.none { it.eventId == offer.eventId }
+            // Check if this is a fare boost (same rider, different event)
+            val isFareBoost = currentOffers.any { it.riderPubKey == offer.riderPubKey }
+
+            if (isNewOffer) {
+                // Filter out stale offers AND any existing offer from same rider (fare boost case)
+                val freshOffers = currentOffers.filter { existing ->
+                    (currentTimeSeconds - existing.createdAt) <= maxOfferAgeSeconds &&
+                    existing.riderPubKey != offer.riderPubKey  // Remove old offer from same rider
                 }
                 // Sort by createdAt descending (newest first)
                 val sortedOffers = (freshOffers + offer).sortedByDescending { it.createdAt }
                 _uiState.value = _uiState.value.copy(
                     pendingOffers = sortedOffers
                 )
+
+                // Update deletion subscription to watch for this offer being cancelled
+                updateDeletionSubscription()
+
+                // Notify service of new offer (plays sound, updates notification temporarily)
+                // Only for NEW offers, not fare boosts (same as broadcast requests)
+                if (!isFareBoost) {
+                    val context = getApplication<Application>()
+                    val fareDisplay = "${offer.fareEstimate.toInt()} sats"
+                    val distanceDisplay = offer.rideRouteKm?.let { "${String.format("%.1f", it)} km ride" } ?: "Direct offer"
+                    DriverOnlineService.updateStatus(
+                        context,
+                        DriverStatus.NewRequest(
+                            count = sortedOffers.size,
+                            fare = fareDisplay,
+                            distance = distanceDisplay
+                        )
+                    )
+                    Log.d(TAG, "Direct offer received - notified service")
+                } else {
+                    Log.d(TAG, "Fare boost received from same rider - updating offer quietly")
+                }
+
+                // Calculate routes for the new offer
+                calculateDirectOfferRoutes(offer)
             }
         }
     }
@@ -1720,6 +1907,92 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /**
+     * Calculate both pickup route (driver to pickup) and ride route (pickup to destination)
+     * for a direct offer. This provides full ride info display.
+     *
+     * If rider pre-calculated route metrics, uses those directly for instant display.
+     * Otherwise falls back to calculating routes locally.
+     */
+    private fun calculateDirectOfferRoutes(offer: RideOfferData) {
+        // Already calculated?
+        if (_uiState.value.directOfferPickupRoutes.containsKey(offer.eventId) &&
+            _uiState.value.directOfferRideRoutes.containsKey(offer.eventId)) {
+            return
+        }
+
+        // If rider provided route metrics, use them directly (no calculation needed)
+        val pickupKm = offer.pickupRouteKm
+        val pickupMin = offer.pickupRouteMin
+        val rideKm = offer.rideRouteKm
+        val rideMin = offer.rideRouteMin
+
+        if (pickupKm != null && pickupMin != null && rideKm != null && rideMin != null) {
+            val pickupRoute = RouteResult(
+                distanceKm = pickupKm,
+                durationSeconds = pickupMin * 60.0,
+                encodedPolyline = null,
+                maneuvers = emptyList()
+            )
+            val rideRoute = RouteResult(
+                distanceKm = rideKm,
+                durationSeconds = rideMin * 60.0,
+                encodedPolyline = null,
+                maneuvers = emptyList()
+            )
+
+            _uiState.value = _uiState.value.copy(
+                directOfferPickupRoutes = _uiState.value.directOfferPickupRoutes + (offer.eventId to pickupRoute),
+                directOfferRideRoutes = _uiState.value.directOfferRideRoutes + (offer.eventId to rideRoute)
+            )
+            Log.d(TAG, "Using rider-provided route metrics for ${offer.eventId.take(8)}: " +
+                "pickup ${pickupRoute.distanceKm}km/${(pickupRoute.durationSeconds/60).toInt()}min, " +
+                "ride ${rideRoute.distanceKm}km/${(rideRoute.durationSeconds/60).toInt()}min")
+            return
+        }
+
+        // Fallback: calculate routes locally
+        val driverLocation = _uiState.value.currentLocation
+        if (driverLocation == null) {
+            Log.w(TAG, "No driver location for direct offer route calculation")
+            return
+        }
+
+        viewModelScope.launch {
+            // Calculate pickup route (driver -> pickup)
+            val pickupRoute: RouteResult = if (routingService.isReady()) {
+                routingService.calculateRoute(
+                    originLat = driverLocation.lat,
+                    originLon = driverLocation.lon,
+                    destLat = offer.approxPickup.lat,
+                    destLon = offer.approxPickup.lon
+                ) ?: calculateStraightLineRoute(driverLocation, offer.approxPickup)
+            } else {
+                calculateStraightLineRoute(driverLocation, offer.approxPickup)
+            }
+
+            // Calculate ride route (pickup -> destination)
+            val rideRoute: RouteResult = if (routingService.isReady()) {
+                routingService.calculateRoute(
+                    originLat = offer.approxPickup.lat,
+                    originLon = offer.approxPickup.lon,
+                    destLat = offer.destination.lat,
+                    destLon = offer.destination.lon
+                ) ?: calculateStraightLineRoute(offer.approxPickup, offer.destination)
+            } else {
+                calculateStraightLineRoute(offer.approxPickup, offer.destination)
+            }
+
+            Log.d(TAG, "Calculated direct offer routes locally for ${offer.eventId.take(8)}: " +
+                "pickup ${pickupRoute.distanceKm}km, ride ${rideRoute.distanceKm}km")
+
+            _uiState.value = _uiState.value.copy(
+                directOfferPickupRoutes = _uiState.value.directOfferPickupRoutes + (offer.eventId to pickupRoute),
+                directOfferRideRoutes = _uiState.value.directOfferRideRoutes + (offer.eventId to rideRoute)
+            )
+        }
+    }
+
+    /**
      * Toggle expanded search to find ride requests in a wider area.
      */
     fun toggleExpandedSearch() {
@@ -1791,43 +2064,32 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             if (isNewRequest) {
                 val context = getApplication<Application>()
 
-                // Play sound and show popup for NEW requests (not fare boosts)
-                // Skip popup notification if user is already viewing the ride request screen
-                if (!isFareBoost && !isViewingRideRequests) {
-                    Log.d(TAG, "NEW ride request - playing alert and showing notification")
-                    SoundManager.playRideRequestAlert(
-                        context,
-                        settingsManager.notificationSoundEnabled.value,
-                        settingsManager.notificationVibrationEnabled.value
-                    )
-
-                    // Show notification
+                // Notify service of new request (plays sound, updates notification temporarily)
+                // Don't notify for fare boosts (same rider increasing their offer)
+                if (!isFareBoost) {
+                    // Calculate distance display for notification
                     val fareDisplay = "${request.fareEstimate.toInt()} sats"
-                    val distanceDisplay = "${String.format("%.1f", request.routeDistanceKm)} km"
-                    val contentIntent = PendingIntent.getActivity(
-                        context,
-                        0,
-                        Intent(context, MainActivity::class.java).apply {
-                            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                        },
-                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                    )
-                    val notification = NotificationHelper.buildRideRequestNotification(
-                        context = context,
-                        contentIntent = contentIntent,
-                        fareAmount = fareDisplay,
-                        distance = distanceDisplay
-                    )
-                    NotificationHelper.showNotification(
-                        context,
-                        NotificationHelper.NOTIFICATION_ID_RIDE_REQUEST,
-                        notification
-                    )
+                    val driverLocation = _uiState.value.currentLocation
+                    val pickupDistanceKm = driverLocation?.distanceToKm(request.pickupArea)
+                    val distanceDisplay = if (pickupDistanceKm != null) {
+                        if (pickupDistanceKm < 1.0) {
+                            "${(pickupDistanceKm * 1000).toInt()} m away"
+                        } else {
+                            "${String.format("%.1f", pickupDistanceKm)} km away"
+                        }
+                    } else {
+                        "${String.format("%.1f", request.routeDistanceKm)} km ride"
+                    }
 
-                    // Update foreground service notification with request count
-                    DriverOnlineService.updateRequestCount(context, currentRequests.size + 1)
-                } else {
-                    Log.d(TAG, "Skipping notification - fare boost: $isFareBoost, viewing requests: $isViewingRideRequests")
+                    DriverOnlineService.updateStatus(
+                        context,
+                        DriverStatus.NewRequest(
+                            count = currentRequests.size + 1,
+                            fare = fareDisplay,
+                            distance = distanceDisplay
+                        )
+                    )
+                    Log.d(TAG, "NEW ride request - notified service")
                 }
                 // Filter out stale requests and any previous requests from the same rider
                 // (handles fare boosts - new request replaces old one from same rider)
@@ -1850,6 +2112,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
                 // Subscribe to acceptances for this request to detect if another driver takes it
                 subscribeToAcceptancesForRequest(request.eventId)
+
+                // Update deletion subscription to include this new request
+                updateDeletionSubscription()
             }
         }
     }
@@ -1880,7 +2145,13 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      */
     private fun markRequestAsTaken(requestEventId: String) {
         takenOfferEventIds.add(requestEventId)
+        removeRideRequest(requestEventId)
+    }
 
+    /**
+     * Remove a ride request from the visible list (used for taken, cancelled, or stale requests).
+     */
+    private fun removeRideRequest(requestEventId: String) {
         // Remove from pending requests
         val currentRequests = _uiState.value.pendingBroadcastRequests
         val updatedRequests = currentRequests.filter { it.eventId != requestEventId }
@@ -1897,6 +2168,53 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Close the acceptance subscription for this request (no longer needed)
         requestAcceptanceSubscriptionIds.remove(requestEventId)?.let {
             nostrService.closeSubscription(it)
+        }
+
+        // Update deletion subscription with new list of event IDs
+        updateDeletionSubscription()
+    }
+
+    /**
+     * Handle a cancelled ride request (rider deleted it).
+     * Removes from BOTH broadcast requests and direct offers.
+     */
+    private fun handleCancelledRideRequest(requestEventId: String) {
+        Log.d(TAG, "Rider cancelled request: ${requestEventId.take(8)}")
+
+        // Remove from broadcast requests
+        removeRideRequest(requestEventId)
+
+        // Also remove from direct offers
+        val currentOffers = _uiState.value.pendingOffers
+        val updatedOffers = currentOffers.filter { it.eventId != requestEventId }
+        if (updatedOffers.size != currentOffers.size) {
+            Log.d(TAG, "Removed cancelled direct offer: ${requestEventId.take(8)}")
+            _uiState.value = _uiState.value.copy(
+                pendingOffers = updatedOffers
+            )
+        }
+    }
+
+    /**
+     * Update the deletion subscription to watch all current pending requests.
+     * Called when requests are added or removed.
+     * Watches BOTH broadcast requests AND direct offers for cancellations.
+     */
+    private fun updateDeletionSubscription() {
+        // Close existing subscription
+        deletionSubscriptionId?.let { nostrService.closeSubscription(it) }
+        deletionSubscriptionId = null
+
+        // Combine event IDs from BOTH broadcast requests AND direct offers
+        val broadcastEventIds = _uiState.value.pendingBroadcastRequests.map { it.eventId }
+        val directOfferEventIds = _uiState.value.pendingOffers.map { it.eventId }
+        val allPendingEventIds = (broadcastEventIds + directOfferEventIds).distinct()
+
+        if (allPendingEventIds.isEmpty()) return
+
+        Log.d(TAG, "Watching ${allPendingEventIds.size} requests for deletions (${broadcastEventIds.size} broadcast, ${directOfferEventIds.size} direct)")
+        deletionSubscriptionId = nostrService.subscribeToRideRequestDeletions(allPendingEventIds) { deletedEventId ->
+            handleCancelledRideRequest(deletedEventId)
         }
     }
 
@@ -1941,6 +2259,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     pendingOffers = emptyList(),
                     pendingBroadcastRequests = emptyList(),
                     pinAttempts = 0,
+                    confirmationWaitStartMs = System.currentTimeMillis(),  // Start confirmation timer
                     statusMessage = "Ride accepted! Waiting for rider confirmation..."
                 )
 
@@ -1985,28 +2304,56 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
     /**
      * Remove stale requests from the pending list.
+     * Cleans up BOTH broadcast requests AND direct offers.
      */
     private fun pruneStaleRequests() {
         val currentTimeSeconds = System.currentTimeMillis() / 1000
         val maxRequestAgeSeconds = 2 * 60 // 2 minutes
 
+        var stateChanged = false
+
+        // Prune stale broadcast requests
         val currentRequests = _uiState.value.pendingBroadcastRequests
         val freshRequests = currentRequests.filter { request ->
             val ageSeconds = currentTimeSeconds - request.createdAt
             val isFresh = ageSeconds <= maxRequestAgeSeconds
             if (!isFresh) {
-                Log.d(TAG, "Pruning stale request ${request.eventId.take(8)} (${ageSeconds}s old)")
+                Log.d(TAG, "Pruning stale broadcast request ${request.eventId.take(8)} (${ageSeconds}s old)")
+            }
+            isFresh
+        }
+
+        // Prune stale direct offers
+        val currentOffers = _uiState.value.pendingOffers
+        val freshOffers = currentOffers.filter { offer ->
+            val ageSeconds = currentTimeSeconds - offer.createdAt
+            val isFresh = ageSeconds <= maxRequestAgeSeconds
+            if (!isFresh) {
+                Log.d(TAG, "Pruning stale direct offer ${offer.eventId.take(8)} (${ageSeconds}s old)")
             }
             isFresh
         }
 
         if (freshRequests.size != currentRequests.size) {
-            Log.d(TAG, "Pruned ${currentRequests.size - freshRequests.size} stale requests")
+            Log.d(TAG, "Pruned ${currentRequests.size - freshRequests.size} stale broadcast requests")
+            stateChanged = true
+        }
+
+        if (freshOffers.size != currentOffers.size) {
+            Log.d(TAG, "Pruned ${currentOffers.size - freshOffers.size} stale direct offers")
+            stateChanged = true
+        }
+
+        if (stateChanged) {
             _uiState.value = _uiState.value.copy(
-                pendingBroadcastRequests = freshRequests
+                pendingBroadcastRequests = freshRequests,
+                pendingOffers = freshOffers
             )
-            // Update foreground service notification
-            DriverOnlineService.updateRequestCount(getApplication(), freshRequests.size)
+            // Update foreground service notification with total count
+            val totalRequests = freshRequests.size + freshOffers.size
+            DriverOnlineService.updateStatus(getApplication(), DriverStatus.Available(totalRequests))
+            // Update deletion subscription since lists changed
+            updateDeletionSubscription()
         }
     }
 
@@ -2027,13 +2374,16 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         super.onCleared()
         stopBroadcasting()
         stopStaleRequestCleanup()
+        confirmationTimeoutJob?.cancel()
         offerSubscriptionId?.let { nostrService.closeSubscription(it) }
         broadcastRequestSubscriptionId?.let { nostrService.closeSubscription(it) }
+        deletionSubscriptionId?.let { nostrService.closeSubscription(it) }
         requestAcceptanceSubscriptionIds.values.forEach { nostrService.closeSubscription(it) }
         confirmationSubscriptionId?.let { nostrService.closeSubscription(it) }
         verificationSubscriptionId?.let { nostrService.closeSubscription(it) }
         chatSubscriptionId?.let { nostrService.closeSubscription(it) }
         cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
+        preciseLocationSubscriptionId?.let { nostrService.closeSubscription(it) }
         nostrService.disconnect()
         // Clean up Bitcoin price service
         bitcoinPriceService.cleanup()
@@ -2059,6 +2409,9 @@ data class DriverUiState(
     val pendingBroadcastRequests: List<BroadcastRideOfferData> = emptyList(),
     // Cached pickup routes for broadcast requests (keyed by eventId)
     val pickupRoutes: Map<String, RouteResult> = emptyMap(),
+    // Cached routes for direct offers (keyed by eventId)
+    val directOfferPickupRoutes: Map<String, RouteResult> = emptyMap(),  // Driver to pickup
+    val directOfferRideRoutes: Map<String, RouteResult> = emptyMap(),    // Pickup to destination
     val isProcessingOffer: Boolean = false,
 
     // Active ride info
@@ -2067,12 +2420,17 @@ data class DriverUiState(
     val acceptanceEventId: String? = null,  // Our acceptance event (Kind 3174) for cleanup
     val confirmationEventId: String? = null,
     val precisePickupLocation: Location? = null,
+    val preciseDestinationLocation: Location? = null,  // Received via progressive reveal after PIN verified
 
     // PIN verification (rider generates PIN, driver submits for verification)
     val pinAttempts: Int = 0,                           // Number of PIN submission attempts
     val isAwaitingPinVerification: Boolean = false,     // Waiting for rider to verify
     val pinVerificationTimedOut: Boolean = false,       // True if verification timed out (show retry/cancel)
     val lastPinSubmissionEventId: String? = null,       // Last PIN submission event ID
+
+    // Confirmation wait tracking (waiting for rider to confirm after accepting)
+    val confirmationWaitStartMs: Long? = null,          // When we started waiting for confirmation
+    val confirmationWaitDurationMs: Long = 15_000L,     // 15 seconds to wait for confirmation
 
     // Chat (NIP-17 style private messaging)
     val chatMessages: List<RideshareChatData> = emptyList(),

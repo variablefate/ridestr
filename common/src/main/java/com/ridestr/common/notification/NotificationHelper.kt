@@ -5,7 +5,6 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
-import android.content.Intent
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -145,189 +144,52 @@ object NotificationHelper {
     }
 
     /**
-     * Build a persistent notification for driver online status.
-     * Used as the foreground service notification.
+     * Build a generic driver status notification with custom title and content.
+     * Used by the unified notification system for all driver status updates.
+     * @param isHighPriority If true, uses high-priority channel for prominent display (e.g., new request, chat)
      */
-    fun buildDriverOnlineNotification(
+    fun buildDriverStatusNotification(
         context: Context,
         contentIntent: PendingIntent,
-        requestCount: Int = 0
+        title: String,
+        content: String,
+        isHighPriority: Boolean = false
     ): Notification {
-        val contentText = if (requestCount > 0) {
-            "$requestCount ride request${if (requestCount > 1) "s" else ""} waiting"
-        } else {
-            "Waiting for ride requests"
-        }
-
-        return NotificationCompat.Builder(context, CHANNEL_ONLINE_STATUS)
+        val channel = if (isHighPriority) CHANNEL_RIDE_REQUEST else CHANNEL_ONLINE_STATUS
+        val priority = if (isHighPriority) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_LOW
+        return NotificationCompat.Builder(context, channel)
             .setSmallIcon(android.R.drawable.ic_menu_compass) // TODO: Use app icon
-            .setContentTitle("You are online")
-            .setContentText(contentText)
+            .setContentTitle(title)
+            .setContentText(content)
             .setOngoing(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setContentIntent(contentIntent)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setPriority(priority)
             .build()
     }
 
     /**
-     * Build a notification for a new ride request.
+     * Build a generic rider status notification with custom title and content.
+     * Used by the unified notification system for all rider status updates.
+     * @param isHighPriority If true, uses high-priority channel for prominent display (e.g., driver arrived, chat)
      */
-    fun buildRideRequestNotification(
+    fun buildRiderStatusNotification(
         context: Context,
         contentIntent: PendingIntent,
-        fareAmount: String,
-        distance: String
+        title: String,
+        content: String,
+        isHighPriority: Boolean = false
     ): Notification {
-        return NotificationCompat.Builder(context, CHANNEL_RIDE_REQUEST)
+        val channel = if (isHighPriority) CHANNEL_RIDE_REQUEST else CHANNEL_ONLINE_STATUS
+        val priority = if (isHighPriority) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_LOW
+        return NotificationCompat.Builder(context, channel)
             .setSmallIcon(android.R.drawable.ic_menu_compass) // TODO: Use app icon
-            .setContentTitle("New Ride Request!")
-            .setContentText("$fareAmount - $distance away")
-            .setAutoCancel(true)
-            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-            .setContentIntent(contentIntent)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setDefaults(NotificationCompat.DEFAULT_SOUND or NotificationCompat.DEFAULT_VIBRATE)
-            .build()
-    }
-
-    /**
-     * Build a persistent notification for rider searching status.
-     */
-    fun buildRiderSearchingNotification(
-        context: Context,
-        contentIntent: PendingIntent,
-        driverCount: Int = 0,
-        customMessage: String? = null
-    ): Notification {
-        val contentText = customMessage ?: if (driverCount > 0) {
-            "Searching... $driverCount driver${if (driverCount > 1) "s" else ""} nearby"
-        } else {
-            "Searching for drivers..."
-        }
-
-        return NotificationCompat.Builder(context, CHANNEL_ONLINE_STATUS)
-            .setSmallIcon(android.R.drawable.ic_menu_compass) // TODO: Use app icon
-            .setContentTitle("Looking for a ride")
-            .setContentText(contentText)
+            .setContentTitle(title)
+            .setContentText(content)
             .setOngoing(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setContentIntent(contentIntent)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .build()
-    }
-
-    /**
-     * Build a persistent notification for an active ride (driver found).
-     */
-    fun buildRiderRideActiveNotification(
-        context: Context,
-        contentIntent: PendingIntent,
-        driverName: String? = null,
-        customMessage: String? = null
-    ): Notification {
-        val title = if (driverName != null) "Ride with $driverName" else "Ride in progress"
-        val contentText = customMessage ?: "Your ride is on the way"
-
-        return NotificationCompat.Builder(context, CHANNEL_ONLINE_STATUS)
-            .setSmallIcon(android.R.drawable.ic_menu_compass) // TODO: Use app icon
-            .setContentTitle(title)
-            .setContentText(contentText)
-            .setOngoing(true)
-            .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .setContentIntent(contentIntent)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .build()
-    }
-
-    /**
-     * Build a notification when driver accepts the ride.
-     */
-    fun buildDriverAcceptedNotification(
-        context: Context,
-        contentIntent: PendingIntent,
-        driverName: String?
-    ): Notification {
-        val title = if (driverName != null) "$driverName accepted!" else "Driver accepted!"
-
-        return NotificationCompat.Builder(context, CHANNEL_RIDE_REQUEST)
-            .setSmallIcon(android.R.drawable.ic_menu_compass) // TODO: Use app icon
-            .setContentTitle(title)
-            .setContentText("Your ride has been confirmed")
-            .setAutoCancel(true)
-            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-            .setContentIntent(contentIntent)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setDefaults(NotificationCompat.DEFAULT_SOUND or NotificationCompat.DEFAULT_VIBRATE)
-            .build()
-    }
-
-    /**
-     * Build a notification when driver arrives at pickup.
-     */
-    fun buildDriverArrivedNotification(
-        context: Context,
-        contentIntent: PendingIntent
-    ): Notification {
-        return NotificationCompat.Builder(context, CHANNEL_RIDE_UPDATE)
-            .setSmallIcon(android.R.drawable.ic_menu_compass) // TODO: Use app icon
-            .setContentTitle("Driver has arrived!")
-            .setContentText("Your driver is waiting at the pickup location")
-            .setAutoCancel(true)
-            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-            .setContentIntent(contentIntent)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setDefaults(NotificationCompat.DEFAULT_SOUND or NotificationCompat.DEFAULT_VIBRATE)
-            .build()
-    }
-
-    /**
-     * Build a notification for ride cancellation.
-     */
-    fun buildRideCancelledNotification(
-        context: Context,
-        contentIntent: PendingIntent,
-        cancelledBy: String // "rider" or "driver"
-    ): Notification {
-        val title = if (cancelledBy == "rider") "Ride cancelled by rider" else "Ride cancelled"
-
-        return NotificationCompat.Builder(context, CHANNEL_RIDE_CANCELLED)
-            .setSmallIcon(android.R.drawable.ic_menu_compass) // TODO: Use app icon
-            .setContentTitle(title)
-            .setContentText("The ride has been cancelled")
-            .setAutoCancel(true)
-            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-            .setContentIntent(contentIntent)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setDefaults(NotificationCompat.DEFAULT_SOUND or NotificationCompat.DEFAULT_VIBRATE)
-            .build()
-    }
-
-    /**
-     * Build a notification for chat messages.
-     */
-    fun buildChatMessageNotification(
-        context: Context,
-        contentIntent: PendingIntent,
-        senderName: String?,
-        messagePreview: String
-    ): Notification {
-        val title = senderName ?: "New message"
-        val preview = if (messagePreview.length > 50) {
-            messagePreview.take(47) + "..."
-        } else {
-            messagePreview
-        }
-
-        return NotificationCompat.Builder(context, CHANNEL_RIDE_UPDATE)
-            .setSmallIcon(android.R.drawable.ic_menu_compass) // TODO: Use app icon
-            .setContentTitle(title)
-            .setContentText(preview)
-            .setAutoCancel(true)
-            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-            .setContentIntent(contentIntent)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .setDefaults(NotificationCompat.DEFAULT_SOUND)
+            .setPriority(priority)
             .build()
     }
 

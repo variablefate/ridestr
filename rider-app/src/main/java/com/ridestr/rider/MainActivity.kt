@@ -35,6 +35,7 @@ import com.ridestr.common.routing.TileManager
 import com.ridestr.common.routing.ValhallaRoutingService
 import com.ridestr.common.settings.SettingsManager
 import com.ridestr.common.ui.AccountBottomSheet
+import com.ridestr.common.ui.AccountSafetyScreen
 import com.ridestr.common.ui.DeveloperOptionsScreen
 import com.ridestr.common.ui.RelaySignalIndicator
 import com.ridestr.common.ui.LocationPermissionScreen
@@ -72,7 +73,8 @@ enum class Screen {
     DEBUG,
     BACKUP_KEYS,
     TILES,
-    DEV_OPTIONS
+    DEV_OPTIONS,
+    ACCOUNT_SAFETY
 }
 
 class MainActivity : ComponentActivity() {
@@ -302,6 +304,7 @@ fun RidestrApp() {
                     keyManager = onboardingViewModel.getKeyManager(),
                     connectionStates = connectionStates,
                     settingsManager = settingsManager,
+                    nostrService = nostrService,
                     userProfile = userProfile,
                     onLogout = {
                         nostrService.disconnect()
@@ -314,6 +317,9 @@ fun RidestrApp() {
                     },
                     onOpenBackup = {
                         currentScreen = Screen.BACKUP_KEYS
+                    },
+                    onOpenAccountSafety = {
+                        currentScreen = Screen.ACCOUNT_SAFETY
                     },
                     onOpenTiles = {
                         currentScreen = Screen.TILES
@@ -338,7 +344,6 @@ fun RidestrApp() {
                     recentEvents = recentEvents,
                     notices = notices,
                     useGeocodingSearch = useGeocodingSearch,
-                    routingService = routingService,
                     onToggleGeocodingSearch = { settingsManager.toggleUseGeocodingSearch() },
                     onConnect = { nostrService.connect() },
                     onDisconnect = { nostrService.disconnect() },
@@ -375,6 +380,14 @@ fun RidestrApp() {
                     modifier = Modifier.padding(innerPadding)
                 )
             }
+
+            Screen.ACCOUNT_SAFETY -> {
+                AccountSafetyScreen(
+                    nostrService = nostrService,
+                    onBack = { currentScreen = Screen.MAIN },
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
         }
     }
 }
@@ -385,10 +398,12 @@ fun MainScreen(
     keyManager: com.ridestr.common.nostr.keys.KeyManager,
     connectionStates: Map<String, RelayConnectionState>,
     settingsManager: SettingsManager,
+    nostrService: NostrService,
     userProfile: UserProfile?,
     onLogout: () -> Unit,
     onOpenProfile: () -> Unit,
     onOpenBackup: () -> Unit,
+    onOpenAccountSafety: () -> Unit,
     onOpenTiles: () -> Unit,
     onOpenDevOptions: () -> Unit,
     onOpenDebug: () -> Unit,
@@ -523,6 +538,7 @@ fun MainScreen(
             isConnected = isConnected,
             onEditProfile = onOpenProfile,
             onBackupKeys = onOpenBackup,
+            onAccountSafety = onOpenAccountSafety,
             onLogout = onLogout,
             onDismiss = { showAccountSheet = false }
         )

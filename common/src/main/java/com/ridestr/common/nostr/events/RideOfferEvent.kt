@@ -74,7 +74,13 @@ object RideOfferEvent {
 
     /**
      * Create and sign a DIRECT ride offer event targeted to a specific driver.
-     * (Legacy behavior - used for advanced/direct driver selection)
+     * Content is NIP-44 encrypted to protect pickup/destination from public view.
+     * This is now the default flow for privacy.
+     *
+     * @param pickupRouteKm Optional pre-calculated driver→pickup distance in km
+     * @param pickupRouteMin Optional pre-calculated driver→pickup duration in minutes
+     * @param rideRouteKm Optional pre-calculated pickup→destination distance in km
+     * @param rideRouteMin Optional pre-calculated pickup→destination duration in minutes
      */
     suspend fun create(
         signer: NostrSigner,
@@ -82,13 +88,26 @@ object RideOfferEvent {
         driverPubKey: String,
         pickup: Location,
         destination: Location,
-        fareEstimate: Double
+        fareEstimate: Double,
+        pickupRouteKm: Double? = null,
+        pickupRouteMin: Double? = null,
+        rideRouteKm: Double? = null,
+        rideRouteMin: Double? = null
     ): Event {
-        val content = JSONObject().apply {
+        // Build plaintext content
+        val plaintext = JSONObject().apply {
             put("fare_estimate", fareEstimate)
             put("destination", destination.toJson())
             put("approx_pickup", pickup.approximate().toJson())
+            // Add route metrics if available (pre-calculated by rider)
+            pickupRouteKm?.let { put("pickup_route_km", it) }
+            pickupRouteMin?.let { put("pickup_route_min", it) }
+            rideRouteKm?.let { put("ride_route_km", it) }
+            rideRouteMin?.let { put("ride_route_min", it) }
         }.toString()
+
+        // Encrypt using NIP-44 so only the target driver can read it
+        val encryptedContent = signer.nip44Encrypt(plaintext, driverPubKey)
 
         val tags = arrayOf(
             arrayOf(RideshareTags.EVENT_REF, driverAvailabilityEventId),
@@ -100,7 +119,7 @@ object RideOfferEvent {
             createdAt = System.currentTimeMillis() / 1000,
             kind = RideshareEventKinds.RIDE_OFFER,
             tags = tags,
-            content = content
+            content = encryptedContent
         )
     }
 
@@ -154,9 +173,97 @@ object RideOfferEvent {
     }
 
     /**
-     * Parse a DIRECT ride offer event (targeted to specific driver).
-     * Returns null if this is a broadcast offer.
+     * Parse a DIRECT ride offer event (encrypted, targeted to specific driver).
+     * Returns encrypted data that must be decrypted separately.
+     * Returns null if this is a broadcast offer (has ride-request tag).
      */
+    fun parseEncrypted(event: Event): RideOfferDataEncrypted? {
+        if (event.kind != RideshareEventKinds.RIDE_OFFER) return null
+
+        // If it has the ride-request tag, it's a broadcast, not direct
+        if (isBroadcast(event)) return null
+
+        return try {
+            var driverEventId: String? = null
+            var driverPubKey: String? = null
+
+            for (tag in event.tags) {
+                when (tag.getOrNull(0)) {
+                    RideshareTags.EVENT_REF -> driverEventId = tag.getOrNull(1)
+                    RideshareTags.PUBKEY_REF -> driverPubKey = tag.getOrNull(1)
+                }
+            }
+
+            if (driverEventId == null || driverPubKey == null) return null
+
+            RideOfferDataEncrypted(
+                eventId = event.id,
+                riderPubKey = event.pubKey,
+                driverEventId = driverEventId,
+                driverPubKey = driverPubKey,
+                encryptedContent = event.content,
+                createdAt = event.createdAt
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to parse encrypted direct offer", e)
+            null
+        }
+    }
+
+    /**
+     * Decrypt a direct ride offer to get the full data.
+     * @param signer The driver's signer (must be the intended recipient)
+     * @param encryptedData The encrypted offer data from parseEncrypted()
+     * @return Decrypted RideOfferData, or null if decryption fails
+     */
+    suspend fun decrypt(
+        signer: NostrSigner,
+        encryptedData: RideOfferDataEncrypted
+    ): RideOfferData? {
+        return try {
+            val decrypted = signer.nip44Decrypt(encryptedData.encryptedContent, encryptedData.riderPubKey)
+            val json = JSONObject(decrypted)
+
+            val destinationJson = json.getJSONObject("destination")
+            val destination = Location.fromJson(destinationJson) ?: return null
+
+            val pickupJson = json.getJSONObject("approx_pickup")
+            val approxPickup = Location.fromJson(pickupJson) ?: return null
+
+            val fareEstimate = json.getDouble("fare_estimate")
+
+            // Parse optional route metrics (pre-calculated by rider)
+            val pickupRouteKm = json.optDouble("pickup_route_km").takeIf { !it.isNaN() }
+            val pickupRouteMin = json.optDouble("pickup_route_min").takeIf { !it.isNaN() }
+            val rideRouteKm = json.optDouble("ride_route_km").takeIf { !it.isNaN() }
+            val rideRouteMin = json.optDouble("ride_route_min").takeIf { !it.isNaN() }
+
+            RideOfferData(
+                eventId = encryptedData.eventId,
+                riderPubKey = encryptedData.riderPubKey,
+                driverEventId = encryptedData.driverEventId,
+                driverPubKey = encryptedData.driverPubKey,
+                approxPickup = approxPickup,
+                destination = destination,
+                fareEstimate = fareEstimate,
+                createdAt = encryptedData.createdAt,
+                pickupRouteKm = pickupRouteKm,
+                pickupRouteMin = pickupRouteMin,
+                rideRouteKm = rideRouteKm,
+                rideRouteMin = rideRouteMin
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to decrypt direct offer", e)
+            null
+        }
+    }
+
+    /**
+     * Parse a DIRECT ride offer event (targeted to specific driver).
+     * @deprecated Use parseEncrypted() + decrypt() instead. Direct offers are now encrypted.
+     * This function is kept for backwards compatibility with unencrypted offers.
+     */
+    @Deprecated("Direct offers are now encrypted. Use parseEncrypted() + decrypt()")
     fun parse(event: Event): RideOfferData? {
         if (event.kind != RideshareEventKinds.RIDE_OFFER) return null
 
@@ -216,7 +323,19 @@ object RideOfferEvent {
 }
 
 /**
- * Parsed data from a DIRECT ride offer event (targeted to specific driver).
+ * Encrypted data from a DIRECT ride offer event (before decryption).
+ */
+data class RideOfferDataEncrypted(
+    val eventId: String,
+    val riderPubKey: String,
+    val driverEventId: String,
+    val driverPubKey: String,
+    val encryptedContent: String,
+    val createdAt: Long
+)
+
+/**
+ * Decrypted data from a DIRECT ride offer event (targeted to specific driver).
  */
 data class RideOfferData(
     val eventId: String,
@@ -226,7 +345,12 @@ data class RideOfferData(
     val approxPickup: Location,
     val destination: Location,
     val fareEstimate: Double,
-    val createdAt: Long
+    val createdAt: Long,
+    // Route metrics pre-calculated by rider (null if not provided)
+    val pickupRouteKm: Double? = null,
+    val pickupRouteMin: Double? = null,
+    val rideRouteKm: Double? = null,
+    val rideRouteMin: Double? = null
 )
 
 /**

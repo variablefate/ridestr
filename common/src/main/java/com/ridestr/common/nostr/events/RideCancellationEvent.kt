@@ -12,7 +12,8 @@ import org.json.JSONObject
  */
 object RideCancellationEvent {
 
-    const val KIND = 3179
+    // Use the constant from RideshareEventKinds for consistency
+    const val KIND = RideshareEventKinds.RIDE_CANCELLATION
 
     /**
      * Create and sign a ride cancellation event.

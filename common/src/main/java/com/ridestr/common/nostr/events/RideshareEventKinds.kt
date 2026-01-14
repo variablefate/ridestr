@@ -54,13 +54,14 @@ object RideshareEventKinds {
     const val RIDE_CONFIRMATION = 3175
 
     /**
-     * Kind 3179: Precise Location Reveal Event (Regular)
+     * Kind 3181: Precise Location Reveal Event (Regular)
      * Sent by riders when driver is close (~1 mile) to share precise pickup/destination.
      * Contains NIP-44 encrypted precise location.
      * This enables progressive privacy - approximate location shared first,
      * precise location only when driver is nearby.
+     * Note: Kind 3179 is reserved for RideCancellationEvent.
      */
-    const val PRECISE_LOCATION_REVEAL = 3179
+    const val PRECISE_LOCATION_REVEAL = 3181
 
     /**
      * Kind 3180: Driver Status Event (Regular)
@@ -88,9 +89,16 @@ object RideshareEventKinds {
     /**
      * Kind 3178: Rideshare Chat Event (Regular)
      * Private chat messages between rider and driver during active ride.
-     * Wrapped in NIP-17 style gift wrapping for maximum privacy.
+     * Content is NIP-44 encrypted to the recipient.
      */
     const val RIDESHARE_CHAT = 3178
+
+    /**
+     * Kind 3179: Ride Cancellation Event (Regular)
+     * Sent by either rider or driver to cancel an active ride.
+     * References the confirmation event and notifies the other party.
+     */
+    const val RIDE_CANCELLATION = 3179
 
     /**
      * Kind 30174: Ride History Backup Event (Parameterized Replaceable)
@@ -103,7 +111,7 @@ object RideshareEventKinds {
 }
 
 /**
- * Status values for driver status updates (Kind 3179).
+ * Status values for driver status updates (Kind 3180).
  */
 object DriverStatusType {
     const val EN_ROUTE_PICKUP = "en_route_pickup"
