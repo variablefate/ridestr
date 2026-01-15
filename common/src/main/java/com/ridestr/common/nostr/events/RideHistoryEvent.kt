@@ -117,18 +117,32 @@ object RideHistoryEvent {
 
 /**
  * A single ride entry in the history.
+ *
+ * Privacy note:
+ * - Drivers store only 6-character geohashes (~1.2km precision) for passenger privacy
+ * - Riders store exact coordinates + addresses for their own history
+ * All data is NIP-44 encrypted to the user's own pubkey.
  */
 data class RideHistoryEntry(
     val rideId: String,  // The confirmation event ID
     val timestamp: Long, // When the ride occurred
     val role: String,    // "rider" or "driver"
     val counterpartyPubKey: String, // The other party's pubkey
-    val pickupLat: Double,
-    val pickupLon: Double,
-    val dropoffLat: Double,
-    val dropoffLon: Double,
-    val distanceMiles: Double,
-    val durationMinutes: Int,
+
+    // Coarse location (always present, used by drivers, fallback for riders)
+    val pickupGeohash: String,   // 6 chars = ~1.2km precision
+    val dropoffGeohash: String,  // Neighborhood-level
+
+    // Precise location (rider only - null for drivers for privacy)
+    val pickupLat: Double? = null,       // Exact latitude
+    val pickupLon: Double? = null,       // Exact longitude
+    val pickupAddress: String? = null,   // Human-readable address
+    val dropoffLat: Double? = null,
+    val dropoffLon: Double? = null,
+    val dropoffAddress: String? = null,
+
+    val distanceMiles: Double,   // Exact distance for stats
+    val durationMinutes: Int,    // Exact duration for stats
     val fareSats: Long,
     val status: String   // "completed", "cancelled", etc.
 ) {
@@ -137,10 +151,15 @@ data class RideHistoryEntry(
         put("timestamp", timestamp)
         put("role", role)
         put("counterparty", counterpartyPubKey)
-        put("pickup_lat", pickupLat)
-        put("pickup_lon", pickupLon)
-        put("dropoff_lat", dropoffLat)
-        put("dropoff_lon", dropoffLon)
+        put("pickup_geohash", pickupGeohash)
+        put("dropoff_geohash", dropoffGeohash)
+        // Precise location fields (rider only)
+        pickupLat?.let { put("pickup_lat", it) }
+        pickupLon?.let { put("pickup_lon", it) }
+        pickupAddress?.let { put("pickup_address", it) }
+        dropoffLat?.let { put("dropoff_lat", it) }
+        dropoffLon?.let { put("dropoff_lon", it) }
+        dropoffAddress?.let { put("dropoff_address", it) }
         put("distance_miles", distanceMiles)
         put("duration_minutes", durationMinutes)
         put("fare_sats", fareSats)
@@ -155,10 +174,15 @@ data class RideHistoryEntry(
                     timestamp = json.getLong("timestamp"),
                     role = json.getString("role"),
                     counterpartyPubKey = json.getString("counterparty"),
-                    pickupLat = json.getDouble("pickup_lat"),
-                    pickupLon = json.getDouble("pickup_lon"),
-                    dropoffLat = json.getDouble("dropoff_lat"),
-                    dropoffLon = json.getDouble("dropoff_lon"),
+                    pickupGeohash = json.optString("pickup_geohash", ""),
+                    dropoffGeohash = json.optString("dropoff_geohash", ""),
+                    // Precise location fields (optional)
+                    pickupLat = if (json.has("pickup_lat")) json.getDouble("pickup_lat") else null,
+                    pickupLon = if (json.has("pickup_lon")) json.getDouble("pickup_lon") else null,
+                    pickupAddress = if (json.has("pickup_address")) json.getString("pickup_address") else null,
+                    dropoffLat = if (json.has("dropoff_lat")) json.getDouble("dropoff_lat") else null,
+                    dropoffLon = if (json.has("dropoff_lon")) json.getDouble("dropoff_lon") else null,
+                    dropoffAddress = if (json.has("dropoff_address")) json.getString("dropoff_address") else null,
                     distanceMiles = json.getDouble("distance_miles"),
                     durationMinutes = json.getInt("duration_minutes"),
                     fareSats = json.getLong("fare_sats"),

@@ -162,6 +162,7 @@ object NotificationHelper {
             .setContentTitle(title)
             .setContentText(content)
             .setOngoing(true)
+            .setSilent(true)  // Prevent notification sound - SoundManager handles all audio
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setContentIntent(contentIntent)
             .setPriority(priority)
@@ -187,6 +188,7 @@ object NotificationHelper {
             .setContentTitle(title)
             .setContentText(content)
             .setOngoing(true)
+            .setSilent(true)  // Prevent notification sound - SoundManager handles all audio
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setContentIntent(contentIntent)
             .setPriority(priority)

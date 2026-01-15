@@ -8,8 +8,10 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.ridestr.common.data.RideHistoryRepository
 import com.ridestr.common.data.SavedLocation
 import com.ridestr.common.data.SavedLocationRepository
+import com.ridestr.common.nostr.events.RideHistoryEntry
 import com.ridestr.common.location.GeocodingResult
 import com.ridestr.common.location.GeocodingService
 import com.ridestr.common.nostr.NostrService
@@ -94,6 +96,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     private val geocodingService = GeocodingService(application)
     private val tileManager = TileManager.getInstance(application)
     private val savedLocationRepository = SavedLocationRepository.getInstance(application)
+    private val rideHistoryRepository = RideHistoryRepository.getInstance(application)
 
     // Track which tile region is currently loaded
     private var currentTileRegion: String? = null
@@ -1324,6 +1327,38 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         val wasConfirmedRide = state.rideStage in listOf(RideStage.RIDE_CONFIRMED, RideStage.DRIVER_ARRIVED, RideStage.IN_PROGRESS)
 
         viewModelScope.launch {
+            // Save cancelled ride to history (only if ride was confirmed/in progress)
+            if (wasConfirmedRide) {
+                try {
+                    val historyEntry = RideHistoryEntry(
+                        rideId = confirmationId ?: state.pendingOfferEventId ?: "",
+                        timestamp = System.currentTimeMillis() / 1000,
+                        role = "rider",
+                        counterpartyPubKey = state.selectedDriver?.driverPubKey ?: driverPubKey ?: "",
+                        pickupGeohash = state.pickupLocation?.geohash(6) ?: "",
+                        dropoffGeohash = state.destination?.geohash(6) ?: "",
+                        // Rider gets exact locations for their own history
+                        pickupLat = state.pickupLocation?.lat,
+                        pickupLon = state.pickupLocation?.lon,
+                        pickupAddress = state.pickupLocation?.addressLabel,
+                        dropoffLat = state.destination?.lat,
+                        dropoffLon = state.destination?.lon,
+                        dropoffAddress = state.destination?.addressLabel,
+                        distanceMiles = (state.routeResult?.distanceKm ?: 0.0) * 0.621371,
+                        durationMinutes = 0,  // Ride was cancelled, no actual duration
+                        fareSats = 0,  // No fare charged for cancelled ride
+                        status = "cancelled"
+                    )
+                    rideHistoryRepository.addRide(historyEntry)
+                    Log.d(TAG, "Saved rider-cancelled ride to history: ${historyEntry.rideId}")
+
+                    // Backup to Nostr (encrypted to self)
+                    rideHistoryRepository.backupToNostr(nostrService)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to save cancelled ride to history", e)
+                }
+            }
+
             // If we have an active confirmed ride, notify the driver of cancellation
             if (confirmationId != null && driverPubKey != null && wasConfirmedRide) {
                 Log.d(TAG, "Publishing ride cancellation to driver")
@@ -2094,7 +2129,41 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         // Capture fare info before launching coroutine
         val fareMessage = statusData.finalFare?.let { " Fare: ${it.toInt()} sats" } ?: ""
 
+        // Capture state for ride history before launching coroutine
+        val state = _uiState.value
+        val finalFareSats = statusData.finalFare?.toLong() ?: state.fareEstimate?.toLong() ?: 0L
+
         viewModelScope.launch {
+            // Save to ride history (rider gets exact coords + addresses for their own history)
+            try {
+                val historyEntry = RideHistoryEntry(
+                    rideId = state.confirmationEventId ?: state.pendingOfferEventId ?: "",
+                    timestamp = System.currentTimeMillis() / 1000,
+                    role = "rider",
+                    counterpartyPubKey = state.selectedDriver?.driverPubKey ?: state.acceptance?.driverPubKey ?: "",
+                    pickupGeohash = state.pickupLocation?.geohash(6) ?: "",  // ~1.2km for compatibility
+                    dropoffGeohash = state.destination?.geohash(6) ?: "",
+                    // Rider gets exact locations for their own history
+                    pickupLat = state.pickupLocation?.lat,
+                    pickupLon = state.pickupLocation?.lon,
+                    pickupAddress = state.pickupLocation?.addressLabel,
+                    dropoffLat = state.destination?.lat,
+                    dropoffLon = state.destination?.lon,
+                    dropoffAddress = state.destination?.addressLabel,
+                    distanceMiles = (state.routeResult?.distanceKm ?: 0.0) * 0.621371,
+                    durationMinutes = ((state.routeResult?.durationSeconds ?: 0.0) / 60).toInt(),
+                    fareSats = finalFareSats,
+                    status = "completed"
+                )
+                rideHistoryRepository.addRide(historyEntry)
+                Log.d(TAG, "Saved completed ride to history: ${historyEntry.rideId}")
+
+                // Backup to Nostr (encrypted to self)
+                rideHistoryRepository.backupToNostr(nostrService)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to save ride to history", e)
+            }
+
             // Clean up all our ride events (NIP-09) - AWAIT before state reset
             cleanupRideEventsInBackground("ride completed")
 
@@ -2137,7 +2206,42 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         // Capture reason before launching coroutine
         val errorMessage = reason ?: "Driver cancelled the ride"
 
+        // Capture state for ride history before launching coroutine
+        val state = _uiState.value
+
         viewModelScope.launch {
+            // Save cancelled ride to history (only if ride was confirmed/in progress)
+            if (state.confirmationEventId != null || state.acceptance != null) {
+                try {
+                    val historyEntry = RideHistoryEntry(
+                        rideId = state.confirmationEventId ?: state.pendingOfferEventId ?: "",
+                        timestamp = System.currentTimeMillis() / 1000,
+                        role = "rider",
+                        counterpartyPubKey = state.selectedDriver?.driverPubKey ?: state.acceptance?.driverPubKey ?: "",
+                        pickupGeohash = state.pickupLocation?.geohash(6) ?: "",
+                        dropoffGeohash = state.destination?.geohash(6) ?: "",
+                        // Rider gets exact locations for their own history
+                        pickupLat = state.pickupLocation?.lat,
+                        pickupLon = state.pickupLocation?.lon,
+                        pickupAddress = state.pickupLocation?.addressLabel,
+                        dropoffLat = state.destination?.lat,
+                        dropoffLon = state.destination?.lon,
+                        dropoffAddress = state.destination?.addressLabel,
+                        distanceMiles = (state.routeResult?.distanceKm ?: 0.0) * 0.621371,
+                        durationMinutes = 0,  // Ride was cancelled, no actual duration
+                        fareSats = 0,  // No fare charged for cancelled ride
+                        status = "cancelled"
+                    )
+                    rideHistoryRepository.addRide(historyEntry)
+                    Log.d(TAG, "Saved cancelled ride to history: ${historyEntry.rideId}")
+
+                    // Backup to Nostr (encrypted to self)
+                    rideHistoryRepository.backupToNostr(nostrService)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to save cancelled ride to history", e)
+                }
+            }
+
             // Clean up all our ride events (NIP-09) - AWAIT before state reset
             cleanupRideEventsInBackground("driver cancelled")
 

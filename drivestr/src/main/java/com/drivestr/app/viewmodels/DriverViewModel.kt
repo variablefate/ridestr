@@ -9,8 +9,11 @@ import com.drivestr.app.service.DriverOnlineService
 import com.drivestr.app.service.DriverStackableAlert
 import com.drivestr.app.service.DriverStatus
 import com.ridestr.common.bitcoin.BitcoinPriceService
+import com.ridestr.common.data.RideHistoryRepository
 import com.ridestr.common.data.Vehicle
 import com.ridestr.common.nostr.NostrService
+import com.ridestr.common.nostr.events.RideHistoryEntry
+import com.ridestr.common.nostr.events.geohash
 import com.ridestr.common.nostr.events.BroadcastRideOfferData
 import com.ridestr.common.nostr.events.DriverRideAction
 import com.ridestr.common.nostr.events.DriverRideStateEvent
@@ -102,6 +105,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     private val settingsManager = com.ridestr.common.settings.SettingsManager(application)
 
     private val nostrService = NostrService(application)
+
+    // Ride history repository
+    private val rideHistoryRepository = RideHistoryRepository.getInstance(application)
 
     // Bitcoin price service for fare conversion
     val bitcoinPriceService = BitcoinPriceService()
@@ -816,6 +822,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      * Return to available after completing a ride.
      */
     fun finishAndGoOnline(location: Location) {
+        // Capture state for ride history BEFORE clearing
+        val state = _uiState.value
+        val offer = state.acceptedOffer
+
         // Close subscriptions
         confirmationSubscriptionId?.let { nostrService.closeSubscription(it) }
         confirmationSubscriptionId = null
@@ -849,6 +859,33 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
         // Clear persisted ride state
         clearSavedRideState()
+
+        // Save completed ride to history (using 6-char geohashes for ~1.2km precision)
+        if (offer != null) {
+            viewModelScope.launch {
+                try {
+                    val historyEntry = RideHistoryEntry(
+                        rideId = state.confirmationEventId ?: state.acceptanceEventId ?: offer.eventId,
+                        timestamp = System.currentTimeMillis() / 1000,
+                        role = "driver",
+                        counterpartyPubKey = offer.riderPubKey,
+                        pickupGeohash = offer.approxPickup.geohash(6),  // ~1.2km precision
+                        dropoffGeohash = offer.destination.geohash(6),
+                        distanceMiles = offer.rideRouteKm?.let { it * 0.621371 } ?: 0.0,  // Convert km to miles
+                        durationMinutes = offer.rideRouteMin?.toInt() ?: 0,
+                        fareSats = offer.fareEstimate.toLong(),
+                        status = "completed"
+                    )
+                    rideHistoryRepository.addRide(historyEntry)
+                    Log.d(TAG, "Saved completed ride to history: ${historyEntry.rideId}")
+
+                    // Backup to Nostr (encrypted to self)
+                    rideHistoryRepository.backupToNostr(nostrService)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to save ride to history", e)
+                }
+            }
+        }
 
         // Clean up ride events in background (non-blocking)
         cleanupRideEventsInBackground("ride completed")
@@ -1074,6 +1111,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         val state = _uiState.value
         val confirmationEventId = state.confirmationEventId
         val riderPubKey = state.acceptedOffer?.riderPubKey
+        val offer = state.acceptedOffer
 
         // Cancel timeout jobs if running
         pinVerificationTimeoutJob?.cancel()
@@ -1082,6 +1120,31 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         confirmationTimeoutJob = null
 
         viewModelScope.launch {
+            // Save cancelled ride to history (only if we had an accepted offer)
+            if (offer != null) {
+                try {
+                    val historyEntry = RideHistoryEntry(
+                        rideId = confirmationEventId ?: state.acceptanceEventId ?: offer.eventId,
+                        timestamp = System.currentTimeMillis() / 1000,
+                        role = "driver",
+                        counterpartyPubKey = offer.riderPubKey,
+                        pickupGeohash = offer.approxPickup.geohash(6),
+                        dropoffGeohash = offer.destination.geohash(6),
+                        distanceMiles = offer.rideRouteKm?.let { it * 0.621371 } ?: 0.0,
+                        durationMinutes = 0,  // Ride was cancelled, no actual duration
+                        fareSats = 0,  // No fare earned for cancelled ride
+                        status = "cancelled"
+                    )
+                    rideHistoryRepository.addRide(historyEntry)
+                    Log.d(TAG, "Saved cancelled ride to history: ${historyEntry.rideId}")
+
+                    // Backup to Nostr (encrypted to self)
+                    rideHistoryRepository.backupToNostr(nostrService)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to save cancelled ride to history", e)
+                }
+            }
+
             // Send cancellation event if we have an active ride
             if (confirmationEventId != null && riderPubKey != null) {
                 val cancellationEventId = nostrService.publishRideCancellation(
@@ -1607,10 +1670,38 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     private fun handleRideCancellation(reason: String?) {
         val state = _uiState.value
         val context = getApplication<Application>()
+        val offer = state.acceptedOffer
 
         // Notify service of cancellation (plays sound, updates notification)
         DriverOnlineService.updateStatus(context, DriverStatus.Cancelled)
         Log.d(TAG, "Ride cancelled - notified service")
+
+        // Save cancelled ride to history (only if we had an accepted offer)
+        if (offer != null) {
+            viewModelScope.launch {
+                try {
+                    val historyEntry = RideHistoryEntry(
+                        rideId = state.confirmationEventId ?: state.acceptanceEventId ?: offer.eventId,
+                        timestamp = System.currentTimeMillis() / 1000,
+                        role = "driver",
+                        counterpartyPubKey = offer.riderPubKey,
+                        pickupGeohash = offer.approxPickup.geohash(6),
+                        dropoffGeohash = offer.destination.geohash(6),
+                        distanceMiles = offer.rideRouteKm?.let { it * 0.621371 } ?: 0.0,
+                        durationMinutes = 0,  // Ride was cancelled, no actual duration
+                        fareSats = 0,  // No fare earned for cancelled ride
+                        status = "cancelled"
+                    )
+                    rideHistoryRepository.addRide(historyEntry)
+                    Log.d(TAG, "Saved rider-cancelled ride to history: ${historyEntry.rideId}")
+
+                    // Backup to Nostr (encrypted to self)
+                    rideHistoryRepository.backupToNostr(nostrService)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to save cancelled ride to history", e)
+                }
+            }
+        }
 
         // Close active subscriptions
         confirmationSubscriptionId?.let { nostrService.closeSubscription(it) }

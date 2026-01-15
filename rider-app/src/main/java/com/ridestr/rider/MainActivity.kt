@@ -47,6 +47,7 @@ import com.ridestr.rider.viewmodels.ProfileViewModel
 import com.ridestr.common.nostr.NostrService
 import com.ridestr.common.nostr.events.UserProfile
 import com.ridestr.common.nostr.relay.RelayConnectionState
+import com.ridestr.common.data.RideHistoryRepository
 import com.ridestr.common.notification.NotificationHelper
 import com.ridestr.common.ui.theme.RidestrTheme
 import com.ridestr.rider.service.RiderActiveService
@@ -425,6 +426,12 @@ fun MainScreen(
 
     val context = LocalContext.current
 
+    // Ride history repository
+    val rideHistoryRepository = remember { RideHistoryRepository.getInstance(context) }
+
+    // Bitcoin price for fare display
+    val btcPriceUsd by riderViewModel.bitcoinPriceService.btcPriceUsd.collectAsState()
+
     // Ensure relay connections when app returns to foreground
     // Also clear any stacked notification alerts
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
@@ -514,13 +521,19 @@ fun MainScreen(
             }
             Tab.WALLET -> {
                 WalletScreen(
-                    lightningAddress = userProfile?.lud16,
-                    onEditLightningAddress = onOpenProfile,
+                    rideHistoryRepository = rideHistoryRepository,
+                    settingsManager = settingsManager,
+                    priceService = riderViewModel.bitcoinPriceService,
+                    onViewHistory = { currentTab = Tab.HISTORY },
                     modifier = Modifier.padding(innerPadding)
                 )
             }
             Tab.HISTORY -> {
                 HistoryScreen(
+                    rideHistoryRepository = rideHistoryRepository,
+                    settingsManager = settingsManager,
+                    nostrService = nostrService,
+                    priceService = riderViewModel.bitcoinPriceService,
                     modifier = Modifier.padding(innerPadding)
                 )
             }

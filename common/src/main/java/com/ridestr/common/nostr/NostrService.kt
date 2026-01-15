@@ -403,6 +403,7 @@ class NostrService(
             RideshareEventKinds.RIDER_RIDE_STATE,
             RideshareEventKinds.RIDESHARE_CHAT,
             RideshareEventKinds.RIDE_CANCELLATION,
+            RideshareEventKinds.RIDE_HISTORY_BACKUP,
             20173  // Legacy ephemeral driver status
         )
 
@@ -1400,5 +1401,109 @@ class NostrService(
     ): String? {
         val myPubKey = keyManager.getPubKeyHex() ?: return null
         return subscribeToProfile(myPubKey, onProfile)
+    }
+
+    // ========================================
+    // RIDE HISTORY BACKUP (Kind 30174)
+    // ========================================
+
+    /**
+     * Publish ride history backup to Nostr relays.
+     * The content is NIP-44 encrypted to the user's own pubkey for privacy.
+     *
+     * @param rides List of ride history entries
+     * @param stats Aggregate statistics
+     * @return Event ID if successful, null on failure
+     */
+    suspend fun publishRideHistoryBackup(
+        rides: List<RideHistoryEntry>,
+        stats: RideHistoryStats
+    ): String? {
+        val signer = keyManager.getSigner()
+        if (signer == null) {
+            Log.e(TAG, "Cannot publish ride history: Not logged in")
+            return null
+        }
+
+        return try {
+            val event = RideHistoryEvent.create(signer, rides, stats)
+            if (event != null) {
+                relayManager.publish(event)
+                Log.d(TAG, "Published ride history backup: ${event.id} (${rides.size} rides)")
+                event.id
+            } else {
+                Log.e(TAG, "Failed to create ride history event")
+                null
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to publish ride history", e)
+            null
+        }
+    }
+
+    /**
+     * Fetch the user's ride history from Nostr relays.
+     * Decrypts the content using the user's keys.
+     *
+     * @return Decrypted ride history data, or null if not found or decryption fails
+     */
+    suspend fun fetchRideHistory(): RideHistoryData? {
+        val signer = keyManager.getSigner()
+        val myPubKey = keyManager.getPubKeyHex()
+        if (signer == null || myPubKey == null) {
+            Log.e(TAG, "Cannot fetch ride history: Not logged in")
+            return null
+        }
+
+        return withContext(Dispatchers.IO) {
+            try {
+                var result: RideHistoryData? = null
+                val subscriptionId = relayManager.subscribe(
+                    kinds = listOf(RideshareEventKinds.RIDE_HISTORY_BACKUP),
+                    authors = listOf(myPubKey),
+                    tags = mapOf("d" to listOf(RideHistoryEvent.D_TAG)),
+                    limit = 1
+                ) { event, _ ->
+                    // This is our own history event - try to decrypt
+                    kotlinx.coroutines.runBlocking {
+                        RideHistoryEvent.parseAndDecrypt(signer, event)?.let { data ->
+                            result = data
+                            Log.d(TAG, "Fetched ride history: ${data.rides.size} rides")
+                        }
+                    }
+                }
+
+                // Wait a bit for the response
+                delay(3000)
+                relayManager.closeSubscription(subscriptionId)
+
+                result
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to fetch ride history", e)
+                null
+            }
+        }
+    }
+
+    /**
+     * Delete ride history backup from relays (NIP-09).
+     * @param reason Reason for deletion
+     * @return True if deletion request was sent
+     */
+    suspend fun deleteRideHistoryBackup(reason: String = "user requested"): Boolean {
+        val myPubKey = keyManager.getPubKeyHex() ?: return false
+
+        return try {
+            // First find the current history event ID
+            val historyData = fetchRideHistory()
+            if (historyData != null) {
+                deleteEvents(listOf(historyData.eventId), reason)
+                Log.d(TAG, "Deleted ride history backup: ${historyData.eventId}")
+            }
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to delete ride history", e)
+            false
+        }
     }
 }

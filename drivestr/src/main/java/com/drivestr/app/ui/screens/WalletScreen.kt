@@ -1,5 +1,6 @@
 package com.drivestr.app.ui.screens
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
@@ -8,37 +9,45 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.ridestr.common.data.RideHistoryRepository
+import com.ridestr.common.nostr.events.RideHistoryStats
+import com.ridestr.common.bitcoin.BitcoinPriceService
+import com.ridestr.common.settings.DisplayCurrency
+import com.ridestr.common.settings.SettingsManager
 
 /**
- * Driver wallet screen showing Lightning address and earnings.
- * This is a placeholder until payment rails are implemented.
+ * Driver wallet screen showing earnings summary and tips.
+ * Click earnings card to view full earnings history.
  */
 @Composable
 fun WalletScreen(
-    lightningAddress: String?,
-    onEditLightningAddress: () -> Unit,
+    rideHistoryRepository: RideHistoryRepository,
+    settingsManager: SettingsManager,
+    priceService: BitcoinPriceService,
+    onViewEarningsDetails: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val stats by rideHistoryRepository.stats.collectAsState()
+    val displayCurrency by settingsManager.displayCurrency.collectAsState()
+    val btcPriceUsd by priceService.btcPriceUsd.collectAsState()
+
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // Lightning Address Section
+        // Earnings Section - clickable to view details
         item {
-            LightningAddressCard(
-                lightningAddress = lightningAddress,
-                onEdit = onEditLightningAddress
+            EarningsCard(
+                stats = stats,
+                displayCurrency = displayCurrency,
+                btcPriceUsd = btcPriceUsd,
+                settingsManager = settingsManager,
+                onClick = onViewEarningsDetails
             )
-        }
-
-        // Earnings Section
-        item {
-            EarningsCard()
         }
 
         // Tips Section
@@ -49,12 +58,30 @@ fun WalletScreen(
 }
 
 @Composable
-private fun LightningAddressCard(
-    lightningAddress: String?,
-    onEdit: () -> Unit
+private fun EarningsCard(
+    stats: RideHistoryStats,
+    displayCurrency: DisplayCurrency,
+    btcPriceUsd: Int?,
+    settingsManager: SettingsManager,
+    onClick: () -> Unit
 ) {
+    // Calculate display values
+    val totalEarned = stats.totalFareSatsEarned
+    val completedRides = stats.completedRides
+    val totalMiles = stats.totalDistanceMiles
+
+    val totalDisplay = when (displayCurrency) {
+        DisplayCurrency.SATS -> "${totalEarned} sats"
+        DisplayCurrency.USD -> {
+            val usd = btcPriceUsd?.let { totalEarned.toDouble() * it / 100_000_000.0 }
+            usd?.let { String.format("$%.2f", it) } ?: "${totalEarned} sats"
+        }
+    }
+
     Card(
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
     ) {
         Column(
             modifier = Modifier
@@ -70,129 +97,80 @@ private fun LightningAddressCard(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
-                        imageVector = Icons.Default.ElectricBolt,
+                        imageVector = Icons.Default.Payments,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.primary
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Lightning Address",
+                        text = "Earnings",
                         style = MaterialTheme.typography.titleMedium
                     )
                 }
-                IconButton(onClick = onEdit) {
-                    Icon(
-                        imageVector = Icons.Default.Edit,
-                        contentDescription = "Edit Lightning Address"
-                    )
-                }
+                Icon(
+                    imageVector = Icons.Default.ChevronRight,
+                    contentDescription = "View details",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
-            if (lightningAddress.isNullOrBlank()) {
+            // Stats summary - now with 3 items
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                EarningsStat(
+                    label = "Rides",
+                    value = "$completedRides",
+                    icon = Icons.Default.DirectionsCar,
+                    onToggleCurrency = null
+                )
+                EarningsStat(
+                    label = "Miles",
+                    value = String.format("%.1f", totalMiles),
+                    icon = Icons.Default.Route,
+                    onToggleCurrency = null
+                )
+                EarningsStat(
+                    label = "Earned",
+                    value = totalDisplay,
+                    icon = Icons.Default.Savings,
+                    onToggleCurrency = { settingsManager.toggleDisplayCurrency() }
+                )
+            }
+
+            if (completedRides > 0) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Surface(
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "Tap to view full earnings history",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(8.dp)
+                    )
+                }
+            } else {
+                Spacer(modifier = Modifier.height(12.dp))
                 Surface(
                     color = MaterialTheme.colorScheme.surfaceVariant,
                     shape = MaterialTheme.shapes.small,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        text = "Not set - Edit your profile to add a Lightning address",
-                        style = MaterialTheme.typography.bodyMedium,
+                        text = "Complete rides to start earning!\nPayments are sent directly to your Lightning wallet.",
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
                         modifier = Modifier.padding(12.dp)
                     )
                 }
-            } else {
-                Surface(
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                    shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        text = lightningAddress,
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        modifier = Modifier.padding(12.dp)
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = "Riders will send payment to this address after completing rides",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-    }
-}
-
-@Composable
-private fun EarningsCard() {
-    Card(
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp)
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    imageVector = Icons.Default.AccountBalanceWallet,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "Earnings",
-                    style = MaterialTheme.typography.titleMedium
-                )
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Placeholder stats
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly
-            ) {
-                EarningsStat(
-                    label = "Today",
-                    value = "--",
-                    icon = Icons.Default.Today
-                )
-                EarningsStat(
-                    label = "This Week",
-                    value = "--",
-                    icon = Icons.Default.DateRange
-                )
-                EarningsStat(
-                    label = "Total",
-                    value = "--",
-                    icon = Icons.Default.Savings
-                )
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            Surface(
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                shape = MaterialTheme.shapes.small,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(
-                    text = "Earnings tracking coming soon!\nPayments are sent directly to your Lightning wallet.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(12.dp)
-                )
             }
         }
     }
@@ -202,7 +180,8 @@ private fun EarningsCard() {
 private fun EarningsStat(
     label: String,
     value: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onToggleCurrency: (() -> Unit)? = null
 ) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally
@@ -217,7 +196,12 @@ private fun EarningsStat(
         Text(
             text = value,
             style = MaterialTheme.typography.titleLarge,
-            color = MaterialTheme.colorScheme.onSurface
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = if (onToggleCurrency != null) {
+                Modifier.clickable { onToggleCurrency() }
+            } else {
+                Modifier
+            }
         )
         Text(
             text = label,

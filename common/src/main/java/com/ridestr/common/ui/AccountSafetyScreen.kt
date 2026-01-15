@@ -301,6 +301,7 @@ fun AccountSafetyScreen(
                         EventTypeRow("Rider Ride State", RideshareEventKinds.RIDER_RIDE_STATE, kindCounts?.get(RideshareEventKinds.RIDER_RIDE_STATE))
                         EventTypeRow("Chat Messages", RideshareEventKinds.RIDESHARE_CHAT, kindCounts?.get(RideshareEventKinds.RIDESHARE_CHAT))
                         EventTypeRow("Ride Cancellations", RideshareEventKinds.RIDE_CANCELLATION, kindCounts?.get(RideshareEventKinds.RIDE_CANCELLATION))
+                        EventTypeRow("Ride History Backup", RideshareEventKinds.RIDE_HISTORY_BACKUP, kindCounts?.get(RideshareEventKinds.RIDE_HISTORY_BACKUP))
                     }
 
                     Spacer(modifier = Modifier.height(16.dp))
@@ -374,7 +375,8 @@ fun AccountSafetyScreen(
                             Triple("Rider Ride State", RideshareEventKinds.RIDER_RIDE_STATE, "Verifications + locations (consolidated)"),
                             Triple("Chat Messages", RideshareEventKinds.RIDESHARE_CHAT, "In-ride messages"),
                             Triple("Ride Cancellations", RideshareEventKinds.RIDE_CANCELLATION, "Cancelled ride notices"),
-                            Triple("Ride Acceptances", RideshareEventKinds.RIDE_ACCEPTANCE, "Your accepted rides")
+                            Triple("Ride Acceptances", RideshareEventKinds.RIDE_ACCEPTANCE, "Your accepted rides"),
+                            Triple("Ride History Backup", RideshareEventKinds.RIDE_HISTORY_BACKUP, "Encrypted ride history backup")
                         )
 
                         kindOptions.forEach { (name, kind, description) ->

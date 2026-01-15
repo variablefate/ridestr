@@ -31,6 +31,8 @@ import com.drivestr.app.ui.screens.SettingsContent
 import com.drivestr.app.ui.screens.VehiclesScreen
 import com.drivestr.app.ui.screens.VehicleSetupScreen
 import com.drivestr.app.ui.screens.WalletScreen
+import com.drivestr.app.ui.screens.EarningsScreen
+import com.ridestr.common.data.RideHistoryRepository
 import com.ridestr.common.data.VehicleRepository
 import com.ridestr.common.routing.NostrTileDiscoveryService
 import com.ridestr.common.routing.TileDownloadService
@@ -47,18 +49,18 @@ import com.drivestr.app.viewmodels.DriverViewModel
 import com.drivestr.app.viewmodels.OnboardingViewModel
 import com.drivestr.app.viewmodels.ProfileViewModel
 import com.ridestr.common.nostr.NostrService
-import com.ridestr.common.nostr.events.UserProfile
 import com.ridestr.common.nostr.relay.RelayConnectionState
 import com.ridestr.common.notification.NotificationHelper
 import com.ridestr.common.ui.theme.RidestrTheme
 import com.drivestr.app.service.DriverOnlineService
+import com.ridestr.common.bitcoin.BitcoinPriceService
 
 /**
  * Bottom navigation tabs for the main screen.
  */
 enum class Tab {
     DRIVE,      // Main driver mode
-    WALLET,     // Earnings & payments
+    WALLET,     // Lightning address, earnings summary & payments
     VEHICLES,   // Vehicle management
     SETTINGS    // Settings & developer options
 }
@@ -73,6 +75,7 @@ enum class Screen {
     LOCATION_PERMISSION,
     TILE_SETUP,
     MAIN,           // Shows bottom navigation with tabs
+    EARNINGS,       // Full earnings history (navigated from wallet)
     DEBUG,
     BACKUP_KEYS,
     TILES,
@@ -112,6 +115,17 @@ fun DrivestrApp() {
     // Vehicle repository for multi-vehicle support
     val vehicleRepository = remember { VehicleRepository.getInstance(context) }
 
+    // Ride history repository
+    val rideHistoryRepository = remember { RideHistoryRepository.getInstance(context) }
+
+    // Bitcoin price service for currency conversion
+    val bitcoinPriceService = remember { BitcoinPriceService() }
+
+    // Start price auto-refresh when app starts
+    LaunchedEffect(Unit) {
+        bitcoinPriceService.startAutoRefresh()
+    }
+
     // Tile management (singleton to share with ViewModels)
     val tileManager = remember { TileManager.getInstance(context) }
     val tileDownloadService = remember { TileDownloadService(context, tileManager) }
@@ -134,9 +148,6 @@ fun DrivestrApp() {
     val connectionStates by nostrService.connectionStates.collectAsState()
     val recentEvents by nostrService.relayManager.events.collectAsState()
     val notices by nostrService.relayManager.notices.collectAsState()
-
-    // User profile (for lightning address in wallet)
-    var userProfile by remember { mutableStateOf<UserProfile?>(null) }
 
     // Check if location permission already granted
     val hasLocationPermission = remember {
@@ -166,15 +177,6 @@ fun DrivestrApp() {
     LaunchedEffect(Unit) {
         if (currentScreen == Screen.MAIN) {
             nostrService.connect()
-        }
-    }
-
-    // Subscribe to own profile for lightning address
-    LaunchedEffect(uiState.isLoggedIn) {
-        if (uiState.isLoggedIn) {
-            nostrService.subscribeToOwnProfile { profile ->
-                userProfile = profile
-            }
         }
     }
 
@@ -330,7 +332,7 @@ fun DrivestrApp() {
                     settingsManager = settingsManager,
                     nostrService = nostrService,
                     vehicleRepository = vehicleRepository,
-                    userProfile = userProfile,
+                    rideHistoryRepository = rideHistoryRepository,
                     onLogout = {
                         nostrService.disconnect()
                         onboardingViewModel.logout()
@@ -354,6 +356,9 @@ fun DrivestrApp() {
                     },
                     onOpenDebug = {
                         currentScreen = Screen.DEBUG
+                    },
+                    onOpenEarnings = {
+                        currentScreen = Screen.EARNINGS
                     },
                     modifier = Modifier.padding(innerPadding)
                 )
@@ -421,6 +426,17 @@ fun DrivestrApp() {
                     modifier = Modifier.padding(innerPadding)
                 )
             }
+
+            Screen.EARNINGS -> {
+                EarningsScreen(
+                    rideHistoryRepository = rideHistoryRepository,
+                    settingsManager = settingsManager,
+                    nostrService = nostrService,
+                    priceService = bitcoinPriceService,
+                    onBack = { currentScreen = Screen.MAIN },
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
         }
     }
 }
@@ -433,7 +449,7 @@ fun MainScreen(
     settingsManager: SettingsManager,
     nostrService: NostrService,
     vehicleRepository: VehicleRepository,
-    userProfile: UserProfile?,
+    rideHistoryRepository: RideHistoryRepository,
     onLogout: () -> Unit,
     onOpenProfile: () -> Unit,
     onOpenBackup: () -> Unit,
@@ -441,6 +457,7 @@ fun MainScreen(
     onOpenTiles: () -> Unit,
     onOpenDevOptions: () -> Unit,
     onOpenDebug: () -> Unit,
+    onOpenEarnings: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val connectedCount = connectionStates.values.count { it == RelayConnectionState.CONNECTED }
@@ -462,6 +479,9 @@ fun MainScreen(
     val autoOpenNavigation by settingsManager.autoOpenNavigation.collectAsState()
 
     val context = LocalContext.current
+
+    // Bitcoin price for fare display
+    val btcPriceUsd by driverViewModel.bitcoinPriceService.btcPriceUsd.collectAsState()
 
     // Ensure relay connections when app returns to foreground
     // Also clear any stacked notification alerts
@@ -559,8 +579,10 @@ fun MainScreen(
             }
             Tab.WALLET -> {
                 WalletScreen(
-                    lightningAddress = userProfile?.lud16,
-                    onEditLightningAddress = onOpenProfile,
+                    rideHistoryRepository = rideHistoryRepository,
+                    settingsManager = settingsManager,
+                    priceService = driverViewModel.bitcoinPriceService,
+                    onViewEarningsDetails = onOpenEarnings,
                     modifier = Modifier.padding(innerPadding)
                 )
             }

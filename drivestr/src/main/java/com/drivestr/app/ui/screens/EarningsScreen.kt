@@ -1,11 +1,11 @@
-package com.ridestr.rider.ui.screens
+package com.drivestr.app.ui.screens
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -26,15 +26,17 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 /**
- * Ride history screen showing past rides and statistics.
+ * Driver earnings screen showing past rides and earnings statistics.
+ * Displays as a full navigation page with back button.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun HistoryScreen(
+fun EarningsScreen(
     rideHistoryRepository: RideHistoryRepository,
     settingsManager: SettingsManager,
     nostrService: NostrService,
     priceService: BitcoinPriceService,
+    onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val rides by rideHistoryRepository.rides.collectAsState()
@@ -52,7 +54,7 @@ fun HistoryScreen(
         AlertDialog(
             onDismissRequest = { showClearDialog = false },
             icon = { Icon(Icons.Default.DeleteForever, contentDescription = null) },
-            title = { Text("Clear Ride History?") },
+            title = { Text("Clear Earnings History?") },
             text = {
                 Text("This will permanently delete all your ride history from this device and Nostr relays. This cannot be undone.")
             },
@@ -103,76 +105,95 @@ fun HistoryScreen(
         )
     }
 
-    LazyColumn(
-        modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        // Stats Summary Card
-        item {
-            StatsCard(
-                stats = stats,
-                displayCurrency = displayCurrency,
-                btcPriceUsd = btcPriceUsd,
-                settingsManager = settingsManager
+    Scaffold(
+        modifier = modifier,
+        topBar = {
+            TopAppBar(
+                title = { Text("Earnings History") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Back"
+                        )
+                    }
+                }
             )
         }
-
-        // Header with Clear All option
-        if (rides.isNotEmpty()) {
+    ) { innerPadding ->
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding),
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // Earnings Summary Card
             item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Recent Rides",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    TextButton(
-                        onClick = { showClearDialog = true }
+                EarningsCard(
+                    stats = stats,
+                    displayCurrency = displayCurrency,
+                    btcPriceUsd = btcPriceUsd,
+                    settingsManager = settingsManager
+                )
+            }
+
+            // Header with Clear All option
+            if (rides.isNotEmpty()) {
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.DeleteSweep,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
+                        Text(
+                            text = "Completed Rides",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurface
                         )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Clear All")
+                        TextButton(
+                            onClick = { showClearDialog = true }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.DeleteSweep,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Clear All")
+                        }
                     }
                 }
             }
-        }
 
-        // Ride List
-        if (rides.isEmpty()) {
-            item {
-                EmptyHistoryCard()
+            // Ride List
+            if (rides.isEmpty()) {
+                item {
+                    EmptyEarningsCard()
+                }
+            } else {
+                items(rides, key = { it.rideId }) { ride ->
+                    DriverRideCard(
+                        ride = ride,
+                        displayCurrency = displayCurrency,
+                        btcPriceUsd = btcPriceUsd,
+                        settingsManager = settingsManager,
+                        onDelete = { rideToDelete = ride }
+                    )
+                }
             }
-        } else {
-            items(rides, key = { it.rideId }) { ride ->
-                RideHistoryCard(
-                    ride = ride,
-                    displayCurrency = displayCurrency,
-                    btcPriceUsd = btcPriceUsd,
-                    settingsManager = settingsManager,
-                    onDelete = { rideToDelete = ride }
-                )
-            }
-        }
 
-        // Loading indicator
-        if (isLoading) {
-            item {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    CircularProgressIndicator()
+            // Loading indicator
+            if (isLoading) {
+                item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator()
+                    }
                 }
             }
         }
@@ -180,7 +201,7 @@ fun HistoryScreen(
 }
 
 @Composable
-private fun StatsCard(
+private fun EarningsCard(
     stats: RideHistoryStats,
     displayCurrency: DisplayCurrency,
     btcPriceUsd: Int?,
@@ -201,16 +222,53 @@ private fun StatsCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
-                    imageVector = Icons.Default.Analytics,
+                    imageVector = Icons.Default.Payments,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onPrimaryContainer
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "Your Stats",
+                    text = "Your Earnings",
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onPrimaryContainer
                 )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Total Earned (prominent display)
+            val totalEarnedDisplay = when (displayCurrency) {
+                DisplayCurrency.SATS -> "${stats.totalFareSatsEarned} sats"
+                DisplayCurrency.USD -> {
+                    val usd = btcPriceUsd?.let { stats.totalFareSatsEarned.toDouble() * it / 100_000_000.0 }
+                    usd?.let { String.format("$%.2f", it) } ?: "${stats.totalFareSatsEarned} sats"
+                }
+            }
+
+            Surface(
+                color = MaterialTheme.colorScheme.primary,
+                shape = MaterialTheme.shapes.medium,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = "Total Earned",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.8f)
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = totalEarnedDisplay,
+                        style = MaterialTheme.typography.headlineMedium,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier.clickable { settingsManager.toggleDisplayCurrency() }
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -220,9 +278,9 @@ private fun StatsCard(
                 horizontalArrangement = Arrangement.SpaceEvenly
             ) {
                 StatItem(
-                    label = "Rides",
+                    label = "Completed",
                     value = "${stats.completedRides}",
-                    icon = Icons.Default.DirectionsCar
+                    icon = Icons.Default.CheckCircle
                 )
                 StatItem(
                     label = "Distance",
@@ -236,41 +294,26 @@ private fun StatsCard(
                 )
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // Total spent
-            val totalSpentDisplay = when (displayCurrency) {
-                DisplayCurrency.SATS -> "${stats.totalFareSatsPaid} sats"
-                DisplayCurrency.USD -> {
-                    val usd = btcPriceUsd?.let { stats.totalFareSatsPaid.toDouble() * it / 100_000_000.0 }
-                    usd?.let { String.format("$%.2f", it) } ?: "${stats.totalFareSatsPaid} sats"
+            // Average per ride
+            if (stats.completedRides > 0) {
+                Spacer(modifier = Modifier.height(12.dp))
+                val avgPerRide = stats.totalFareSatsEarned / stats.completedRides
+                val avgDisplay = when (displayCurrency) {
+                    DisplayCurrency.SATS -> "$avgPerRide sats/ride"
+                    DisplayCurrency.USD -> {
+                        val usd = btcPriceUsd?.let { avgPerRide.toDouble() * it / 100_000_000.0 }
+                        usd?.let { String.format("$%.2f/ride", it) } ?: "$avgPerRide sats/ride"
+                    }
                 }
-            }
-
-            Surface(
-                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
-                shape = MaterialTheme.shapes.small,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
+                Text(
+                    text = "Average: $avgDisplay",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Total Spent",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
-                    )
-                    Text(
-                        text = totalSpentDisplay,
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        modifier = Modifier.clickable { settingsManager.toggleDisplayCurrency() }
-                    )
-                }
+                        .clickable { settingsManager.toggleDisplayCurrency() },
+                    textAlign = TextAlign.Center
+                )
             }
 
             // Show cancelled rides if any
@@ -316,7 +359,7 @@ private fun StatItem(
 }
 
 @Composable
-private fun RideHistoryCard(
+private fun DriverRideCard(
     ride: RideHistoryEntry,
     displayCurrency: DisplayCurrency,
     btcPriceUsd: Int?,
@@ -329,10 +372,10 @@ private fun RideHistoryCard(
     }
 
     val fareDisplay = when (displayCurrency) {
-        DisplayCurrency.SATS -> "${ride.fareSats} sats"
+        DisplayCurrency.SATS -> "+${ride.fareSats} sats"
         DisplayCurrency.USD -> {
             val usd = btcPriceUsd?.let { ride.fareSats.toDouble() * it / 100_000_000.0 }
-            usd?.let { String.format("$%.2f", it) } ?: "${ride.fareSats} sats"
+            usd?.let { String.format("+$%.2f", it) } ?: "+${ride.fareSats} sats"
         }
     }
 
@@ -379,16 +422,22 @@ private fun RideHistoryCard(
                             MaterialTheme.colorScheme.error
                     )
                 }
-                IconButton(
-                    onClick = onDelete,
-                    modifier = Modifier.size(32.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Delete,
-                        contentDescription = "Delete ride",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(18.dp)
-                    )
+
+                // Earnings badge (prominent for completed rides)
+                if (isCompleted && ride.fareSats > 0) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.primary,
+                        shape = MaterialTheme.shapes.small
+                    ) {
+                        Text(
+                            text = fareDisplay,
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier
+                                .clickable { settingsManager.toggleDisplayCurrency() }
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                        )
+                    }
                 }
             }
 
@@ -403,23 +452,7 @@ private fun RideHistoryCard(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Pickup location - show address if available, else coords, else geohash
-            val pickupDisplay = ride.pickupAddress
-                ?: ride.pickupLat?.let { lat ->
-                    ride.pickupLon?.let { lon ->
-                        String.format("%.4f, %.4f", lat, lon)
-                    }
-                }
-                ?: "${ride.pickupGeohash.take(4)}..."
-
-            val dropoffDisplay = ride.dropoffAddress
-                ?: ride.dropoffLat?.let { lat ->
-                    ride.dropoffLon?.let { lon ->
-                        String.format("%.4f, %.4f", lat, lon)
-                    }
-                }
-                ?: "${ride.dropoffGeohash.take(4)}..."
-
+            // Route info (using geohash prefixes as neighborhood indicators)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -432,9 +465,9 @@ private fun RideHistoryCard(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "From: $pickupDisplay",
+                    text = "Pickup: ${ride.pickupGeohash.take(4)}...",
                     style = MaterialTheme.typography.bodyMedium,
-                    maxLines = 2,
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
@@ -454,9 +487,9 @@ private fun RideHistoryCard(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "To: $dropoffDisplay",
+                    text = "Dropoff: ${ride.dropoffGeohash.take(4)}...",
                     style = MaterialTheme.typography.bodyMedium,
-                    maxLines = 2,
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
@@ -464,10 +497,11 @@ private fun RideHistoryCard(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Ride details
+            // Ride details and delete button
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Column {
                     Text(
@@ -483,20 +517,16 @@ private fun RideHistoryCard(
                         )
                     }
                 }
-                if (isCompleted && ride.fareSats > 0) {
-                    Surface(
-                        color = MaterialTheme.colorScheme.primaryContainer,
-                        shape = MaterialTheme.shapes.small
-                    ) {
-                        Text(
-                            text = fareDisplay,
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer,
-                            modifier = Modifier
-                                .clickable { settingsManager.toggleDisplayCurrency() }
-                                .padding(horizontal = 12.dp, vertical = 6.dp)
-                        )
-                    }
+                IconButton(
+                    onClick = onDelete,
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Delete,
+                        contentDescription = "Delete ride",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp)
+                    )
                 }
             }
         }
@@ -504,7 +534,7 @@ private fun RideHistoryCard(
 }
 
 @Composable
-private fun EmptyHistoryCard() {
+private fun EmptyEarningsCard() {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -518,7 +548,7 @@ private fun EmptyHistoryCard() {
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Icon(
-                imageVector = Icons.Default.History,
+                imageVector = Icons.Default.DirectionsCar,
                 contentDescription = null,
                 modifier = Modifier.size(48.dp),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
@@ -535,7 +565,7 @@ private fun EmptyHistoryCard() {
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-                text = "Your completed rides will appear here.\nStart by booking your first ride!",
+                text = "Your completed rides will appear here.\nGo online to start earning!",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
                 textAlign = TextAlign.Center
