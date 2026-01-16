@@ -924,7 +924,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         cleanupRideEventsInBackground("ride completed")
 
         // Go online immediately - don't wait for cleanup
-        toggleAvailability(location)
+        // Use goOnline directly with the captured vehicle (from state at start of function)
+        goOnline(location, state.activeVehicle)
     }
 
     private fun closeOfferSubscription() {
