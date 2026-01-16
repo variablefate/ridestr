@@ -1386,11 +1386,13 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             // Save cancelled ride to history (only if ride was confirmed/in progress)
             if (wasConfirmedRide) {
                 try {
+                    val driver = state.selectedDriver
+                    val driverProfile = driver?.let { state.driverProfiles[it.driverPubKey] }
                     val historyEntry = RideHistoryEntry(
                         rideId = confirmationId ?: state.pendingOfferEventId ?: "",
                         timestamp = System.currentTimeMillis() / 1000,
                         role = "rider",
-                        counterpartyPubKey = state.selectedDriver?.driverPubKey ?: driverPubKey ?: "",
+                        counterpartyPubKey = driver?.driverPubKey ?: driverPubKey ?: "",
                         pickupGeohash = state.pickupLocation?.geohash(6) ?: "",
                         dropoffGeohash = state.destination?.geohash(6) ?: "",
                         // Rider gets exact locations for their own history
@@ -1403,7 +1405,11 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                         distanceMiles = (state.routeResult?.distanceKm ?: 0.0) * 0.621371,
                         durationMinutes = 0,  // Ride was cancelled, no actual duration
                         fareSats = 0,  // No fare charged for cancelled ride
-                        status = "cancelled"
+                        status = "cancelled",
+                        // Driver details for ride history
+                        counterpartyFirstName = driverProfile?.bestName()?.split(" ")?.firstOrNull(),
+                        vehicleMake = driver?.carMake,
+                        vehicleModel = driver?.carModel
                     )
                     rideHistoryRepository.addRide(historyEntry)
                     Log.d(TAG, "Saved rider-cancelled ride to history: ${historyEntry.rideId}")
@@ -2275,6 +2281,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         // Capture state for ride history before launching coroutine
         val state = _uiState.value
         val finalFareSats = statusData.finalFare?.toLong() ?: state.fareEstimate?.toLong() ?: 0L
+        val driver = state.selectedDriver
+        val driverProfile = driver?.let { state.driverProfiles[it.driverPubKey] }
 
         viewModelScope.launch {
             // Save to ride history (rider gets exact coords + addresses for their own history)
@@ -2283,7 +2291,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     rideId = state.confirmationEventId ?: state.pendingOfferEventId ?: "",
                     timestamp = System.currentTimeMillis() / 1000,
                     role = "rider",
-                    counterpartyPubKey = state.selectedDriver?.driverPubKey ?: state.acceptance?.driverPubKey ?: "",
+                    counterpartyPubKey = driver?.driverPubKey ?: state.acceptance?.driverPubKey ?: "",
                     pickupGeohash = state.pickupLocation?.geohash(6) ?: "",  // ~1.2km for compatibility
                     dropoffGeohash = state.destination?.geohash(6) ?: "",
                     // Rider gets exact locations for their own history
@@ -2296,7 +2304,11 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     distanceMiles = (state.routeResult?.distanceKm ?: 0.0) * 0.621371,
                     durationMinutes = ((state.routeResult?.durationSeconds ?: 0.0) / 60).toInt(),
                     fareSats = finalFareSats,
-                    status = "completed"
+                    status = "completed",
+                    // Driver details for ride history
+                    counterpartyFirstName = driverProfile?.bestName()?.split(" ")?.firstOrNull(),
+                    vehicleMake = driver?.carMake,
+                    vehicleModel = driver?.carModel
                 )
                 rideHistoryRepository.addRide(historyEntry)
                 Log.d(TAG, "Saved completed ride to history: ${historyEntry.rideId}")
@@ -2358,6 +2370,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
         // Capture state for ride history before launching coroutine
         val state = _uiState.value
+        val driver = state.selectedDriver
+        val driverProfile = driver?.let { state.driverProfiles[it.driverPubKey] }
 
         // CRITICAL: Reset ride-related fields SYNCHRONOUSLY before launching coroutine
         // This prevents phantom cancellations where delayed events from ride #1
@@ -2381,7 +2395,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                         rideId = state.confirmationEventId ?: state.pendingOfferEventId ?: "",
                         timestamp = System.currentTimeMillis() / 1000,
                         role = "rider",
-                        counterpartyPubKey = state.selectedDriver?.driverPubKey ?: state.acceptance?.driverPubKey ?: "",
+                        counterpartyPubKey = driver?.driverPubKey ?: state.acceptance?.driverPubKey ?: "",
                         pickupGeohash = state.pickupLocation?.geohash(6) ?: "",
                         dropoffGeohash = state.destination?.geohash(6) ?: "",
                         // Rider gets exact locations for their own history
@@ -2394,7 +2408,11 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                         distanceMiles = (state.routeResult?.distanceKm ?: 0.0) * 0.621371,
                         durationMinutes = 0,  // Ride was cancelled, no actual duration
                         fareSats = 0,  // No fare charged for cancelled ride
-                        status = "cancelled"
+                        status = "cancelled",
+                        // Driver details for ride history
+                        counterpartyFirstName = driverProfile?.bestName()?.split(" ")?.firstOrNull(),
+                        vehicleMake = driver?.carMake,
+                        vehicleModel = driver?.carModel
                     )
                     rideHistoryRepository.addRide(historyEntry)
                     Log.d(TAG, "Saved cancelled ride to history: ${historyEntry.rideId}")

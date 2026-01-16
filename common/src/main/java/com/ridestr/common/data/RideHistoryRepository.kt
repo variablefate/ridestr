@@ -189,8 +189,9 @@ class RideHistoryRepository(context: Context) {
     }
 
     /**
-     * Restore ride history from Nostr relays.
-     * Merges with local history, preferring the more complete set.
+     * Restore ride history from Nostr relays (MERGE mode).
+     * Merges with local history - adds rides from Nostr that don't exist locally.
+     * Use this when you want to preserve local changes.
      */
     suspend fun restoreFromNostr(nostrService: NostrService): Boolean {
         return try {
@@ -222,6 +223,55 @@ class RideHistoryRepository(context: Context) {
         } finally {
             _isLoading.value = false
         }
+    }
+
+    /**
+     * Sync ride history from Nostr relays (REPLACE mode).
+     * Nostr is the source of truth - local data is replaced entirely.
+     * Use this for pull-to-refresh and initial sync on new devices.
+     */
+    suspend fun syncFromNostr(nostrService: NostrService): Boolean {
+        return try {
+            _isLoading.value = true
+            val historyData = nostrService.fetchRideHistory()
+            if (historyData != null) {
+                Log.d(TAG, "Syncing ${historyData.rides.size} rides from Nostr (replacing local)")
+
+                // REPLACE local with Nostr data - Nostr is source of truth
+                _rides.value = historyData.rides
+                    .sortedByDescending { it.timestamp }
+                    .take(MAX_RIDES)
+                saveRides()
+                updateStats()
+                Log.d(TAG, "Replaced local history with ${_rides.value.size} rides from Nostr")
+                true
+            } else {
+                Log.d(TAG, "No ride history found on Nostr (keeping local)")
+                false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error syncing from Nostr", e)
+            false
+        } finally {
+            _isLoading.value = false
+        }
+    }
+
+    /**
+     * Update a specific ride entry (e.g., to add tip amount).
+     * Returns true if the ride was found and updated.
+     */
+    fun updateRide(rideId: String, updater: (RideHistoryEntry) -> RideHistoryEntry): Boolean {
+        val index = _rides.value.indexOfFirst { it.rideId == rideId }
+        if (index == -1) return false
+
+        val updatedList = _rides.value.toMutableList()
+        updatedList[index] = updater(updatedList[index])
+        _rides.value = updatedList
+        saveRides()
+        updateStats()
+        Log.d(TAG, "Updated ride: $rideId")
+        return true
     }
 
     /**

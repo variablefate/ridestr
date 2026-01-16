@@ -144,7 +144,16 @@ data class RideHistoryEntry(
     val distanceMiles: Double,   // Exact distance for stats
     val durationMinutes: Int,    // Exact duration for stats
     val fareSats: Long,
-    val status: String   // "completed", "cancelled", etc.
+    val status: String,   // "completed", "cancelled", etc.
+
+    // Counterparty details (for ride detail screen)
+    val counterpartyFirstName: String? = null,  // First word of display name
+    val vehicleMake: String? = null,            // e.g. "Toyota"
+    val vehicleModel: String? = null,           // e.g. "Camry"
+    val lightningAddress: String? = null,       // For tips (stored, not displayed in list)
+
+    // Tip tracking
+    val tipSats: Long = 0  // Tip amount if given
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("ride_id", rideId)
@@ -164,6 +173,13 @@ data class RideHistoryEntry(
         put("duration_minutes", durationMinutes)
         put("fare_sats", fareSats)
         put("status", status)
+        // Counterparty details
+        counterpartyFirstName?.let { put("counterparty_first_name", it) }
+        vehicleMake?.let { put("vehicle_make", it) }
+        vehicleModel?.let { put("vehicle_model", it) }
+        lightningAddress?.let { put("lightning_address", it) }
+        // Tip tracking (only if > 0)
+        if (tipSats > 0) put("tip_sats", tipSats)
     }
 
     companion object {
@@ -186,7 +202,13 @@ data class RideHistoryEntry(
                     distanceMiles = json.getDouble("distance_miles"),
                     durationMinutes = json.getInt("duration_minutes"),
                     fareSats = json.getLong("fare_sats"),
-                    status = json.getString("status")
+                    status = json.getString("status"),
+                    // Counterparty details (optional, for backwards compatibility)
+                    counterpartyFirstName = json.optString("counterparty_first_name", null),
+                    vehicleMake = json.optString("vehicle_make", null),
+                    vehicleModel = json.optString("vehicle_model", null),
+                    lightningAddress = json.optString("lightning_address", null),
+                    tipSats = json.optLong("tip_sats", 0)
                 )
             } catch (e: Exception) {
                 null

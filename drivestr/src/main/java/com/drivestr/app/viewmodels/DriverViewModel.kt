@@ -892,6 +892,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         if (offer != null) {
             viewModelScope.launch {
                 try {
+                    val vehicle = state.activeVehicle
                     val historyEntry = RideHistoryEntry(
                         rideId = state.confirmationEventId ?: state.acceptanceEventId ?: offer.eventId,
                         timestamp = System.currentTimeMillis() / 1000,
@@ -902,7 +903,11 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                         distanceMiles = offer.rideRouteKm?.let { it * 0.621371 } ?: 0.0,  // Convert km to miles
                         durationMinutes = offer.rideRouteMin?.toInt() ?: 0,
                         fareSats = offer.fareEstimate.toLong(),
-                        status = "completed"
+                        status = "completed",
+                        // Vehicle info for ride details
+                        vehicleMake = vehicle?.make,
+                        vehicleModel = vehicle?.model
+                        // counterpartyFirstName and lightningAddress will be added when rider profile sharing is implemented
                     )
                     rideHistoryRepository.addRide(historyEntry)
                     Log.d(TAG, "Saved completed ride to history: ${historyEntry.rideId}")
@@ -1168,6 +1173,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             // Save cancelled ride to history (only if we had an accepted offer)
             if (offer != null) {
                 try {
+                    val vehicle = state.activeVehicle
                     val historyEntry = RideHistoryEntry(
                         rideId = confirmationEventId ?: state.acceptanceEventId ?: offer.eventId,
                         timestamp = System.currentTimeMillis() / 1000,
@@ -1178,7 +1184,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                         distanceMiles = offer.rideRouteKm?.let { it * 0.621371 } ?: 0.0,
                         durationMinutes = 0,  // Ride was cancelled, no actual duration
                         fareSats = 0,  // No fare earned for cancelled ride
-                        status = "cancelled"
+                        status = "cancelled",
+                        vehicleMake = vehicle?.make,
+                        vehicleModel = vehicle?.model
                     )
                     rideHistoryRepository.addRide(historyEntry)
                     Log.d(TAG, "Saved cancelled ride to history: ${historyEntry.rideId}")
@@ -1760,6 +1768,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         if (offer != null) {
             viewModelScope.launch {
                 try {
+                    val vehicle = state.activeVehicle
                     val historyEntry = RideHistoryEntry(
                         rideId = state.confirmationEventId ?: state.acceptanceEventId ?: offer.eventId,
                         timestamp = System.currentTimeMillis() / 1000,
@@ -1770,7 +1779,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                         distanceMiles = offer.rideRouteKm?.let { it * 0.621371 } ?: 0.0,
                         durationMinutes = 0,  // Ride was cancelled, no actual duration
                         fareSats = 0,  // No fare earned for cancelled ride
-                        status = "cancelled"
+                        status = "cancelled",
+                        vehicleMake = vehicle?.make,
+                        vehicleModel = vehicle?.model
                     )
                     rideHistoryRepository.addRide(historyEntry)
                     Log.d(TAG, "Saved rider-cancelled ride to history: ${historyEntry.rideId}")

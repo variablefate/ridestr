@@ -91,6 +91,10 @@ fun EarningsScreen(
                 TextButton(
                     onClick = {
                         rideHistoryRepository.deleteRide(ride.rideId)
+                        // Sync deletion to Nostr (Nostr is source of truth)
+                        coroutineScope.launch {
+                            rideHistoryRepository.backupToNostr(nostrService)
+                        }
                         rideToDelete = null
                     }
                 ) {
