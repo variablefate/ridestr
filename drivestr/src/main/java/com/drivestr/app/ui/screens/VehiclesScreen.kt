@@ -97,6 +97,7 @@ fun VehiclesScreen(
                         alwaysAskVehicle = alwaysAskVehicle,
                         activeVehicleId = activeVehicleId,
                         isRideActive = isRideActive,
+                        driverStage = driverStage,
                         onEdit = { editingVehicle = vehicle },
                         onDelete = { onDeleteVehicle(vehicle.id) },
                         onSetPrimary = { onSetPrimary(vehicle.id) }
@@ -179,6 +180,7 @@ private fun VehicleCard(
     alwaysAskVehicle: Boolean,
     activeVehicleId: String?,
     isRideActive: Boolean,
+    driverStage: DriverStage?,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
     onSetPrimary: () -> Unit
@@ -193,8 +195,8 @@ private fun VehicleCard(
         !alwaysAskVehicle && vehicle.isPrimary -> "Currently in use"
         else -> null
     }
-    // Only show "Set Primary" button in auto-select mode AND when no ride is active
-    val showSetPrimaryButton = !alwaysAskVehicle && !vehicle.isPrimary && !isRideActive
+    // Only show "Set Primary" button in auto-select mode AND when offline (not online)
+    val showSetPrimaryButton = !alwaysAskVehicle && !vehicle.isPrimary && !isRideActive && driverStage == DriverStage.OFFLINE
 
     Card(
         modifier = Modifier.fillMaxWidth()
