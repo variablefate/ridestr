@@ -189,19 +189,6 @@ fun HistoryScreen(
                 }
             }
 
-            // Loading indicator
-            if (isLoading) {
-                item {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        CircularProgressIndicator()
-                    }
-                }
-            }
         }
     }
 }
