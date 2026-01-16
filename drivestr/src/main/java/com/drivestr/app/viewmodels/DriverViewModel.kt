@@ -1592,6 +1592,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.value.currentLocation?.let { location ->
             startBroadcasting(location)
             subscribeToBroadcastRequests(location)
+            subscribeToOffers()
+            Log.d(TAG, "Resumed broadcasting after confirmation timeout")
         }
     }
 
@@ -1803,6 +1805,14 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Stop the foreground service if going offline
         if (newStage == DriverStage.OFFLINE) {
             DriverOnlineService.stop(context)
+        }
+
+        // Resume broadcasting and subscriptions if returning to AVAILABLE
+        if (newStage == DriverStage.AVAILABLE && state.currentLocation != null) {
+            startBroadcasting(state.currentLocation)
+            subscribeToBroadcastRequests(state.currentLocation)
+            subscribeToOffers()
+            Log.d(TAG, "Resumed broadcasting after rider cancellation")
         }
 
         _uiState.value = state.copy(
