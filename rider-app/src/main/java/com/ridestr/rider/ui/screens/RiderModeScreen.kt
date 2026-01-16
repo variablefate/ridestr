@@ -52,6 +52,7 @@ import com.ridestr.common.nostr.events.UserProfile
 import com.ridestr.common.routing.RouteResult
 import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.location.GeocodingResult
+import com.ridestr.common.location.GeocodingService
 import com.ridestr.common.settings.DisplayCurrency
 import com.ridestr.common.settings.DistanceUnit
 import com.ridestr.common.settings.SettingsManager
@@ -1367,7 +1368,7 @@ private fun SwipeableDriverCard(
 
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = profile?.bestName() ?: "Driver ${driver.driverPubKey.take(8)}...",
+                        text = profile?.bestName()?.split(" ")?.firstOrNull() ?: "Driver ${driver.driverPubKey.take(8)}...",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold
                     )
@@ -1439,7 +1440,7 @@ private fun DriverCard(
 
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = profile?.bestName() ?: "Driver ${driver.driverPubKey.take(8)}...",
+                    text = profile?.bestName()?.split(" ")?.firstOrNull() ?: "Driver ${driver.driverPubKey.take(8)}...",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold
                 )
@@ -1811,7 +1812,7 @@ private fun RequestRideCard(
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-                text = "Driver: ${driverProfile?.bestName() ?: driver.driverPubKey.take(12) + "..."}",
+                text = "Driver: ${driverProfile?.bestName()?.split(" ")?.firstOrNull() ?: driver.driverPubKey.take(12) + "..."}",
                 style = MaterialTheme.typography.bodyMedium
             )
             // Prefer vehicle info from availability event, fallback to profile
@@ -1895,7 +1896,7 @@ private fun RideWaitingContent(
     }
     val driverCount = uiState.nearbyDriverCount
     val driverName = uiState.selectedDriver?.let {
-        uiState.driverProfiles[it.driverPubKey]?.bestName()
+        uiState.driverProfiles[it.driverPubKey]?.bestName()?.split(" ")?.firstOrNull()
     } ?: "driver"
 
     // Animated progress state
@@ -2474,7 +2475,7 @@ private fun DriverOnTheWayContent(
 
             // Driver name
             Text(
-                text = driverProfile?.bestName() ?: "Your driver",
+                text = driverProfile?.bestName()?.split(" ")?.firstOrNull() ?: "Your driver",
                 style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.Bold
             )
@@ -2638,8 +2639,8 @@ private fun DriverArrivedContent(
                 )
             }
 
-            // Driver name
-            driverProfile?.bestName()?.let { name ->
+            // Driver name (first name only)
+            driverProfile?.bestName()?.split(" ")?.firstOrNull()?.let { name ->
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = "Driver: $name",
@@ -2740,10 +2741,21 @@ private fun RideInProgressContent(
     onCancelRide: () -> Unit,
     chatMessageCount: Int
 ) {
+    val context = LocalContext.current
+    val geocodingService = remember { GeocodingService(context) }
+    var destinationAddress by remember { mutableStateOf<String?>(null) }
+
+    // Reverse geocode destination to show address
+    LaunchedEffect(uiState.destination) {
+        uiState.destination?.let { dest ->
+            destinationAddress = geocodingService.reverseGeocode(dest.lat, dest.lon)
+        }
+    }
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.tertiaryContainer
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
         )
     ) {
         Column(
@@ -2756,24 +2768,26 @@ private fun RideInProgressContent(
                 Icons.Default.DirectionsCar,
                 contentDescription = null,
                 modifier = Modifier.size(48.dp),
-                tint = MaterialTheme.colorScheme.tertiary
+                tint = MaterialTheme.colorScheme.primary
             )
 
             Spacer(modifier = Modifier.height(16.dp))
 
             Text(
-                text = "Ride in Progress",
+                text = "RIDE IN PROGRESS",
                 style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.Bold
             )
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            Text(
-                text = uiState.statusMessage,
-                style = MaterialTheme.typography.bodyMedium,
-                textAlign = TextAlign.Center
-            )
+            destinationAddress?.let { address ->
+                Text(
+                    text = address,
+                    style = MaterialTheme.typography.bodyMedium,
+                    textAlign = TextAlign.Center
+                )
+            }
 
             // Show PIN from state (rider generated)
             uiState.pickupPin?.let { pin ->

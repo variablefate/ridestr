@@ -506,6 +506,24 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 startChatRefreshJob(confirmationEventId)
             }
 
+            // Start foreground service with appropriate status for restored ride
+            // This ensures notification appears when app is reopened with active ride
+            val context = getApplication<Application>()
+            val driverName = _uiState.value.driverProfiles[acceptance.driverPubKey]?.bestName()?.split(" ")?.firstOrNull()
+
+            when (stage) {
+                RideStage.RIDE_CONFIRMED -> {
+                    RiderActiveService.updateStatus(context, RiderStatus.DriverEnRoute(driverName))
+                }
+                RideStage.DRIVER_ARRIVED -> {
+                    RiderActiveService.updateStatus(context, RiderStatus.DriverArrived(driverName))
+                }
+                RideStage.IN_PROGRESS -> {
+                    RiderActiveService.updateStatus(context, RiderStatus.RideInProgress(driverName))
+                }
+                else -> { /* No service needed for other stages */ }
+            }
+
         } catch (e: Exception) {
             Log.e(TAG, "Failed to restore ride state", e)
             clearSavedRideState()
@@ -1683,7 +1701,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 acceptanceSubscriptionId = null
 
                 // Update service status - plays confirmation sound and updates notification
-                val driverName = _uiState.value.driverProfiles[acceptance.driverPubKey]?.bestName()
+                val driverName = _uiState.value.driverProfiles[acceptance.driverPubKey]?.bestName()?.split(" ")?.firstOrNull()
                 RiderActiveService.updateStatus(getApplication(), RiderStatus.DriverEnRoute(driverName))
 
                 _uiState.value = _uiState.value.copy(
@@ -1823,7 +1841,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         val driverPubKey = state.acceptance?.driverPubKey
-        val driverName = driverPubKey?.let { _uiState.value.driverProfiles[it]?.bestName() }
+        val driverName = driverPubKey?.let { _uiState.value.driverProfiles[it]?.bestName()?.split(" ")?.firstOrNull() }
 
         when (action.status) {
             DriverStatusType.EN_ROUTE_PICKUP -> {
@@ -1912,12 +1930,13 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
                 // Update service status to in progress
                 val context = getApplication<Application>()
-                val driverName = _uiState.value.driverProfiles[driverPubKey]?.bestName()
+                val driverName = _uiState.value.driverProfiles[driverPubKey]?.bestName()?.split(" ")?.firstOrNull()
                 RiderActiveService.updateStatus(context, RiderStatus.RideInProgress(driverName))
 
                 _uiState.value = state.copy(
                     pinAttempts = newAttempts,
                     pinVerified = true,
+                    pickupPin = null,  // Clear PIN after verification - no longer needed
                     rideStage = RideStage.IN_PROGRESS,
                     statusMessage = "PIN verified! Ride in progress."
                 )
@@ -2468,7 +2487,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
         val context = getApplication<Application>()
         val driverPubKey = _uiState.value.acceptance?.driverPubKey
-        val driverName = driverPubKey?.let { _uiState.value.driverProfiles[it]?.bestName() }
+        val driverName = driverPubKey?.let { _uiState.value.driverProfiles[it]?.bestName()?.split(" ")?.firstOrNull() }
 
         // Update service - handles notification update and sound
         RiderActiveService.updateStatus(context, RiderStatus.DriverArrived(driverName))

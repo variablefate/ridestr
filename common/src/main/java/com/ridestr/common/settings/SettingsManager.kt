@@ -64,7 +64,7 @@ class SettingsManager(context: Context) {
         val DEFAULT_RELAYS = listOf(
             "wss://relay.damus.io",
             "wss://nos.lol",
-            "wss://relay.nostr.band"
+            "wss://relay.primal.net"
         )
 
         // Maximum number of relays allowed

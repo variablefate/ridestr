@@ -11,7 +11,7 @@ object RelayConfig {
     val DEFAULT_RELAYS = listOf(
         "wss://relay.damus.io",
         "wss://nos.lol",
-        "wss://relay.nostr.band"
+        "wss://relay.primal.net"
     )
 
     /**
