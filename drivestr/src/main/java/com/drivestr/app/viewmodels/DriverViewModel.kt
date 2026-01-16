@@ -26,6 +26,7 @@ import com.ridestr.common.nostr.events.RiderRideStateData
 import com.ridestr.common.nostr.events.RiderRideStateEvent
 import com.ridestr.common.nostr.events.RideshareChatData
 import com.ridestr.common.nostr.events.RideshareEventKinds
+import com.ridestr.common.nostr.events.UserProfile
 import com.ridestr.common.routing.RouteResult
 import com.ridestr.common.routing.ValhallaRoutingService
 import kotlinx.coroutines.Job
@@ -165,6 +166,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
     // Subscription ID for rider ride state (replaces verificationSubscriptionId and preciseLocationSubscriptionId)
     private var riderRideStateSubscriptionId: String? = null
+
+    // Rider profile subscription tracking
+    private val riderProfileSubscriptionIds = mutableMapOf<String, String>()
 
     /**
      * Helper to add a status action to history and publish driver ride state.
@@ -786,6 +790,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
         cancellationSubscriptionId = null
 
+        // Unsubscribe from rider profile
+        state.acceptedOffer?.riderPubKey?.let { unsubscribeFromRiderProfile(it) }
+
         // Clear driver state history
         clearDriverStateHistory()
 
@@ -893,6 +900,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             viewModelScope.launch {
                 try {
                     val vehicle = state.activeVehicle
+                    val riderProfile = state.riderProfiles[offer.riderPubKey]
                     val historyEntry = RideHistoryEntry(
                         rideId = state.confirmationEventId ?: state.acceptanceEventId ?: offer.eventId,
                         timestamp = System.currentTimeMillis() / 1000,
@@ -906,8 +914,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                         status = "completed",
                         // Vehicle info for ride details
                         vehicleMake = vehicle?.make,
-                        vehicleModel = vehicle?.model
-                        // counterpartyFirstName and lightningAddress will be added when rider profile sharing is implemented
+                        vehicleModel = vehicle?.model,
+                        // Rider profile info
+                        counterpartyFirstName = riderProfile?.bestName()?.split(" ")?.firstOrNull()
                     )
                     rideHistoryRepository.addRide(historyEntry)
                     Log.d(TAG, "Saved completed ride to history: ${historyEntry.rideId}")
@@ -920,12 +929,42 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
 
+        // Unsubscribe from rider profile
+        offer?.riderPubKey?.let { unsubscribeFromRiderProfile(it) }
+
         // Clean up ride events in background (non-blocking)
         cleanupRideEventsInBackground("ride completed")
 
         // Go online immediately - don't wait for cleanup
         // Use goOnline directly with the captured vehicle (from state at start of function)
         goOnline(location, state.activeVehicle)
+    }
+
+    /**
+     * Subscribe to a rider's profile to get their name for ride history.
+     */
+    private fun subscribeToRiderProfile(riderPubKey: String) {
+        if (riderProfileSubscriptionIds.containsKey(riderPubKey)) return
+
+        val subId = nostrService.subscribeToProfile(riderPubKey) { profile ->
+            Log.d(TAG, "Got profile for rider ${riderPubKey.take(8)}: ${profile.bestName()}")
+            val currentProfiles = _uiState.value.riderProfiles.toMutableMap()
+            currentProfiles[riderPubKey] = profile
+            _uiState.value = _uiState.value.copy(riderProfiles = currentProfiles)
+        }
+        riderProfileSubscriptionIds[riderPubKey] = subId
+    }
+
+    /**
+     * Unsubscribe from a rider's profile when the ride ends.
+     */
+    private fun unsubscribeFromRiderProfile(riderPubKey: String) {
+        riderProfileSubscriptionIds.remove(riderPubKey)?.let { subId ->
+            nostrService.closeSubscription(subId)
+        }
+        val currentProfiles = _uiState.value.riderProfiles.toMutableMap()
+        currentProfiles.remove(riderPubKey)
+        _uiState.value = _uiState.value.copy(riderProfiles = currentProfiles)
     }
 
     private fun closeOfferSubscription() {
@@ -993,6 +1032,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 // Note: Confirmation references our acceptance event ID, not the offer ID
                 subscribeToConfirmation(eventId)
                 // Note: We'll subscribe to rider ride state after receiving confirmation
+
+                // Subscribe to rider profile to get their name for ride history
+                subscribeToRiderProfile(offer.riderPubKey)
             } else {
                 _uiState.value = _uiState.value.copy(
                     isProcessingOffer = false,
@@ -2626,6 +2668,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 // Subscribe to rider's confirmation
                 subscribeToConfirmation(eventId)
                 // Note: We'll subscribe to rider ride state after receiving confirmation
+
+                // Subscribe to rider profile to get their name for ride history
+                subscribeToRiderProfile(request.riderPubKey)
             } else {
                 _uiState.value = _uiState.value.copy(
                     isProcessingOffer = false,
@@ -2793,6 +2838,9 @@ data class DriverUiState(
 
     // User identity
     val myPubKey: String = "",
+
+    // Rider profiles (for displaying name in history)
+    val riderProfiles: Map<String, UserProfile> = emptyMap(),
 
     // UI
     val statusMessage: String = "Tap to go online",
