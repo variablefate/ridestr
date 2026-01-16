@@ -29,6 +29,9 @@ import com.ridestr.rider.ui.screens.OnboardingScreen
 import com.ridestr.rider.ui.screens.ProfileSetupScreen
 import com.ridestr.rider.ui.screens.SettingsContent
 import com.ridestr.rider.ui.screens.WalletScreen
+import com.ridestr.rider.ui.screens.TipScreen
+import com.ridestr.common.ui.RideDetailScreen
+import com.ridestr.common.nostr.events.RideHistoryEntry
 import com.ridestr.common.routing.NostrTileDiscoveryService
 import com.ridestr.common.routing.TileDownloadService
 import com.ridestr.common.routing.TileManager
@@ -51,6 +54,7 @@ import com.ridestr.common.data.RideHistoryRepository
 import com.ridestr.common.notification.NotificationHelper
 import com.ridestr.common.ui.theme.RidestrTheme
 import com.ridestr.rider.service.RiderActiveService
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 
 /**
@@ -72,6 +76,8 @@ enum class Screen {
     LOCATION_PERMISSION,
     TILE_SETUP,
     MAIN,           // Shows bottom navigation with tabs
+    RIDE_DETAIL,    // Detail view for single ride
+    TIP,            // Tip driver screen
     DEBUG,
     BACKUP_KEYS,
     TILES,
@@ -160,6 +166,12 @@ fun RidestrApp() {
         }
         mutableStateOf(initialScreen)
     }
+
+    // Selected ride for detail screen
+    var selectedRide by remember { mutableStateOf<RideHistoryEntry?>(null) }
+
+    // Lightning address for tip screen
+    var tipLightningAddress by remember { mutableStateOf<String?>(null) }
 
     // Connect to Nostr if starting at MAIN screen
     LaunchedEffect(Unit) {
@@ -332,6 +344,10 @@ fun RidestrApp() {
                     onOpenDebug = {
                         currentScreen = Screen.DEBUG
                     },
+                    onOpenRideDetail = { ride ->
+                        selectedRide = ride
+                        currentScreen = Screen.RIDE_DETAIL
+                    },
                     modifier = Modifier.padding(innerPadding)
                 )
             }
@@ -392,6 +408,75 @@ fun RidestrApp() {
                     modifier = Modifier.padding(innerPadding)
                 )
             }
+
+            Screen.RIDE_DETAIL -> {
+                val rideHistoryRepo = remember { RideHistoryRepository.getInstance(context) }
+                val displayCurrency by settingsManager.displayCurrency.collectAsState()
+                val riderViewModel: RiderViewModel = viewModel()
+                val btcPrice by riderViewModel.bitcoinPriceService.btcPriceUsd.collectAsState()
+                val coroutineScope = rememberCoroutineScope()
+
+                selectedRide?.let { ride ->
+                    RideDetailScreen(
+                        ride = ride,
+                        displayCurrency = displayCurrency,
+                        btcPriceUsd = btcPrice,
+                        settingsManager = settingsManager,
+                        isRiderApp = true,
+                        onBack = {
+                            currentScreen = Screen.MAIN
+                            selectedRide = null
+                        },
+                        onDelete = {
+                            rideHistoryRepo.deleteRide(ride.rideId)
+                            coroutineScope.launch {
+                                rideHistoryRepo.backupToNostr(nostrService)
+                            }
+                            currentScreen = Screen.MAIN
+                            selectedRide = null
+                        },
+                        onTip = { lightningAddress ->
+                            tipLightningAddress = lightningAddress
+                            currentScreen = Screen.TIP
+                        },
+                        modifier = Modifier.padding(innerPadding)
+                    )
+                } ?: run {
+                    // Fallback if no ride selected
+                    currentScreen = Screen.MAIN
+                }
+            }
+
+            Screen.TIP -> {
+                val rideHistoryRepo = remember { RideHistoryRepository.getInstance(context) }
+                val riderViewModel: RiderViewModel = viewModel()
+                val displayCurrency by settingsManager.displayCurrency.collectAsState()
+                val btcPrice by riderViewModel.bitcoinPriceService.btcPriceUsd.collectAsState()
+
+                tipLightningAddress?.let { address ->
+                    TipScreen(
+                        lightningAddress = address,
+                        displayCurrency = displayCurrency,
+                        btcPriceUsd = btcPrice,
+                        settingsManager = settingsManager,
+                        onBack = { currentScreen = Screen.RIDE_DETAIL },
+                        onTipSent = { tipAmount ->
+                            // Update the ride entry with tip amount
+                            selectedRide?.let { ride ->
+                                rideHistoryRepo.updateRide(ride.rideId) { entry ->
+                                    entry.copy(tipSats = entry.tipSats + tipAmount)
+                                }
+                                // Update selected ride for detail screen
+                                selectedRide = rideHistoryRepo.rides.value.find { it.rideId == ride.rideId }
+                            }
+                            currentScreen = Screen.RIDE_DETAIL
+                        },
+                        modifier = Modifier.padding(innerPadding)
+                    )
+                } ?: run {
+                    currentScreen = Screen.RIDE_DETAIL
+                }
+            }
         }
     }
 }
@@ -411,6 +496,7 @@ fun MainScreen(
     onOpenTiles: () -> Unit,
     onOpenDevOptions: () -> Unit,
     onOpenDebug: () -> Unit,
+    onOpenRideDetail: (RideHistoryEntry) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val connectedCount = connectionStates.values.count { it == RelayConnectionState.CONNECTED }
@@ -536,6 +622,7 @@ fun MainScreen(
                     settingsManager = settingsManager,
                     nostrService = nostrService,
                     priceService = riderViewModel.bitcoinPriceService,
+                    onRideClick = onOpenRideDetail,
                     modifier = Modifier.padding(innerPadding)
                 )
             }

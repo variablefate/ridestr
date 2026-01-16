@@ -8,9 +8,12 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -35,6 +38,7 @@ fun HistoryScreen(
     settingsManager: SettingsManager,
     nostrService: NostrService,
     priceService: BitcoinPriceService,
+    onRideClick: (RideHistoryEntry) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val rides by rideHistoryRepository.rides.collectAsState()
@@ -46,6 +50,12 @@ fun HistoryScreen(
 
     var showClearDialog by remember { mutableStateOf(false) }
     var rideToDelete by remember { mutableStateOf<RideHistoryEntry?>(null) }
+    var isRefreshing by remember { mutableStateOf(false) }
+
+    // Sync from Nostr on first load
+    LaunchedEffect(Unit) {
+        rideHistoryRepository.syncFromNostr(nostrService)
+    }
 
     // Clear all history confirmation dialog
     if (showClearDialog) {
@@ -107,76 +117,89 @@ fun HistoryScreen(
         )
     }
 
-    LazyColumn(
-        modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+    PullToRefreshBox(
+        isRefreshing = isRefreshing || isLoading,
+        onRefresh = {
+            isRefreshing = true
+            coroutineScope.launch {
+                rideHistoryRepository.syncFromNostr(nostrService)
+                isRefreshing = false
+            }
+        },
+        modifier = modifier.fillMaxSize()
     ) {
-        // Stats Summary Card
-        item {
-            StatsCard(
-                stats = stats,
-                displayCurrency = displayCurrency,
-                btcPriceUsd = btcPriceUsd,
-                settingsManager = settingsManager
-            )
-        }
-
-        // Header with Clear All option
-        if (rides.isNotEmpty()) {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // Stats Summary Card
             item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Recent Rides",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    TextButton(
-                        onClick = { showClearDialog = true }
+                StatsCard(
+                    stats = stats,
+                    displayCurrency = displayCurrency,
+                    btcPriceUsd = btcPriceUsd,
+                    settingsManager = settingsManager
+                )
+            }
+
+            // Header with Clear All option
+            if (rides.isNotEmpty()) {
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.DeleteSweep,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
+                        Text(
+                            text = "Recent Rides",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurface
                         )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Clear All")
+                        TextButton(
+                            onClick = { showClearDialog = true }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.DeleteSweep,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Clear All")
+                        }
                     }
                 }
             }
-        }
 
-        // Ride List
-        if (rides.isEmpty()) {
-            item {
-                EmptyHistoryCard()
+            // Ride List
+            if (rides.isEmpty()) {
+                item {
+                    EmptyHistoryCard()
+                }
+            } else {
+                items(rides, key = { it.rideId }) { ride ->
+                    RideHistoryCard(
+                        ride = ride,
+                        displayCurrency = displayCurrency,
+                        btcPriceUsd = btcPriceUsd,
+                        settingsManager = settingsManager,
+                        onClick = { onRideClick(ride) },
+                        onDelete = { rideToDelete = ride }
+                    )
+                }
             }
-        } else {
-            items(rides, key = { it.rideId }) { ride ->
-                RideHistoryCard(
-                    ride = ride,
-                    displayCurrency = displayCurrency,
-                    btcPriceUsd = btcPriceUsd,
-                    settingsManager = settingsManager,
-                    onDelete = { rideToDelete = ride }
-                )
-            }
-        }
 
-        // Loading indicator
-        if (isLoading) {
-            item {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    CircularProgressIndicator()
+            // Loading indicator
+            if (isLoading) {
+                item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator()
+                    }
                 }
             }
         }
@@ -325,6 +348,7 @@ private fun RideHistoryCard(
     displayCurrency: DisplayCurrency,
     btcPriceUsd: Int?,
     settingsManager: SettingsManager,
+    onClick: () -> Unit,
     onDelete: () -> Unit
 ) {
     val dateFormat = remember { SimpleDateFormat("MMM d, yyyy 'at' h:mm a", Locale.getDefault()) }
@@ -343,7 +367,9 @@ private fun RideHistoryCard(
     val isCompleted = ride.status == "completed"
 
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
         colors = CardDefaults.cardColors(
             containerColor = if (isCompleted)
                 MaterialTheme.colorScheme.surface

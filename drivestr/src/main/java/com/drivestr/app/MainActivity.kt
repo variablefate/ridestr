@@ -33,6 +33,9 @@ import com.drivestr.app.ui.screens.VehicleSetupScreen
 import com.drivestr.app.ui.screens.WalletScreen
 import com.drivestr.app.ui.screens.EarningsScreen
 import com.ridestr.common.data.RideHistoryRepository
+import com.ridestr.common.nostr.events.RideHistoryEntry
+import com.ridestr.common.ui.RideDetailScreen
+import kotlinx.coroutines.launch
 import com.ridestr.common.data.VehicleRepository
 import com.ridestr.common.routing.NostrTileDiscoveryService
 import com.ridestr.common.routing.TileDownloadService
@@ -76,6 +79,7 @@ enum class Screen {
     TILE_SETUP,
     MAIN,           // Shows bottom navigation with tabs
     EARNINGS,       // Full earnings history (navigated from wallet)
+    RIDE_DETAIL,    // Detail view for single ride
     DEBUG,
     BACKUP_KEYS,
     TILES,
@@ -172,6 +176,9 @@ fun DrivestrApp() {
         }
         mutableStateOf(initialScreen)
     }
+
+    // Selected ride for detail screen
+    var selectedRide by remember { mutableStateOf<RideHistoryEntry?>(null) }
 
     // Connect to Nostr if starting at MAIN screen
     LaunchedEffect(Unit) {
@@ -436,8 +443,44 @@ fun DrivestrApp() {
                     nostrService = nostrService,
                     priceService = bitcoinPriceService,
                     onBack = { currentScreen = Screen.MAIN },
+                    onRideClick = { ride ->
+                        selectedRide = ride
+                        currentScreen = Screen.RIDE_DETAIL
+                    },
                     modifier = Modifier.padding(innerPadding)
                 )
+            }
+
+            Screen.RIDE_DETAIL -> {
+                val displayCurrency by settingsManager.displayCurrency.collectAsState()
+                val btcPrice by bitcoinPriceService.btcPriceUsd.collectAsState()
+                val coroutineScope = rememberCoroutineScope()
+
+                selectedRide?.let { ride ->
+                    RideDetailScreen(
+                        ride = ride,
+                        displayCurrency = displayCurrency,
+                        btcPriceUsd = btcPrice,
+                        settingsManager = settingsManager,
+                        isRiderApp = false,
+                        onBack = {
+                            currentScreen = Screen.EARNINGS
+                            selectedRide = null
+                        },
+                        onDelete = {
+                            rideHistoryRepository.deleteRide(ride.rideId)
+                            coroutineScope.launch {
+                                rideHistoryRepository.backupToNostr(nostrService)
+                            }
+                            currentScreen = Screen.EARNINGS
+                            selectedRide = null
+                        },
+                        onTip = null,  // Drivers don't tip riders
+                        modifier = Modifier.padding(innerPadding)
+                    )
+                } ?: run {
+                    currentScreen = Screen.EARNINGS
+                }
             }
         }
     }
