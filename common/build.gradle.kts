@@ -53,6 +53,7 @@ dependencies {
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.activity.compose)
+    implementation("androidx.compose.material:material-icons-extended:1.7.6")
 
     // Valhalla Mobile - Offline routing engine
     implementation(libs.valhalla.mobile)
