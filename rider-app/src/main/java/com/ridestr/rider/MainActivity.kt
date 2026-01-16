@@ -384,9 +384,11 @@ fun RidestrApp() {
             }
 
             Screen.ACCOUNT_SAFETY -> {
+                val riderViewModel: RiderViewModel = viewModel()
                 AccountSafetyScreen(
                     nostrService = nostrService,
                     onBack = { currentScreen = Screen.MAIN },
+                    onLocalStateClear = { riderViewModel.clearLocalRideState() },
                     modifier = Modifier.padding(innerPadding)
                 )
             }

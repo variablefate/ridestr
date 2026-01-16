@@ -40,6 +40,7 @@ import com.ridestr.common.settings.SettingsManager
 import com.ridestr.common.routing.ValhallaRoutingService
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -57,6 +58,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         private const val TAG = "RiderViewModel"
         // Fare pricing in USD
         private const val FARE_USD_PER_MILE = 1.85  // $1.85 per mile (competitive with Uber/Lyft)
+        private const val MINIMUM_FARE_USD = 5.0    // $5.00 minimum fare to ensure driver profitability
         // Fare boost amounts
         private const val FARE_BOOST_USD = 1.0     // $1 boost in USD mode
         private const val FARE_BOOST_SATS = 1000.0 // 1000 sats boost in sats mode
@@ -148,8 +150,33 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     // Track how many driver actions we've processed (to detect new actions)
     private var lastProcessedDriverActionCount = 0
 
+    // Event deduplication sets - prevents stale events from affecting new rides
+    // These track processed event IDs to avoid re-processing queued events from closed subscriptions
+    private val processedDriverStateEventIds = mutableSetOf<String>()
+    private val processedCancellationEventIds = mutableSetOf<String>()
+
     // Current phase for rider ride state
     private var currentRiderPhase = RiderRideStateEvent.Phase.AWAITING_DRIVER
+
+    /**
+     * Close all ride-related subscriptions.
+     * CRITICAL: Call this before starting a new ride to prevent old events affecting the new ride.
+     */
+    private fun closeAllRideSubscriptions() {
+        cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
+        cancellationSubscriptionId = null
+
+        driverRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
+        driverRideStateSubscriptionId = null
+
+        chatSubscriptionId?.let { nostrService.closeSubscription(it) }
+        chatSubscriptionId = null
+
+        acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
+        acceptanceSubscriptionId = null
+
+        Log.d(TAG, "Closed all ride subscriptions before new ride")
+    }
 
     /**
      * Clean up all ride events in background (NIP-09 deletion).
@@ -240,11 +267,16 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * Clear rider state history (called when ride ends or is cancelled).
+     * Also clears event deduplication sets to allow fresh events for new rides.
      */
     private fun clearRiderStateHistory() {
         riderStateHistory.clear()
         lastProcessedDriverActionCount = 0
         currentRiderPhase = RiderRideStateEvent.Phase.AWAITING_DRIVER
+        // Clear deduplication sets so new rides can process fresh events
+        processedDriverStateEventIds.clear()
+        processedCancellationEventIds.clear()
+        Log.d(TAG, "Cleared rider state history and event deduplication sets")
     }
 
     init {
@@ -326,6 +358,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 put("pickupPin", state.pickupPin)
                 put("pinAttempts", state.pinAttempts)
                 put("pinVerified", state.pinVerified)
+                put("lastProcessedDriverActionCount", lastProcessedDriverActionCount)
                 put("fareEstimate", state.fareEstimate)
 
                 // Acceptance data
@@ -425,6 +458,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             val pickupPin: String? = if (data.has("pickupPin")) data.getString("pickupPin") else null
             val pinAttempts = data.optInt("pinAttempts", 0)
             val pinVerified = data.optBoolean("pinVerified", false)
+            // Restore action count to prevent re-processing events on app restart
+            lastProcessedDriverActionCount = data.optInt("lastProcessedDriverActionCount", 0)
             val fareEstimate = if (data.has("fareEstimate")) data.getDouble("fareEstimate") else null
 
             // Restore chat messages
@@ -478,10 +513,27 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Clear saved ride state.
+     * Clear saved ride state from SharedPreferences.
      */
     private fun clearSavedRideState() {
         prefs.edit().remove(KEY_RIDE_STATE).apply()
+    }
+
+    /**
+     * Clear all local ride state.
+     * Called from Account Safety screen after deleting events from relays.
+     * This ensures phantom events from local storage don't affect new rides.
+     */
+    fun clearLocalRideState() {
+        Log.d(TAG, "Clearing all local ride state (Account Safety cleanup)")
+        clearSavedRideState()
+        // Reset action counter so we don't skip legitimate new events
+        lastProcessedDriverActionCount = 0
+        // Clear tracked event IDs
+        myRideEventIds.clear()
+        // Clear rider state history
+        riderStateHistory.clear()
+        currentRiderPhase = RiderRideStateEvent.Phase.AWAITING_DRIVER
     }
 
     /**
@@ -1259,6 +1311,10 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         val acceptance = state.acceptance ?: return
         val pickup = state.pickupLocation ?: return
 
+        // CRITICAL: Close any lingering subscriptions from previous rides
+        // This prevents old cancellation events from affecting this new ride
+        closeAllRideSubscriptions()
+
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isConfirmingRide = true)
 
@@ -1659,7 +1715,17 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      * This unified subscription replaces subscribeToPinSubmissions and subscribeToDriverStatus.
      */
     private fun subscribeToDriverRideState(confirmationEventId: String, driverPubKey: String) {
-        driverRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
+        // DEBUG: Log subscription creation to trace phantom cancellation
+        Log.w(TAG, "=== CREATING DRIVER STATE SUBSCRIPTION ===")
+        Log.w(TAG, "  For confirmationEventId: $confirmationEventId")
+        Log.w(TAG, "  Current state confirmationEventId: ${_uiState.value.confirmationEventId}")
+        Log.w(TAG, "  Current rideStage: ${_uiState.value.rideStage}")
+        Log.w(TAG, "  Old subscriptionId: $driverRideStateSubscriptionId")
+
+        driverRideStateSubscriptionId?.let {
+            Log.w(TAG, "  Closing old subscription: $it")
+            nostrService.closeSubscription(it)
+        }
 
         Log.d(TAG, "Subscribing to driver ride state for confirmation: ${confirmationEventId.take(8)}")
 
@@ -1681,7 +1747,37 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      * Handle updates to driver ride state - processes new actions in history.
      */
     private fun handleDriverRideState(driverState: DriverRideStateData, confirmationEventId: String, driverPubKey: String) {
-        Log.d(TAG, "Received driver ride state: status=${driverState.currentStatus}, actions=${driverState.history.size}")
+        // FIRST: Event deduplication - prevents stale queued events from affecting new rides
+        // This is the definitive fix for the phantom cancellation bug
+        if (driverState.eventId in processedDriverStateEventIds) {
+            Log.w(TAG, "=== IGNORING ALREADY-PROCESSED DRIVER STATE EVENT: ${driverState.eventId.take(8)} ===")
+            return
+        }
+
+        val currentState = _uiState.value
+
+        // DEBUG: Extensive logging to trace phantom cancellation bug
+        Log.w(TAG, "=== DRIVER STATE RECEIVED ===")
+        Log.w(TAG, "  Event ID: ${driverState.eventId.take(8)}")
+        Log.w(TAG, "  Event confirmationEventId: ${driverState.confirmationEventId}")
+        Log.w(TAG, "  Closure confirmationEventId: $confirmationEventId")
+        Log.w(TAG, "  Current state confirmationEventId: ${currentState.confirmationEventId}")
+        Log.w(TAG, "  Current rideStage: ${currentState.rideStage}")
+        Log.w(TAG, "  Event status: ${driverState.currentStatus}")
+        Log.w(TAG, "  Event history size: ${driverState.history.size}")
+        Log.w(TAG, "  lastProcessedDriverActionCount: $lastProcessedDriverActionCount")
+
+        // SECOND: Validate the EVENT's confirmation ID matches current ride
+        // This is the definitive check - the event itself knows which ride it belongs to
+        if (driverState.confirmationEventId != currentState.confirmationEventId) {
+            Log.w(TAG, "  >>> REJECTED: event confId doesn't match current state <<<")
+            return
+        }
+
+        // Mark as processed AFTER validation passes
+        processedDriverStateEventIds.add(driverState.eventId)
+        Log.w(TAG, "  >>> VALIDATION PASSED - processing event (marked as processed) <<<")
+        Log.w(TAG, "===============================")
 
         // Process only NEW actions (ones we haven't seen yet)
         val newActions = driverState.history.drop(lastProcessedDriverActionCount)
@@ -1712,6 +1808,14 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     private fun handleDriverStatusAction(action: DriverRideAction.Status, driverState: DriverRideStateData, confirmationEventId: String) {
         val state = _uiState.value
         val context = getApplication<Application>()
+
+        // CRITICAL: Validate this event is for the CURRENT ride
+        // This prevents old events from affecting new rides
+        if (state.confirmationEventId != confirmationEventId) {
+            Log.d(TAG, "Ignoring driver status for old ride: ${confirmationEventId.take(8)} vs current ${state.confirmationEventId?.take(8)}")
+            return
+        }
+
         val driverPubKey = state.acceptance?.driverPubKey
         val driverName = driverPubKey?.let { _uiState.value.driverProfiles[it]?.bestName() }
 
@@ -1751,7 +1855,10 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 handleRideCompletion(driverState)
             }
             DriverStatusType.CANCELLED -> {
-                Log.d(TAG, "Driver cancelled the ride")
+                Log.w(TAG, "=== CANCELLED STATUS DETECTED ===")
+                Log.w(TAG, "  Closure confirmationEventId: $confirmationEventId")
+                Log.w(TAG, "  Current state confirmationEventId: ${state.confirmationEventId}")
+                Log.w(TAG, "  Current rideStage: ${state.rideStage}")
                 handleDriverCancellation()
             }
         }
@@ -1762,6 +1869,14 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      */
     private fun handlePinSubmission(action: DriverRideAction.PinSubmit, confirmationEventId: String, driverPubKey: String) {
         val state = _uiState.value
+
+        // CRITICAL: Skip if already verified (prevents duplicate verification on app restart)
+        // After app restart, subscription may receive full history including already-verified PIN actions
+        if (state.pinVerified) {
+            Log.d(TAG, "PIN already verified, ignoring duplicate pin action")
+            return
+        }
+
         val expectedPin = state.pickupPin ?: return
 
         viewModelScope.launch {
@@ -1813,23 +1928,39 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     // Brute force protection - cancel the ride
                     Log.e(TAG, "Max PIN attempts reached! Cancelling ride for security.")
 
-                    // Clear driver ride state subscription
+                    // CRITICAL: Stop chat refresh job to prevent phantom events from affecting future rides
+                    stopChatRefreshJob()
+
+                    // Close ALL active subscriptions (prevents old events affecting new rides)
+                    acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
+                    acceptanceSubscriptionId = null
                     driverRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
                     driverRideStateSubscriptionId = null
+                    chatSubscriptionId?.let { nostrService.closeSubscription(it) }
+                    chatSubscriptionId = null
+                    cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
+                    cancellationSubscriptionId = null
 
                     // Clear rider state history
                     clearRiderStateHistory()
 
+                    // Stop foreground service
+                    RiderActiveService.stop(getApplication())
+
                     _uiState.value = state.copy(
                         pinAttempts = newAttempts,
                         rideStage = RideStage.IDLE,
+                        acceptance = null,
+                        confirmationEventId = null,
+                        pickupPin = null,
+                        pinVerified = false,
+                        chatMessages = emptyList(),
                         statusMessage = "Ride cancelled - too many wrong PIN attempts",
                         error = "Security alert: Driver entered wrong PIN $MAX_PIN_ATTEMPTS times. Ride cancelled."
                     )
 
                     // Clean up events
-                    state.confirmationEventId?.let { nostrService.deleteEvent(it, "security cancellation") }
-                    state.pendingOfferEventId?.let { nostrService.deleteEvent(it, "security cancellation") }
+                    cleanupRideEventsInBackground("pin brute force security")
 
                     // Resubscribe to get fresh driver list
                     resubscribeToDrivers()
@@ -1847,35 +1978,14 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Handle driver cancellation.
+     * Handle driver cancellation (called from driver ride state CANCELLED status).
+     * Delegates to the full handleDriverCancellation(reason) for consistent cleanup.
      */
     private fun handleDriverCancellation() {
-        val context = getApplication<Application>()
-        val driverPubKey = _uiState.value.acceptance?.driverPubKey
-        val driverName = driverPubKey?.let { _uiState.value.driverProfiles[it]?.bestName() }
-
-        RiderActiveService.updateStatus(context, RiderStatus.Cancelled)
-
-        // Clear subscriptions
-        driverRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
-        driverRideStateSubscriptionId = null
-
-        // Clear rider state history
-        clearRiderStateHistory()
-
-        _uiState.value = _uiState.value.copy(
-            rideStage = RideStage.IDLE,
-            acceptance = null,
-            confirmationEventId = null,
-            statusMessage = "Driver cancelled the ride",
-            error = "The driver cancelled the ride"
-        )
-
-        // Resubscribe to get fresh driver list
-        resubscribeToDrivers()
-
-        // Clear persisted ride state
-        clearSavedRideState()
+        // CRITICAL: Delegate to the full cancellation handler for proper cleanup
+        // This ensures chatRefreshJob is stopped and all subscriptions are closed,
+        // preventing phantom cancellations where old events affect new rides.
+        handleDriverCancellation(null)
     }
 
     /**
@@ -1926,7 +2036,15 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         chatRefreshJob = viewModelScope.launch {
             while (isActive) {
                 delay(CHAT_REFRESH_INTERVAL_MS)
-                Log.d(TAG, "Refreshing chat and driver state subscriptions")
+
+                // CRITICAL: Check cancellation IMMEDIATELY after delay
+                // Kotlin coroutine cancellation is cooperative - cancel() only sets a flag.
+                // Without this check, a cancelled job suspended in delay() would execute
+                // one more iteration after waking up, potentially creating stale subscriptions
+                // that receive events from a previous ride (phantom cancellation bug).
+                ensureActive()
+
+                Log.d(TAG, "Refreshing chat and driver state subscriptions for ${confirmationEventId.take(8)}")
                 subscribeToChatMessages(confirmationEventId)
                 // Refresh driver ride state subscription if we have acceptance data
                 _uiState.value.acceptance?.driverPubKey?.let { driverPubKey ->
@@ -1998,15 +2116,40 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         Log.d(TAG, "Subscribing to cancellation events for confirmation: ${confirmationEventId.take(8)}")
 
         val newSubId = nostrService.subscribeToCancellation(confirmationEventId) { cancellation ->
-            Log.d(TAG, "Received ride cancellation from driver: ${cancellation.reason ?: "no reason"}")
-
-            // Only process if we're in an active ride
-            val currentStage = _uiState.value.rideStage
-            if (currentStage !in listOf(RideStage.RIDE_CONFIRMED, RideStage.IN_PROGRESS)) {
-                Log.d(TAG, "Ignoring cancellation - not in active ride (stage=$currentStage)")
+            // FIRST: Event deduplication - prevents stale queued events from affecting new rides
+            if (cancellation.eventId in processedCancellationEventIds) {
+                Log.w(TAG, "=== IGNORING ALREADY-PROCESSED CANCELLATION EVENT: ${cancellation.eventId.take(8)} ===")
                 return@subscribeToCancellation
             }
 
+            val currentState = _uiState.value
+            val currentConfirmationId = currentState.confirmationEventId
+
+            // DEBUG: Extensive logging for Kind 3179 cancellation events
+            Log.w(TAG, "=== KIND 3179 CANCELLATION RECEIVED ===")
+            Log.w(TAG, "  Event ID: ${cancellation.eventId.take(8)}")
+            Log.w(TAG, "  Event confirmationEventId: ${cancellation.confirmationEventId}")
+            Log.w(TAG, "  Closure confirmationEventId: $confirmationEventId")
+            Log.w(TAG, "  Current state confirmationEventId: $currentConfirmationId")
+            Log.w(TAG, "  Current rideStage: ${currentState.rideStage}")
+            Log.w(TAG, "  Reason: ${cancellation.reason ?: "none"}")
+
+            // SECOND: Validate the EVENT's confirmation ID matches current ride
+            // This is the definitive check - the event itself knows which ride it belongs to
+            if (cancellation.confirmationEventId != currentConfirmationId) {
+                Log.w(TAG, "  >>> REJECTED: event confId doesn't match current state <<<")
+                return@subscribeToCancellation
+            }
+
+            // Only process if we're in an active ride
+            if (currentState.rideStage !in listOf(RideStage.RIDE_CONFIRMED, RideStage.DRIVER_ARRIVED, RideStage.IN_PROGRESS)) {
+                Log.w(TAG, "  >>> REJECTED: not in active ride stage <<<")
+                return@subscribeToCancellation
+            }
+
+            // Mark as processed AFTER validation passes
+            processedCancellationEventIds.add(cancellation.eventId)
+            Log.w(TAG, "  >>> VALIDATION PASSED - processing cancellation (marked as processed) <<<")
             handleDriverCancellation(cancellation.reason)
         }
 
@@ -2179,6 +2322,13 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      * Handle ride cancellation from driver.
      */
     private fun handleDriverCancellation(reason: String?) {
+        // DEBUG: Log cancellation handling
+        Log.w(TAG, "=== HANDLE DRIVER CANCELLATION ===")
+        Log.w(TAG, "  Reason: $reason")
+        Log.w(TAG, "  Current confirmationEventId: ${_uiState.value.confirmationEventId}")
+        Log.w(TAG, "  Current rideStage: ${_uiState.value.rideStage}")
+        Log.w(TAG, "  driverRideStateSubscriptionId: $driverRideStateSubscriptionId")
+
         // Stop refresh jobs
         stopChatRefreshJob()
 
@@ -2208,6 +2358,20 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
         // Capture state for ride history before launching coroutine
         val state = _uiState.value
+
+        // CRITICAL: Reset ride-related fields SYNCHRONOUSLY before launching coroutine
+        // This prevents phantom cancellations where delayed events from ride #1
+        // could pass validation and affect ride #2. The validation checks
+        // driverState.confirmationEventId != currentState.confirmationEventId,
+        // so setting it to null immediately ensures any stale events are rejected.
+        // Also clear selectedDriver and acceptance to prevent stale UI state.
+        _uiState.value = _uiState.value.copy(
+            confirmationEventId = null,
+            rideStage = RideStage.IDLE,
+            selectedDriver = null,
+            acceptance = null
+        )
+        Log.w(TAG, "  >>> State reset: confirmationEventId=null, rideStage=IDLE, selectedDriver=null, acceptance=null <<<")
 
         viewModelScope.launch {
             // Save cancelled ride to history (only if ride was confirmed/in progress)
@@ -2242,27 +2406,30 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
-            // Clean up all our ride events (NIP-09) - AWAIT before state reset
+            // Clean up all our ride events (NIP-09)
             cleanupRideEventsInBackground("driver cancelled")
 
-            // THEN update state after deletion completes
-            _uiState.value = _uiState.value.copy(
-                selectedDriver = null,
-                pendingOfferEventId = null,
-                acceptance = null,
-                confirmationEventId = null,
-                pickupPin = null,
-                pinAttempts = 0,
-                pinVerified = false,
-                chatMessages = emptyList(),
-                isSendingMessage = false,
-                rideStage = RideStage.IDLE,
-                statusMessage = "Driver cancelled the ride",
-                error = errorMessage
-            )
+            // Only update remaining state and resubscribe if we're still in IDLE (no new ride started)
+            // The critical fields (confirmationEventId, rideStage, selectedDriver, acceptance)
+            // were already reset synchronously. This updates the remaining UI state.
+            val currentState = _uiState.value
+            if (currentState.rideStage == RideStage.IDLE && currentState.confirmationEventId == null) {
+                _uiState.value = currentState.copy(
+                    pendingOfferEventId = null,
+                    pickupPin = null,
+                    pinAttempts = 0,
+                    pinVerified = false,
+                    chatMessages = emptyList(),
+                    isSendingMessage = false,
+                    statusMessage = "Driver cancelled the ride",
+                    error = errorMessage
+                )
 
-            // Resubscribe to get fresh driver list
-            resubscribeToDrivers()
+                // Resubscribe to get fresh driver list (only if still IDLE)
+                resubscribeToDrivers()
+            } else {
+                Log.d(TAG, "Skipping state cleanup and resubscribe - new ride already started (stage=${currentState.rideStage})")
+            }
         }
     }
 
@@ -2421,14 +2588,19 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     private fun calculateFare(route: RouteResult): Double {
         // Convert km to miles
         val distanceMiles = route.distanceKm * KM_TO_MILES
-        // Calculate fare in USD ($2 per mile)
-        val fareUsd = distanceMiles * FARE_USD_PER_MILE
+        // Calculate fare in USD
+        val distanceBasedFare = distanceMiles * FARE_USD_PER_MILE
+
+        // Enforce minimum fare of $5.00 to ensure driver profitability on short rides
+        val fareUsd = maxOf(distanceBasedFare, MINIMUM_FARE_USD)
 
         // Convert USD to sats using current BTC price
         val sats = bitcoinPriceService.usdToSats(fareUsd)
 
         // Return sats, or fallback if price unavailable
-        return sats?.toDouble() ?: (distanceMiles * FALLBACK_SATS_PER_MILE)
+        // For fallback, also enforce minimum (assuming ~$100k BTC, $5 = ~5000 sats)
+        val minimumFallbackSats = 5000.0
+        return sats?.toDouble() ?: maxOf(distanceMiles * FALLBACK_SATS_PER_MILE, minimumFallbackSats)
     }
 
     /**

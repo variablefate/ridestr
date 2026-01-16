@@ -420,9 +420,11 @@ fun DrivestrApp() {
             }
 
             Screen.ACCOUNT_SAFETY -> {
+                val driverViewModel: DriverViewModel = viewModel()
                 AccountSafetyScreen(
                     nostrService = nostrService,
                     onBack = { currentScreen = Screen.MAIN },
+                    onLocalStateClear = { driverViewModel.clearLocalRideState() },
                     modifier = Modifier.padding(innerPadding)
                 )
             }

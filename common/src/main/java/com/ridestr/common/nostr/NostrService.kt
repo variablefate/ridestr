@@ -642,6 +642,7 @@ class NostrService(
 
         // Subscribe to Kind 30180 events from the driver for this ride
         // d-tag is the confirmation event ID
+        // NOTE: No timestamp filter - handlers validate event's confirmationEventId against current ride
         return relayManager.subscribe(
             kinds = listOf(RideshareEventKinds.DRIVER_RIDE_STATE),
             authors = listOf(driverPubKey),
@@ -1237,6 +1238,7 @@ class NostrService(
 
         // Subscribe to Kind 3179 events addressed to us for this ride
         // Filter by both p tag (recipient) and e tag (confirmation) for reliable delivery
+        // NOTE: No timestamp filter - handlers validate event's confirmationEventId against current ride
         return relayManager.subscribe(
             kinds = listOf(RideCancellationEvent.KIND),
             tags = mapOf(

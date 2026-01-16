@@ -19,12 +19,17 @@ import kotlinx.coroutines.launch
 /**
  * Account Safety screen for managing data privacy.
  * Allows users to delete their rideshare events from relays.
+ *
+ * @param onLocalStateClear Called after successful event deletion to clear local app state
+ *                          (SharedPreferences ride state, etc.). This ensures phantom events
+ *                          from local storage don't affect new rides.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AccountSafetyScreen(
     nostrService: NostrService,
     onBack: () -> Unit,
+    onLocalStateClear: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     var showDeleteDialog by remember { mutableStateOf(false) }
@@ -63,6 +68,9 @@ fun AccountSafetyScreen(
                             try {
                                 val count = nostrService.deleteAllRideshareEvents()
                                 deleteResult = DeleteResult.Success(count)
+                                // Clear local state after successful relay deletion
+                                // This prevents phantom events from local storage affecting new rides
+                                onLocalStateClear?.invoke()
                             } catch (e: Exception) {
                                 deleteResult = DeleteResult.Error(e.message ?: "Unknown error")
                             }
