@@ -368,17 +368,16 @@ For ride history backups, the author encrypts to their own public key for secure
 
 All events include expiration tags to prevent relay bloat:
 
-| Event Type | Expiration |
-|------------|------------|
-| Driver Availability | 10 minutes |
-| Ride Offer (Direct) | 15 seconds |
-| Ride Offer (Broadcast) | 2 minutes |
-| Ride Acceptance | 5 minutes |
-| Ride Confirmation | 3 hours |
-| Driver/Rider Ride State | 3 hours |
-| Chat Message | 24 hours |
-| Ride Cancellation | 1 hour |
-| Ride History Backup | 7 days |
+| Event Type | Expiration | Constant |
+|------------|------------|----------|
+| Driver Availability | 30 minutes | `DRIVER_AVAILABILITY_MINUTES` |
+| Ride Offer | 15 minutes | `RIDE_OFFER_MINUTES` |
+| Ride Acceptance | 10 minutes | `RIDE_ACCEPTANCE_MINUTES` |
+| Ride Confirmation | 8 hours | `RIDE_CONFIRMATION_HOURS` |
+| Driver/Rider Ride State | 8 hours | `DRIVER_RIDE_STATE_HOURS` |
+| Chat Message | 8 hours | `RIDESHARE_CHAT_HOURS` |
+| Ride Cancellation | 24 hours | `RIDE_CANCELLATION_HOURS` |
+| Ride History Backup | No expiration | Profile data persists |
 
 ---
 
@@ -390,6 +389,25 @@ All events include expiration tags to prevent relay bloat:
 | 6 | ~1km x 1km | Area-level location |
 | 7 | ~150m x 150m | Approximate pickup/destination |
 | 8+ | <40m | Precise location (encrypted only) |
+
+---
+
+## NIP-44 Encryption Matrix
+
+Who encrypts to whom for each content type:
+
+| Content | Encrypted To | Decrypted By | Event Kind |
+|---------|--------------|--------------|------------|
+| Ride Offer details | Driver pubkey | Driver | 3173 |
+| Fare quote | Rider pubkey | Rider | 3174 |
+| PIN code | Rider pubkey | Rider | 30180 (PIN_SUBMIT action) |
+| Precise pickup location | Driver pubkey | Driver | 30181 (LOCATION_REVEAL action) |
+| Precise destination | Driver pubkey | Driver | 30181 (LOCATION_REVEAL action) |
+| Preimage share | Driver pubkey | Driver | 30181 (PREIMAGE_SHARE action) |
+| Chat messages | Recipient pubkey | Recipient | 3178 |
+| Ride history backup | Self (author) | Author on new device | 30174 |
+| Vehicle backup | Self (author) | Author on new device | 30175 |
+| Saved locations backup | Self (author) | Author on new device | 30176 |
 
 ---
 

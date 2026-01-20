@@ -1,7 +1,7 @@
 # Ridestr Architecture Overview
 
-**Version**: 1.0
-**Last Updated**: 2026-01-15
+**Version**: 1.1
+**Last Updated**: 2026-01-17
 
 ---
 
@@ -184,15 +184,40 @@ See: [Simplification Plan](../../.claude/plans/memoized-baking-newt.md)
 
 ---
 
-## Future: Payment Rails
+## Profile Sync Architecture
 
-Payment integration will add:
-- `paymentHash` in ride offers
-- HODL invoices or Nut-14 HTLC proofs
-- Preimage sharing via encrypted Nostr event
-- Geohash-gated fund claiming
+ProfileSyncManager coordinates all profile data sync with Nostr relays:
 
-See: [Payment Flow Plan](../../.claude/plans/paymentrails.md)
+### Sync Order (on key import)
+1. **Wallet (order=0)** - NIP-60 proofs, highest priority
+2. **Ride History (order=1)** - Kind 30174 events
+3. **Vehicles (order=2, driver)** - Kind 30175 events
+4. **Saved Locations (order=3, rider)** - Kind 30176 events
+
+### Key Files
+- `common/.../sync/ProfileSyncManager.kt` - Orchestrator
+- `common/.../sync/SyncableProfileData.kt` - Interface
+- `common/.../sync/*SyncAdapter.kt` - Adapters for each type
+
+See: [ADDING_NOSTR_SYNC.md](../guides/ADDING_NOSTR_SYNC.md) for how to add new sync types.
+
+---
+
+## Payment Architecture
+
+The Cashu wallet implementation uses:
+- **cdk-kotlin** for mint operations
+- **NIP-60** for cross-device backup
+- **NUT-14 HTLC** for ride escrow (partially implemented)
+
+### Current Status
+- Deposits/Withdrawals: ✅ COMPLETE
+- NIP-60 Sync: ✅ COMPLETE
+- HTLC Create: ⚠️ PARTIAL (structure exists)
+- HTLC Claim: ⚠️ PARTIAL (P2PK signing missing)
+- ViewModel Integration: ❌ NOT WIRED
+
+See: [PAYMENT_ARCHITECTURE.md](PAYMENT_ARCHITECTURE.md) for full details.
 
 ---
 
@@ -200,14 +225,17 @@ See: [Payment Flow Plan](../../.claude/plans/paymentrails.md)
 
 ### Protocol
 - [NOSTR_EVENTS.md](../protocol/NOSTR_EVENTS.md) - All event kind definitions
+- [DEPRECATION.md](../protocol/DEPRECATION.md) - Deprecated event history
 
 ### Architecture
 - [STATE_MACHINES.md](./STATE_MACHINES.md) - State diagrams and transitions
 - [OVERVIEW.md](./OVERVIEW.md) - This file
+- [PAYMENT_ARCHITECTURE.md](./PAYMENT_ARCHITECTURE.md) - Cashu wallet and HTLC escrow
 
 ### ViewModels
 - [RIDER_VIEWMODEL.md](../viewmodels/RIDER_VIEWMODEL.md) - Rider function reference
 - [DRIVER_VIEWMODEL.md](../viewmodels/DRIVER_VIEWMODEL.md) - Driver function reference
 
-### Payment (Future)
-- Payment flow documentation will be added during implementation
+### Guides
+- [DEBUGGING.md](../guides/DEBUGGING.md) - Debugging principles
+- [ADDING_NOSTR_SYNC.md](../guides/ADDING_NOSTR_SYNC.md) - Adding new sync features

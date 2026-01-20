@@ -1,6 +1,11 @@
 # Deprecated Event Kinds - NIP-014173
 
+**Last Updated**: 2026-01-17
+**Original Location**: `common/src/main/java/com/ridestr/common/nostr/events/deprecation.md`
+
 This document describes event kinds that have been deprecated in the rideshare protocol.
+
+---
 
 ## Deprecation Date: 2026-01-14
 
@@ -9,6 +14,8 @@ This document describes event kinds that have been deprecated in the rideshare p
 The following event kinds were deprecated and consolidated into two new parameterized replaceable events:
 - **Kind 30180: Driver Ride State** - consolidates driver status and PIN submission
 - **Kind 30181: Rider Ride State** - consolidates rider verification and location reveals
+
+---
 
 ## Deprecated Kinds
 
@@ -45,6 +52,8 @@ Location reveals (pickup and destination) are now embedded as actions in the rid
 
 Ephemeral driver availability was considered but never implemented. Kind 30173 (parameterized replaceable) was chosen instead for better reliability.
 
+---
+
 ## Design Rationale
 
 ### Why Consolidate?
@@ -65,6 +74,8 @@ The handshake events (Kinds 3173, 3174, 3175) remain separate regular events bec
 2. **Different Lifecycle**: Handshake events are one-time per ride, while ride state events update continuously
 3. **Event References**: The confirmation event ID becomes the d-tag for state events
 
+---
+
 ## Current Event Kind Summary
 
 | Kind | Name | Type | Phase |
@@ -78,14 +89,20 @@ The handshake events (Kinds 3173, 3174, 3175) remain separate regular events bec
 | 3178 | Rideshare Chat | Regular | Ride |
 | 3179 | Ride Cancellation | Regular | Any |
 | 30174 | Ride History Backup | Param Replaceable | Post |
+| 30175 | Vehicle Backup | Param Replaceable | Profile |
+| 30176 | Saved Locations Backup | Param Replaceable | Profile |
 
-**Total: 9 event kinds** (down from 11)
+**Total: 11 active event kinds** (9 ride + 2 profile sync)
+
+---
 
 ## Migration Notes
 
 If old events from deprecated kinds exist on relays, they will be ignored by the current implementation. Use the Account Safety screen to clean up old events.
 
-## Files Deleted
+---
+
+## Files Deleted (Historical)
 
 - `DriverStatusEvent.kt`
 - `PinSubmissionEvent.kt`
@@ -96,3 +113,10 @@ If old events from deprecated kinds exist on relays, they will be ignored by the
 
 - `DriverRideStateEvent.kt` (Kind 30180)
 - `RiderRideStateEvent.kt` (Kind 30181)
+
+---
+
+## Related Documentation
+
+- [NOSTR_EVENTS.md](NOSTR_EVENTS.md) - Current event definitions
+- [STATE_MACHINES.md](../architecture/STATE_MACHINES.md) - State transitions using new events

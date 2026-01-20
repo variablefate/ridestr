@@ -14,6 +14,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.ridestr.common.nostr.NostrService
 import com.ridestr.common.nostr.events.RideshareEventKinds
+import com.ridestr.common.payment.WalletService
 import kotlinx.coroutines.launch
 
 /**
@@ -30,6 +31,7 @@ fun AccountSafetyScreen(
     nostrService: NostrService,
     onBack: () -> Unit,
     onLocalStateClear: (() -> Unit)? = null,
+    walletService: WalletService? = null,
     modifier: Modifier = Modifier
 ) {
     var showDeleteDialog by remember { mutableStateOf(false) }
@@ -39,6 +41,8 @@ fun AccountSafetyScreen(
     var eventCount by remember { mutableStateOf<Int?>(null) }
     var kindCounts by remember { mutableStateOf<Map<Int, Int>?>(null) }
     val scope = rememberCoroutineScope()
+
+    // Note: Wallet-related state (wallet reset, NIP-60 deletion) moved to Settings → Wallet
 
     // Confirmation dialog
     if (showDeleteDialog) {
@@ -508,6 +512,8 @@ fun AccountSafetyScreen(
                 }
             }
 
+            // Note: Wallet data options moved to Settings → Wallet
+
             Spacer(modifier = Modifier.height(24.dp))
 
             // Warning section
@@ -549,6 +555,8 @@ fun AccountSafetyScreen(
             Spacer(modifier = Modifier.height(32.dp))
         }
     }
+
+    // Note: Wallet reset and NIP-60 delete dialogs moved to Settings → Wallet
 }
 
 @Composable

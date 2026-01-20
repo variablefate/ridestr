@@ -17,6 +17,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.ridestr.common.data.RideHistoryRepository
 import com.ridestr.common.nostr.NostrService
+import com.ridestr.common.nostr.events.Geohash
 import com.ridestr.common.nostr.events.RideHistoryEntry
 import com.ridestr.common.nostr.events.RideHistoryStats
 import com.ridestr.common.bitcoin.BitcoinPriceService
@@ -134,7 +135,7 @@ fun EarningsScreen(
         }
     ) { innerPadding ->
         PullToRefreshBox(
-            isRefreshing = isRefreshing || isLoading,
+            isRefreshing = isRefreshing,  // Only show indicator for manual pull-to-refresh, not initial load
             onRefresh = {
                 isRefreshing = true
                 coroutineScope.launch {
@@ -467,46 +468,71 @@ private fun DriverRideCard(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Route info (using geohash prefixes as neighborhood indicators)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    imageVector = Icons.Default.TripOrigin,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(16.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "Pickup: ${ride.pickupGeohash.take(4)}...",
-                    style = MaterialTheme.typography.bodyMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-            }
+            // Route info - show estimated coordinates for completed rides, hide for cancelled
+            if (isCompleted) {
+                // Decode geohashes to approximate coordinates
+                val pickupCoords = remember(ride.pickupGeohash) {
+                    if (ride.pickupGeohash.isNotEmpty()) {
+                        val (lat, lon) = Geohash.decode(ride.pickupGeohash)
+                        String.format("~%.2f, %.2f", lat, lon)
+                    } else "Unknown"
+                }
+                val dropoffCoords = remember(ride.dropoffGeohash) {
+                    if (ride.dropoffGeohash.isNotEmpty()) {
+                        val (lat, lon) = Geohash.decode(ride.dropoffGeohash)
+                        String.format("~%.2f, %.2f", lat, lon)
+                    } else "Unknown"
+                }
 
-            Spacer(modifier = Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.TripOrigin,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Pickup: $pickupCoords",
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Place,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.size(16.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
+                Spacer(modifier = Modifier.height(4.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Place,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Dropoff: $dropoffCoords",
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                // Privacy indicator
                 Text(
-                    text = "Dropoff: ${ride.dropoffGeohash.take(4)}...",
-                    style = MaterialTheme.typography.bodyMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
+                    text = "Locations estimated for privacy",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                 )
             }
 

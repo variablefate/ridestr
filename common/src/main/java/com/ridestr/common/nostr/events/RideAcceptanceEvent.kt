@@ -17,14 +17,28 @@ object RideAcceptanceEvent {
      * @param signer The driver's signer
      * @param offerEventId The ride offer event ID being accepted
      * @param riderPubKey The rider's public key
+     * @param walletPubKey Driver's wallet pubkey for P2PK escrow (separate from Nostr key)
+     * @param escrowType Type of escrow: "cashu_nut14" or "hodl" (null for non-escrow)
+     * @param escrowInvoice HTLC token or BOLT11 invoice (null if escrow not used)
+     * @param escrowExpiry Unix timestamp when escrow expires (null if no escrow)
      */
     suspend fun create(
         signer: NostrSigner,
         offerEventId: String,
-        riderPubKey: String
+        riderPubKey: String,
+        walletPubKey: String? = null,
+        escrowType: String? = null,
+        escrowInvoice: String? = null,
+        escrowExpiry: Long? = null
     ): Event {
         val content = JSONObject().apply {
             put("status", "accepted")
+            // Driver's wallet pubkey for P2PK escrow claims
+            walletPubKey?.let { put("wallet_pubkey", it) }
+            // Payment rails: escrow details for HTLC-based payment
+            escrowType?.let { put("escrow_type", it) }
+            escrowInvoice?.let { put("escrow_invoice", it) }
+            escrowExpiry?.let { put("escrow_expiry", it) }
         }.toString()
 
         // Add NIP-40 expiration (10 minutes)
@@ -55,6 +69,14 @@ object RideAcceptanceEvent {
             val json = JSONObject(event.content)
             val status = json.getString("status")
 
+            // Parse wallet pubkey for P2PK escrow
+            val walletPubKey = if (json.has("wallet_pubkey")) json.getString("wallet_pubkey") else null
+
+            // Parse escrow fields (null for legacy events)
+            val escrowType = if (json.has("escrow_type")) json.getString("escrow_type") else null
+            val escrowInvoice = if (json.has("escrow_invoice")) json.getString("escrow_invoice") else null
+            val escrowExpiry = if (json.has("escrow_expiry")) json.getLong("escrow_expiry") else null
+
             var offerEventId: String? = null
             var riderPubKey: String? = null
 
@@ -73,7 +95,11 @@ object RideAcceptanceEvent {
                 offerEventId = offerEventId,
                 riderPubKey = riderPubKey,
                 status = status,
-                createdAt = event.createdAt
+                createdAt = event.createdAt,
+                walletPubKey = walletPubKey,
+                escrowType = escrowType,
+                escrowInvoice = escrowInvoice,
+                escrowExpiry = escrowExpiry
             )
         } catch (e: Exception) {
             null
@@ -90,5 +116,11 @@ data class RideAcceptanceData(
     val offerEventId: String,
     val riderPubKey: String,
     val status: String,
-    val createdAt: Long
+    val createdAt: Long,
+    // Driver's wallet pubkey for P2PK escrow (separate from Nostr key)
+    val walletPubKey: String? = null,
+    // Payment rails escrow fields (null for legacy non-escrow rides)
+    val escrowType: String? = null,      // "cashu_nut14" or "hodl"
+    val escrowInvoice: String? = null,   // HTLC token or BOLT11 invoice
+    val escrowExpiry: Long? = null       // Unix timestamp when escrow expires
 )

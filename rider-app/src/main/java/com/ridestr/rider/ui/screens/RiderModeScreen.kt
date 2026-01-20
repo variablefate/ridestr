@@ -86,6 +86,7 @@ fun RiderModeScreen(
     viewModel: RiderViewModel,
     settingsManager: SettingsManager,
     onOpenTiles: () -> Unit,
+    onOpenWallet: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -157,6 +158,49 @@ fun RiderModeScreen(
                 priceService = viewModel.bitcoinPriceService
             )
         }
+    }
+
+    // Insufficient funds dialog
+    if (uiState.showInsufficientFundsDialog) {
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissInsufficientFundsDialog() },
+            icon = {
+                Icon(
+                    Icons.Default.AccountBalanceWallet,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            },
+            title = { Text("Insufficient Funds") },
+            text = {
+                Column {
+                    Text(
+                        "You need ${uiState.insufficientFundsAmount} more sats to request this ride."
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        "Add funds to your wallet to continue.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.dismissInsufficientFundsDialog()
+                        onOpenWallet()
+                    }
+                ) {
+                    Text("Add Funds")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.dismissInsufficientFundsDialog() }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 
     Column(
@@ -293,10 +337,11 @@ fun RiderModeScreen(
             RideStage.DRIVER_ACCEPTED -> {
                 DriverAcceptedContent(
                     uiState = uiState,
-                    onConfirm = viewModel::confirmRide,
                     onCancel = viewModel::clearRide,
                     onOpenChat = { showChatSheet = true },
-                    chatMessageCount = uiState.chatMessages.size
+                    chatMessageCount = uiState.chatMessages.size,
+                    settingsManager = settingsManager,
+                    priceService = viewModel.bitcoinPriceService
                 )
             }
             RideStage.RIDE_CONFIRMED -> {
@@ -2295,11 +2340,20 @@ private fun RideWaitingContent(
 @Composable
 private fun DriverAcceptedContent(
     uiState: RiderUiState,
-    onConfirm: () -> Unit,
     onCancel: () -> Unit,
     onOpenChat: () -> Unit,
-    chatMessageCount: Int
+    chatMessageCount: Int,
+    settingsManager: com.ridestr.common.settings.SettingsManager,
+    priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
+    // Get driver info
+    val driverPubKey = uiState.acceptance?.driverPubKey
+    val driverProfile = driverPubKey?.let { uiState.driverProfiles[it] }
+    val driverAvailability = driverPubKey?.let { pk ->
+        uiState.selectedDriver?.takeIf { it.driverPubKey == pk }
+            ?: uiState.availableDrivers.find { it.driverPubKey == pk }
+    }
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -2312,73 +2366,156 @@ private fun DriverAcceptedContent(
                 .padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Icon(
-                Icons.Default.CheckCircle,
-                contentDescription = null,
-                modifier = Modifier.size(48.dp),
-                tint = MaterialTheme.colorScheme.primary
-            )
+            // Status header with spinner
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
+            ) {
+                if (uiState.isConfirmingRide) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(24.dp),
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text(
+                        text = "Confirming ride...",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                } else {
+                    Icon(
+                        Icons.Default.CheckCircle,
+                        contentDescription = null,
+                        modifier = Modifier.size(24.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text(
+                        text = "Driver Accepted!",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            // Driver info row
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Driver icon
+                Icon(
+                    Icons.Default.Person,
+                    contentDescription = "Driver",
+                    modifier = Modifier
+                        .size(56.dp)
+                        .background(
+                            MaterialTheme.colorScheme.surfaceVariant,
+                            RoundedCornerShape(28.dp)
+                        )
+                        .padding(12.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(modifier = Modifier.width(12.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = driverProfile?.bestName() ?: "Driver",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    // Use vehicleDescription() like DriverOnTheWayContent does
+                    (driverAvailability?.vehicleDescription() ?: driverProfile?.carDescription())?.let { carInfo ->
+                        Text(
+                            text = carInfo,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            Text(
-                text = "Driver Accepted!",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = "Driver is on the way to pick you up",
-                style = MaterialTheme.typography.bodyMedium,
-                textAlign = TextAlign.Center
-            )
-
-            // Display pickup PIN prominently
-            uiState.pickupPin?.let { pin ->
-                Spacer(modifier = Modifier.height(16.dp))
-
-                Card(
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.secondaryContainer
-                    )
+            // Ride summary card
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                )
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp)
                 ) {
-                    Column(
-                        modifier = Modifier.padding(16.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
+                    // Pickup
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Default.TripOrigin,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = uiState.pickupLocation?.addressLabel ?: "Pickup location",
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Dropoff
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Default.Place,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = uiState.destination?.addressLabel ?: "Destination",
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    // Fare
+                    uiState.fareEstimate?.let { fare ->
+                        Spacer(modifier = Modifier.height(12.dp))
+                        HorizontalDivider()
+                        Spacer(modifier = Modifier.height(12.dp))
+
                         Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(
-                                Icons.Default.Pin,
-                                contentDescription = null,
-                                modifier = Modifier.size(20.dp),
-                                tint = MaterialTheme.colorScheme.secondary
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "Your Pickup PIN",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSecondaryContainer
+                                text = "Fare",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Text(
+                                text = formatFare(
+                                    satsAmount = fare.toDouble(),
+                                    settingsManager = settingsManager,
+                                    priceService = priceService
+                                ),
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
                             )
                         }
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = pin,
-                            style = MaterialTheme.typography.headlineLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer,
-                            letterSpacing = 8.sp
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "Tell this PIN to your driver at pickup",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer,
-                            textAlign = TextAlign.Center
-                        )
                     }
                 }
             }
@@ -2405,32 +2542,17 @@ private fun DriverAcceptedContent(
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
-            Row(
+            // Cancel button only (no confirm button - auto-confirm happens automatically)
+            OutlinedButton(
+                onClick = onCancel,
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = MaterialTheme.colorScheme.error
+                )
             ) {
-                OutlinedButton(
-                    onClick = onCancel,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text("Cancel")
-                }
-                Button(
-                    onClick = onConfirm,
-                    enabled = !uiState.isConfirmingRide,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    if (uiState.isConfirmingRide) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(18.dp),
-                            strokeWidth = 2.dp
-                        )
-                    } else {
-                        Text("Confirm Ride")
-                    }
-                }
+                Text("Cancel Ride")
             }
         }
     }

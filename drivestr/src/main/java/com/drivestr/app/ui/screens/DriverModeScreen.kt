@@ -31,6 +31,7 @@ import androidx.core.content.ContextCompat
 import com.drivestr.app.viewmodels.DriverStage
 import com.drivestr.app.viewmodels.DriverUiState
 import com.drivestr.app.viewmodels.DriverViewModel
+import com.drivestr.app.viewmodels.PaymentStatus
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.gms.tasks.CancellationTokenSource
@@ -358,6 +359,36 @@ fun DriverModeScreen(
                 onDismiss = {
                     showVehiclePickerDialog = false
                     pendingLocationForGoOnline = null
+                }
+            )
+        }
+
+        // Payment warning dialog (shown when trying to complete ride without payment)
+        if (uiState.showPaymentWarningDialog) {
+            AlertDialog(
+                onDismissRequest = { viewModel.dismissPaymentWarningDialog() },
+                title = { Text("Payment Issue") },
+                text = {
+                    Text(when (uiState.paymentWarningStatus) {
+                        PaymentStatus.MISSING_PREIMAGE ->
+                            "The rider app failed to share payment authorization. You won't be able to claim payment for this ride."
+                        PaymentStatus.MISSING_ESCROW_TOKEN ->
+                            "The rider app failed to lock payment escrow. You won't be able to claim payment for this ride."
+                        PaymentStatus.WAITING_FOR_PREIMAGE ->
+                            "Still waiting for payment authorization. This may take a moment."
+                        else ->
+                            "Payment setup incomplete. You may not receive payment for this ride."
+                    })
+                },
+                confirmButton = {
+                    TextButton(onClick = { viewModel.confirmCompleteWithoutPayment() }) {
+                        Text("Complete Anyway")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { viewModel.cancelRideDueToPaymentIssue() }) {
+                        Text("Cancel Ride", color = MaterialTheme.colorScheme.error)
+                    }
                 }
             )
         }

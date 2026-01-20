@@ -26,6 +26,7 @@ object RiderRideStateEvent {
     object ActionType {
         const val LOCATION_REVEAL = "location_reveal"
         const val PIN_VERIFY = "pin_verify"
+        const val PREIMAGE_SHARE = "preimage_share"  // Payment rails: shares escrow preimage
     }
 
     /**
@@ -169,6 +170,25 @@ object RiderRideStateEvent {
             at = System.currentTimeMillis() / 1000
         )
     }
+
+    /**
+     * Helper to create a preimage share action.
+     * Preimage and escrow token are encrypted with NIP-44 to driver before calling this.
+     * Called automatically after successful PIN verification.
+     *
+     * @param preimageEncrypted NIP-44 encrypted preimage (64-char hex)
+     * @param escrowTokenEncrypted NIP-44 encrypted HTLC token containing locked funds
+     */
+    fun createPreimageShareAction(
+        preimageEncrypted: String,
+        escrowTokenEncrypted: String? = null
+    ): RiderRideAction.PreimageShare {
+        return RiderRideAction.PreimageShare(
+            preimageEncrypted = preimageEncrypted,
+            escrowTokenEncrypted = escrowTokenEncrypted,
+            at = System.currentTimeMillis() / 1000
+        )
+    }
 }
 
 /**
@@ -212,6 +232,28 @@ sealed class RiderRideAction {
         }
     }
 
+    /**
+     * Preimage share action.
+     * Shares the HTLC preimage and escrow token with the driver after successful PIN verification.
+     * Preimage and escrow token are NIP-44 encrypted to the driver's pubkey.
+     * This allows the driver to settle the escrow at dropoff.
+     *
+     * @property preimageEncrypted NIP-44 encrypted preimage (64-char hex that SHA256-hashes to paymentHash)
+     * @property escrowTokenEncrypted NIP-44 encrypted HTLC token containing locked funds (optional for legacy)
+     */
+    data class PreimageShare(
+        val preimageEncrypted: String,
+        val escrowTokenEncrypted: String? = null,
+        override val at: Long
+    ) : RiderRideAction() {
+        override fun toJson(): JSONObject = JSONObject().apply {
+            put("action", RiderRideStateEvent.ActionType.PREIMAGE_SHARE)
+            put("preimage_encrypted", preimageEncrypted)
+            escrowTokenEncrypted?.let { put("escrow_token_encrypted", it) }
+            put("at", at)
+        }
+    }
+
     companion object {
         fun fromJson(json: JSONObject): RiderRideAction? {
             return try {
@@ -234,6 +276,15 @@ sealed class RiderRideAction {
                         PinVerify(
                             verified = status == "verified",
                             attempt = attempt,
+                            at = at
+                        )
+                    }
+                    RiderRideStateEvent.ActionType.PREIMAGE_SHARE -> {
+                        val preimageEncrypted = json.getString("preimage_encrypted")
+                        val escrowTokenEncrypted = json.optString("escrow_token_encrypted").takeIf { it.isNotEmpty() }
+                        PreimageShare(
+                            preimageEncrypted = preimageEncrypted,
+                            escrowTokenEncrypted = escrowTokenEncrypted,
                             at = at
                         )
                     }
@@ -305,5 +356,20 @@ data class RiderRideStateData(
      */
     fun getPinAttemptCount(): Int {
         return history.filterIsInstance<RiderRideAction.PinVerify>().size
+    }
+
+    /**
+     * Get the preimage share action if present.
+     * Used by driver to extract preimage for settlement.
+     */
+    fun getPreimageShare(): RiderRideAction.PreimageShare? {
+        return history.filterIsInstance<RiderRideAction.PreimageShare>().lastOrNull()
+    }
+
+    /**
+     * Check if preimage has been shared.
+     */
+    fun isPreimageShared(): Boolean {
+        return getPreimageShare() != null
     }
 }

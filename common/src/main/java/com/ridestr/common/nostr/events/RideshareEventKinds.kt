@@ -96,10 +96,26 @@ object RideshareEventKinds {
      * Content is NIP-44 encrypted to self.
      * Parameterized replaceable: only the latest backup per user is kept.
      * Uses d-tag "rideshare-history" for identification.
-     *
-     * Note: Not yet integrated - placeholder for future ride history feature.
      */
     const val RIDE_HISTORY_BACKUP = 30174
+
+    /**
+     * Kind 30175: Vehicle Backup Event (Parameterized Replaceable)
+     * Encrypted backup of driver's vehicles.
+     * Content is NIP-44 encrypted to self.
+     * Parameterized replaceable: only the latest backup per user is kept.
+     * Uses d-tag "rideshare-vehicles" for identification.
+     */
+    const val VEHICLE_BACKUP = 30175
+
+    /**
+     * Kind 30176: Saved Locations Backup Event (Parameterized Replaceable)
+     * Encrypted backup of rider's saved/favorite locations.
+     * Content is NIP-44 encrypted to self.
+     * Parameterized replaceable: only the latest backup per user is kept.
+     * Uses d-tag "rideshare-locations" for identification.
+     */
+    const val SAVED_LOCATIONS_BACKUP = 30176
 }
 
 /**

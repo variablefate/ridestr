@@ -13,7 +13,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import com.ridestr.common.payment.WalletService
 import com.ridestr.common.settings.SettingsManager
+import kotlinx.coroutines.launch
 
 /**
  * Developer Options screen with debug tools and advanced settings.
@@ -26,6 +28,7 @@ fun DeveloperOptionsScreen(
     isDriverApp: Boolean,
     onOpenDebug: () -> Unit,
     onBack: () -> Unit,
+    walletService: WalletService? = null,
     modifier: Modifier = Modifier
 ) {
     val useGeocodingSearch by settingsManager.useGeocodingSearch.collectAsState()
@@ -256,6 +259,32 @@ fun DeveloperOptionsScreen(
                 ) {
                     Text("Reset to defaults")
                 }
+            }
+
+            // Wallet Developer Options (only show if walletService is provided)
+            if (walletService != null) {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
+
+                Text(
+                    text = "Wallet Developer Options",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+
+                // Always show wallet diagnostics toggle
+                val alwaysShowDiagnostics by settingsManager.alwaysShowWalletDiagnostics.collectAsState()
+                SettingsSwitchRow(
+                    title = "Always Show Diagnostics",
+                    description = if (alwaysShowDiagnostics)
+                        "Shows sync status icon (green = synced)"
+                    else
+                        "Only shows icon when there are issues",
+                    checked = alwaysShowDiagnostics,
+                    onCheckedChange = { settingsManager.setAlwaysShowWalletDiagnostics(it) }
+                )
+
+                // Note: Verify Balance and Resync buttons removed - use Settings → Wallet → Sync Wallet instead
+                // Note: Change Mint URL and Reset Wallet moved to Settings → Wallet
             }
 
             // Bottom padding for scroll

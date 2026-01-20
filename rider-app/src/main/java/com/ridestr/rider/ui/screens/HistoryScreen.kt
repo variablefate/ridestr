@@ -118,7 +118,7 @@ fun HistoryScreen(
     }
 
     PullToRefreshBox(
-        isRefreshing = isRefreshing || isLoading,
+        isRefreshing = isRefreshing,  // Only show indicator for manual pull-to-refresh, not initial load
         onRefresh = {
             isRefreshing = true
             coroutineScope.launch {

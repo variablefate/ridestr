@@ -1,6 +1,7 @@
 package com.ridestr.common.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
@@ -23,12 +24,14 @@ import androidx.compose.ui.unit.dp
  *
  * @param connectedCount Number of currently connected relays
  * @param totalRelays Total number of relays configured (used for color only)
+ * @param onClick Optional callback when the indicator is clicked (navigates to relay settings)
  * @param modifier Modifier for the composable
  */
 @Composable
 fun RelaySignalIndicator(
     connectedCount: Int,
     totalRelays: Int,
+    onClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     // Determine color based on connection status
@@ -44,7 +47,10 @@ fun RelaySignalIndicator(
     Row(
         modifier = modifier
             .height(20.dp)
-            .padding(horizontal = 4.dp),
+            .padding(horizontal = 4.dp)
+            .then(
+                if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
+            ),
         horizontalArrangement = Arrangement.spacedBy(2.dp),
         verticalAlignment = Alignment.Bottom
     ) {

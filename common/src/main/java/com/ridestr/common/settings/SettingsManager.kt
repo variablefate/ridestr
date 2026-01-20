@@ -56,6 +56,11 @@ class SettingsManager(context: Context) {
         // Rider pickup location preference
         private const val KEY_USE_GPS_FOR_PICKUP = "use_gps_for_pickup"
 
+        // Wallet settings
+        private const val KEY_WALLET_SETUP_COMPLETED = "wallet_setup_completed"
+        private const val KEY_WALLET_SETUP_SKIPPED = "wallet_setup_skipped"
+        private const val KEY_ALWAYS_SHOW_WALLET_DIAGNOSTICS = "always_show_wallet_diagnostics"
+
         // Default manual location: Las Vegas (Fremont St)
         private const val DEFAULT_MANUAL_LAT = 36.1699
         private const val DEFAULT_MANUAL_LON = -115.1398
@@ -337,6 +342,66 @@ class SettingsManager(context: Context) {
     }
 
     // ===================
+    // WALLET SETUP
+    // ===================
+
+    // Wallet setup completed (user selected a mint and connected)
+    private val _walletSetupCompleted = MutableStateFlow(prefs.getBoolean(KEY_WALLET_SETUP_COMPLETED, false))
+    val walletSetupCompleted: StateFlow<Boolean> = _walletSetupCompleted.asStateFlow()
+
+    // Wallet setup skipped (user chose to skip for now)
+    private val _walletSetupSkipped = MutableStateFlow(prefs.getBoolean(KEY_WALLET_SETUP_SKIPPED, false))
+    val walletSetupSkipped: StateFlow<Boolean> = _walletSetupSkipped.asStateFlow()
+
+    /**
+     * Mark wallet setup as completed.
+     */
+    fun setWalletSetupCompleted(completed: Boolean) {
+        prefs.edit().putBoolean(KEY_WALLET_SETUP_COMPLETED, completed).apply()
+        _walletSetupCompleted.value = completed
+    }
+
+    /**
+     * Mark wallet setup as skipped.
+     */
+    fun setWalletSetupSkipped(skipped: Boolean) {
+        prefs.edit().putBoolean(KEY_WALLET_SETUP_SKIPPED, skipped).apply()
+        _walletSetupSkipped.value = skipped
+    }
+
+    /**
+     * Check if wallet setup has been done (either completed or skipped).
+     */
+    fun isWalletSetupDone(): Boolean {
+        return _walletSetupCompleted.value || _walletSetupSkipped.value
+    }
+
+    /**
+     * Reset wallet setup status (for logout or re-setup).
+     */
+    fun resetWalletSetup() {
+        prefs.edit()
+            .putBoolean(KEY_WALLET_SETUP_COMPLETED, false)
+            .putBoolean(KEY_WALLET_SETUP_SKIPPED, false)
+            .apply()
+        _walletSetupCompleted.value = false
+        _walletSetupSkipped.value = false
+    }
+
+    // Always show wallet diagnostics (developer option, default: false)
+    private val _alwaysShowWalletDiagnostics = MutableStateFlow(prefs.getBoolean(KEY_ALWAYS_SHOW_WALLET_DIAGNOSTICS, false))
+    val alwaysShowWalletDiagnostics: StateFlow<Boolean> = _alwaysShowWalletDiagnostics.asStateFlow()
+
+    /**
+     * Set whether to always show the wallet diagnostics icon (even when synced).
+     * When enabled, shows a green icon when wallet is fully synced.
+     */
+    fun setAlwaysShowWalletDiagnostics(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_ALWAYS_SHOW_WALLET_DIAGNOSTICS, enabled).apply()
+        _alwaysShowWalletDiagnostics.value = enabled
+    }
+
+    // ===================
     // RELAY MANAGEMENT
     // ===================
 
@@ -431,5 +496,31 @@ class SettingsManager(context: Context) {
      */
     fun isUsingCustomRelays(): Boolean {
         return _customRelays.value.isNotEmpty()
+    }
+
+    /**
+     * Clear all settings data (for logout).
+     * Resets everything to defaults.
+     */
+    fun clearAllData() {
+        prefs.edit().clear().apply()
+
+        // Reset all StateFlows to defaults
+        _autoOpenNavigation.value = true
+        _displayCurrency.value = DisplayCurrency.SATS
+        _distanceUnit.value = DistanceUnit.MILES
+        _useGeocodingSearch.value = true
+        _useManualDriverLocation.value = false
+        _manualDriverLat.value = DEFAULT_MANUAL_LAT
+        _manualDriverLon.value = DEFAULT_MANUAL_LON
+        _customRelays.value = emptyList()
+        _notificationSoundEnabled.value = true
+        _notificationVibrationEnabled.value = true
+        _alwaysAskVehicle.value = true
+        _activeVehicleId.value = null
+        _useGpsForPickup.value = false
+        _walletSetupCompleted.value = false
+        _walletSetupSkipped.value = false
+        _alwaysShowWalletDiagnostics.value = false
     }
 }

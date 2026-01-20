@@ -6,6 +6,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -26,10 +27,14 @@ fun OnboardingScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
 
-    LaunchedEffect(uiState.isLoggedIn, uiState.showBackupReminder) {
-        if (uiState.isLoggedIn && !uiState.showBackupReminder) {
-            onComplete()
-        }
+    // Use snapshotFlow to ensure we read current state values, not stale ones
+    LaunchedEffect(Unit) {
+        snapshotFlow { uiState.isLoggedIn to uiState.showBackupReminder }
+            .collect { (isLoggedIn, showBackupReminder) ->
+                if (isLoggedIn && !showBackupReminder) {
+                    onComplete()
+                }
+            }
     }
 
     when {

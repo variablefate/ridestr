@@ -66,6 +66,9 @@ dependencies {
     api(libs.quartz)
     implementation(libs.security.crypto)
 
+    // Cashu - ecash payments (NUT-14 HTLC for escrow)
+    implementation(libs.cdk.kotlin)
+
     // Accompanist - Compose utilities
     implementation(libs.accompanist.permissions)
 
@@ -74,6 +77,9 @@ dependencies {
 
     // Image Loading
     api(libs.coil.compose)
+
+    // QR Code generation
+    implementation("com.google.zxing:core:3.5.3")
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

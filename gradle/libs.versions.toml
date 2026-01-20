@@ -20,6 +20,9 @@ moshi = "1.15.1"
 quartz = "1.05.1"
 securityCrypto = "1.1.0-alpha06"
 
+# Cashu - ecash payments
+cdkKotlin = "0.14.3"
+
 # Accompanist - Compose utilities
 accompanist = "0.36.0"
 
@@ -55,6 +58,9 @@ moshi-kotlin = { group = "com.squareup.moshi", name = "moshi-kotlin", version.re
 # Nostr - Quartz library
 quartz = { group = "com.vitorpamplona.quartz", name = "quartz", version.ref = "quartz" }
 security-crypto = { group = "androidx.security", name = "security-crypto", version.ref = "securityCrypto" }
+
+# Cashu - ecash payments
+cdk-kotlin = { group = "org.cashudevkit", name = "cdk-kotlin", version.ref = "cdkKotlin" }
 
 # Accompanist - Compose utilities
 accompanist-permissions = { group = "com.google.accompanist", name = "accompanist-permissions", version.ref = "accompanist" }

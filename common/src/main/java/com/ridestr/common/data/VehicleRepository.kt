@@ -180,6 +180,14 @@ class VehicleRepository(context: Context) {
         return activeVehicleId?.let { getVehicleById(it) } ?: getPrimaryVehicle()
     }
 
+    /**
+     * Clear all vehicles (for logout).
+     */
+    fun clearAll() {
+        prefs.edit().remove(KEY_VEHICLES).apply()
+        _vehicles.value = emptyList()
+    }
+
     companion object {
         private const val PREFS_NAME = "ridestr_vehicles"
         private const val KEY_VEHICLES = "vehicles"

@@ -27,6 +27,8 @@ import com.ridestr.common.nostr.events.RiderRideStateEvent
 import com.ridestr.common.nostr.events.RideshareChatData
 import com.ridestr.common.nostr.events.RideshareEventKinds
 import com.ridestr.common.nostr.events.UserProfile
+import com.ridestr.common.payment.PaymentCrypto
+import com.ridestr.common.payment.WalletService
 import com.ridestr.common.routing.RouteResult
 import com.ridestr.common.routing.ValhallaRoutingService
 import kotlinx.coroutines.Job
@@ -37,6 +39,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 
 /**
@@ -65,9 +68,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         private const val CHAT_REFRESH_INTERVAL_MS = 15 * 1000L
         // Timeout for PIN verification response (30 seconds)
         private const val PIN_VERIFICATION_TIMEOUT_MS = 30 * 1000L
-        // Timeout for rider confirmation after accepting (15 seconds)
+        // Timeout for rider confirmation after accepting (30 seconds)
         // If no confirmation arrives, the ride was likely cancelled
-        private const val CONFIRMATION_TIMEOUT_MS = 15 * 1000L
+        private const val CONFIRMATION_TIMEOUT_MS = 30 * 1000L
         // SharedPreferences keys for ride state persistence
         private const val PREFS_NAME = "drivestr_ride_state"
         private const val KEY_RIDE_STATE = "active_ride"
@@ -107,6 +110,13 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     private val settingsManager = com.ridestr.common.settings.SettingsManager(application)
 
     private val nostrService = NostrService(application)
+
+    // Wallet service for HTLC escrow settlement (injected from MainActivity)
+    private var walletService: WalletService? = null
+
+    fun setWalletService(service: WalletService?) {
+        walletService = service
+    }
 
     // Ride history repository
     private val rideHistoryRepository = RideHistoryRepository.getInstance(application)
@@ -159,7 +169,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
     // Driver ride state history for consolidated Kind 30180 events
     // This accumulates all driver actions during a ride (status changes, PIN submissions)
-    private val driverStateHistory = mutableListOf<DriverRideAction>()
+    // THREAD SAFETY: Use synchronized list and historyMutex to prevent race conditions
+    private val driverStateHistory = java.util.Collections.synchronizedList(mutableListOf<DriverRideAction>())
+    private val historyMutex = kotlinx.coroutines.sync.Mutex()
 
     // Track how many rider actions we've processed (to detect new actions)
     private var lastProcessedRiderActionCount = 0
@@ -193,17 +205,21 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             finalFare = finalFare,
             invoice = invoice
         )
-        driverStateHistory.add(statusAction)
 
-        // Publish consolidated driver ride state
-        return nostrService.publishDriverRideState(
-            confirmationEventId = confirmationEventId,
-            riderPubKey = riderPubKey,
-            currentStatus = status,
-            history = driverStateHistory.toList(),
-            finalFare = finalFare,
-            invoice = invoice
-        )
+        // CRITICAL: Use mutex to prevent race condition with PIN submissions
+        return historyMutex.withLock {
+            driverStateHistory.add(statusAction)
+
+            // Publish consolidated driver ride state
+            nostrService.publishDriverRideState(
+                confirmationEventId = confirmationEventId,
+                riderPubKey = riderPubKey,
+                currentStatus = status,
+                history = driverStateHistory.toList(),
+                finalFare = finalFare,
+                invoice = invoice
+            )
+        }
     }
 
     /**
@@ -225,20 +241,24 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
         // Add PIN submission action to history
         val pinAction = DriverRideStateEvent.createPinSubmitAction(encryptedPin)
-        driverStateHistory.add(pinAction)
 
-        // Get current status from the last status action in history
-        val currentStatus = driverStateHistory
-            .filterIsInstance<DriverRideAction.Status>()
-            .lastOrNull()?.status ?: DriverStatusType.ARRIVED
+        // CRITICAL: Use mutex to prevent race condition with status updates
+        return historyMutex.withLock {
+            driverStateHistory.add(pinAction)
 
-        // Publish consolidated driver ride state
-        return nostrService.publishDriverRideState(
-            confirmationEventId = confirmationEventId,
-            riderPubKey = riderPubKey,
-            currentStatus = currentStatus,
-            history = driverStateHistory.toList()
-        )
+            // Get current status from the last status action in history
+            val currentStatus = driverStateHistory
+                .filterIsInstance<DriverRideAction.Status>()
+                .lastOrNull()?.status ?: DriverStatusType.ARRIVED
+
+            // Publish consolidated driver ride state
+            nostrService.publishDriverRideState(
+                confirmationEventId = confirmationEventId,
+                riderPubKey = riderPubKey,
+                currentStatus = currentStatus,
+                history = driverStateHistory.toList()
+            )
+        }
     }
 
     /**
@@ -842,7 +862,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 isSendingMessage = false,
                 pendingOffers = emptyList(),
                 pendingBroadcastRequests = emptyList(),
-                statusMessage = "Ride cancelled. Tap to go online."
+                statusMessage = "Ride cancelled. Tap to go online.",
+                // Clear HTLC escrow state
+                activePaymentHash = null,
+                activePreimage = null,
+                activeEscrowToken = null,
+                canSettleEscrow = false
             )
 
             // Clear persisted ride state
@@ -889,7 +914,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             isSendingMessage = false,
             pendingOffers = emptyList(),
             pendingBroadcastRequests = emptyList(),
-            statusMessage = "Tap to go online"
+            statusMessage = "Tap to go online",
+            // Clear HTLC escrow state
+            activePaymentHash = null,
+            activePreimage = null,
+            activeEscrowToken = null,
+            canSettleEscrow = false
         )
 
         // Clear persisted ride state
@@ -1000,8 +1030,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
             _uiState.value = _uiState.value.copy(isProcessingOffer = true)
 
+            // Get wallet pubkey for P2PK escrow (driver will sign with this key to claim)
+            val walletPubKey = walletService?.getWalletPubKey()
+            Log.d(TAG, "Including wallet pubkey in acceptance: ${walletPubKey?.take(16)}...")
+
             // PIN is now generated by rider - driver will ask rider for PIN at pickup
-            val eventId = nostrService.acceptRide(offer)
+            val eventId = nostrService.acceptRide(offer, walletPubKey)
 
             if (eventId != null) {
                 // Track this offer as accepted AFTER success (so it won't show up again after ride completion)
@@ -1014,15 +1048,27 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 stopBroadcasting()
                 deleteAllAvailabilityEvents()
 
+                // Extract payment hash for HTLC escrow (if present in offer)
+                val paymentHash = offer.paymentHash
+                if (paymentHash != null) {
+                    Log.d(TAG, "Offer includes HTLC payment hash: ${paymentHash.take(16)}...")
+                }
+
                 _uiState.value = _uiState.value.copy(
                     stage = DriverStage.RIDE_ACCEPTED,
                     isProcessingOffer = false,
                     acceptedOffer = offer,
                     acceptanceEventId = eventId,  // Track for cleanup later
+                    confirmationEventId = null,  // CRITICAL: Clear old confirmation to prevent stale state
                     pendingOffers = emptyList(), // Clear all pending offers
                     pinAttempts = 0,
                     confirmationWaitStartMs = System.currentTimeMillis(),  // Start confirmation timer
-                    statusMessage = "Ride accepted! Waiting for rider confirmation..."
+                    statusMessage = "Ride accepted! Waiting for rider confirmation...",
+                    // HTLC escrow tracking
+                    activePaymentHash = paymentHash,
+                    activePreimage = null,
+                    activeEscrowToken = null,
+                    canSettleEscrow = false
                 )
 
                 // Save ride state for persistence
@@ -1342,6 +1388,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 is RiderRideAction.LocationReveal -> {
                     handleLocationReveal(action)
                 }
+                is RiderRideAction.PreimageShare -> {
+                    handlePreimageShare(action)
+                }
             }
         }
     }
@@ -1461,6 +1510,95 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /**
+     * Handle preimage share from rider (received after successful PIN verification).
+     * This provides the driver with the preimage and escrow token needed to claim payment.
+     */
+    private fun handlePreimageShare(preimageShare: RiderRideAction.PreimageShare) {
+        Log.d(TAG, "=== HANDLING PREIMAGE SHARE ===")
+        val state = _uiState.value
+        val riderPubKey = state.acceptedOffer?.riderPubKey ?: run {
+            Log.e(TAG, "No accepted offer - cannot handle preimage share")
+            return
+        }
+        Log.d(TAG, "Rider pubkey: ${riderPubKey.take(16)}...")
+        Log.d(TAG, "Encrypted preimage present: ${preimageShare.preimageEncrypted != null}")
+        Log.d(TAG, "Encrypted escrow token present: ${preimageShare.escrowTokenEncrypted != null}")
+
+        viewModelScope.launch {
+            try {
+                // Decrypt the preimage
+                val preimage = nostrService.decryptFromUser(preimageShare.preimageEncrypted, riderPubKey)
+                if (preimage == null) {
+                    Log.e(TAG, "Failed to decrypt preimage - NIP-44 decryption returned null")
+                    return@launch
+                }
+                Log.d(TAG, "Decrypted preimage: ${preimage.length} chars, ${preimage.take(16)}...")
+
+                // Verify preimage matches payment hash (if we have one)
+                val paymentHash = state.activePaymentHash
+                if (paymentHash != null) {
+                    Log.d(TAG, "Verifying preimage against payment hash: ${paymentHash.take(16)}...")
+                    if (!PaymentCrypto.verifyPreimage(preimage, paymentHash)) {
+                        Log.e(TAG, "Preimage verification FAILED - hash mismatch!")
+                        _uiState.value = state.copy(
+                            error = "Invalid payment preimage received"
+                        )
+                        return@launch
+                    }
+                    Log.d(TAG, "Preimage verified successfully!")
+                } else {
+                    Log.w(TAG, "No payment hash stored - cannot verify preimage")
+                }
+
+                // Decrypt escrow token if present
+                var escrowToken: String? = null
+                val encryptedToken = preimageShare.escrowTokenEncrypted
+                if (encryptedToken != null) {
+                    escrowToken = nostrService.decryptFromUser(encryptedToken, riderPubKey)
+                    if (escrowToken != null) {
+                        Log.d(TAG, "Decrypted escrow token: ${escrowToken.length} chars, ${escrowToken.take(30)}...")
+                    } else {
+                        Log.e(TAG, "Failed to decrypt escrow token - NIP-44 decryption returned null")
+                    }
+                } else {
+                    Log.w(TAG, "No encrypted escrow token in preimage share")
+                }
+
+                // Update state with escrow info
+                val canSettle = preimage != null && escrowToken != null
+                Log.d(TAG, "Updating state: canSettleEscrow=$canSettle")
+                _uiState.value = state.copy(
+                    activePreimage = preimage,
+                    activeEscrowToken = escrowToken,
+                    canSettleEscrow = canSettle
+                )
+
+                if (canSettle) {
+                    Log.d(TAG, "=== ESCROW READY FOR SETTLEMENT ===")
+                } else {
+                    Log.w(TAG, "Escrow NOT ready: preimage=${preimage != null}, escrowToken=${escrowToken != null}")
+
+                    // EARLY WARNING: If payment was expected but can't be claimed, warn driver immediately
+                    // This ensures driver finds out RIGHT after PIN verification, not at dropoff
+                    if (state.activePaymentHash != null) {
+                        Log.w(TAG, "Payment issue detected - showing warning dialog immediately")
+                        _uiState.value = _uiState.value.copy(
+                            showPaymentWarningDialog = true,
+                            paymentWarningStatus = when {
+                                preimage == null -> PaymentStatus.MISSING_PREIMAGE
+                                escrowToken == null -> PaymentStatus.MISSING_ESCROW_TOKEN
+                                else -> PaymentStatus.UNKNOWN_ERROR
+                            }
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error handling preimage share: ${e.message}", e)
+            }
+        }
+    }
+
+    /**
      * Start the ride (rider is in vehicle).
      */
     private fun startRide() {
@@ -1496,18 +1634,124 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /**
+     * Get current payment status for HTLC escrow.
+     */
+    fun getPaymentStatus(): PaymentStatus {
+        val state = _uiState.value
+        return when {
+            state.activePaymentHash == null -> PaymentStatus.NO_PAYMENT_EXPECTED
+            state.canSettleEscrow -> PaymentStatus.READY_TO_CLAIM
+            state.activePreimage == null && state.activeEscrowToken == null -> PaymentStatus.WAITING_FOR_PREIMAGE
+            state.activePreimage == null -> PaymentStatus.MISSING_PREIMAGE
+            state.activeEscrowToken == null -> PaymentStatus.MISSING_ESCROW_TOKEN
+            else -> PaymentStatus.UNKNOWN_ERROR
+        }
+    }
+
+    /**
      * Complete the ride (arrived at destination).
+     * Shows warning dialog if payment cannot be claimed.
      */
     fun completeRide() {
         val state = _uiState.value
         if (state.stage != DriverStage.IN_RIDE) return
 
+        val paymentStatus = getPaymentStatus()
+        Log.d(TAG, "completeRide: paymentStatus=$paymentStatus")
+
+        // Check if we can claim payment
+        if (paymentStatus != PaymentStatus.READY_TO_CLAIM &&
+            paymentStatus != PaymentStatus.NO_PAYMENT_EXPECTED) {
+            // Show warning dialog - driver won't be able to claim payment
+            Log.w(TAG, "Payment not ready for claim - showing warning dialog")
+            _uiState.value = state.copy(
+                showPaymentWarningDialog = true,
+                paymentWarningStatus = paymentStatus
+            )
+            return
+        }
+
+        // Payment ready or not expected - proceed with completion
+        completeRideInternal()
+    }
+
+    /**
+     * User confirmed to complete ride without payment.
+     */
+    fun confirmCompleteWithoutPayment() {
+        Log.d(TAG, "User confirmed to complete ride without payment")
+        _uiState.value = _uiState.value.copy(
+            showPaymentWarningDialog = false,
+            paymentWarningStatus = null
+        )
+        completeRideInternal()
+    }
+
+    /**
+     * User chose to cancel ride due to payment issue.
+     */
+    fun cancelRideDueToPaymentIssue() {
+        Log.d(TAG, "User chose to cancel ride due to payment issue")
+        _uiState.value = _uiState.value.copy(
+            showPaymentWarningDialog = false,
+            paymentWarningStatus = null
+        )
+        cancelRide()
+    }
+
+    /**
+     * Dismiss payment warning dialog without action (e.g., wait for payment to arrive).
+     */
+    fun dismissPaymentWarningDialog() {
+        _uiState.value = _uiState.value.copy(
+            showPaymentWarningDialog = false,
+            paymentWarningStatus = null
+        )
+    }
+
+    /**
+     * Internal method to actually complete the ride.
+     * Settles HTLC escrow if available.
+     */
+    private fun completeRideInternal() {
+        val state = _uiState.value
         val offer = state.acceptedOffer ?: return
 
         // Stop chat refresh job since ride is ending
         stopChatRefreshJob()
 
         viewModelScope.launch {
+            // Attempt to settle HTLC escrow if we have preimage and token
+            var settlementMessage = ""
+            if (state.canSettleEscrow && state.activePreimage != null && state.activeEscrowToken != null) {
+                Log.d(TAG, "=== ATTEMPTING HTLC SETTLEMENT ===")
+                Log.d(TAG, "Preimage: ${state.activePreimage.take(16)}...")
+                Log.d(TAG, "Escrow token: ${state.activeEscrowToken.take(30)}...")
+                try {
+                    val settlement = walletService?.claimHtlcPayment(
+                        htlcToken = state.activeEscrowToken,
+                        preimage = state.activePreimage,
+                        paymentHash = state.activePaymentHash
+                    )
+
+                    if (settlement != null) {
+                        Log.d(TAG, "=== HTLC SETTLED SUCCESSFULLY ===")
+                        Log.d(TAG, "Received ${settlement.amountSats} sats")
+                        settlementMessage = " + ${settlement.amountSats} sats received"
+                    } else {
+                        Log.e(TAG, "Failed to settle HTLC escrow - claimHtlcPayment returned null")
+                        settlementMessage = " (payment claim failed)"
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error settling HTLC escrow: ${e.message}", e)
+                    settlementMessage = " (payment error)"
+                }
+            } else if (state.activePaymentHash != null) {
+                // Had payment hash but no preimage/token - log for debugging
+                Log.w(TAG, "Ride had HTLC but settlement not possible - preimage=${state.activePreimage != null}, token=${state.activeEscrowToken != null}")
+                settlementMessage = " (no payment received)"
+            }
+
             state.confirmationEventId?.let { confId ->
                 val eventId = updateDriverStatus(
                     confirmationEventId = confId,
@@ -1522,7 +1766,14 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
             _uiState.value = state.copy(
                 stage = DriverStage.RIDE_COMPLETED,
-                statusMessage = "Ride completed! Fare: ${offer.fareEstimate.toInt()} sats"
+                statusMessage = "Ride completed! Fare: ${offer.fareEstimate.toInt()} sats$settlementMessage",
+                // Clear HTLC state
+                activePaymentHash = null,
+                activePreimage = null,
+                activeEscrowToken = null,
+                canSettleEscrow = false,
+                showPaymentWarningDialog = false,
+                paymentWarningStatus = null
             )
         }
     }
@@ -1948,6 +2199,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     fun clearAcceptedOffer() {
         // Only clear if ride is completed
         if (_uiState.value.stage == DriverStage.RIDE_COMPLETED) {
+            // Capture state for ride history BEFORE clearing
+            val state = _uiState.value
+            val offer = state.acceptedOffer
             val context = getApplication<Application>()
 
             // Stop chat refresh job
@@ -1983,11 +2237,53 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 chatMessages = emptyList(),
                 isSendingMessage = false,
                 pendingBroadcastRequests = emptyList(),
-                statusMessage = "Tap to go online"
+                statusMessage = "Tap to go online",
+                // Clear HTLC escrow state
+                activePaymentHash = null,
+                activePreimage = null,
+                activeEscrowToken = null,
+                canSettleEscrow = false
             )
 
             // Clear persisted ride state
             clearSavedRideState()
+
+            // Save completed ride to history (using 6-char geohashes for ~1.2km precision)
+            if (offer != null) {
+                viewModelScope.launch {
+                    try {
+                        val vehicle = state.activeVehicle
+                        val riderProfile = state.riderProfiles[offer.riderPubKey]
+                        val historyEntry = RideHistoryEntry(
+                            rideId = state.confirmationEventId ?: state.acceptanceEventId ?: offer.eventId,
+                            timestamp = System.currentTimeMillis() / 1000,
+                            role = "driver",
+                            counterpartyPubKey = offer.riderPubKey,
+                            pickupGeohash = offer.approxPickup.geohash(6),  // ~1.2km precision
+                            dropoffGeohash = offer.destination.geohash(6),
+                            distanceMiles = offer.rideRouteKm?.let { it * 0.621371 } ?: 0.0,  // Convert km to miles
+                            durationMinutes = offer.rideRouteMin?.toInt() ?: 0,
+                            fareSats = offer.fareEstimate.toLong(),
+                            status = "completed",
+                            // Vehicle info for ride details
+                            vehicleMake = vehicle?.make,
+                            vehicleModel = vehicle?.model,
+                            // Rider profile info
+                            counterpartyFirstName = riderProfile?.bestName()?.split(" ")?.firstOrNull()
+                        )
+                        rideHistoryRepository.addRide(historyEntry)
+                        Log.d(TAG, "Saved completed ride to history (go offline): ${historyEntry.rideId}")
+
+                        // Backup to Nostr (encrypted to self)
+                        rideHistoryRepository.backupToNostr(nostrService)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to save ride to history", e)
+                    }
+                }
+            }
+
+            // Unsubscribe from rider profile
+            offer?.riderPubKey?.let { unsubscribeFromRiderProfile(it) }
 
             // Clean up ride events in background (non-blocking)
             cleanupRideEventsInBackground("ride completed")
@@ -2623,7 +2919,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
             _uiState.value = _uiState.value.copy(isProcessingOffer = true)
 
-            val eventId = nostrService.acceptBroadcastRide(request)
+            // Include wallet pubkey for P2PK escrow - driver signs with wallet key, not Nostr key
+            val walletPubKey = walletService?.getWalletPubKey()
+            Log.d(TAG, "Including wallet pubkey in broadcast acceptance: ${walletPubKey?.take(16)}...")
+            val eventId = nostrService.acceptBroadcastRide(request, walletPubKey)
 
             if (eventId != null) {
                 // Track this request as accepted AFTER success
@@ -2655,6 +2954,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     acceptedOffer = compatibleOffer,
                     acceptedBroadcastRequest = request,  // Keep original for reference
                     acceptanceEventId = eventId,
+                    confirmationEventId = null,  // CRITICAL: Clear old confirmation to prevent stale state
                     pendingOffers = emptyList(),
                     pendingBroadcastRequests = emptyList(),
                     pinAttempts = 0,
@@ -2791,6 +3091,18 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 }
 
 /**
+ * Payment status for HTLC escrow settlement.
+ */
+enum class PaymentStatus {
+    NO_PAYMENT_EXPECTED,    // No HTLC (cash ride or legacy)
+    READY_TO_CLAIM,         // Both preimage and escrow token received
+    WAITING_FOR_PREIMAGE,   // Not yet shared (ride still in progress)
+    MISSING_PREIMAGE,       // Escrow token received but no preimage
+    MISSING_ESCROW_TOKEN,   // Preimage received but no escrow token
+    UNKNOWN_ERROR
+}
+
+/**
  * UI state for driver mode.
  */
 data class DriverUiState(
@@ -2830,7 +3142,7 @@ data class DriverUiState(
 
     // Confirmation wait tracking (waiting for rider to confirm after accepting)
     val confirmationWaitStartMs: Long? = null,          // When we started waiting for confirmation
-    val confirmationWaitDurationMs: Long = 15_000L,     // 15 seconds to wait for confirmation
+    val confirmationWaitDurationMs: Long = 30_000L,     // 30 seconds to wait for confirmation
 
     // Chat (NIP-17 style private messaging)
     val chatMessages: List<RideshareChatData> = emptyList(),
@@ -2847,7 +3159,17 @@ data class DriverUiState(
     val error: String? = null,
 
     // Guards for race condition prevention
-    val isCancelling: Boolean = false  // Prevents concurrent cancel/arrive operations
+    val isCancelling: Boolean = false,  // Prevents concurrent cancel/arrive operations
+
+    // HTLC Escrow state (NUT-14)
+    val activePaymentHash: String? = null,      // Payment hash from ride offer
+    val activePreimage: String? = null,         // Preimage received from rider after PIN verification
+    val activeEscrowToken: String? = null,      // HTLC token received from rider
+    val canSettleEscrow: Boolean = false,       // True when we have preimage + escrow token
+
+    // Payment warning dialog (shown when trying to complete without valid escrow)
+    val showPaymentWarningDialog: Boolean = false,
+    val paymentWarningStatus: PaymentStatus? = null
 ) {
     /** Convenience property for backward compatibility */
     val isAvailable: Boolean get() = stage == DriverStage.AVAILABLE

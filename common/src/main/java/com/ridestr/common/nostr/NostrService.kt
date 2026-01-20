@@ -394,6 +394,21 @@ class NostrService(
             return@withContext emptyMap()
         }
 
+        // Wait for relay connection (up to 15 seconds)
+        var waitedMs = 0L
+        while (!relayManager.isConnected() && waitedMs < 15000) {
+            Log.d(TAG, "countRideshareEventsByKind: Waiting for relay... (${waitedMs}ms)")
+            delay(500)
+            waitedMs += 500
+        }
+
+        if (!relayManager.isConnected()) {
+            Log.e(TAG, "countRideshareEventsByKind: No relays connected")
+            return@withContext emptyMap()
+        }
+
+        Log.d(TAG, "Counting events from ${relayManager.connectedCount()} relays for ${pubkey.take(16)}...")
+
         val rideshareKinds = listOf(
             RideshareEventKinds.DRIVER_AVAILABILITY,
             RideshareEventKinds.RIDE_OFFER,
@@ -426,10 +441,12 @@ class NostrService(
             }
         }
 
-        delay(2000)
+        // Wait longer for relay responses (increased from 2s to 5s)
+        delay(5000)
         relayManager.closeSubscription(subscriptionId)
 
-        Log.d(TAG, "Events by kind: $kindCounts")
+        val total = kindCounts.values.sum()
+        Log.d(TAG, "Found $total events by kind: $kindCounts")
         kindCounts.toMap()
     }
 
@@ -555,9 +572,10 @@ class NostrService(
      * Accept a ride offer.
      * PIN is no longer included - the rider generates it and shares verbally.
      * @param offer The offer to accept
+     * @param walletPubKey Driver's wallet pubkey for P2PK escrow (separate from Nostr key)
      * @return The event ID if successful, null on failure
      */
-    suspend fun acceptRide(offer: RideOfferData): String? {
+    suspend fun acceptRide(offer: RideOfferData, walletPubKey: String? = null): String? {
         val signer = keyManager.getSigner()
         if (signer == null) {
             Log.e(TAG, "Cannot accept ride: Not logged in")
@@ -568,7 +586,8 @@ class NostrService(
             val event = RideAcceptanceEvent.create(
                 signer = signer,
                 offerEventId = offer.eventId,
-                riderPubKey = offer.riderPubKey
+                riderPubKey = offer.riderPubKey,
+                walletPubKey = walletPubKey
             )
             relayManager.publish(event)
             Log.d(TAG, "Accepted ride: ${event.id}")
@@ -783,6 +802,48 @@ class NostrService(
     }
 
     /**
+     * Encrypt arbitrary string data for a specific user (NIP-44).
+     * Generic helper for encrypting any data to a recipient.
+     *
+     * @param data The data to encrypt
+     * @param recipientPubKey The recipient's public key
+     * @return Encrypted string, or null on failure
+     */
+    suspend fun encryptForUser(
+        data: String,
+        recipientPubKey: String
+    ): String? {
+        val signer = keyManager.getSigner() ?: return null
+        return try {
+            signer.nip44Encrypt(data, recipientPubKey)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to encrypt data for user", e)
+            null
+        }
+    }
+
+    /**
+     * Decrypt arbitrary string data from a specific user (NIP-44).
+     * Generic helper for decrypting any data from a sender.
+     *
+     * @param encryptedData The encrypted data
+     * @param senderPubKey The sender's public key
+     * @return Decrypted string, or null on failure
+     */
+    suspend fun decryptFromUser(
+        encryptedData: String,
+        senderPubKey: String
+    ): String? {
+        val signer = keyManager.getSigner() ?: return null
+        return try {
+            signer.nip44Decrypt(encryptedData, senderPubKey)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to decrypt data from user", e)
+            null
+        }
+    }
+
+    /**
      * Decrypt a PIN from driver ride state history.
      * @param encryptedPin The encrypted PIN string
      * @param driverPubKey The driver's public key (sender)
@@ -823,7 +884,8 @@ class NostrService(
         pickupRouteKm: Double? = null,
         pickupRouteMin: Double? = null,
         rideRouteKm: Double? = null,
-        rideRouteMin: Double? = null
+        rideRouteMin: Double? = null,
+        paymentHash: String? = null  // HTLC payment hash for escrow
     ): String? {
         val signer = keyManager.getSigner()
         if (signer == null) {
@@ -842,10 +904,11 @@ class NostrService(
                 pickupRouteKm = pickupRouteKm,
                 pickupRouteMin = pickupRouteMin,
                 rideRouteKm = rideRouteKm,
-                rideRouteMin = rideRouteMin
+                rideRouteMin = rideRouteMin,
+                paymentHash = paymentHash
             )
             relayManager.publish(event)
-            Log.d(TAG, "Sent ride offer: ${event.id}")
+            Log.d(TAG, "Sent ride offer: ${event.id}${paymentHash?.let { " with payment hash" } ?: ""}")
             event.id
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send ride offer", e)
@@ -1005,9 +1068,10 @@ class NostrService(
     /**
      * Accept a broadcast ride request.
      * @param request The broadcast ride request to accept
+     * @param walletPubKey Driver's wallet pubkey for P2PK escrow (separate from Nostr key)
      * @return The event ID if successful, null on failure
      */
-    suspend fun acceptBroadcastRide(request: BroadcastRideOfferData): String? {
+    suspend fun acceptBroadcastRide(request: BroadcastRideOfferData, walletPubKey: String? = null): String? {
         val signer = keyManager.getSigner()
         if (signer == null) {
             Log.e(TAG, "Cannot accept broadcast ride: Not logged in")
@@ -1018,7 +1082,8 @@ class NostrService(
             val event = RideAcceptanceEvent.create(
                 signer = signer,
                 offerEventId = request.eventId,
-                riderPubKey = request.riderPubKey
+                riderPubKey = request.riderPubKey,
+                walletPubKey = walletPubKey
             )
             relayManager.publish(event)
             Log.d(TAG, "Accepted broadcast ride: ${event.id}")
@@ -1427,11 +1492,24 @@ class NostrService(
             return null
         }
 
+        // Wait for relay connection (up to 15 seconds)
+        var waitedMs = 0L
+        while (!relayManager.isConnected() && waitedMs < 15000) {
+            Log.d(TAG, "publishRideHistoryBackup: Waiting for relay... (${waitedMs}ms)")
+            delay(500)
+            waitedMs += 500
+        }
+
+        if (!relayManager.isConnected()) {
+            Log.e(TAG, "publishRideHistoryBackup: No relays connected - backup NOT saved!")
+            return null
+        }
+
         return try {
             val event = RideHistoryEvent.create(signer, rides, stats)
             if (event != null) {
                 relayManager.publish(event)
-                Log.d(TAG, "Published ride history backup: ${event.id} (${rides.size} rides)")
+                Log.d(TAG, "Published ride history backup: ${event.id} (${rides.size} rides) to ${relayManager.connectedCount()} relays")
                 event.id
             } else {
                 Log.e(TAG, "Failed to create ride history event")
@@ -1458,6 +1536,21 @@ class NostrService(
         }
 
         return withContext(Dispatchers.IO) {
+            // Wait for relay connection (up to 15 seconds)
+            var waitedMs = 0L
+            while (!relayManager.isConnected() && waitedMs < 15000) {
+                Log.d(TAG, "fetchRideHistory: Waiting for relay... (${waitedMs}ms)")
+                delay(500)
+                waitedMs += 500
+            }
+
+            if (!relayManager.isConnected()) {
+                Log.e(TAG, "fetchRideHistory: No relays connected - cannot restore")
+                return@withContext null
+            }
+
+            Log.d(TAG, "Fetching ride history from ${relayManager.connectedCount()} relays for ${myPubKey.take(16)}...")
+
             try {
                 var result: RideHistoryData? = null
                 val subscriptionId = relayManager.subscribe(
@@ -1465,20 +1558,24 @@ class NostrService(
                     authors = listOf(myPubKey),
                     tags = mapOf("d" to listOf(RideHistoryEvent.D_TAG)),
                     limit = 1
-                ) { event, _ ->
+                ) { event, relayUrl ->
                     // This is our own history event - try to decrypt
+                    Log.d(TAG, "Received ride history event ${event.id} from $relayUrl")
                     kotlinx.coroutines.runBlocking {
                         RideHistoryEvent.parseAndDecrypt(signer, event)?.let { data ->
                             result = data
-                            Log.d(TAG, "Fetched ride history: ${data.rides.size} rides")
+                            Log.d(TAG, "Decrypted ride history: ${data.rides.size} rides")
                         }
                     }
                 }
 
-                // Wait a bit for the response
-                delay(3000)
+                // Wait for response (increased from 3s to 8s)
+                delay(8000)
                 relayManager.closeSubscription(subscriptionId)
 
+                if (result == null) {
+                    Log.d(TAG, "No ride history backup found on relays")
+                }
                 result
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to fetch ride history", e)
@@ -1506,6 +1603,220 @@ class NostrService(
         } catch (e: Exception) {
             Log.e(TAG, "Failed to delete ride history", e)
             false
+        }
+    }
+
+    // ==================== Vehicle Backup ====================
+
+    /**
+     * Backup vehicles to Nostr as an encrypted event.
+     *
+     * @param vehicles List of vehicles to backup
+     * @return Event ID if successful, null on failure
+     */
+    suspend fun backupVehicles(vehicles: List<Vehicle>): String? {
+        val signer = keyManager.getSigner()
+        if (signer == null) {
+            Log.e(TAG, "Cannot backup vehicles: Not logged in")
+            return null
+        }
+
+        // Wait for relay connection (up to 15 seconds)
+        var waitedMs = 0L
+        while (!relayManager.isConnected() && waitedMs < 15000) {
+            Log.d(TAG, "backupVehicles: Waiting for relay... (${waitedMs}ms)")
+            delay(500)
+            waitedMs += 500
+        }
+
+        if (!relayManager.isConnected()) {
+            Log.e(TAG, "backupVehicles: No relays connected - backup NOT saved!")
+            return null
+        }
+
+        return try {
+            val event = VehicleBackupEvent.create(signer, vehicles)
+            if (event != null) {
+                relayManager.publish(event)
+                Log.d(TAG, "Published vehicle backup: ${event.id} (${vehicles.size} vehicles) to ${relayManager.connectedCount()} relays")
+                event.id
+            } else {
+                Log.e(TAG, "Failed to create vehicle backup event")
+                null
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to backup vehicles", e)
+            null
+        }
+    }
+
+    /**
+     * Fetch the user's vehicle backup from Nostr relays.
+     * Decrypts the content using the user's keys.
+     *
+     * @return Decrypted vehicle data, or null if not found or decryption fails
+     */
+    suspend fun fetchVehicleBackup(): VehicleBackupData? {
+        val signer = keyManager.getSigner()
+        val myPubKey = keyManager.getPubKeyHex()
+        if (signer == null || myPubKey == null) {
+            Log.e(TAG, "Cannot fetch vehicle backup: Not logged in")
+            return null
+        }
+
+        return withContext(Dispatchers.IO) {
+            // Wait for relay connection (up to 15 seconds)
+            var waitedMs = 0L
+            while (!relayManager.isConnected() && waitedMs < 15000) {
+                Log.d(TAG, "fetchVehicleBackup: Waiting for relay... (${waitedMs}ms)")
+                delay(500)
+                waitedMs += 500
+            }
+
+            if (!relayManager.isConnected()) {
+                Log.e(TAG, "fetchVehicleBackup: No relays connected - cannot restore")
+                return@withContext null
+            }
+
+            Log.d(TAG, "Fetching vehicle backup from ${relayManager.connectedCount()} relays for ${myPubKey.take(16)}...")
+
+            try {
+                var result: VehicleBackupData? = null
+                val subscriptionId = relayManager.subscribe(
+                    kinds = listOf(RideshareEventKinds.VEHICLE_BACKUP),
+                    authors = listOf(myPubKey),
+                    tags = mapOf("d" to listOf(VehicleBackupEvent.D_TAG)),
+                    limit = 1
+                ) { event, relayUrl ->
+                    // This is our own vehicle event - try to decrypt
+                    Log.d(TAG, "Received vehicle backup event ${event.id} from $relayUrl")
+                    kotlinx.coroutines.runBlocking {
+                        VehicleBackupEvent.parseAndDecrypt(signer, event)?.let { data ->
+                            result = data
+                            Log.d(TAG, "Decrypted vehicle backup: ${data.vehicles.size} vehicles")
+                        }
+                    }
+                }
+
+                // Wait for response
+                delay(8000)
+                relayManager.closeSubscription(subscriptionId)
+
+                if (result == null) {
+                    Log.d(TAG, "No vehicle backup found on relays")
+                }
+                result
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to fetch vehicle backup", e)
+                null
+            }
+        }
+    }
+
+    // ==================== Saved Location Backup ====================
+
+    /**
+     * Backup saved locations to Nostr as an encrypted event.
+     *
+     * @param locations List of saved locations to backup
+     * @return Event ID if successful, null on failure
+     */
+    suspend fun backupSavedLocations(locations: List<com.ridestr.common.data.SavedLocation>): String? {
+        val signer = keyManager.getSigner()
+        if (signer == null) {
+            Log.e(TAG, "Cannot backup saved locations: Not logged in")
+            return null
+        }
+
+        // Wait for relay connection (up to 15 seconds)
+        var waitedMs = 0L
+        while (!relayManager.isConnected() && waitedMs < 15000) {
+            Log.d(TAG, "backupSavedLocations: Waiting for relay... (${waitedMs}ms)")
+            delay(500)
+            waitedMs += 500
+        }
+
+        if (!relayManager.isConnected()) {
+            Log.e(TAG, "backupSavedLocations: No relays connected - backup NOT saved!")
+            return null
+        }
+
+        return try {
+            val event = SavedLocationBackupEvent.create(signer, locations)
+            if (event != null) {
+                relayManager.publish(event)
+                Log.d(TAG, "Published saved location backup: ${event.id} (${locations.size} locations) to ${relayManager.connectedCount()} relays")
+                event.id
+            } else {
+                Log.e(TAG, "Failed to create saved location backup event")
+                null
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to backup saved locations", e)
+            null
+        }
+    }
+
+    /**
+     * Fetch the user's saved location backup from Nostr relays.
+     * Decrypts the content using the user's keys.
+     *
+     * @return Decrypted saved location data, or null if not found or decryption fails
+     */
+    suspend fun fetchSavedLocationBackup(): SavedLocationBackupData? {
+        val signer = keyManager.getSigner()
+        val myPubKey = keyManager.getPubKeyHex()
+        if (signer == null || myPubKey == null) {
+            Log.e(TAG, "Cannot fetch saved location backup: Not logged in")
+            return null
+        }
+
+        return withContext(Dispatchers.IO) {
+            // Wait for relay connection (up to 15 seconds)
+            var waitedMs = 0L
+            while (!relayManager.isConnected() && waitedMs < 15000) {
+                Log.d(TAG, "fetchSavedLocationBackup: Waiting for relay... (${waitedMs}ms)")
+                delay(500)
+                waitedMs += 500
+            }
+
+            if (!relayManager.isConnected()) {
+                Log.e(TAG, "fetchSavedLocationBackup: No relays connected - cannot restore")
+                return@withContext null
+            }
+
+            Log.d(TAG, "Fetching saved location backup from ${relayManager.connectedCount()} relays for ${myPubKey.take(16)}...")
+
+            try {
+                var result: SavedLocationBackupData? = null
+                val subscriptionId = relayManager.subscribe(
+                    kinds = listOf(RideshareEventKinds.SAVED_LOCATIONS_BACKUP),
+                    authors = listOf(myPubKey),
+                    tags = mapOf("d" to listOf(SavedLocationBackupEvent.D_TAG)),
+                    limit = 1
+                ) { event, relayUrl ->
+                    // This is our own saved locations event - try to decrypt
+                    Log.d(TAG, "Received saved location backup event ${event.id} from $relayUrl")
+                    kotlinx.coroutines.runBlocking {
+                        SavedLocationBackupEvent.parseAndDecrypt(signer, event)?.let { data ->
+                            result = data
+                            Log.d(TAG, "Decrypted saved location backup: ${data.locations.size} locations")
+                        }
+                    }
+                }
+
+                // Wait for response
+                delay(8000)
+                relayManager.closeSubscription(subscriptionId)
+
+                if (result == null) {
+                    Log.d(TAG, "No saved location backup found on relays")
+                }
+                result
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to fetch saved location backup", e)
+                null
+            }
         }
     }
 }

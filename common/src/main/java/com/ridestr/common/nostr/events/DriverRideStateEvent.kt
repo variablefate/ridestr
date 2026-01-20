@@ -26,6 +26,7 @@ object DriverRideStateEvent {
     object ActionType {
         const val STATUS = "status"
         const val PIN_SUBMIT = "pin_submit"
+        const val SETTLEMENT = "settlement"  // Payment rails: records successful escrow settlement
     }
 
     /**
@@ -161,6 +162,24 @@ object DriverRideStateEvent {
             at = System.currentTimeMillis() / 1000
         )
     }
+
+    /**
+     * Helper to create a settlement action.
+     * Called when driver successfully settles the HTLC escrow at dropoff.
+     *
+     * @param settlementProof Cryptographic proof of settlement (e.g., HTLC claim tx)
+     * @param settledAmount Amount settled in satoshis
+     */
+    fun createSettlementAction(
+        settlementProof: String,
+        settledAmount: Long
+    ): DriverRideAction.Settlement {
+        return DriverRideAction.Settlement(
+            settlementProof = settlementProof,
+            settledAmount = settledAmount,
+            at = System.currentTimeMillis() / 1000
+        )
+    }
 }
 
 /**
@@ -206,6 +225,23 @@ sealed class DriverRideAction {
         }
     }
 
+    /**
+     * Settlement action.
+     * Records successful HTLC escrow settlement at dropoff.
+     */
+    data class Settlement(
+        val settlementProof: String,
+        val settledAmount: Long,
+        override val at: Long
+    ) : DriverRideAction() {
+        override fun toJson(): JSONObject = JSONObject().apply {
+            put("action", DriverRideStateEvent.ActionType.SETTLEMENT)
+            put("settlement_proof", settlementProof)
+            put("settled_amount", settledAmount)
+            put("at", at)
+        }
+    }
+
     companion object {
         fun fromJson(json: JSONObject): DriverRideAction? {
             return try {
@@ -232,6 +268,15 @@ sealed class DriverRideAction {
                     DriverRideStateEvent.ActionType.PIN_SUBMIT -> {
                         val pinEncrypted = json.getString("pin_encrypted")
                         PinSubmit(pinEncrypted = pinEncrypted, at = at)
+                    }
+                    DriverRideStateEvent.ActionType.SETTLEMENT -> {
+                        val settlementProof = json.getString("settlement_proof")
+                        val settledAmount = json.getLong("settled_amount")
+                        Settlement(
+                            settlementProof = settlementProof,
+                            settledAmount = settledAmount,
+                            at = at
+                        )
                     }
                     else -> null
                 }
@@ -274,5 +319,26 @@ data class DriverRideStateData(
      */
     fun getStatusUpdates(): List<DriverRideAction.Status> {
         return history.filterIsInstance<DriverRideAction.Status>()
+    }
+
+    /**
+     * Get the settlement action if present.
+     */
+    fun getSettlement(): DriverRideAction.Settlement? {
+        return history.filterIsInstance<DriverRideAction.Settlement>().lastOrNull()
+    }
+
+    /**
+     * Check if the ride has been settled (payment completed).
+     */
+    fun isSettled(): Boolean {
+        return getSettlement() != null
+    }
+
+    /**
+     * Get the settled amount if payment was completed.
+     */
+    fun getSettledAmount(): Long? {
+        return getSettlement()?.settledAmount
     }
 }

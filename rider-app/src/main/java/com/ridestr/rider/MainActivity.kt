@@ -40,6 +40,8 @@ import com.ridestr.common.settings.SettingsManager
 import com.ridestr.common.ui.AccountBottomSheet
 import com.ridestr.common.ui.AccountSafetyScreen
 import com.ridestr.common.ui.DeveloperOptionsScreen
+import com.ridestr.common.ui.RelayManagementScreen
+import com.ridestr.common.ui.WalletSettingsScreen
 import com.ridestr.common.ui.RelaySignalIndicator
 import com.ridestr.common.ui.LocationPermissionScreen
 import com.ridestr.common.ui.TileManagementScreen
@@ -53,9 +55,21 @@ import com.ridestr.common.nostr.relay.RelayConnectionState
 import com.ridestr.common.data.RideHistoryRepository
 import com.ridestr.common.notification.NotificationHelper
 import com.ridestr.common.ui.theme.RidestrTheme
+import com.ridestr.common.ui.WalletDetailScreen
+import com.ridestr.common.ui.WalletSetupScreen
+import com.ridestr.common.payment.WalletKeyManager
+import com.ridestr.common.payment.WalletService
+import com.ridestr.common.payment.cashu.Nip60WalletSync
+import com.ridestr.common.sync.ProfileSyncManager
+import com.ridestr.common.sync.ProfileSyncState
+import com.ridestr.common.sync.Nip60WalletSyncAdapter
+import com.ridestr.common.sync.RideHistorySyncAdapter
+import com.ridestr.common.sync.SavedLocationSyncAdapter
+import com.ridestr.common.data.SavedLocationRepository
 import com.ridestr.rider.service.RiderActiveService
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
+import com.ridestr.common.bitcoin.BitcoinPriceService
 
 /**
  * Bottom navigation tabs for the main screen.
@@ -73,16 +87,20 @@ enum class Tab {
 enum class Screen {
     ONBOARDING,
     PROFILE_SETUP,
+    WALLET_SETUP,       // Wallet onboarding (after profile, before location)
     LOCATION_PERMISSION,
     TILE_SETUP,
     MAIN,           // Shows bottom navigation with tabs
+    WALLET_DETAIL,  // Full wallet interface (deposit, withdraw, etc.)
+    WALLET_SETTINGS,// Wallet management settings
     RIDE_DETAIL,    // Detail view for single ride
     TIP,            // Tip driver screen
     DEBUG,
     BACKUP_KEYS,
     TILES,
     DEV_OPTIONS,
-    ACCOUNT_SAFETY
+    ACCOUNT_SAFETY,
+    RELAY_SETTINGS
 }
 
 class MainActivity : ComponentActivity() {
@@ -131,6 +149,54 @@ fun RidestrApp() {
 
     // Routing service
     val routingService = remember { ValhallaRoutingService(context) }
+
+    // Wallet services for payment rails
+    val walletKeyManager = remember { WalletKeyManager(context) }
+    val walletService = remember { WalletService(context, walletKeyManager) }
+
+    // Bitcoin price service for USD display
+    val bitcoinPriceService = remember { BitcoinPriceService() }
+
+    // NIP-60 wallet sync for cross-device portability
+    // IMPORTANT: Wire to walletService immediately to avoid race condition with lockForRide()
+    val nip60Sync = remember {
+        Nip60WalletSync(
+            relayManager = nostrService.relayManager,
+            keyManager = nostrService.keyManager,
+            walletKeyManager = walletKeyManager
+        ).also { sync ->
+            walletService.setNip60Sync(sync)
+        }
+    }
+
+    // ProfileSyncManager for coordinated profile data sync
+    val profileSyncManager = remember {
+        ProfileSyncManager.getInstance(context, settingsManager.getEffectiveRelays())
+    }
+
+    // Ride history repository (for sync adapter)
+    val rideHistoryRepo = remember { RideHistoryRepository.getInstance(context) }
+    val savedLocationRepo = remember { SavedLocationRepository.getInstance(context) }
+
+    // Register sync adapters
+    LaunchedEffect(Unit) {
+        profileSyncManager.registerSyncable(Nip60WalletSyncAdapter(nip60Sync))
+        profileSyncManager.registerSyncable(RideHistorySyncAdapter(rideHistoryRepo, nostrService))
+        profileSyncManager.registerSyncable(SavedLocationSyncAdapter(savedLocationRepo, nostrService))
+    }
+
+    // Observable sync state for potential UI feedback
+    val syncState by profileSyncManager.syncState.collectAsState()
+
+    // Start Bitcoin price auto-refresh for USD display
+    LaunchedEffect(Unit) {
+        bitcoinPriceService.startAutoRefresh()
+    }
+
+    // Auto-connect wallet to saved mint
+    LaunchedEffect(Unit) {
+        walletService.autoConnect()
+    }
 
     // Current location for tile recommendations
     var currentLocation by remember { mutableStateOf<Location?>(null) }
@@ -189,9 +255,29 @@ fun RidestrApp() {
         }
     }
 
+    // Sync all profile data from Nostr on login (for fresh installs importing existing key)
+    // Uses ProfileSyncManager for coordinated, ordered sync of wallet, history, and locations
+    LaunchedEffect(uiState.isLoggedIn) {
+        if (uiState.isLoggedIn) {
+            // Only sync if local data is empty (fresh install with imported key)
+            val needsSync = !rideHistoryRepo.hasRides() && !savedLocationRepo.hasLocations()
+            if (needsSync) {
+                // CRITICAL: Refresh KeyManagers from storage
+                // OnboardingViewModel has a separate KeyManager instance that imported the keys,
+                // so other KeyManagers need to reload from SharedPreferences
+                nostrService.keyManager.refreshFromStorage()
+                profileSyncManager.keyManager.refreshFromStorage()
+
+                android.util.Log.d("MainActivity", "Starting ProfileSyncManager sync (fresh install)")
+                profileSyncManager.onKeyImported()
+            }
+        }
+    }
+
     // Check if already logged in on first composition (only if not already at MAIN)
-    LaunchedEffect(uiState.isLoggedIn, uiState.isProfileCompleted) {
-        if (uiState.isLoggedIn && currentScreen == Screen.ONBOARDING) {
+    // IMPORTANT: Don't navigate if showBackupReminder is true - let OnboardingScreen handle that
+    LaunchedEffect(uiState.isLoggedIn, uiState.isProfileCompleted, uiState.showBackupReminder) {
+        if (uiState.isLoggedIn && !uiState.showBackupReminder && currentScreen == Screen.ONBOARDING) {
             nostrService.connect()
 
             // Determine next screen based on completion status
@@ -200,6 +286,8 @@ fun RidestrApp() {
                 onboardingCompleted -> Screen.MAIN
                 // If profile not complete, go to profile setup
                 !uiState.isProfileCompleted -> Screen.PROFILE_SETUP
+                // If wallet setup not done, go to wallet setup
+                !settingsManager.isWalletSetupDone() -> Screen.WALLET_SETUP
                 // If no location permission, request it
                 !hasLocationPermission -> Screen.LOCATION_PERMISSION
                 // Skip tile setup if already have tiles downloaded
@@ -238,7 +326,26 @@ fun RidestrApp() {
                     onComplete = {
                         // Start tile discovery early (before location permission)
                         tileDiscoveryService.startDiscovery()
-                        // After profile, go to location permission
+                        // After profile, go to wallet setup
+                        currentScreen = if (settingsManager.isWalletSetupDone()) {
+                            Screen.LOCATION_PERMISSION
+                        } else {
+                            Screen.WALLET_SETUP
+                        }
+                    },
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
+
+            Screen.WALLET_SETUP -> {
+                WalletSetupScreen(
+                    walletService = walletService,
+                    onComplete = {
+                        settingsManager.setWalletSetupCompleted(true)
+                        currentScreen = Screen.LOCATION_PERMISSION
+                    },
+                    onSkip = {
+                        settingsManager.setWalletSetupSkipped(true)
                         currentScreen = Screen.LOCATION_PERMISSION
                     },
                     modifier = Modifier.padding(innerPadding)
@@ -320,10 +427,27 @@ fun RidestrApp() {
                     settingsManager = settingsManager,
                     nostrService = nostrService,
                     userProfile = userProfile,
+                    walletService = walletService,
                     onLogout = {
+                        // Disconnect from Nostr
                         nostrService.disconnect()
+
+                        // Clear Nostr key and profile
                         onboardingViewModel.logout()
-                        settingsManager.resetOnboarding()
+
+                        // Clear all settings (relays, preferences, onboarding, wallet setup)
+                        settingsManager.clearAllData()
+
+                        // Clear wallet data and key
+                        walletService.resetWallet()
+                        walletKeyManager.clearWalletKey()
+
+                        // Clear ride history (singleton)
+                        RideHistoryRepository.getInstance(context).clearAllHistory()
+
+                        // Clear saved locations (favorites/recents)
+                        com.ridestr.common.data.SavedLocationRepository.getInstance(context).clearAll()
+
                         currentScreen = Screen.ONBOARDING
                     },
                     onOpenProfile = {
@@ -334,6 +458,9 @@ fun RidestrApp() {
                     },
                     onOpenAccountSafety = {
                         currentScreen = Screen.ACCOUNT_SAFETY
+                    },
+                    onOpenRelaySettings = {
+                        currentScreen = Screen.RELAY_SETTINGS
                     },
                     onOpenTiles = {
                         currentScreen = Screen.TILES
@@ -348,8 +475,32 @@ fun RidestrApp() {
                         selectedRide = ride
                         currentScreen = Screen.RIDE_DETAIL
                     },
+                    onSetupWallet = {
+                        currentScreen = Screen.WALLET_SETUP
+                    },
+                    onOpenWalletDetail = {
+                        currentScreen = Screen.WALLET_DETAIL
+                    },
+                    onOpenWalletSettings = {
+                        currentScreen = Screen.WALLET_SETTINGS
+                    },
                     modifier = Modifier.padding(innerPadding)
                 )
+            }
+
+            Screen.WALLET_DETAIL -> {
+                if (walletService != null) {
+                    WalletDetailScreen(
+                        walletService = walletService,
+                        settingsManager = settingsManager,
+                        priceService = bitcoinPriceService,
+                        onBack = { currentScreen = Screen.MAIN },
+                        modifier = Modifier.padding(innerPadding)
+                    )
+                } else {
+                    // Fallback if wallet not set up
+                    currentScreen = Screen.WALLET_SETUP
+                }
             }
 
             Screen.DEBUG -> {
@@ -395,6 +546,7 @@ fun RidestrApp() {
                     isDriverApp = false,
                     onOpenDebug = { currentScreen = Screen.DEBUG },
                     onBack = { currentScreen = Screen.MAIN },
+                    walletService = walletService,
                     modifier = Modifier.padding(innerPadding)
                 )
             }
@@ -405,6 +557,28 @@ fun RidestrApp() {
                     nostrService = nostrService,
                     onBack = { currentScreen = Screen.MAIN },
                     onLocalStateClear = { riderViewModel.clearLocalRideState() },
+                    walletService = walletService,
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
+
+            Screen.RELAY_SETTINGS -> {
+                val connectedCount = connectionStates.values.count { it == RelayConnectionState.CONNECTED }
+                val totalRelays = connectionStates.size
+
+                RelayManagementScreen(
+                    settingsManager = settingsManager,
+                    connectedCount = connectedCount,
+                    totalRelays = totalRelays,
+                    onBack = { currentScreen = Screen.MAIN },
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
+
+            Screen.WALLET_SETTINGS -> {
+                WalletSettingsScreen(
+                    walletService = walletService,
+                    onBack = { currentScreen = Screen.MAIN },
                     modifier = Modifier.padding(innerPadding)
                 )
             }
@@ -489,14 +663,19 @@ fun MainScreen(
     settingsManager: SettingsManager,
     nostrService: NostrService,
     userProfile: UserProfile?,
+    walletService: WalletService?,
     onLogout: () -> Unit,
     onOpenProfile: () -> Unit,
     onOpenBackup: () -> Unit,
     onOpenAccountSafety: () -> Unit,
+    onOpenRelaySettings: () -> Unit,
     onOpenTiles: () -> Unit,
     onOpenDevOptions: () -> Unit,
     onOpenDebug: () -> Unit,
     onOpenRideDetail: (RideHistoryEntry) -> Unit,
+    onSetupWallet: () -> Unit,
+    onOpenWalletDetail: () -> Unit,
+    onOpenWalletSettings: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val connectedCount = connectionStates.values.count { it == RelayConnectionState.CONNECTED }
@@ -511,6 +690,11 @@ fun MainScreen(
 
     // Rider ViewModel (persists across tab switches)
     val riderViewModel: RiderViewModel = viewModel()
+
+    // Wire up wallet service for balance checks
+    LaunchedEffect(walletService) {
+        riderViewModel.setWalletService(walletService)
+    }
 
     val context = LocalContext.current
 
@@ -559,7 +743,8 @@ fun MainScreen(
                     ) {
                         RelaySignalIndicator(
                             connectedCount = connectedCount,
-                            totalRelays = totalRelays
+                            totalRelays = totalRelays,
+                            onClick = onOpenRelaySettings
                         )
                         IconButton(onClick = { showAccountSheet = true }) {
                             Icon(Icons.Default.Person, contentDescription = "Account")
@@ -604,6 +789,7 @@ fun MainScreen(
                     viewModel = riderViewModel,
                     settingsManager = settingsManager,
                     onOpenTiles = onOpenTiles,
+                    onOpenWallet = { currentTab = Tab.WALLET },
                     modifier = Modifier.padding(innerPadding)
                 )
             }
@@ -612,6 +798,9 @@ fun MainScreen(
                     rideHistoryRepository = rideHistoryRepository,
                     settingsManager = settingsManager,
                     priceService = riderViewModel.bitcoinPriceService,
+                    walletService = walletService,
+                    onSetupWallet = onSetupWallet,
+                    onOpenWalletDetail = onOpenWalletDetail,
                     onViewHistory = { currentTab = Tab.HISTORY },
                     modifier = Modifier.padding(innerPadding)
                 )
@@ -631,6 +820,7 @@ fun MainScreen(
                     settingsManager = settingsManager,
                     onOpenTiles = onOpenTiles,
                     onOpenDevOptions = onOpenDevOptions,
+                    onOpenWalletSettings = onOpenWalletSettings,
                     modifier = Modifier.padding(innerPadding)
                 )
             }
@@ -646,6 +836,7 @@ fun MainScreen(
             onEditProfile = onOpenProfile,
             onBackupKeys = onOpenBackup,
             onAccountSafety = onOpenAccountSafety,
+            onRelaySettings = onOpenRelaySettings,
             onLogout = onLogout,
             onDismiss = { showAccountSheet = false }
         )

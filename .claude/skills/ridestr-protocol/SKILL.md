@@ -1,3 +1,8 @@
+---
+name: ridestr-protocol
+description: Expert knowledge for debugging Ridestr ride flow issues. Use when troubleshooting phantom cancellations, state bugs, events not received, rides stuck, subscriptions not working, or confirmation event ID problems. Covers state machines, NIP-014173 protocol, history accumulation, and the dual-origin debugging principle.
+---
+
 # Ridestr Protocol Expert Skill
 
 Use this skill when working on Nostr event handling, ride state management, payment rails, or debugging data flow issues in the Ridestr rideshare platform.
@@ -203,14 +208,14 @@ val meltQuote = cashuMint.getMeltQuote(invoiceAmount)
 
 ### ViewModels (State Management)
 - `drivestr/src/main/java/com/drivestr/app/viewmodels/DriverViewModel.kt`
-  - `clearDriverStateHistory()` - Line ~243
-  - `acceptOffer()` - Line ~950
-  - `acceptBroadcastRequest()` - Line ~2550
+  - `clearDriverStateHistory()` - Line ~267
+  - `acceptOffer()` - Line ~1025
+  - `acceptBroadcastRequest()` - Line ~2798
   - `updateDriverStatus()` - Adds to history
   - `publishDriverRideState()` - Publishes Kind 30180
 
 - `rider-app/src/main/java/com/ridestr/rider/viewmodels/RiderViewModel.kt`
-  - `clearRiderStateHistory()` - Line ~340
+  - `clearRiderStateHistory()` - Line ~354
   - `handleDriverRideState()` - Processes Kind 30180
   - `handleDriverCancellation()` - Cancellation handler
   - `publishRiderRideState()` - Publishes Kind 30181

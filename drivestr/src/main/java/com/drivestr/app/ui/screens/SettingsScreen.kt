@@ -28,6 +28,7 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onOpenTiles: () -> Unit,
     onOpenDevOptions: () -> Unit,
+    onOpenWalletSettings: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     Scaffold(
@@ -50,6 +51,7 @@ fun SettingsScreen(
             settingsManager = settingsManager,
             onOpenTiles = onOpenTiles,
             onOpenDevOptions = onOpenDevOptions,
+            onOpenWalletSettings = onOpenWalletSettings,
             modifier = Modifier.padding(padding)
         )
     }
@@ -65,6 +67,7 @@ fun SettingsContent(
     driverStage: DriverStage? = null,
     onOpenTiles: () -> Unit,
     onOpenDevOptions: () -> Unit,
+    onOpenWalletSettings: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val autoOpenNavigation by settingsManager.autoOpenNavigation.collectAsState()
@@ -185,6 +188,16 @@ fun SettingsContent(
                 description = "Manage offline routing data for your area",
                 icon = Icons.Default.Map,
                 onClick = onOpenTiles
+            )
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+            // Wallet Settings Navigation
+            SettingsNavigationRow(
+                title = "Wallet",
+                description = "Manage Cashu wallet and sync",
+                icon = Icons.Default.AccountBalanceWallet,
+                onClick = onOpenWalletSettings
             )
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))

@@ -158,6 +158,15 @@ class KeyManager(context: Context) {
     }
 
     /**
+     * Reload keys from storage.
+     * Call this after another KeyManager instance imports a key,
+     * to ensure this instance has the latest keys.
+     */
+    fun refreshFromStorage() {
+        loadStoredKey()
+    }
+
+    /**
      * Load the key from secure storage.
      */
     private fun loadStoredKey() {

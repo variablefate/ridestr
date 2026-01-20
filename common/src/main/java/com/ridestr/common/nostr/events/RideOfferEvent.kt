@@ -96,7 +96,10 @@ object RideOfferEvent {
         pickupRouteKm: Double? = null,
         pickupRouteMin: Double? = null,
         rideRouteKm: Double? = null,
-        rideRouteMin: Double? = null
+        rideRouteMin: Double? = null,
+        // Payment rails fields
+        paymentHash: String? = null,
+        destinationGeohash: String? = null
     ): Event {
         // Build plaintext content
         val plaintext = JSONObject().apply {
@@ -108,6 +111,9 @@ object RideOfferEvent {
             pickupRouteMin?.let { put("pickup_route_min", it) }
             rideRouteKm?.let { put("ride_route_km", it) }
             rideRouteMin?.let { put("ride_route_min", it) }
+            // Payment rails: hash for HTLC escrow, geohash for settlement verification
+            paymentHash?.let { put("payment_hash", it) }
+            destinationGeohash?.let { put("destination_geohash", it) }
         }.toString()
 
         // Encrypt using NIP-44 so only the target driver can read it
@@ -246,6 +252,10 @@ object RideOfferEvent {
             val rideRouteKm = json.optDouble("ride_route_km").takeIf { !it.isNaN() }
             val rideRouteMin = json.optDouble("ride_route_min").takeIf { !it.isNaN() }
 
+            // Parse payment rails fields
+            val paymentHash = if (json.has("payment_hash")) json.getString("payment_hash") else null
+            val destinationGeohash = if (json.has("destination_geohash")) json.getString("destination_geohash") else null
+
             RideOfferData(
                 eventId = encryptedData.eventId,
                 riderPubKey = encryptedData.riderPubKey,
@@ -258,7 +268,9 @@ object RideOfferEvent {
                 pickupRouteKm = pickupRouteKm,
                 pickupRouteMin = pickupRouteMin,
                 rideRouteKm = rideRouteKm,
-                rideRouteMin = rideRouteMin
+                rideRouteMin = rideRouteMin,
+                paymentHash = paymentHash,
+                destinationGeohash = destinationGeohash
             )
         } catch (e: Exception) {
             Log.e(TAG, "Failed to decrypt direct offer", e)
@@ -358,7 +370,10 @@ data class RideOfferData(
     val pickupRouteKm: Double? = null,
     val pickupRouteMin: Double? = null,
     val rideRouteKm: Double? = null,
-    val rideRouteMin: Double? = null
+    val rideRouteMin: Double? = null,
+    // Payment rails fields (null for legacy non-escrow rides)
+    val paymentHash: String? = null,
+    val destinationGeohash: String? = null
 )
 
 /**

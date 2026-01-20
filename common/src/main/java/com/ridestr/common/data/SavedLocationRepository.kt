@@ -141,6 +141,28 @@ class SavedLocationRepository(context: Context) {
     }
 
     /**
+     * Clear all saved locations (for logout).
+     */
+    fun clearAll() {
+        prefs.edit().remove(KEY_LOCATIONS).apply()
+        _savedLocations.value = emptyList()
+    }
+
+    /**
+     * Restore locations from a backup, replacing all local data.
+     * Used during sync from Nostr.
+     */
+    fun restoreFromBackup(locations: List<SavedLocation>) {
+        _savedLocations.value = locations
+        saveLocations()
+    }
+
+    /**
+     * Check if there are any saved locations.
+     */
+    fun hasLocations(): Boolean = _savedLocations.value.isNotEmpty()
+
+    /**
      * Find an existing location within ~50m of the given coordinates.
      */
     private fun findNearby(lat: Double, lon: Double): SavedLocation? {

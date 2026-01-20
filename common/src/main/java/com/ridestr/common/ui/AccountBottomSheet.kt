@@ -28,6 +28,7 @@ fun AccountBottomSheet(
     onEditProfile: () -> Unit,
     onBackupKeys: () -> Unit,
     onAccountSafety: () -> Unit,
+    onRelaySettings: () -> Unit,
     onLogout: () -> Unit,
     onDismiss: () -> Unit,
     sheetState: SheetState = rememberModalBottomSheetState(),
@@ -63,8 +64,12 @@ fun AccountBottomSheet(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                // Connection status badge
+                // Connection status badge (clickable - opens relay settings)
                 Surface(
+                    onClick = {
+                        onRelaySettings()
+                        onDismiss()
+                    },
                     color = if (isConnected)
                         MaterialTheme.colorScheme.primaryContainer
                     else

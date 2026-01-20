@@ -44,6 +44,8 @@ import com.ridestr.common.settings.SettingsManager
 import com.ridestr.common.ui.AccountBottomSheet
 import com.ridestr.common.ui.AccountSafetyScreen
 import com.ridestr.common.ui.DeveloperOptionsScreen
+import com.ridestr.common.ui.RelayManagementScreen
+import com.ridestr.common.ui.WalletSettingsScreen
 import com.ridestr.common.ui.RelaySignalIndicator
 import com.ridestr.common.ui.LocationPermissionScreen
 import com.ridestr.common.ui.TileManagementScreen
@@ -55,6 +57,16 @@ import com.ridestr.common.nostr.NostrService
 import com.ridestr.common.nostr.relay.RelayConnectionState
 import com.ridestr.common.notification.NotificationHelper
 import com.ridestr.common.ui.theme.RidestrTheme
+import com.ridestr.common.ui.WalletDetailScreen
+import com.ridestr.common.ui.WalletSetupScreen
+import com.ridestr.common.payment.WalletKeyManager
+import com.ridestr.common.payment.WalletService
+import com.ridestr.common.payment.cashu.Nip60WalletSync
+import com.ridestr.common.sync.ProfileSyncManager
+import com.ridestr.common.sync.ProfileSyncState
+import com.ridestr.common.sync.Nip60WalletSyncAdapter
+import com.ridestr.common.sync.RideHistorySyncAdapter
+import com.ridestr.common.sync.VehicleSyncAdapter
 import com.drivestr.app.service.DriverOnlineService
 import com.ridestr.common.bitcoin.BitcoinPriceService
 
@@ -75,16 +87,20 @@ enum class Screen {
     ONBOARDING,
     PROFILE_SETUP,
     VEHICLE_SETUP,      // Vehicle onboarding for drivers without vehicles
+    WALLET_SETUP,       // Wallet onboarding (after vehicle, before location)
     LOCATION_PERMISSION,
     TILE_SETUP,
     MAIN,           // Shows bottom navigation with tabs
+    WALLET_DETAIL,  // Full wallet interface (deposit, withdraw, etc.)
+    WALLET_SETTINGS,// Wallet management settings
     EARNINGS,       // Full earnings history (navigated from wallet)
     RIDE_DETAIL,    // Detail view for single ride
     DEBUG,
     BACKUP_KEYS,
     TILES,
     DEV_OPTIONS,
-    ACCOUNT_SAFETY
+    ACCOUNT_SAFETY,
+    RELAY_SETTINGS
 }
 
 class MainActivity : ComponentActivity() {
@@ -129,6 +145,42 @@ fun DrivestrApp() {
     LaunchedEffect(Unit) {
         bitcoinPriceService.startAutoRefresh()
     }
+
+    // Wallet services for payment rails
+    val walletKeyManager = remember { WalletKeyManager(context) }
+    val walletService = remember { WalletService(context, walletKeyManager) }
+
+    // NIP-60 wallet sync for cross-device portability
+    // IMPORTANT: Wire to walletService immediately to avoid race condition with lockForRide()
+    val nip60Sync = remember {
+        Nip60WalletSync(
+            relayManager = nostrService.relayManager,
+            keyManager = nostrService.keyManager,
+            walletKeyManager = walletKeyManager
+        ).also { sync ->
+            walletService.setNip60Sync(sync)
+        }
+    }
+
+    // Auto-connect wallet to saved mint
+    LaunchedEffect(Unit) {
+        walletService.autoConnect()
+    }
+
+    // ProfileSyncManager for coordinated profile data sync
+    val profileSyncManager = remember {
+        ProfileSyncManager.getInstance(context, settingsManager.getEffectiveRelays())
+    }
+
+    // Register sync adapters (driver-specific: includes vehicles instead of saved locations)
+    LaunchedEffect(Unit) {
+        profileSyncManager.registerSyncable(Nip60WalletSyncAdapter(nip60Sync))
+        profileSyncManager.registerSyncable(RideHistorySyncAdapter(rideHistoryRepository, nostrService))
+        profileSyncManager.registerSyncable(VehicleSyncAdapter(vehicleRepository, nostrService))
+    }
+
+    // Observable sync state for potential UI feedback
+    val syncState by profileSyncManager.syncState.collectAsState()
 
     // Tile management (singleton to share with ViewModels)
     val tileManager = remember { TileManager.getInstance(context) }
@@ -187,9 +239,29 @@ fun DrivestrApp() {
         }
     }
 
+    // Sync all profile data from Nostr on login (for fresh installs importing existing key)
+    // Uses ProfileSyncManager for coordinated, ordered sync of wallet, history, and vehicles
+    LaunchedEffect(uiState.isLoggedIn) {
+        if (uiState.isLoggedIn) {
+            // Only sync if local data is empty (fresh install with imported key)
+            val needsSync = !rideHistoryRepository.hasRides() && !vehicleRepository.hasVehicles()
+            if (needsSync) {
+                // CRITICAL: Refresh KeyManagers from storage
+                // OnboardingViewModel has a separate KeyManager instance that imported the keys,
+                // so other KeyManagers need to reload from SharedPreferences
+                nostrService.keyManager.refreshFromStorage()
+                profileSyncManager.keyManager.refreshFromStorage()
+
+                android.util.Log.d("MainActivity", "Starting ProfileSyncManager sync (fresh install)")
+                profileSyncManager.onKeyImported()
+            }
+        }
+    }
+
     // Check if already logged in on first composition (only if not already at MAIN)
-    LaunchedEffect(uiState.isLoggedIn, uiState.isProfileCompleted) {
-        if (uiState.isLoggedIn && currentScreen == Screen.ONBOARDING) {
+    // IMPORTANT: Don't navigate if showBackupReminder is true - let OnboardingScreen handle that
+    LaunchedEffect(uiState.isLoggedIn, uiState.isProfileCompleted, uiState.showBackupReminder) {
+        if (uiState.isLoggedIn && !uiState.showBackupReminder && currentScreen == Screen.ONBOARDING) {
             nostrService.connect()
 
             // Determine next screen based on completion status
@@ -198,6 +270,8 @@ fun DrivestrApp() {
                 onboardingCompleted -> Screen.MAIN
                 // If profile not complete, go to profile setup
                 !uiState.isProfileCompleted -> Screen.PROFILE_SETUP
+                // If wallet setup not done, go to wallet setup
+                !settingsManager.isWalletSetupDone() -> Screen.WALLET_SETUP
                 // If no location permission, request it
                 !hasLocationPermission -> Screen.LOCATION_PERMISSION
                 // Skip tile setup if already have tiles downloaded
@@ -239,10 +313,10 @@ fun DrivestrApp() {
                         // Start tile discovery early (before location permission)
                         tileDiscoveryService.startDiscovery()
                         // After profile, check if driver has vehicles
-                        currentScreen = if (hasVehicles) {
-                            Screen.LOCATION_PERMISSION
-                        } else {
-                            Screen.VEHICLE_SETUP
+                        currentScreen = when {
+                            !hasVehicles -> Screen.VEHICLE_SETUP
+                            !settingsManager.isWalletSetupDone() -> Screen.WALLET_SETUP
+                            else -> Screen.LOCATION_PERMISSION
                         }
                     },
                     modifier = Modifier.padding(innerPadding)
@@ -253,11 +327,34 @@ fun DrivestrApp() {
                 VehicleSetupScreen(
                     vehicleRepository = vehicleRepository,
                     onComplete = {
-                        // After adding vehicle, continue to location permission
-                        currentScreen = Screen.LOCATION_PERMISSION
+                        // After adding vehicle, continue to wallet setup
+                        currentScreen = if (settingsManager.isWalletSetupDone()) {
+                            Screen.LOCATION_PERMISSION
+                        } else {
+                            Screen.WALLET_SETUP
+                        }
                     },
                     onSkip = {
                         // Allow skipping vehicle setup (can add later)
+                        currentScreen = if (settingsManager.isWalletSetupDone()) {
+                            Screen.LOCATION_PERMISSION
+                        } else {
+                            Screen.WALLET_SETUP
+                        }
+                    },
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
+
+            Screen.WALLET_SETUP -> {
+                WalletSetupScreen(
+                    walletService = walletService,
+                    onComplete = {
+                        settingsManager.setWalletSetupCompleted(true)
+                        currentScreen = Screen.LOCATION_PERMISSION
+                    },
+                    onSkip = {
+                        settingsManager.setWalletSetupSkipped(true)
                         currentScreen = Screen.LOCATION_PERMISSION
                     },
                     modifier = Modifier.padding(innerPadding)
@@ -340,10 +437,30 @@ fun DrivestrApp() {
                     nostrService = nostrService,
                     vehicleRepository = vehicleRepository,
                     rideHistoryRepository = rideHistoryRepository,
+                    walletService = walletService,
                     onLogout = {
+                        // Disconnect from Nostr
                         nostrService.disconnect()
+
+                        // Clear Nostr key and profile
                         onboardingViewModel.logout()
-                        settingsManager.resetOnboarding()
+
+                        // Clear all settings (relays, preferences, onboarding, wallet setup)
+                        settingsManager.clearAllData()
+
+                        // Clear wallet data and key
+                        walletService.resetWallet()
+                        walletKeyManager.clearWalletKey()
+
+                        // Clear ride history
+                        rideHistoryRepository.clearAllHistory()
+
+                        // Clear saved locations (favorites/recents)
+                        com.ridestr.common.data.SavedLocationRepository.getInstance(context).clearAll()
+
+                        // Clear vehicle repository
+                        vehicleRepository.clearAll()
+
                         currentScreen = Screen.ONBOARDING
                     },
                     onOpenProfile = {
@@ -354,6 +471,9 @@ fun DrivestrApp() {
                     },
                     onOpenAccountSafety = {
                         currentScreen = Screen.ACCOUNT_SAFETY
+                    },
+                    onOpenRelaySettings = {
+                        currentScreen = Screen.RELAY_SETTINGS
                     },
                     onOpenTiles = {
                         currentScreen = Screen.TILES
@@ -367,8 +487,32 @@ fun DrivestrApp() {
                     onOpenEarnings = {
                         currentScreen = Screen.EARNINGS
                     },
+                    onSetupWallet = {
+                        currentScreen = Screen.WALLET_SETUP
+                    },
+                    onOpenWalletDetail = {
+                        currentScreen = Screen.WALLET_DETAIL
+                    },
+                    onOpenWalletSettings = {
+                        currentScreen = Screen.WALLET_SETTINGS
+                    },
                     modifier = Modifier.padding(innerPadding)
                 )
+            }
+
+            Screen.WALLET_DETAIL -> {
+                if (walletService != null) {
+                    WalletDetailScreen(
+                        walletService = walletService,
+                        settingsManager = settingsManager,
+                        priceService = bitcoinPriceService,
+                        onBack = { currentScreen = Screen.MAIN },
+                        modifier = Modifier.padding(innerPadding)
+                    )
+                } else {
+                    // Fallback if wallet not set up
+                    currentScreen = Screen.WALLET_SETUP
+                }
             }
 
             Screen.DEBUG -> {
@@ -422,6 +566,7 @@ fun DrivestrApp() {
                     isDriverApp = true,
                     onOpenDebug = { currentScreen = Screen.DEBUG },
                     onBack = { currentScreen = Screen.MAIN },
+                    walletService = walletService,
                     modifier = Modifier.padding(innerPadding)
                 )
             }
@@ -432,6 +577,28 @@ fun DrivestrApp() {
                     nostrService = nostrService,
                     onBack = { currentScreen = Screen.MAIN },
                     onLocalStateClear = { driverViewModel.clearLocalRideState() },
+                    walletService = walletService,
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
+
+            Screen.RELAY_SETTINGS -> {
+                val connectedCount = connectionStates.values.count { it == RelayConnectionState.CONNECTED }
+                val totalRelays = connectionStates.size
+
+                RelayManagementScreen(
+                    settingsManager = settingsManager,
+                    connectedCount = connectedCount,
+                    totalRelays = totalRelays,
+                    onBack = { currentScreen = Screen.MAIN },
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
+
+            Screen.WALLET_SETTINGS -> {
+                WalletSettingsScreen(
+                    walletService = walletService,
+                    onBack = { currentScreen = Screen.MAIN },
                     modifier = Modifier.padding(innerPadding)
                 )
             }
@@ -495,14 +662,19 @@ fun MainScreen(
     nostrService: NostrService,
     vehicleRepository: VehicleRepository,
     rideHistoryRepository: RideHistoryRepository,
+    walletService: WalletService?,
     onLogout: () -> Unit,
     onOpenProfile: () -> Unit,
     onOpenBackup: () -> Unit,
     onOpenAccountSafety: () -> Unit,
+    onOpenRelaySettings: () -> Unit,
     onOpenTiles: () -> Unit,
     onOpenDevOptions: () -> Unit,
     onOpenDebug: () -> Unit,
     onOpenEarnings: () -> Unit,
+    onSetupWallet: () -> Unit,
+    onOpenWalletDetail: () -> Unit,
+    onOpenWalletSettings: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val connectedCount = connectionStates.values.count { it == RelayConnectionState.CONNECTED }
@@ -522,6 +694,11 @@ fun MainScreen(
     val driverViewModel: DriverViewModel = viewModel()
     val driverUiState by driverViewModel.uiState.collectAsState()
     val autoOpenNavigation by settingsManager.autoOpenNavigation.collectAsState()
+
+    // Wire up wallet service for HTLC escrow settlement
+    LaunchedEffect(walletService) {
+        driverViewModel.setWalletService(walletService)
+    }
 
     val context = LocalContext.current
 
@@ -567,7 +744,8 @@ fun MainScreen(
                     ) {
                         RelaySignalIndicator(
                             connectedCount = connectedCount,
-                            totalRelays = totalRelays
+                            totalRelays = totalRelays,
+                            onClick = onOpenRelaySettings
                         )
                         IconButton(onClick = { showAccountSheet = true }) {
                             Icon(Icons.Default.Person, contentDescription = "Account")
@@ -627,6 +805,9 @@ fun MainScreen(
                     rideHistoryRepository = rideHistoryRepository,
                     settingsManager = settingsManager,
                     priceService = driverViewModel.bitcoinPriceService,
+                    walletService = walletService,
+                    onSetupWallet = onSetupWallet,
+                    onOpenWalletDetail = onOpenWalletDetail,
                     onViewEarningsDetails = onOpenEarnings,
                     modifier = Modifier.padding(innerPadding)
                 )
@@ -656,6 +837,7 @@ fun MainScreen(
                     driverStage = driverUiState.stage,
                     onOpenTiles = onOpenTiles,
                     onOpenDevOptions = onOpenDevOptions,
+                    onOpenWalletSettings = onOpenWalletSettings,
                     modifier = Modifier.padding(innerPadding)
                 )
             }
@@ -671,6 +853,7 @@ fun MainScreen(
             onEditProfile = onOpenProfile,
             onBackupKeys = onOpenBackup,
             onAccountSafety = onOpenAccountSafety,
+            onRelaySettings = onOpenRelaySettings,
             onLogout = onLogout,
             onDismiss = { showAccountSheet = false }
         )
