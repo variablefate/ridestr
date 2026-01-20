@@ -25,9 +25,7 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 | Kind | Name | Type | d-tag | Purpose |
 |------|------|------|-------|---------|
 | 30174 | Ride History | Parameterized Replaceable | `rideshare-history` | Encrypted backup of ride details |
-| **30177** | **Unified Profile** | Parameterized Replaceable | `rideshare-profile` | Vehicles, locations, settings |
-| ~~30175~~ | ~~Vehicle Backup~~ | ~~Parameterized Replaceable~~ | ~~`rideshare-vehicles`~~ | ~~Deprecated - use 30177~~ |
-| ~~30176~~ | ~~Saved Locations~~ | ~~Parameterized Replaceable~~ | ~~`rideshare-locations`~~ | ~~Deprecated - use 30177~~ |
+| 30177 | Unified Profile | Parameterized Replaceable | `rideshare-profile` | Vehicles, locations, settings |
 
 ### Wallet Events (NIP-60)
 | Kind | Name | Type | Purpose |
@@ -234,86 +232,6 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
     "timestamp": <unix_timestamp>
   }
 ]
-```
-
-**Note**: No expiration - profile backup data persists indefinitely.
-
----
-
-### Kind 30175: Vehicle Backup
-
-**Purpose**: Encrypted backup of driver's vehicle list.
-
-**Type**: Parameterized Replaceable Event (NIP-33)
-
-**Author**: Driver
-
-**d-tag**: `rideshare-vehicles`
-
-**Tags**:
-```
-["d", "rideshare-vehicles"]
-```
-
-**Content** (JSON, self-encrypted with NIP-44):
-```json
-{
-  "vehicles": [
-    {
-      "id": "<uuid>",
-      "make": "Toyota",
-      "model": "Camry",
-      "year": 2022,
-      "color": "Silver",
-      "licensePlate": "ABC123",
-      "isPrimary": true
-    }
-  ],
-  "primaryVehicleId": "<uuid>"
-}
-```
-
-**Note**: No expiration - profile backup data persists indefinitely.
-
----
-
-### Kind 30176: Saved Locations Backup
-
-**Purpose**: Encrypted backup of rider's saved/favorite locations.
-
-**Type**: Parameterized Replaceable Event (NIP-33)
-
-**Author**: Rider
-
-**d-tag**: `rideshare-locations`
-
-**Tags**:
-```
-["d", "rideshare-locations"]
-```
-
-**Content** (JSON, self-encrypted with NIP-44):
-```json
-{
-  "favorites": [
-    {
-      "id": "<uuid>",
-      "name": "Home",
-      "address": "123 Main St, City, State",
-      "lat": <latitude>,
-      "lon": <longitude>
-    }
-  ],
-  "recent": [
-    {
-      "id": "<uuid>",
-      "address": "456 Oak Ave, City, State",
-      "lat": <latitude>,
-      "lon": <longitude>,
-      "lastUsed": <unix_timestamp>
-    }
-  ]
-}
 ```
 
 **Note**: No expiration - profile backup data persists indefinitely.
@@ -575,8 +493,7 @@ Who encrypts to whom for each content type:
 | Preimage + escrow token | Driver pubkey | Driver | 30181 (preimage_share action) |
 | Chat messages | Recipient pubkey | Recipient | 3178 |
 | Ride history backup | Self (author) | Author on new device | 30174 |
-| Vehicle backup | Self (author) | Author on new device | 30175 |
-| Saved locations backup | Self (author) | Author on new device | 30176 |
+| Profile backup (vehicles, locations, settings) | Self (author) | Author on new device | 30177 |
 
 ---
 
@@ -687,9 +604,7 @@ RIDER                           NOSTR RELAY                         DRIVER
 | 30180 | `DriverRideStateEvent.kt` | `create()`, `parse()` |
 | 30181 | `RiderRideStateEvent.kt` | `create()`, `parse()`, `createPreimageShareAction()` |
 | 30174 | `RideHistoryEvent.kt` | `create()`, `parse()` |
-| **30177** | `ProfileBackupEvent.kt` | `create()`, `parseAndDecrypt()` |
-| ~~30175~~ | `VehicleBackupEvent.kt` (deprecated) | `create()`, `parse()` |
-| ~~30176~~ | `SavedLocationBackupEvent.kt` (deprecated) | `create()`, `parse()` |
+| 30177 | `ProfileBackupEvent.kt` | `create()`, `parseAndDecrypt()` |
 | 3173 | `RideOfferEvent.kt` | `create()`, `createBroadcast()`, `decrypt()` |
 | 3174 | `RideAcceptanceEvent.kt` | `create()`, `parse()` |
 | 3175 | `RideConfirmationEvent.kt` | `create()`, `parse()` |
@@ -734,3 +649,77 @@ See [GitHub Issue #13](https://github.com/variablefate/ridestr/issues/13) for th
 | P0 | `payment_methods` in profile, `payment_method` in offers |
 | P1 | `protocol_version`, `ext_*` convention documentation |
 | P2 | Public profile event (Kind 30178) |
+
+---
+
+## Deprecated Events
+
+These events are deprecated and replaced by Kind 30177 (Unified Profile). They remain documented for migration purposes only. New implementations should use Kind 30177.
+
+### Kind 30175: Vehicle Backup (DEPRECATED)
+
+**Replaced by**: Kind 30177 (Unified Profile)
+
+**Purpose**: Encrypted backup of driver's vehicle list.
+
+**Type**: Parameterized Replaceable Event (NIP-33)
+
+**d-tag**: `rideshare-vehicles`
+
+**Content** (JSON, self-encrypted with NIP-44):
+```json
+{
+  "vehicles": [
+    {
+      "id": "<uuid>",
+      "make": "Toyota",
+      "model": "Camry",
+      "year": 2022,
+      "color": "Silver",
+      "licensePlate": "ABC123",
+      "isPrimary": true
+    }
+  ],
+  "primaryVehicleId": "<uuid>"
+}
+```
+
+**Source**: `VehicleBackupEvent.kt` (deprecated)
+
+---
+
+### Kind 30176: Saved Locations Backup (DEPRECATED)
+
+**Replaced by**: Kind 30177 (Unified Profile)
+
+**Purpose**: Encrypted backup of rider's saved/favorite locations.
+
+**Type**: Parameterized Replaceable Event (NIP-33)
+
+**d-tag**: `rideshare-locations`
+
+**Content** (JSON, self-encrypted with NIP-44):
+```json
+{
+  "favorites": [
+    {
+      "id": "<uuid>",
+      "name": "Home",
+      "address": "123 Main St, City, State",
+      "lat": <latitude>,
+      "lon": <longitude>
+    }
+  ],
+  "recent": [
+    {
+      "id": "<uuid>",
+      "address": "456 Oak Ave, City, State",
+      "lat": <latitude>,
+      "lon": <longitude>,
+      "lastUsed": <unix_timestamp>
+    }
+  ]
+}
+```
+
+**Source**: `SavedLocationBackupEvent.kt` (deprecated)
