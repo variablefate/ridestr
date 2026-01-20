@@ -25,8 +25,9 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 | Kind | Name | Type | d-tag | Purpose |
 |------|------|------|-------|---------|
 | 30174 | Ride History | Parameterized Replaceable | `rideshare-history` | Encrypted backup of ride details |
-| 30175 | Vehicle Backup | Parameterized Replaceable | `rideshare-vehicles` | Driver's vehicle list backup |
-| 30176 | Saved Locations | Parameterized Replaceable | `rideshare-locations` | Rider's saved locations backup |
+| **30177** | **Unified Profile** | Parameterized Replaceable | `rideshare-profile` | Vehicles, locations, settings |
+| ~~30175~~ | ~~Vehicle Backup~~ | ~~Parameterized Replaceable~~ | ~~`rideshare-vehicles`~~ | ~~Deprecated - use 30177~~ |
+| ~~30176~~ | ~~Saved Locations~~ | ~~Parameterized Replaceable~~ | ~~`rideshare-locations`~~ | ~~Deprecated - use 30177~~ |
 
 ### Wallet Events (NIP-60)
 | Kind | Name | Type | Purpose |
@@ -686,11 +687,50 @@ RIDER                           NOSTR RELAY                         DRIVER
 | 30180 | `DriverRideStateEvent.kt` | `create()`, `parse()` |
 | 30181 | `RiderRideStateEvent.kt` | `create()`, `parse()`, `createPreimageShareAction()` |
 | 30174 | `RideHistoryEvent.kt` | `create()`, `parse()` |
-| 30175 | `VehicleBackupEvent.kt` | `create()`, `parse()` |
-| 30176 | `SavedLocationBackupEvent.kt` | `create()`, `parse()` |
+| **30177** | `ProfileBackupEvent.kt` | `create()`, `parseAndDecrypt()` |
+| ~~30175~~ | `VehicleBackupEvent.kt` (deprecated) | `create()`, `parse()` |
+| ~~30176~~ | `SavedLocationBackupEvent.kt` (deprecated) | `create()`, `parse()` |
 | 3173 | `RideOfferEvent.kt` | `create()`, `createBroadcast()`, `decrypt()` |
 | 3174 | `RideAcceptanceEvent.kt` | `create()`, `parse()` |
 | 3175 | `RideConfirmationEvent.kt` | `create()`, `parse()` |
 | 3178 | `RideshareChatEvent.kt` | `create()`, `parse()` |
 | 3179 | `RideCancellationEvent.kt` | `create()`, `parse()` |
 | Constants | `RideshareEventKinds.kt` | Kind constants, tags, expiration helpers |
+
+---
+
+## Future: Protocol Interoperability
+
+See [GitHub Issue #13](https://github.com/variablefate/ridestr/issues/13) for the full interoperability roadmap.
+
+### Planned Protocol Enhancements
+
+**1. Payment Method Extensibility**
+- Add `payment_methods` array to profile backup (Kind 30177)
+- Add `payment_method` field to ride offers (Kind 3173)
+- Standardized values: `cashu`, `lightning`, `fiat_stripe`, `fiat_cash`
+- Enables apps to filter incompatible drivers/riders
+
+**2. Protocol Versioning**
+- Add `protocol_version` field to all backup events
+- Format: `NIP-014173-1.0`
+- Apps can gracefully handle older/newer versions
+
+**3. Extension Fields Convention**
+- `ext_` prefix marks optional app-specific fields
+- Apps MUST ignore unknown `ext_*` fields
+- Example: `ext_strictapp_drivers_license`, `ext_strictapp_insurance_verified`
+- Allows stricter apps to add requirements without breaking protocol
+
+**4. Public Profile (Proposed Kind 30178)**
+- Optional public driver/rider profile for discoverability
+- Fields: display_name, rating, rides_completed, payment_methods, verification_level
+- Cross-app reputation sharing
+
+### Implementation Priority
+
+| Priority | Enhancement |
+|----------|-------------|
+| P0 | `payment_methods` in profile, `payment_method` in offers |
+| P1 | `protocol_version`, `ext_*` convention documentation |
+| P2 | Public profile event (Kind 30178) |

@@ -2,8 +2,10 @@ package com.ridestr.common.nostr
 
 import android.content.Context
 import android.util.Log
+import com.ridestr.common.data.SavedLocation
 import com.ridestr.common.data.Vehicle
 import com.ridestr.common.nostr.events.*
+import com.ridestr.common.settings.SettingsManager
 import com.ridestr.common.nostr.keys.KeyManager
 import com.ridestr.common.nostr.relay.RelayConfig
 import com.ridestr.common.nostr.relay.RelayConnectionState
@@ -1606,14 +1608,130 @@ class NostrService(
         }
     }
 
-    // ==================== Vehicle Backup ====================
+    // ==================== Profile Backup (Unified) ====================
+
+    /**
+     * Backup user profile to Nostr as an encrypted event.
+     * Includes vehicles, saved locations, and settings in a single unified event.
+     *
+     * @param vehicles List of vehicles to backup (driver)
+     * @param savedLocations List of saved locations to backup (rider)
+     * @param settings Settings backup data
+     * @return Event ID if successful, null on failure
+     */
+    suspend fun publishProfileBackup(
+        vehicles: List<Vehicle>,
+        savedLocations: List<SavedLocation>,
+        settings: SettingsBackup
+    ): String? {
+        val signer = keyManager.getSigner()
+        if (signer == null) {
+            Log.e(TAG, "Cannot backup profile: Not logged in")
+            return null
+        }
+
+        // Wait for relay connection (up to 15 seconds)
+        var waitedMs = 0L
+        while (!relayManager.isConnected() && waitedMs < 15000) {
+            Log.d(TAG, "publishProfileBackup: Waiting for relay... (${waitedMs}ms)")
+            delay(500)
+            waitedMs += 500
+        }
+
+        if (!relayManager.isConnected()) {
+            Log.e(TAG, "publishProfileBackup: No relays connected - backup NOT saved!")
+            return null
+        }
+
+        return try {
+            val event = ProfileBackupEvent.create(signer, vehicles, savedLocations, settings)
+            if (event != null) {
+                relayManager.publish(event)
+                Log.d(TAG, "Published profile backup: ${event.id} (${vehicles.size} vehicles, ${savedLocations.size} locations) to ${relayManager.connectedCount()} relays")
+                event.id
+            } else {
+                Log.e(TAG, "Failed to create profile backup event")
+                null
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to backup profile", e)
+            null
+        }
+    }
+
+    /**
+     * Fetch the user's profile backup from Nostr relays.
+     * Decrypts the content using the user's keys.
+     *
+     * @return Decrypted profile data, or null if not found or decryption fails
+     */
+    suspend fun fetchProfileBackup(): ProfileBackupData? {
+        val signer = keyManager.getSigner()
+        val myPubKey = keyManager.getPubKeyHex()
+        if (signer == null || myPubKey == null) {
+            Log.e(TAG, "Cannot fetch profile backup: Not logged in")
+            return null
+        }
+
+        return withContext(Dispatchers.IO) {
+            // Wait for relay connection (up to 15 seconds)
+            var waitedMs = 0L
+            while (!relayManager.isConnected() && waitedMs < 15000) {
+                Log.d(TAG, "fetchProfileBackup: Waiting for relay... (${waitedMs}ms)")
+                delay(500)
+                waitedMs += 500
+            }
+
+            if (!relayManager.isConnected()) {
+                Log.e(TAG, "fetchProfileBackup: No relays connected - cannot restore")
+                return@withContext null
+            }
+
+            Log.d(TAG, "Fetching profile backup from ${relayManager.connectedCount()} relays for ${myPubKey.take(16)}...")
+
+            try {
+                var result: ProfileBackupData? = null
+                val subscriptionId = relayManager.subscribe(
+                    kinds = listOf(RideshareEventKinds.PROFILE_BACKUP),
+                    authors = listOf(myPubKey),
+                    tags = mapOf("d" to listOf(ProfileBackupEvent.D_TAG)),
+                    limit = 1
+                ) { event, relayUrl ->
+                    // This is our own profile event - try to decrypt
+                    Log.d(TAG, "Received profile backup event ${event.id} from $relayUrl")
+                    kotlinx.coroutines.runBlocking {
+                        ProfileBackupEvent.parseAndDecrypt(signer, event)?.let { data ->
+                            result = data
+                            Log.d(TAG, "Decrypted profile backup: ${data.vehicles.size} vehicles, ${data.savedLocations.size} locations")
+                        }
+                    }
+                }
+
+                // Wait for response
+                delay(8000)
+                relayManager.closeSubscription(subscriptionId)
+
+                if (result == null) {
+                    Log.d(TAG, "No profile backup found on relays")
+                }
+                result
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to fetch profile backup", e)
+                null
+            }
+        }
+    }
+
+    // ==================== Vehicle Backup (DEPRECATED) ====================
 
     /**
      * Backup vehicles to Nostr as an encrypted event.
      *
      * @param vehicles List of vehicles to backup
      * @return Event ID if successful, null on failure
+     * @deprecated Use [publishProfileBackup] instead. Vehicles are now part of unified profile backup.
      */
+    @Deprecated("Use publishProfileBackup instead", ReplaceWith("publishProfileBackup(vehicles, emptyList(), SettingsBackup())"))
     suspend fun backupVehicles(vehicles: List<Vehicle>): String? {
         val signer = keyManager.getSigner()
         if (signer == null) {
@@ -1655,7 +1773,9 @@ class NostrService(
      * Decrypts the content using the user's keys.
      *
      * @return Decrypted vehicle data, or null if not found or decryption fails
+     * @deprecated Use [fetchProfileBackup] instead. Vehicles are now part of unified profile backup.
      */
+    @Deprecated("Use fetchProfileBackup instead", ReplaceWith("fetchProfileBackup()"))
     suspend fun fetchVehicleBackup(): VehicleBackupData? {
         val signer = keyManager.getSigner()
         val myPubKey = keyManager.getPubKeyHex()
@@ -1713,14 +1833,16 @@ class NostrService(
         }
     }
 
-    // ==================== Saved Location Backup ====================
+    // ==================== Saved Location Backup (DEPRECATED) ====================
 
     /**
      * Backup saved locations to Nostr as an encrypted event.
      *
      * @param locations List of saved locations to backup
      * @return Event ID if successful, null on failure
+     * @deprecated Use [publishProfileBackup] instead. Saved locations are now part of unified profile backup.
      */
+    @Deprecated("Use publishProfileBackup instead", ReplaceWith("publishProfileBackup(emptyList(), locations, SettingsBackup())"))
     suspend fun backupSavedLocations(locations: List<com.ridestr.common.data.SavedLocation>): String? {
         val signer = keyManager.getSigner()
         if (signer == null) {
@@ -1762,7 +1884,9 @@ class NostrService(
      * Decrypts the content using the user's keys.
      *
      * @return Decrypted saved location data, or null if not found or decryption fails
+     * @deprecated Use [fetchProfileBackup] instead. Saved locations are now part of unified profile backup.
      */
+    @Deprecated("Use fetchProfileBackup instead", ReplaceWith("fetchProfileBackup()"))
     suspend fun fetchSavedLocationBackup(): SavedLocationBackupData? {
         val signer = keyManager.getSigner()
         val myPubKey = keyManager.getPubKeyHex()

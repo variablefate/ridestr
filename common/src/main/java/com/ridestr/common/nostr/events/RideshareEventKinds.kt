@@ -100,21 +100,29 @@ object RideshareEventKinds {
     const val RIDE_HISTORY_BACKUP = 30174
 
     /**
-     * Kind 30175: Vehicle Backup Event (Parameterized Replaceable)
-     * Encrypted backup of driver's vehicles.
+     * Kind 30177: Profile Backup Event (Parameterized Replaceable)
+     * Unified encrypted backup of user profile data including:
+     * - Vehicles (driver)
+     * - Saved locations (rider)
+     * - App settings (both)
      * Content is NIP-44 encrypted to self.
      * Parameterized replaceable: only the latest backup per user is kept.
-     * Uses d-tag "rideshare-vehicles" for identification.
+     * Uses d-tag "rideshare-profile" for identification.
      */
+    const val PROFILE_BACKUP = 30177
+
+    /**
+     * Kind 30175: Vehicle Backup Event (Parameterized Replaceable)
+     * @deprecated Use PROFILE_BACKUP (30177) instead. Vehicles are now part of unified profile backup.
+     */
+    @Deprecated("Use PROFILE_BACKUP (30177) instead")
     const val VEHICLE_BACKUP = 30175
 
     /**
      * Kind 30176: Saved Locations Backup Event (Parameterized Replaceable)
-     * Encrypted backup of rider's saved/favorite locations.
-     * Content is NIP-44 encrypted to self.
-     * Parameterized replaceable: only the latest backup per user is kept.
-     * Uses d-tag "rideshare-locations" for identification.
+     * @deprecated Use PROFILE_BACKUP (30177) instead. Saved locations are now part of unified profile backup.
      */
+    @Deprecated("Use PROFILE_BACKUP (30177) instead")
     const val SAVED_LOCATIONS_BACKUP = 30176
 }
 

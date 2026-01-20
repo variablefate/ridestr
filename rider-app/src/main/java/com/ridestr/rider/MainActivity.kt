@@ -64,7 +64,7 @@ import com.ridestr.common.sync.ProfileSyncManager
 import com.ridestr.common.sync.ProfileSyncState
 import com.ridestr.common.sync.Nip60WalletSyncAdapter
 import com.ridestr.common.sync.RideHistorySyncAdapter
-import com.ridestr.common.sync.SavedLocationSyncAdapter
+import com.ridestr.common.sync.ProfileSyncAdapter
 import com.ridestr.common.data.SavedLocationRepository
 import com.ridestr.rider.service.RiderActiveService
 import kotlinx.coroutines.launch
@@ -179,11 +179,16 @@ fun RidestrApp() {
     val rideHistoryRepo = remember { RideHistoryRepository.getInstance(context) }
     val savedLocationRepo = remember { SavedLocationRepository.getInstance(context) }
 
-    // Register sync adapters
+    // Register sync adapters (rider app: includes saved locations, no vehicles)
     LaunchedEffect(Unit) {
         profileSyncManager.registerSyncable(Nip60WalletSyncAdapter(nip60Sync))
+        profileSyncManager.registerSyncable(ProfileSyncAdapter(
+            vehicleRepository = null,  // Rider app doesn't use vehicles
+            savedLocationRepository = savedLocationRepo,
+            settingsManager = settingsManager,
+            nostrService = nostrService
+        ))
         profileSyncManager.registerSyncable(RideHistorySyncAdapter(rideHistoryRepo, nostrService))
-        profileSyncManager.registerSyncable(SavedLocationSyncAdapter(savedLocationRepo, nostrService))
     }
 
     // Observable sync state for potential UI feedback

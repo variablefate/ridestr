@@ -19,7 +19,10 @@ import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
  *
  * Uses event kind 30175 (parameterized replaceable).
  * d-tag: "rideshare-vehicles"
+ *
+ * @deprecated Use [ProfileSyncAdapter] instead. Vehicles are now part of unified profile backup (Kind 30177).
  */
+@Deprecated("Use ProfileSyncAdapter instead", ReplaceWith("ProfileSyncAdapter(vehicleRepository, null, settingsManager, nostrService)"))
 class VehicleSyncAdapter(
     private val vehicleRepository: VehicleRepository,
     private val nostrService: NostrService

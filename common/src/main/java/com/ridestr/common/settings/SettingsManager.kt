@@ -2,6 +2,7 @@ package com.ridestr.common.settings
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.ridestr.common.nostr.events.SettingsBackup
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -496,6 +497,47 @@ class SettingsManager(context: Context) {
      */
     fun isUsingCustomRelays(): Boolean {
         return _customRelays.value.isNotEmpty()
+    }
+
+    // ===================
+    // BACKUP / RESTORE (Nostr Profile Sync)
+    // ===================
+
+    /**
+     * Export current settings to a backup data object for Nostr sync.
+     * Only includes user-facing settings, not internal state.
+     */
+    fun toBackupData(): SettingsBackup {
+        return SettingsBackup(
+            displayCurrency = _displayCurrency.value,
+            distanceUnit = _distanceUnit.value,
+            notificationSoundEnabled = _notificationSoundEnabled.value,
+            notificationVibrationEnabled = _notificationVibrationEnabled.value,
+            autoOpenNavigation = _autoOpenNavigation.value,
+            alwaysAskVehicle = _alwaysAskVehicle.value,
+            customRelays = _customRelays.value
+        )
+    }
+
+    /**
+     * Restore settings from a backup data object (from Nostr sync).
+     * Only restores user-facing settings, not internal state.
+     */
+    fun restoreFromBackup(backup: SettingsBackup) {
+        // Apply each setting
+        setDisplayCurrency(backup.displayCurrency)
+        setDistanceUnit(backup.distanceUnit)
+        setNotificationSoundEnabled(backup.notificationSoundEnabled)
+        setNotificationVibrationEnabled(backup.notificationVibrationEnabled)
+        setAutoOpenNavigation(backup.autoOpenNavigation)
+        setAlwaysAskVehicle(backup.alwaysAskVehicle)
+
+        // Restore custom relays (empty means use defaults)
+        if (backup.customRelays.isNotEmpty()) {
+            saveRelays(backup.customRelays)
+        } else {
+            resetRelaysToDefault()
+        }
     }
 
     /**

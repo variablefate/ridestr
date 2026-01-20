@@ -19,7 +19,10 @@ import org.json.JSONObject
  * - Backup their saved locations across devices
  * - Restore favorites after reinstalling the app
  * - Maintain location data when switching phones
+ *
+ * @deprecated Use [ProfileBackupEvent] (Kind 30177) instead. Saved locations are now part of unified profile backup.
  */
+@Deprecated("Use ProfileBackupEvent (Kind 30177) instead")
 object SavedLocationBackupEvent {
 
     /** The d-tag identifier for saved location backup events */

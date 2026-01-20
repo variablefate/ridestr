@@ -19,7 +19,10 @@ import org.json.JSONObject
  * - Backup their vehicles across devices
  * - Restore vehicles after reinstalling the app
  * - Maintain vehicle data when switching phones
+ *
+ * @deprecated Use [ProfileBackupEvent] (Kind 30177) instead. Vehicles are now part of unified profile backup.
  */
+@Deprecated("Use ProfileBackupEvent (Kind 30177) instead")
 object VehicleBackupEvent {
 
     /** The d-tag identifier for vehicle backup events */

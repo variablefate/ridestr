@@ -66,7 +66,7 @@ import com.ridestr.common.sync.ProfileSyncManager
 import com.ridestr.common.sync.ProfileSyncState
 import com.ridestr.common.sync.Nip60WalletSyncAdapter
 import com.ridestr.common.sync.RideHistorySyncAdapter
-import com.ridestr.common.sync.VehicleSyncAdapter
+import com.ridestr.common.sync.ProfileSyncAdapter
 import com.drivestr.app.service.DriverOnlineService
 import com.ridestr.common.bitcoin.BitcoinPriceService
 
@@ -172,11 +172,16 @@ fun DrivestrApp() {
         ProfileSyncManager.getInstance(context, settingsManager.getEffectiveRelays())
     }
 
-    // Register sync adapters (driver-specific: includes vehicles instead of saved locations)
+    // Register sync adapters (driver app: includes vehicles, no saved locations)
     LaunchedEffect(Unit) {
         profileSyncManager.registerSyncable(Nip60WalletSyncAdapter(nip60Sync))
+        profileSyncManager.registerSyncable(ProfileSyncAdapter(
+            vehicleRepository = vehicleRepository,
+            savedLocationRepository = null,  // Driver app doesn't use saved locations
+            settingsManager = settingsManager,
+            nostrService = nostrService
+        ))
         profileSyncManager.registerSyncable(RideHistorySyncAdapter(rideHistoryRepository, nostrService))
-        profileSyncManager.registerSyncable(VehicleSyncAdapter(vehicleRepository, nostrService))
     }
 
     // Observable sync state for potential UI feedback

@@ -19,7 +19,10 @@ import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
  *
  * Uses event kind 30176 (parameterized replaceable).
  * d-tag: "rideshare-locations"
+ *
+ * @deprecated Use [ProfileSyncAdapter] instead. Saved locations are now part of unified profile backup (Kind 30177).
  */
+@Deprecated("Use ProfileSyncAdapter instead", ReplaceWith("ProfileSyncAdapter(null, savedLocationRepository, settingsManager, nostrService)"))
 class SavedLocationSyncAdapter(
     private val savedLocationRepository: SavedLocationRepository,
     private val nostrService: NostrService

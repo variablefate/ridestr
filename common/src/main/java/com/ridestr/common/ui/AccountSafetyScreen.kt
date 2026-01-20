@@ -58,8 +58,10 @@ fun AccountSafetyScreen(
             title = { Text("Delete All Rideshare Events?") },
             text = {
                 Text(
-                    "This will request deletion of all your rideshare events from connected relays. " +
+                    "This will request deletion of your rideshare activity events from connected relays. " +
                     "This includes ride offers, acceptances, chat messages, and status updates.\n\n" +
+                    "Your profile backup (vehicles, saved locations, settings) and ride history backup will NOT be deleted. " +
+                    "Use Advanced Cleanup to delete those separately.\n\n" +
                     "Note: Relays may not honor deletion requests. This action cannot be undone."
                 )
             },
@@ -288,7 +290,7 @@ fun AccountSafetyScreen(
                                 style = MaterialTheme.typography.bodyLarge
                             )
                             Text(
-                                text = "Request removal of ride offers, acceptances, messages, and status updates from relays",
+                                text = "Request removal of ride activity events (offers, acceptances, messages, status). Does NOT delete profile or history backups.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -313,6 +315,17 @@ fun AccountSafetyScreen(
                         EventTypeRow("Rider Ride State", RideshareEventKinds.RIDER_RIDE_STATE, kindCounts?.get(RideshareEventKinds.RIDER_RIDE_STATE))
                         EventTypeRow("Chat Messages", RideshareEventKinds.RIDESHARE_CHAT, kindCounts?.get(RideshareEventKinds.RIDESHARE_CHAT))
                         EventTypeRow("Ride Cancellations", RideshareEventKinds.RIDE_CANCELLATION, kindCounts?.get(RideshareEventKinds.RIDE_CANCELLATION))
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "NOT deleted (use Advanced Cleanup):",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Column(modifier = Modifier.padding(start = 8.dp)) {
+                        EventTypeRow("Profile Backup", RideshareEventKinds.PROFILE_BACKUP, kindCounts?.get(RideshareEventKinds.PROFILE_BACKUP))
                         EventTypeRow("Ride History Backup", RideshareEventKinds.RIDE_HISTORY_BACKUP, kindCounts?.get(RideshareEventKinds.RIDE_HISTORY_BACKUP))
                     }
 
@@ -387,11 +400,117 @@ fun AccountSafetyScreen(
                             Triple("Rider Ride State", RideshareEventKinds.RIDER_RIDE_STATE, "Verifications + locations (consolidated)"),
                             Triple("Chat Messages", RideshareEventKinds.RIDESHARE_CHAT, "In-ride messages"),
                             Triple("Ride Cancellations", RideshareEventKinds.RIDE_CANCELLATION, "Cancelled ride notices"),
-                            Triple("Ride Acceptances", RideshareEventKinds.RIDE_ACCEPTANCE, "Your accepted rides"),
-                            Triple("Ride History Backup", RideshareEventKinds.RIDE_HISTORY_BACKUP, "Encrypted ride history backup")
+                            Triple("Ride Acceptances", RideshareEventKinds.RIDE_ACCEPTANCE, "Your accepted rides")
+                        )
+
+                        Text(
+                            text = "Ride Activity Events",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(bottom = 4.dp)
                         )
 
                         kindOptions.forEach { (name, kind, description) ->
+                            OutlinedButton(
+                                onClick = {
+                                    scope.launch {
+                                        isDeletingKind = kind
+                                        kindDeleteResult = null
+                                        try {
+                                            val count = nostrService.deleteMyEventsByKind(kind, "manual cleanup")
+                                            kindDeleteResult = kind to DeleteResult.Success(count)
+                                        } catch (e: Exception) {
+                                            kindDeleteResult = kind to DeleteResult.Error(e.message ?: "Unknown error")
+                                        }
+                                        isDeletingKind = null
+                                    }
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp),
+                                enabled = isDeletingKind == null
+                            ) {
+                                if (isDeletingKind == kind) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(16.dp),
+                                        strokeWidth = 2.dp
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                }
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    horizontalAlignment = Alignment.Start
+                                ) {
+                                    Text(
+                                        text = "$name (kind $kind)",
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                    Text(
+                                        text = description,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+
+                            // Show result for this kind
+                            kindDeleteResult?.let { (resultKind, result) ->
+                                if (resultKind == kind) {
+                                    Row(
+                                        modifier = Modifier.padding(start = 8.dp, bottom = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            imageVector = when (result) {
+                                                is DeleteResult.Success -> Icons.Default.CheckCircle
+                                                is DeleteResult.Error -> Icons.Default.Warning
+                                            },
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp),
+                                            tint = when (result) {
+                                                is DeleteResult.Success -> MaterialTheme.colorScheme.primary
+                                                is DeleteResult.Error -> MaterialTheme.colorScheme.error
+                                            }
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            text = when (result) {
+                                                is DeleteResult.Success -> "Deleted ${result.count} events"
+                                                is DeleteResult.Error -> "Error: ${result.message}"
+                                            },
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = when (result) {
+                                                is DeleteResult.Success -> MaterialTheme.colorScheme.primary
+                                                is DeleteResult.Error -> MaterialTheme.colorScheme.error
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+                        HorizontalDivider()
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Text(
+                            text = "Backup Events (Encrypted)",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(bottom = 4.dp)
+                        )
+
+                        // Backup event deletion options
+                        val backupOptions = listOf(
+                            Triple("Profile Backup", RideshareEventKinds.PROFILE_BACKUP, "Vehicles, saved locations, settings (Kind 30177)"),
+                            Triple("Ride History Backup", RideshareEventKinds.RIDE_HISTORY_BACKUP, "Encrypted ride history (Kind 30174)"),
+                            @Suppress("DEPRECATION")
+                            Triple("Vehicles (Legacy)", RideshareEventKinds.VEHICLE_BACKUP, "Deprecated - migrated to Profile Backup"),
+                            @Suppress("DEPRECATION")
+                            Triple("Saved Locations (Legacy)", RideshareEventKinds.SAVED_LOCATIONS_BACKUP, "Deprecated - migrated to Profile Backup")
+                        )
+
+                        backupOptions.forEach { (name, kind, description) ->
                             OutlinedButton(
                                 onClick = {
                                     scope.launch {
