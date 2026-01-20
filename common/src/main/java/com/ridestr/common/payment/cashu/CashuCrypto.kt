@@ -63,9 +63,9 @@ object CashuCrypto {
     }
 
     /**
-     * Hash to curve with raw byte input (for testing against reference vectors).
+     * Hash to curve with raw byte input.
      */
-    fun hashToCurveBytes(message: ByteArray, debug: Boolean = false): String? {
+    fun hashToCurveBytes(message: ByteArray): String? {
         return try {
             val domainBytes = DOMAIN_SEPARATOR.toByteArray(Charsets.UTF_8)
 
@@ -73,12 +73,6 @@ object CashuCrypto {
             // 1. msg_hash = SHA256(DOMAIN_SEPARATOR || message)
             // 2. final = SHA256(msg_hash || counter)
             val msgHash = sha256(domainBytes + message)
-
-            if (debug) {
-                Log.d(TAG, "hashToCurve DEBUG: domain='$DOMAIN_SEPARATOR' (${domainBytes.size} bytes)")
-                Log.d(TAG, "hashToCurve DEBUG: message=${message.size} bytes")
-                Log.d(TAG, "hashToCurve DEBUG: msgHash (first SHA256)=${msgHash.toHexString()}")
-            }
 
             // Try incrementing counter until we find a valid x-coordinate
             // NUT-00: counter is 4 bytes, little-endian
@@ -91,10 +85,6 @@ object CashuCrypto {
                 // Second SHA256: hash of (msgHash || counter)
                 val hash = sha256(msgHash + counterBytes)
 
-                if (debug && counter == 0) {
-                    Log.d(TAG, "hashToCurve DEBUG: counter=0 hash (second SHA256)=${hash.toHexString()}")
-                }
-
                 // Try to lift x to curve
                 // x must be < P to be valid - don't use mod(P) as that changes the value!
                 val x = BigInteger(1, hash)
@@ -102,11 +92,7 @@ object CashuCrypto {
 
                 val point = liftX(x)
                 if (point != null) {
-                    val result = compressPoint(point).toHexString()
-                    if (debug) {
-                        Log.d(TAG, "hashToCurve DEBUG: success at counter=$counter, x=${x.toString(16).take(16)}..., result=$result")
-                    }
-                    return result
+                    return compressPoint(point).toHexString()
                 }
             }
 
@@ -300,35 +286,6 @@ object CashuCrypto {
         }
     }
 
-    /**
-     * Verify hashToCurve against NUT-00 test vector.
-     * Test vector from https://github.com/cashubtc/nuts/blob/main/00.md
-     *
-     * Returns true if our implementation matches the expected output.
-     */
-    fun verifyHashToCurve(): Boolean {
-        // NUT-00 test vector: message = 32 zero bytes
-        val testMessage = ByteArray(32) { 0 }
-        val expectedY = "024cce997d3b518f739663b757deaec95bcd9473c30a14ac2fd04023a739d1a725"
-
-        Log.d(TAG, "=== HASH_TO_CURVE TEST ===")
-        Log.d(TAG, "Test message: ${testMessage.toHexString()} (${testMessage.size} bytes)")
-        Log.d(TAG, "Expected Y: $expectedY")
-
-        val actualY = hashToCurveBytes(testMessage, debug = true)
-        Log.d(TAG, "Actual Y: $actualY")
-
-        val matches = actualY == expectedY
-        Log.d(TAG, "MATCH: $matches")
-
-        if (!matches && actualY != null) {
-            Log.e(TAG, "MISMATCH! Our hashToCurve differs from NUT-00 spec!")
-            Log.e(TAG, "Expected: $expectedY")
-            Log.e(TAG, "Got:      $actualY")
-        }
-
-        return matches
-    }
 }
 
 /**

@@ -164,12 +164,6 @@ class CashuBackend(
                 config = walletConfig
             )
             Log.d(TAG, "cdk-kotlin wallet initialized for $mintUrl")
-
-            // Verify our hashToCurve matches NUT-00 spec
-            val hashToCurveOk = CashuCrypto.verifyHashToCurve()
-            if (!hashToCurveOk) {
-                Log.e(TAG, "⚠️ CRITICAL: hashToCurve mismatch! Change proofs may fail verification.")
-            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize cdk-kotlin wallet: ${e.message}", e)
             // Continue without cdk-kotlin for backward compatibility
