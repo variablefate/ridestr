@@ -12,31 +12,31 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 ### Ride Protocol Events
 | Kind | Name | Type | Author | Purpose |
 |------|------|------|--------|---------|
-| 30173 | Driver Availability | Parameterized Replaceable | Driver | Broadcast driver availability and location |
-| 30180 | Driver Ride State | Parameterized Replaceable | Driver | Consolidated ride status + PIN submissions |
-| 30181 | Rider Ride State | Parameterized Replaceable | Rider | Location reveals + PIN verify + preimage share |
-| 3173 | Ride Offer | Regular | Rider | Request a ride (direct or broadcast) |
-| 3174 | Ride Acceptance | Regular | Driver | Accept ride with wallet pubkey for escrow |
-| 3175 | Ride Confirmation | Regular | Rider | Confirm accepted ride with pickup details |
-| 3178 | Chat Message | Regular | Either | Encrypted chat during ride |
-| 3179 | Ride Cancellation | Regular | Either | Cancel an active ride |
+| [30173](#kind-30173-driver-availability) | Driver Availability | Parameterized Replaceable | Driver | Broadcast driver availability and location |
+| [30180](#kind-30180-driver-ride-state) | Driver Ride State | Parameterized Replaceable | Driver | Consolidated ride status + PIN submissions |
+| [30181](#kind-30181-rider-ride-state) | Rider Ride State | Parameterized Replaceable | Rider | Location reveals + PIN verify + preimage share |
+| [3173](#kind-3173-ride-offer) | Ride Offer | Regular | Rider | Request a ride (direct or broadcast) |
+| [3174](#kind-3174-ride-acceptance) | Ride Acceptance | Regular | Driver | Accept ride with wallet pubkey for escrow |
+| [3175](#kind-3175-ride-confirmation) | Ride Confirmation | Regular | Rider | Confirm accepted ride with pickup details |
+| [3178](#kind-3178-chat-message) | Chat Message | Regular | Either | Encrypted chat during ride |
+| [3179](#kind-3179-ride-cancellation) | Ride Cancellation | Regular | Either | Cancel an active ride |
 
 ### Profile Backup Events (NIP-44 encrypted to self)
 | Kind | Name | Type | d-tag | Purpose |
 |------|------|------|-------|---------|
-| 30174 | Ride History | Parameterized Replaceable | `rideshare-history` | Encrypted backup of ride details |
-| 30177 | Unified Profile | Parameterized Replaceable | `rideshare-profile` | Vehicles, locations, settings |
+| [30174](#kind-30174-ride-history-backup) | Ride History | Parameterized Replaceable | `rideshare-history` | Encrypted backup of ride details |
+| [30177](#kind-30177-unified-profile-backup) | Unified Profile | Parameterized Replaceable | `rideshare-profile` | Vehicles, locations, settings |
 
 ### Wallet Events (NIP-60)
 | Kind | Name | Type | Purpose |
 |------|------|------|---------|
-| 7375 | Wallet Proofs | Regular | Cashu proofs backup |
-| 17375 | Wallet Metadata | Replaceable | Wallet settings/mint URL |
+| [7375](#kind-7375-wallet-proofs) | Wallet Proofs | Regular | Cashu proofs backup |
+| [17375](#kind-17375-wallet-metadata) | Wallet Metadata | Replaceable | Wallet settings/mint URL |
 
 ### Discovery Events
 | Kind | Name | Type | Purpose |
 |------|------|------|---------|
-| 1063 | File Metadata | NIP-94 | Routing tile availability (from official pubkey) |
+| [1063](#kind-1063-tile-availability-nip-94) | File Metadata | NIP-94 | Routing tile availability (from official pubkey) |
 
 ---
 
@@ -235,6 +235,91 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 ```
 
 **Note**: No expiration - profile backup data persists indefinitely.
+
+---
+
+### Kind 30177: Unified Profile Backup
+
+**Purpose**: Encrypted backup of user profile data including vehicles (driver), saved locations (rider), and app settings.
+
+**Type**: Parameterized Replaceable Event (NIP-33)
+
+**Author**: Either party
+
+**d-tag**: `rideshare-profile`
+
+**Tags**:
+```
+["d", "rideshare-profile"]
+["t", "rideshare"]
+```
+
+**Content** (JSON, self-encrypted with NIP-44):
+```json
+{
+  "vehicles": [
+    {
+      "id": "<uuid>",
+      "make": "Toyota",
+      "model": "Camry",
+      "year": 2022,
+      "color": "Silver",
+      "licensePlate": "ABC123",
+      "isPrimary": true
+    }
+  ],
+  "savedLocations": [
+    {
+      "id": "<uuid>",
+      "label": "Home",
+      "latitude": 36.1699,
+      "longitude": -115.1398,
+      "address": "123 Main St, City, State",
+      "isDefault": true
+    }
+  ],
+  "settings": {
+    "displayCurrency": "SATS" | "USD",
+    "distanceUnit": "MILES" | "KILOMETERS",
+    "notificationSoundEnabled": true,
+    "notificationVibrationEnabled": true,
+    "autoOpenNavigation": true,
+    "alwaysAskVehicle": false,
+    "customRelays": ["wss://relay.example.com"]
+  },
+  "updated_at": <unix_timestamp>
+}
+```
+
+**Note**: Replaces deprecated Kind 30175 (vehicles) and Kind 30176 (locations). No expiration - profile backup data persists indefinitely.
+
+---
+
+### Kind 7375: Wallet Proofs
+
+**Purpose**: Cashu ecash proofs backup (NIP-60 standard).
+
+**Type**: Regular Event
+
+**Author**: Wallet owner
+
+**Content**: NIP-44 encrypted Cashu proofs for cross-device wallet restoration.
+
+**Note**: See [NIP-60](https://github.com/nostr-protocol/nips/blob/master/60.md) for full specification.
+
+---
+
+### Kind 17375: Wallet Metadata
+
+**Purpose**: Wallet settings and mint URL (NIP-60 standard).
+
+**Type**: Replaceable Event
+
+**Author**: Wallet owner
+
+**Content**: NIP-44 encrypted wallet metadata including mint URLs.
+
+**Note**: See [NIP-60](https://github.com/nostr-protocol/nips/blob/master/60.md) for full specification.
 
 ---
 
