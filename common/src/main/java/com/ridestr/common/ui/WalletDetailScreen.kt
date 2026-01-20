@@ -197,7 +197,15 @@ fun WalletDetailScreen(
     if (showDepositDialog) {
         DepositDialog(
             walletService = walletService,
-            onDismiss = { showDepositDialog = false }
+            onDismiss = {
+                showDepositDialog = false
+                // Trigger a background refresh after a short delay to clean up pending deposits
+                // This catches payments that completed after the user closed the dialog
+                scope.launch {
+                    delay(3000) // Wait 3 seconds
+                    walletService.refreshBalance()
+                }
+            }
         )
     }
 
