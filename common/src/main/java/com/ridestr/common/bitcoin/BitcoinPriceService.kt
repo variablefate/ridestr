@@ -14,13 +14,25 @@ import java.util.concurrent.TimeUnit
  * Service to fetch and cache Bitcoin price.
  * Uses UTXOracle as primary API with CoinGecko as fallback.
  * Refreshes every 5 minutes automatically.
+ *
+ * This is a singleton to prevent duplicate API calls when multiple
+ * components (MainActivity, ViewModel) create instances.
  */
-class BitcoinPriceService {
+class BitcoinPriceService private constructor() {
     companion object {
         private const val TAG = "BitcoinPriceService"
         private const val PRIMARY_API_URL = "https://api.utxoracle.io/latest.json"
         private const val BACKUP_API_URL = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
         private const val REFRESH_INTERVAL_MS = 5 * 60 * 1000L // 5 minutes
+
+        @Volatile
+        private var instance: BitcoinPriceService? = null
+
+        fun getInstance(): BitcoinPriceService {
+            return instance ?: synchronized(this) {
+                instance ?: BitcoinPriceService().also { instance = it }
+            }
+        }
     }
 
     private val client = OkHttpClient.Builder()

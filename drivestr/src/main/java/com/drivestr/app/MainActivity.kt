@@ -138,8 +138,8 @@ fun DrivestrApp() {
     // Ride history repository
     val rideHistoryRepository = remember { RideHistoryRepository.getInstance(context) }
 
-    // Bitcoin price service for currency conversion
-    val bitcoinPriceService = remember { BitcoinPriceService() }
+    // Bitcoin price service for currency conversion (singleton)
+    val bitcoinPriceService = remember { BitcoinPriceService.getInstance() }
 
     // Start price auto-refresh when app starts
     LaunchedEffect(Unit) {

@@ -155,8 +155,8 @@ fun RidestrApp() {
     val walletKeyManager = remember { WalletKeyManager(context) }
     val walletService = remember { WalletService(context, walletKeyManager) }
 
-    // Bitcoin price service for USD display
-    val bitcoinPriceService = remember { BitcoinPriceService() }
+    // Bitcoin price service for USD display (singleton)
+    val bitcoinPriceService = remember { BitcoinPriceService.getInstance() }
 
     // NIP-60 wallet sync for cross-device portability
     // IMPORTANT: Wire to walletService immediately to avoid race condition with lockForRide()

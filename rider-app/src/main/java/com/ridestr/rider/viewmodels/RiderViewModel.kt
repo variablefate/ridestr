@@ -123,7 +123,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     val isSearchingDest: StateFlow<Boolean> = _isSearchingDest.asStateFlow()
 
     // Bitcoin price service for fare conversion
-    val bitcoinPriceService = BitcoinPriceService()
+    val bitcoinPriceService = BitcoinPriceService.getInstance()
 
     // Wallet service for balance checks (injected from MainActivity)
     private var walletService: WalletService? = null

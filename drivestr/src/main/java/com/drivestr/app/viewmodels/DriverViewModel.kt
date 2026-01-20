@@ -122,7 +122,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     private val rideHistoryRepository = RideHistoryRepository.getInstance(application)
 
     // Bitcoin price service for fare conversion
-    val bitcoinPriceService = BitcoinPriceService()
+    val bitcoinPriceService = BitcoinPriceService.getInstance()
 
     // Valhalla routing service for calculating distances
     private val routingService = ValhallaRoutingService(application)
