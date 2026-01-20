@@ -1609,10 +1609,11 @@ class WalletService(
      * Resolve a Lightning address to a BOLT11 invoice.
      *
      * @param address Lightning address (user@domain.com)
+     * @param amountSats Amount in satoshis (required for LNURL-pay to generate invoice)
      * @return Result containing the resolved BOLT11 invoice
      */
-    suspend fun resolveLnAddress(address: String): Result<String> {
-        val invoice = cashuBackend.resolveLnAddress(address)
+    suspend fun resolveLnAddress(address: String, amountSats: Long): Result<String> {
+        val invoice = cashuBackend.resolveLnAddress(address, amountSats)
             ?: return Result.failure(Exception("Failed to resolve Lightning address"))
         return Result.success(invoice)
     }

@@ -702,6 +702,10 @@ private fun WithdrawDialog(
     var error by remember { mutableStateOf<String?>(null) }
     var isComplete by remember { mutableStateOf(false) }
 
+    // LN address flow: need amount input before resolving
+    var lnAddress by remember { mutableStateOf<String?>(null) }
+    var amountInput by remember { mutableStateOf("") }
+
     val scope = rememberCoroutineScope()
 
     AlertDialog(
@@ -710,8 +714,8 @@ private fun WithdrawDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 when {
-                    quote == null -> {
-                        // Step 1: Enter Lightning invoice or address
+                    // Step 1: Enter Lightning invoice or address
+                    quote == null && lnAddress == null -> {
                         Text("Available: ${"%,d".format(maxAmount)} sats")
 
                         OutlinedTextField(
@@ -729,8 +733,36 @@ private fun WithdrawDialog(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
+
+                    // Step 1.5: LN address detected - enter amount
+                    quote == null && lnAddress != null -> {
+                        Text("Sending to: $lnAddress")
+
+                        Text("Available: ${"%,d".format(maxAmount)} sats")
+
+                        OutlinedTextField(
+                            value = amountInput,
+                            onValueChange = { newValue ->
+                                // Only allow digits
+                                if (newValue.all { it.isDigit() }) {
+                                    amountInput = newValue
+                                }
+                            },
+                            label = { Text("Amount (sats)") },
+                            placeholder = { Text("Enter amount to withdraw") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+
+                        Text(
+                            text = "Enter the amount you want to withdraw in satoshis",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    // Step 2: Confirm fee
                     !isComplete -> {
-                        // Step 2: Confirm fee
                         Card(
                             colors = CardDefaults.cardColors(
                                 containerColor = MaterialTheme.colorScheme.surfaceVariant
@@ -780,8 +812,9 @@ private fun WithdrawDialog(
                             }
                         }
                     }
+
+                    // Step 3: Success
                     else -> {
-                        // Step 3: Success
                         Column(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalAlignment = Alignment.CenterHorizontally
@@ -822,26 +855,32 @@ private fun WithdrawDialog(
                 isComplete -> {
                     Button(onClick = onDismiss) { Text("Done") }
                 }
-                quote == null -> {
+
+                // Step 1: Detect if LN address or get quote for BOLT11
+                quote == null && lnAddress == null -> {
                     Button(
                         onClick = {
                             if (invoice.isBlank()) {
                                 error = "Please enter an invoice or address"
                                 return@Button
                             }
-                            isLoading = true
-                            error = null
-                            scope.launch {
-                                // Handle LN address resolution
-                                val bolt11 = if (invoice.contains("@")) {
-                                    walletService.resolveLnAddress(invoice).getOrNull() ?: invoice
-                                } else invoice.trim()
 
-                                walletService.getMeltQuote(bolt11).fold(
-                                    onSuccess = { quote = it },
-                                    onFailure = { error = it.message ?: "Failed to get quote" }
-                                )
-                                isLoading = false
+                            // Check if it's a Lightning address
+                            if (invoice.contains("@") && !invoice.startsWith("lnbc")) {
+                                // LN address - need amount first
+                                lnAddress = invoice.trim()
+                                error = null
+                            } else {
+                                // BOLT11 invoice - get quote directly
+                                isLoading = true
+                                error = null
+                                scope.launch {
+                                    walletService.getMeltQuote(invoice.trim()).fold(
+                                        onSuccess = { quote = it },
+                                        onFailure = { error = it.message ?: "Failed to get quote" }
+                                    )
+                                    isLoading = false
+                                }
                             }
                         },
                         enabled = invoice.isNotBlank() && !isLoading
@@ -850,9 +889,52 @@ private fun WithdrawDialog(
                             CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                             Spacer(Modifier.width(8.dp))
                         }
+                        Text("Continue")
+                    }
+                }
+
+                // Step 1.5: Resolve LN address with amount
+                quote == null && lnAddress != null -> {
+                    Button(
+                        onClick = {
+                            val amount = amountInput.toLongOrNull()
+                            if (amount == null || amount <= 0) {
+                                error = "Please enter a valid amount"
+                                return@Button
+                            }
+                            if (amount > maxAmount) {
+                                error = "Amount exceeds available balance"
+                                return@Button
+                            }
+
+                            isLoading = true
+                            error = null
+                            scope.launch {
+                                // Resolve LN address to BOLT11 with amount
+                                walletService.resolveLnAddress(lnAddress!!, amount).fold(
+                                    onSuccess = { bolt11 ->
+                                        // Now get the melt quote
+                                        walletService.getMeltQuote(bolt11).fold(
+                                            onSuccess = { quote = it },
+                                            onFailure = { error = it.message ?: "Failed to get quote" }
+                                        )
+                                    },
+                                    onFailure = { error = it.message ?: "Failed to resolve Lightning address" }
+                                )
+                                isLoading = false
+                            }
+                        },
+                        enabled = amountInput.isNotBlank() && !isLoading
+                    ) {
+                        if (isLoading) {
+                            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                        }
                         Text("Get Quote")
                     }
                 }
+
+                // Step 2: Confirm withdrawal
                 else -> {
                     Button(
                         onClick = {
@@ -878,8 +960,19 @@ private fun WithdrawDialog(
             }
         },
         dismissButton = {
-            if (!isComplete && !isLoading) {
-                TextButton(onClick = onDismiss) { Text("Cancel") }
+            when {
+                isComplete || isLoading -> { /* No dismiss button */ }
+                lnAddress != null && quote == null -> {
+                    // Allow going back from amount step
+                    TextButton(onClick = {
+                        lnAddress = null
+                        amountInput = ""
+                        error = null
+                    }) { Text("Back") }
+                }
+                else -> {
+                    TextButton(onClick = onDismiss) { Text("Cancel") }
+                }
             }
         }
     )
