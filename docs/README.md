@@ -1,6 +1,6 @@
 # Ridestr Documentation
 
-**Last Updated**: 2026-01-17
+**Last Updated**: 2026-01-20
 
 Ridestr is a decentralized rideshare platform built on Nostr. This documentation provides comprehensive coverage of the protocol, architecture, and implementation.
 
@@ -16,7 +16,7 @@ Ridestr is a decentralized rideshare platform built on Nostr. This documentation
 | Cashu Wallet (deposit/withdraw) | ✅ COMPLETE | [PAYMENT_ARCHITECTURE.md](architecture/PAYMENT_ARCHITECTURE.md) |
 | NIP-60 Backup/Restore | ✅ COMPLETE | [PAYMENT_ARCHITECTURE.md](architecture/PAYMENT_ARCHITECTURE.md) |
 | NUT-14 HTLC | ✅ COMPLETE | P2PK signing, wallet pubkey handshake, deferred locking |
-| Payment Integration | ✅ COMPLETE | Fully wired (LN address resolution still broken) |
+| Payment Integration | ✅ COMPLETE | Fully wired, HTLC escrow, NIP-60 sync |
 
 ---
 
@@ -90,12 +90,6 @@ HTLC is locked **AFTER** acceptance (not before):
 
 **Location:** `WalletService.kt:324-357`
 
-### Remaining Known Issues
-
-- **LN Address Resolution** - `resolveLnAddress()` broken, users must paste BOLT11
-- **Wallet UI Fresh Install** - Shows "Set Up" even for existing npubs
-- **Escrow Bypass** - Rides proceed if escrow fails (needs enforcement)
-
 See [PAYMENT_ARCHITECTURE.md](architecture/PAYMENT_ARCHITECTURE.md) for detailed flow diagrams.
 
 ---
@@ -119,25 +113,12 @@ See [PAYMENT_ARCHITECTURE.md](architecture/PAYMENT_ARCHITECTURE.md) for detailed
 - `RiderViewModel.sharePreimageWithDriver()` - Shares preimage via Kind 30181
 - `RiderRideStateEvent.PREIMAGE_SHARE` action type exists
 
-## Known Issues (Not Blocking)
+## Wallet UI
 
-### LN Address Resolution (Broken)
-- `WalletService.resolveLnAddress()` at line 600-604 does not work
-- Users must paste BOLT11 invoice directly instead of using `user@domain.com` format
-- Likely cause: LNURL protocol/domain resolution issue
-
-### Deposit/Withdraw UI (WORKING)
-- ✅ **Deposit works**: `WalletDetailScreen.kt:444-682` - full flow with QR code
-- ✅ **Withdraw works**: `WalletDetailScreen.kt:688-880` - full flow with fee preview
+### Deposit/Withdraw
+- ✅ **Deposit works**: `WalletDetailScreen.kt` - full flow with QR code
+- ✅ **Withdraw works**: `WalletDetailScreen.kt` - full flow with fee preview
 - Navigation: Tap wallet card → WalletDetailScreen → Deposit/Withdraw buttons
-- Only limitation: must paste BOLT11 invoice (LN address broken)
-
-### Escrow Bypass (Needs Enforcement)
-- Rides currently proceed if escrow lock fails
-- Future: Block ride if `lockForRide()` returns null
-
-### Dead Code Removed (Stage 2-3 Cleanup)
-- `WalletService.settleRide()` - orphaned, drivers use `claimHtlcPayment()`
 
 ---
 
