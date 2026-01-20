@@ -104,23 +104,33 @@ class NostrTileDiscoveryService(
             delay(500)
 
             // Subscribe to kind 1063 events from official pubkey
-            subscriptionId = relayManager.subscribe(
+            val subId = relayManager.subscribe(
                 kinds = listOf(KIND_FILE_METADATA),
                 authors = listOf(OFFICIAL_PUBKEY),
                 onEvent = { event, relayUrl ->
                     handleTileEvent(event, relayUrl)
                 }
             )
+            subscriptionId = subId
 
-            Log.d(TAG, "Subscribed with ID: $subscriptionId")
+            Log.d(TAG, "Subscribed with ID: $subId")
 
-            // Set a timeout for discovery completion
-            delay(5000)
-            _isDiscovering.value = false
+            // Set a timeout for discovery completion (15s for slow mobile connections)
+            delay(15000)
 
-            // Save discovered regions to cache
-            saveCachedRegions()
-            Log.d(TAG, "Discovery complete. Found ${_discoveredRegions.value.size} regions")
+            // Close the subscription - we don't need to keep receiving events
+            // Use captured subId to avoid race condition if refreshDiscovery() was called
+            if (subscriptionId == subId) {
+                relayManager.closeSubscription(subId)
+                subscriptionId = null
+                _isDiscovering.value = false
+
+                // Save discovered regions to cache
+                saveCachedRegions()
+                Log.d(TAG, "Discovery complete. Found ${_discoveredRegions.value.size} regions")
+            } else {
+                Log.d(TAG, "Discovery was superseded by a new discovery request")
+            }
         }
     }
 
