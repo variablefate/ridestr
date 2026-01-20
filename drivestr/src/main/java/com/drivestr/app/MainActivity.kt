@@ -289,15 +289,18 @@ fun DrivestrApp() {
     Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
         when (currentScreen) {
             Screen.ONBOARDING -> {
+                val hasVehicles = vehicleRepository.vehicles.collectAsState().value.isNotEmpty()
+
                 OnboardingScreen(
                     viewModel = onboardingViewModel,
                     onComplete = {
                         nostrService.connect()
-                        // After login, go to profile setup or location permission
-                        currentScreen = if (uiState.isProfileCompleted) {
-                            Screen.LOCATION_PERMISSION
-                        } else {
-                            Screen.PROFILE_SETUP
+                        // After login, check each step in order
+                        currentScreen = when {
+                            !uiState.isProfileCompleted -> Screen.PROFILE_SETUP
+                            !hasVehicles -> Screen.VEHICLE_SETUP
+                            !settingsManager.isWalletSetupDone() -> Screen.WALLET_SETUP
+                            else -> Screen.LOCATION_PERMISSION
                         }
                     },
                     modifier = Modifier.padding(innerPadding)
