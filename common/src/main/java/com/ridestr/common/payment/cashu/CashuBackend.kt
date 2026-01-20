@@ -264,11 +264,6 @@ class CashuBackend(
         val mintUrl = currentMintUrl ?: return@withContext null
 
         try {
-            // Log first Y for debugging
-            if (Ys.isNotEmpty()) {
-                Log.d(TAG, "checkProofStates: First Y we're sending: ${Ys[0].take(40)}...")
-            }
-
             val requestBody = JSONObject().apply {
                 put("Ys", JSONArray(Ys))
             }.toString()
@@ -348,7 +343,6 @@ class CashuBackend(
         }
 
         Log.d(TAG, "=== CLAIMING HTLC TOKEN ===")
-        Log.d(TAG, "Preimage: ${preimage.take(16)}...")
 
         try {
             // Step 1: Parse token to extract HTLC proofs
@@ -529,8 +523,6 @@ class CashuBackend(
         }
 
         Log.d(TAG, "=== CLAIMING HTLC (with proofs) ===")
-        Log.d(TAG, "Token received (${htlcToken.length} chars): ${htlcToken.take(50)}...")
-        Log.d(TAG, "Preimage: ${preimage.take(16)}...")
 
         try {
             // Parse token
@@ -541,12 +533,7 @@ class CashuBackend(
             }
             val (htlcProofs, tokenMintUrl) = parseResult
             val totalAmount = htlcProofs.sumOf { it.amount }
-            Log.d(TAG, "Parsed token: ${htlcProofs.size} proofs, $totalAmount sats, mint: $tokenMintUrl")
-
-            // Log each proof's details
-            htlcProofs.forEachIndexed { idx, proof ->
-                Log.d(TAG, "  Proof[$idx]: amount=${proof.amount}, secret=${proof.secret.take(40)}..., C=${proof.C.take(20)}...")
-            }
+            Log.d(TAG, "Parsed token: ${htlcProofs.size} proofs, $totalAmount sats")
 
             // Verify preimage
             val expectedHash = extractPaymentHashFromSecret(htlcProofs.first().secret)
@@ -555,7 +542,6 @@ class CashuBackend(
                 return@withContext null
             }
             val computedHash = PaymentCrypto.computePaymentHash(preimage)
-            Log.d(TAG, "Payment hash verification: expected=${expectedHash.take(16)}..., computed=${computedHash.take(16)}...")
             if (!computedHash.equals(expectedHash, ignoreCase = true)) {
                 Log.e(TAG, "Preimage does not match payment_hash")
                 return@withContext null
@@ -616,9 +602,6 @@ class CashuBackend(
             }.toString()
 
             Log.d(TAG, "Swap request to mint (${swapRequest.length} chars)")
-            // Log first input's witness for debugging
-            val firstInput = inputsArray.getJSONObject(0)
-            Log.d(TAG, "  First input witness: ${firstInput.optString("witness", "MISSING").take(100)}...")
 
             // Execute swap
             val targetMint = tokenMintUrl.trimEnd('/')
@@ -1041,19 +1024,12 @@ class CashuBackend(
         return try {
             val keypair = walletKeyManager.getOrCreateWalletKeypair()
             val walletPubKey = keypair.publicKeyHex
-            Log.d(TAG, "signP2pkProof: using wallet pubkey ${walletPubKey.take(16)}...")
-            Log.d(TAG, "signP2pkProof: secret (${secret.length} chars): ${secret.take(50)}...")
-            Log.d(TAG, "signP2pkProof: C (${proofC.length} chars): ${proofC.take(20)}...")
-
             // NUT-11: Sign SHA256(secret) only - do NOT include C
             val messageHash = MessageDigest.getInstance("SHA-256")
                 .digest(secret.toByteArray())
-            Log.d(TAG, "signP2pkProof: messageHash (SHA256 of secret): ${messageHash.joinToString("") { "%02x".format(it) }.take(32)}...")
 
             val signature = keypair.signSchnorr(messageHash)
-            if (signature != null) {
-                Log.d(TAG, "signP2pkProof: signature (${signature.length} chars): ${signature.take(32)}...")
-            } else {
+            if (signature == null) {
                 Log.e(TAG, "signP2pkProof: signSchnorr returned null!")
             }
             signature
@@ -1175,33 +1151,12 @@ class CashuBackend(
         Log.d(TAG, "=== CREATING HTLC FROM NIP-60 PROOFS ===")
         Log.d(TAG, "Input: ${inputProofs.size} proofs ($inputAmount sats), HTLC amount: $amountSats sats")
 
-        // DEBUG: Log first proof received
-        Log.d(TAG, "createHtlc DEBUG: First proof secret: ${inputProofs[0].secret.take(30)}...")
-
-        // DEBUG: Check for duplicate secrets
-        val secretSet = inputProofs.map { it.secret }.toSet()
-        if (secretSet.size != inputProofs.size) {
-            Log.e(TAG, "DUPLICATE SECRETS DETECTED! ${inputProofs.size} proofs but only ${secretSet.size} unique secrets")
-        }
-
-        // DEBUG: Check proof structure
-        val firstProof = inputProofs[0]
-        Log.d(TAG, "First proof structure: amount=${firstProof.amount}, id=${firstProof.id}, secret.len=${firstProof.secret.length}, C.len=${firstProof.C.length}")
-        Log.d(TAG, "First proof C prefix: ${firstProof.C.take(10)}...")
-
         try {
             // Get keyset for outputs
             val keyset = getActiveKeyset()
             if (keyset == null) {
                 Log.e(TAG, "createHtlcTokenFromProofs: getActiveKeyset() returned null!")
                 return@withContext null
-            }
-
-            // DEBUG: Check if proof keyset matches active keyset
-            val proofKeysets = inputProofs.map { it.id }.toSet()
-            Log.d(TAG, "Proof keysets: $proofKeysets, Active keyset: ${keyset.id}")
-            if (proofKeysets.size > 1) {
-                Log.w(TAG, "WARNING: Proofs have multiple keysets!")
             }
 
             // Calculate change
@@ -1246,17 +1201,7 @@ class CashuBackend(
                 put("outputs", outputsArray)
             }.toString()
 
-            Log.d(TAG, "Swap: ${inputProofs.size} inputs → ${htlcOutputs.size} HTLC + ${changeOutputs.size} change")
-            Log.d(TAG, "Keyset ID: ${keyset.id}")
-            if (outputsArray.length() > 0) {
-                val firstOutput = outputsArray.getJSONObject(0)
-                Log.d(TAG, "First output B_: ${firstOutput.optString("B_").take(20)}...")
-            }
-            if (inputsArray.length() > 0) {
-                val firstInput = inputsArray.getJSONObject(0)
-                Log.d(TAG, "First input secret: ${firstInput.optString("secret").take(20)}...")
-                Log.d(TAG, "First input C: ${firstInput.optString("C").take(20)}...")
-            }
+            Log.d(TAG, "Swap: ${inputProofs.size} inputs → ${htlcOutputs.size} HTLC + ${changeOutputs.size} change outputs")
 
             // Execute swap
             val request = Request.Builder()
@@ -1472,11 +1417,6 @@ class CashuBackend(
 
         Log.d(TAG, "Verifying ${secrets.size} proof states with mint")
 
-        // Log first secret for debugging
-        if (secrets.isNotEmpty()) {
-            Log.d(TAG, "First secret: ${secrets[0].take(40)}...")
-        }
-
         try {
             // Compute Y values (hash_to_curve of each secret)
             val yValues = secrets.mapNotNull { secret ->
@@ -1486,11 +1426,6 @@ class CashuBackend(
             if (yValues.size != secrets.size) {
                 Log.e(TAG, "Failed to compute Y for some secrets")
                 return@withContext null
-            }
-
-            // Log first computed Y for debugging
-            if (yValues.isNotEmpty()) {
-                Log.d(TAG, "First computed Y: ${yValues[0].second.take(40)}...")
             }
 
             // Use existing checkProofStates method with Y values
@@ -2291,11 +2226,6 @@ class CashuBackend(
 
             val proofCount = cdkProofs.size
             if (proofCount > 0) {
-                // Debug: Log first proof's details to understand the cdk-kotlin types
-                val firstProof = cdkProofs.first()
-                Log.d(TAG, "DEBUG proof: amount.class=${firstProof.amount::class.simpleName}, amount='${firstProof.amount}'")
-                Log.d(TAG, "DEBUG proof: keysetId='${firstProof.keysetId}', secret='${firstProof.secret.take(20)}...'")
-                Log.d(TAG, "DEBUG proof: c='${firstProof.c.take(20)}...'")
 
                 // Convert cdk-kotlin proofs to our CashuProof format
                 val cashuProofs = cdkProofs.map { proof ->
@@ -2364,7 +2294,7 @@ class CashuBackend(
             // state is a MeltQuoteState enum (UNPAID, PENDING, PAID)
             val isPaid = result.state.toString().uppercase() == "PAID"
             val preimage = result.preimage
-            Log.d(TAG, "✅ Melt complete: state=${result.state}, preimage=${preimage?.take(16)}...")
+            Log.d(TAG, "✅ Melt complete: state=${result.state}")
             MeltResult(
                 paid = isPaid,
                 paymentPreimage = preimage
@@ -2415,12 +2345,8 @@ class CashuBackend(
             Log.d(TAG, "Amount needed: $amountNeeded sats")
             Log.d(TAG, "Expected change: $expectedChange sats")
 
-            // DEBUG: Log proof details
             val keysetIds = proofs.map { it.id }.toSet()
-            Log.d(TAG, "Proof keyset IDs: $keysetIds")
-            proofs.forEachIndexed { idx, proof ->
-                Log.d(TAG, "  Proof[$idx]: amount=${proof.amount}, id=${proof.id}, secret=${proof.secret.take(20)}..., C.len=${proof.C.length}, C=${proof.C.take(20)}...")
-            }
+            Log.d(TAG, "Proof keyset IDs: $keysetIds, count=${proofs.size}")
 
             // Fetch active keyset to compare
             val activeKeyset = getActiveKeyset()
@@ -2465,13 +2391,6 @@ class CashuBackend(
                             Log.e(TAG, "blindMessage failed for change output")
                             continue
                         }
-                        // DEBUG: Log all values for change output creation
-                        Log.d(TAG, "=== CHANGE OUTPUT $amount sat ===")
-                        Log.d(TAG, "  secret: ${secret.take(32)}... (${secret.length} chars)")
-                        Log.d(TAG, "  r (blinding): ${blindingFactor.take(16)}...")
-                        Log.d(TAG, "  Y (h2c): $Y")
-                        Log.d(TAG, "  B_ (blind): $B_")
-                        Log.d(TAG, "  K (mint key for $amount): ${keyset.keys[amount]}")
                         changePremints.add(PreMintSecret(amount, secret, blindingFactor, Y, B_))
                     }
 
@@ -2559,21 +2478,11 @@ class CashuBackend(
                         }
 
                         // Unblind: C = C_ - r*K
-                        // DEBUG: Log all values for unblinding
-                        Log.d(TAG, "=== UNBLIND CHANGE $i ($responseAmount sat) ===")
-                        Log.d(TAG, "  C_ (from mint): $C_")
-                        Log.d(TAG, "  r (blinding): ${pms.blindingFactor.take(16)}...")
-                        Log.d(TAG, "  K (mint pubkey): $mintPubKey")
-                        Log.d(TAG, "  keyset ID: $responseKeysetId")
-
                         val C = CashuCrypto.unblindSignature(C_, pms.blindingFactor, mintPubKey)
                         if (C == null) {
                             Log.w(TAG, "Failed to unblind change signature $i")
                             continue
                         }
-
-                        Log.d(TAG, "  C (unblinded): $C")
-                        Log.d(TAG, "  secret: ${pms.secret.take(32)}...")
 
                         // Use amount AND keyset ID from the response (CRITICAL!)
                         changeProofs.add(CashuProof(
@@ -2598,7 +2507,7 @@ class CashuBackend(
                 Log.w(TAG, "⚠️ Change loss: expected $expectedChange sats, recovered $finalChangeAmount sats")
             }
 
-            Log.d(TAG, "✅ Melt complete: paid=$paid, preimage=${preimage?.take(16)}..., change=${changeProofs.size} proofs ($finalChangeAmount sats)")
+            Log.d(TAG, "✅ Melt complete: paid=$paid, change=${changeProofs.size} proofs ($finalChangeAmount sats)")
 
             MeltResult(
                 paid = paid,
@@ -2931,7 +2840,7 @@ class CashuBackend(
             )
 
             val totalAmount = proofs.sumOf { it.amount }
-            Log.d(TAG, "Recovery token created ($totalAmount sats): ${tokenStr.take(80)}...")
+            Log.d(TAG, "Recovery token created ($totalAmount sats)")
 
             // Store token for later retrieval/backup
             // TODO: Implement NIP-60 storage here
@@ -2958,7 +2867,6 @@ class CashuBackend(
 
             // Proofs ARE valid even if we couldn't store in cdk-kotlin
             Log.d(TAG, "✅ Funds recovered ($totalAmount sats) - token saved for manual import")
-            Log.d(TAG, "Recovery token: $tokenStr")
             return true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to process recovered proofs: ${e.message}", e)

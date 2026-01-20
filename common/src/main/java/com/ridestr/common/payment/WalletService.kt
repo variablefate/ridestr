@@ -768,11 +768,6 @@ class WalletService(
 
         Log.d(TAG, "Selected ${selection.proofs.size} proofs (${selection.totalAmount} sats, change: ${selection.changeAmount})")
 
-        // DEBUG: Log first secret for comparison
-        if (selection.proofs.isNotEmpty()) {
-            Log.d(TAG, "DEBUG: First selected secret: ${selection.proofs[0].secret.take(30)}...")
-        }
-
         // Step 1.5: Check for corrupted C fields in NIP-60 proofs
         // Old NIP-60 events may have stored C as raw bytes, resulting in wrong length
         var proofsToVerify = selection.proofs.map { it.toCashuProof() }
@@ -810,11 +805,6 @@ class WalletService(
 
         // Step 1.6: Verify selected proofs with mint (NUT-07) to catch stale proofs
         Log.d(TAG, "Verifying ${proofsToVerify.size} proofs with mint before HTLC swap...")
-
-        // DEBUG: Log first proof to verify
-        if (proofsToVerify.isNotEmpty()) {
-            Log.d(TAG, "DEBUG: First proof to verify secret: ${proofsToVerify[0].secret.take(30)}...")
-        }
         val verifyResult = cashuBackend.verifyProofsBalance(proofsToVerify)
 
         if (verifyResult != null) {
@@ -886,11 +876,6 @@ class WalletService(
 
         // Convert to CashuProof for mint operations
         val inputProofs = selection.proofs.map { it.toCashuProof() }
-
-        // DEBUG: Log first proof to swap
-        if (inputProofs.isNotEmpty()) {
-            Log.d(TAG, "DEBUG: First proof to swap secret: ${inputProofs[0].secret.take(30)}...")
-        }
 
         val riderPubKey = walletKeyManager.getWalletPubKeyHex()
         if (riderPubKey == null) {
@@ -1895,22 +1880,19 @@ class WalletService(
                         CashuBackend.ProofStateResult.UNSPENT -> true
                         CashuBackend.ProofStateResult.PENDING -> {
                             pendingCount++
-                            Log.w(TAG, "  Proof ${proof.secret.take(8)}... is PENDING (in swap)")
                             true // Include pending - they might become unspent
                         }
                         CashuBackend.ProofStateResult.SPENT -> {
                             spentCount++
-                            Log.d(TAG, "  Proof ${proof.secret.take(8)}... is SPENT - excluding")
                             false
                         }
                         null -> {
-                            Log.w(TAG, "  Proof ${proof.secret.take(8)}... state unknown - including")
                             true // Include if we couldn't verify
                         }
                     }
                 }
 
-                Log.d(TAG, "  Verification: ${verifiedProofs.size} unspent/pending, $spentCount spent")
+                Log.d(TAG, "  Verification: ${verifiedProofs.size} unspent, $pendingCount pending, $spentCount spent")
             } else {
                 // Verification failed - include all proofs but warn
                 Log.w(TAG, "  Mint verification failed - including all proofs without verification")
