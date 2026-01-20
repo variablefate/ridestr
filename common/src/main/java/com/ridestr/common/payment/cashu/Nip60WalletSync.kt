@@ -8,10 +8,12 @@ import com.ridestr.common.payment.WalletBalance
 import com.ridestr.common.payment.WalletKeyManager
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.cancellation.CancellationException as KotlinCancellationException
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -290,6 +292,19 @@ class Nip60WalletSync(
 
             Log.d(TAG, "Fetched ${uniqueProofs.size} unique proofs, $uniqueTotal sats (from ${proofs.size} raw)")
             uniqueProofs
+        } catch (e: CancellationException) {
+            // Scope was cancelled (e.g., user navigated away) - not an error
+            Log.d(TAG, "Fetch proofs cancelled (scope left composition)")
+            cachedProofs.toList()  // Return cached data
+        } catch (e: IllegalStateException) {
+            // Compose scope exception - user navigated away
+            if (e.message?.contains("left the composition") == true) {
+                Log.d(TAG, "Fetch proofs cancelled (Compose scope disposed)")
+                cachedProofs.toList()
+            } else {
+                Log.e(TAG, "Failed to fetch proofs: ${e.message}", e)
+                emptyList()
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to fetch proofs: ${e.message}", e)
             emptyList()

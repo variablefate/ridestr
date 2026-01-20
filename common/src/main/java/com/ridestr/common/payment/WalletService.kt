@@ -7,6 +7,7 @@ import com.ridestr.common.payment.cashu.CashuBackend.ProofStateResult
 import com.ridestr.common.payment.cashu.CashuProof
 import com.ridestr.common.payment.cashu.MintCapabilities
 import com.ridestr.common.payment.cashu.Nip60WalletSync
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -2212,6 +2213,16 @@ class WalletService(
             )
 
             Log.d(TAG, "Diagnostics: displayed=$displayedBalance, nip60=${nip60Balance?.availableSats}, unverified=$unverifiedBalance, issues=${issues.size}")
+        } catch (e: CancellationException) {
+            // Scope was cancelled (e.g., user navigated away) - not an error
+            Log.d(TAG, "Diagnostics update cancelled (scope left)")
+        } catch (e: IllegalStateException) {
+            // Compose scope exception - user navigated away
+            if (e.message?.contains("left the composition") == true) {
+                Log.d(TAG, "Diagnostics update cancelled (Compose scope disposed)")
+            } else {
+                Log.e(TAG, "Failed to update diagnostics", e)
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to update diagnostics", e)
         }
