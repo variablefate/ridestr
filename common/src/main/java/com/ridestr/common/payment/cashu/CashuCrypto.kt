@@ -299,6 +299,36 @@ object CashuCrypto {
             else -> ByteArray(32 - bytes.size) + bytes
         }
     }
+
+    /**
+     * Verify hashToCurve against NUT-00 test vector.
+     * Test vector from https://github.com/cashubtc/nuts/blob/main/00.md
+     *
+     * Returns true if our implementation matches the expected output.
+     */
+    fun verifyHashToCurve(): Boolean {
+        // NUT-00 test vector: message = 32 zero bytes
+        val testMessage = ByteArray(32) { 0 }
+        val expectedY = "024cce997d3b518f739663b757deaec95bcd9473c30a14ac2fd04023a739d1a725"
+
+        Log.d(TAG, "=== HASH_TO_CURVE TEST ===")
+        Log.d(TAG, "Test message: ${testMessage.toHexString()} (${testMessage.size} bytes)")
+        Log.d(TAG, "Expected Y: $expectedY")
+
+        val actualY = hashToCurveBytes(testMessage, debug = true)
+        Log.d(TAG, "Actual Y: $actualY")
+
+        val matches = actualY == expectedY
+        Log.d(TAG, "MATCH: $matches")
+
+        if (!matches && actualY != null) {
+            Log.e(TAG, "MISMATCH! Our hashToCurve differs from NUT-00 spec!")
+            Log.e(TAG, "Expected: $expectedY")
+            Log.e(TAG, "Got:      $actualY")
+        }
+
+        return matches
+    }
 }
 
 /**

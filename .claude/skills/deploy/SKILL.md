@@ -9,11 +9,13 @@ Deploy debug builds to Android devices via ADB.
 
 **Deploy = Build + Install + Launch** (always launch the app after installing)
 
-## Standard Deployment (Recommended for Testing)
+## Default Deployment (USB + Emulator)
 
-**Use for**: "standard deploy", "deploy standard", "deploy for testing", "test deployment"
+**This is the DEFAULT behavior for `/deploy` without arguments.**
 
-Deploys **Rider → USB device** and **Driver → Emulator** without needing wireless debugging port.
+Deploys **Rider → Emulator** and **Driver → USB device** without needing wireless debugging port.
+
+**Use for**: "deploy", "deploy both", "standard deploy", "deploy for testing"
 
 ```bash
 # 1. Check connected devices
@@ -22,26 +24,28 @@ C:/Users/Iwill/AppData/Local/Android/Sdk/platform-tools/adb.exe devices -l
 # 2. Build both apps
 JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :rider-app:assembleDebug :drivestr:assembleDebug
 
-# 3. Install Rider on USB device (use device serial from `adb devices`)
-C:/Users/Iwill/AppData/Local/Android/Sdk/platform-tools/adb.exe -s {USB_DEVICE_SERIAL} install -r rider-app/build/outputs/apk/debug/rider-app-debug.apk
+# 3. Install Rider on emulator
+C:/Users/Iwill/AppData/Local/Android/Sdk/platform-tools/adb.exe -s emulator-5554 install -r rider-app/build/outputs/apk/debug/rider-app-debug.apk
 
-# 4. Install Driver on emulator
-C:/Users/Iwill/AppData/Local/Android/Sdk/platform-tools/adb.exe -s emulator-5554 install -r drivestr/build/outputs/apk/debug/drivestr-debug.apk
+# 4. Install Driver on USB device (use device serial from `adb devices`)
+C:/Users/Iwill/AppData/Local/Android/Sdk/platform-tools/adb.exe -s {USB_DEVICE_SERIAL} install -r drivestr/build/outputs/apk/debug/drivestr-debug.apk
 
 # 5. Launch both apps
-C:/Users/Iwill/AppData/Local/Android/Sdk/platform-tools/adb.exe -s {USB_DEVICE_SERIAL} shell am start -n com.ridestr.rider/.MainActivity
-C:/Users/Iwill/AppData/Local/Android/Sdk/platform-tools/adb.exe -s emulator-5554 shell am start -n com.drivestr.app/.MainActivity
+C:/Users/Iwill/AppData/Local/Android/Sdk/platform-tools/adb.exe -s emulator-5554 shell am start -n com.ridestr.rider/.MainActivity
+C:/Users/Iwill/AppData/Local/Android/Sdk/platform-tools/adb.exe -s {USB_DEVICE_SERIAL} shell am start -n com.drivestr.app/.MainActivity
 ```
 
 **Note**: USB device serial looks like `49011FDAP00005` (physical) vs `emulator-5554` (emulator).
 
 ---
 
-# Deploy to Android over Tailscale (Remote)
+## Tailscale Deployment (Remote Testing)
+
+**Use for**: "deploy tailscale", "remote deploy", "wireless deploy"
 
 Deploy debug builds to Android device via wireless ADB over Tailscale network.
 
-## IMPORTANT: Ask for Port First
+### IMPORTANT: Ask for Port First
 
 **The wireless debugging port changes frequently.** Before deploying via Tailscale, ALWAYS ask the user:
 

@@ -164,6 +164,12 @@ class CashuBackend(
                 config = walletConfig
             )
             Log.d(TAG, "cdk-kotlin wallet initialized for $mintUrl")
+
+            // Verify our hashToCurve matches NUT-00 spec
+            val hashToCurveOk = CashuCrypto.verifyHashToCurve()
+            if (!hashToCurveOk) {
+                Log.e(TAG, "⚠️ CRITICAL: hashToCurve mismatch! Change proofs may fail verification.")
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize cdk-kotlin wallet: ${e.message}", e)
             // Continue without cdk-kotlin for backward compatibility
@@ -450,17 +456,31 @@ class CashuBackend(
             }
 
             // Step 8: Unblind signatures to get plain proofs
+            // CRITICAL: Use keyset ID from response, not from getActiveKeyset()
             val plainProofs = mutableListOf<CashuProof>()
+            val keysetCache = mutableMapOf<String, MintKeyset>()
+            // Pre-cache the active keyset we already have
+            keysetCache[keyset.id] = keyset
+
             for (i in 0 until outputPremints.size) {
                 val sig = signatures.getJSONObject(i)
                 val pms = outputPremints[i]
                 val C_ = sig.getString("C_")
-                val mintPubKey = keyset.keys[pms.amount]
-                    ?: throw Exception("No key for amount ${pms.amount}")
+                val responseKeysetId = sig.getString("id")
+                // CRITICAL: Use amount from response for key lookup (like CDK does)
+                val responseAmount = sig.getLong("amount")
+
+                // Get keyset (use cached if available)
+                val sigKeyset = keysetCache.getOrPut(responseKeysetId) {
+                    fetchKeyset(responseKeysetId) ?: throw Exception("Failed to fetch keyset $responseKeysetId")
+                }
+
+                val mintPubKey = sigKeyset.keys[responseAmount]
+                    ?: throw Exception("No key for amount $responseAmount in keyset $responseKeysetId")
                 val C = CashuCrypto.unblindSignature(C_, pms.blindingFactor, mintPubKey)
                     ?: throw Exception("Failed to unblind signature")
 
-                plainProofs.add(CashuProof(pms.amount, keyset.id, pms.secret, C))
+                plainProofs.add(CashuProof(responseAmount, responseKeysetId, pms.secret, C))
             }
 
             Log.d(TAG, "=== HTLC CLAIMED SUCCESSFULLY ===")
@@ -619,16 +639,27 @@ class CashuBackend(
                 JSONObject(responseBody ?: "{}").getJSONArray("signatures")
             }
 
-            // Unblind signatures
+            // Unblind signatures - CRITICAL: Use keyset ID from response
             val plainProofs = mutableListOf<CashuProof>()
+            val keysetCache = mutableMapOf<String, MintKeyset>()
+            keysetCache[keyset.id] = keyset
+
             for (i in 0 until outputPremints.size) {
                 val sig = signatures.getJSONObject(i)
                 val pms = outputPremints[i]
                 val C_ = sig.getString("C_")
-                val mintPubKey = keyset.keys[pms.amount] ?: throw Exception("No key for ${pms.amount}")
+                val responseKeysetId = sig.getString("id")
+                // CRITICAL: Use amount from response for key lookup (like CDK does)
+                val responseAmount = sig.getLong("amount")
+
+                val sigKeyset = keysetCache.getOrPut(responseKeysetId) {
+                    fetchKeyset(responseKeysetId) ?: throw Exception("Failed to fetch keyset $responseKeysetId")
+                }
+
+                val mintPubKey = sigKeyset.keys[responseAmount] ?: throw Exception("No key for $responseAmount")
                 val C = CashuCrypto.unblindSignature(C_, pms.blindingFactor, mintPubKey)
                     ?: throw Exception("Unblind failed")
-                plainProofs.add(CashuProof(pms.amount, keyset.id, pms.secret, C))
+                plainProofs.add(CashuProof(responseAmount, responseKeysetId, pms.secret, C))
             }
 
             Log.d(TAG, "=== HTLC CLAIMED (with proofs) ===")
@@ -792,21 +823,32 @@ class CashuBackend(
                 json.getJSONArray("signatures")
             }
 
-            // Step 8: Unblind signatures to get plain proofs
+            // Step 8: Unblind signatures to get plain proofs - CRITICAL: Use keyset ID from response
             val plainProofs = mutableListOf<CashuProof>()
+            val keysetCache = mutableMapOf<String, MintKeyset>()
+            keysetCache[keyset.id] = keyset
+
             for (i in 0 until outputPremints.size) {
                 val sig = signatures.getJSONObject(i)
                 val pms = outputPremints[i]
                 val C_ = sig.getString("C_")
+                val responseKeysetId = sig.getString("id")
+                // CRITICAL: Use amount from response for key lookup (like CDK does)
+                val responseAmount = sig.getLong("amount")
+
+                val sigKeyset = keysetCache.getOrPut(responseKeysetId) {
+                    fetchKeyset(responseKeysetId) ?: throw Exception("Failed to fetch keyset $responseKeysetId")
+                }
+
                 val C = CashuCrypto.unblindSignature(
                     C_ = C_,
                     r = pms.blindingFactor,
-                    K = keyset.keys[pms.amount] ?: throw Exception("No key for amount ${pms.amount}")
-                ) ?: throw Exception("Unblind failed for amount ${pms.amount}")
+                    K = sigKeyset.keys[responseAmount] ?: throw Exception("No key for amount $responseAmount")
+                ) ?: throw Exception("Unblind failed for amount $responseAmount")
 
                 plainProofs.add(CashuProof(
-                    amount = pms.amount,
-                    id = keyset.id,
+                    amount = responseAmount,
+                    id = responseKeysetId,
                     secret = pms.secret,
                     C = C
                 ))
@@ -1231,29 +1273,48 @@ class CashuBackend(
                 JSONObject(responseBody ?: "{}").getJSONArray("signatures")
             }
 
-            // Unblind HTLC proofs
+            // Unblind HTLC proofs - CRITICAL: Use keyset ID and amount from response
             val htlcProofs = mutableListOf<HtlcProof>()
+            val keysetCache = mutableMapOf<String, MintKeyset>()
+            keysetCache[keyset.id] = keyset
+
             for (i in 0 until htlcOutputs.size) {
                 val (pms, htlcSecret, _) = htlcOutputs[i]
                 val sig = signatures.getJSONObject(i)
                 val C_ = sig.getString("C_")
-                val mintPubKey = keyset.keys[pms.amount] ?: throw Exception("No key for ${pms.amount}")
+                val responseKeysetId = sig.getString("id")
+                // CRITICAL: Use amount from response for key lookup (like CDK does)
+                val responseAmount = sig.getLong("amount")
+
+                val sigKeyset = keysetCache.getOrPut(responseKeysetId) {
+                    fetchKeyset(responseKeysetId) ?: throw Exception("Failed to fetch keyset $responseKeysetId")
+                }
+
+                val mintPubKey = sigKeyset.keys[responseAmount] ?: throw Exception("No key for $responseAmount")
                 val C = CashuCrypto.unblindSignature(C_, pms.blindingFactor, mintPubKey)
                     ?: throw Exception("Unblind failed")
-                htlcProofs.add(HtlcProof(pms.amount, keyset.id, htlcSecret, C))
+                htlcProofs.add(HtlcProof(responseAmount, responseKeysetId, htlcSecret, C))
             }
 
-            // Unblind change proofs
+            // Unblind change proofs - CRITICAL: Use keyset ID and amount from response
             val changeProofs = mutableListOf<CashuProof>()
             for (i in 0 until changeOutputs.size) {
                 val sigIndex = htlcOutputs.size + i
                 val (pms, secret, _) = changeOutputs[i]
                 val sig = signatures.getJSONObject(sigIndex)
                 val C_ = sig.getString("C_")
-                val mintPubKey = keyset.keys[pms.amount] ?: throw Exception("No key for ${pms.amount}")
+                val responseKeysetId = sig.getString("id")
+                // CRITICAL: Use amount from response for key lookup (like CDK does)
+                val responseAmount = sig.getLong("amount")
+
+                val sigKeyset = keysetCache.getOrPut(responseKeysetId) {
+                    fetchKeyset(responseKeysetId) ?: throw Exception("Failed to fetch keyset $responseKeysetId")
+                }
+
+                val mintPubKey = sigKeyset.keys[responseAmount] ?: throw Exception("No key for $responseAmount")
                 val C = CashuCrypto.unblindSignature(C_, pms.blindingFactor, mintPubKey)
                     ?: throw Exception("Unblind failed")
-                changeProofs.add(CashuProof(pms.amount, keyset.id, secret, C))
+                changeProofs.add(CashuProof(responseAmount, responseKeysetId, secret, C))
             }
 
             // Encode HTLC token
@@ -2354,6 +2415,20 @@ class CashuBackend(
             Log.d(TAG, "Amount needed: $amountNeeded sats")
             Log.d(TAG, "Expected change: $expectedChange sats")
 
+            // DEBUG: Log proof details
+            val keysetIds = proofs.map { it.id }.toSet()
+            Log.d(TAG, "Proof keyset IDs: $keysetIds")
+            proofs.forEachIndexed { idx, proof ->
+                Log.d(TAG, "  Proof[$idx]: amount=${proof.amount}, id=${proof.id}, secret=${proof.secret.take(20)}..., C.len=${proof.C.length}, C=${proof.C.take(20)}...")
+            }
+
+            // Fetch active keyset to compare
+            val activeKeyset = getActiveKeyset()
+            Log.d(TAG, "Mint's active keyset ID: ${activeKeyset?.id ?: "UNAVAILABLE"}")
+            if (activeKeyset != null && !keysetIds.contains(activeKeyset.id)) {
+                Log.w(TAG, "⚠️ WARNING: Proof keyset IDs don't match mint's active keyset!")
+            }
+
             // Build inputs array
             val inputsArray = JSONArray()
             proofs.forEach { proof -> inputsArray.put(proof.toJson()) }
@@ -2390,6 +2465,13 @@ class CashuBackend(
                             Log.e(TAG, "blindMessage failed for change output")
                             continue
                         }
+                        // DEBUG: Log all values for change output creation
+                        Log.d(TAG, "=== CHANGE OUTPUT $amount sat ===")
+                        Log.d(TAG, "  secret: ${secret.take(32)}... (${secret.length} chars)")
+                        Log.d(TAG, "  r (blinding): ${blindingFactor.take(16)}...")
+                        Log.d(TAG, "  Y (h2c): $Y")
+                        Log.d(TAG, "  B_ (blind): $B_")
+                        Log.d(TAG, "  K (mint key for $amount): ${keyset.keys[amount]}")
                         changePremints.add(PreMintSecret(amount, secret, blindingFactor, Y, B_))
                     }
 
@@ -2435,53 +2517,79 @@ class CashuBackend(
             val paid = json.optBoolean("paid", false)
             val preimage = if (json.has("payment_preimage")) json.getString("payment_preimage") else null
 
-            // Parse and unblind change signatures (NUT-05)
+            // Parse and unblind change signatures (NUT-05/NUT-08)
             // The mint returns blinded signatures (C_) that we must unblind
+            // CRITICAL: Use the keyset ID from the response, NOT from getActiveKeyset()!
+            // The mint may use a different keyset than the "active" one.
             val changeProofs = mutableListOf<CashuProof>()
             if (json.has("change") && changePremints.isNotEmpty()) {
                 val changeArray = json.getJSONArray("change")
                 Log.d(TAG, "Received ${changeArray.length()} change signatures to unblind")
 
-                // Get keyset for unblinding
-                val keyset = getActiveKeyset()
-                if (keyset != null) {
-                    for (i in 0 until minOf(changeArray.length(), changePremints.size)) {
-                        try {
-                            val sig = changeArray.getJSONObject(i)
-                            val C_ = sig.getString("C_")
-                            val pms = changePremints[i]
+                // Cache keysets we've fetched to avoid repeated requests
+                val keysetCache = mutableMapOf<String, MintKeyset?>()
 
-                            // Get mint's public key for this amount
-                            val mintPubKey = keyset.keys[pms.amount]
-                            if (mintPubKey == null) {
-                                Log.w(TAG, "No keyset key for amount ${pms.amount}")
-                                continue
-                            }
+                for (i in 0 until minOf(changeArray.length(), changePremints.size)) {
+                    try {
+                        val sig = changeArray.getJSONObject(i)
+                        val C_ = sig.getString("C_")
+                        // CRITICAL FIX: Read keyset ID from response, not from getActiveKeyset()
+                        val responseKeysetId = sig.getString("id")
+                        // CRITICAL FIX: Read amount from response for key lookup (like CDK does)
+                        val responseAmount = sig.getLong("amount")
+                        val pms = changePremints[i]
 
-                            // Unblind: C = C_ - r*K
-                            val C = CashuCrypto.unblindSignature(C_, pms.blindingFactor, mintPubKey)
-                            if (C == null) {
-                                Log.w(TAG, "Failed to unblind change signature $i")
-                                continue
-                            }
-
-                            changeProofs.add(CashuProof(
-                                amount = pms.amount,
-                                id = keyset.id,
-                                secret = pms.secret,
-                                C = C
-                            ))
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Failed to process change signature $i: ${e.message}")
+                        // Get keyset for this specific keyset ID (may be different from active)
+                        val keyset = if (keysetCache.containsKey(responseKeysetId)) {
+                            keysetCache[responseKeysetId]
+                        } else {
+                            fetchKeyset(responseKeysetId).also { keysetCache[responseKeysetId] = it }
                         }
-                    }
 
-                    if (changeProofs.isNotEmpty()) {
-                        val recoveredChange = changeProofs.sumOf { it.amount }
-                        Log.d(TAG, "✅ Unblinded ${changeProofs.size} change proofs ($recoveredChange sats)")
+                        if (keyset == null) {
+                            Log.w(TAG, "Skipping change $i - keyset $responseKeysetId unavailable")
+                            continue
+                        }
+
+                        // Get mint's public key for this amount from RESPONSE (not premint!)
+                        val mintPubKey = keyset.keys[responseAmount]
+                        if (mintPubKey == null) {
+                            Log.w(TAG, "No keyset key for amount $responseAmount in keyset $responseKeysetId")
+                            continue
+                        }
+
+                        // Unblind: C = C_ - r*K
+                        // DEBUG: Log all values for unblinding
+                        Log.d(TAG, "=== UNBLIND CHANGE $i ($responseAmount sat) ===")
+                        Log.d(TAG, "  C_ (from mint): $C_")
+                        Log.d(TAG, "  r (blinding): ${pms.blindingFactor.take(16)}...")
+                        Log.d(TAG, "  K (mint pubkey): $mintPubKey")
+                        Log.d(TAG, "  keyset ID: $responseKeysetId")
+
+                        val C = CashuCrypto.unblindSignature(C_, pms.blindingFactor, mintPubKey)
+                        if (C == null) {
+                            Log.w(TAG, "Failed to unblind change signature $i")
+                            continue
+                        }
+
+                        Log.d(TAG, "  C (unblinded): $C")
+                        Log.d(TAG, "  secret: ${pms.secret.take(32)}...")
+
+                        // Use amount AND keyset ID from the response (CRITICAL!)
+                        changeProofs.add(CashuProof(
+                            amount = responseAmount,
+                            id = responseKeysetId,
+                            secret = pms.secret,
+                            C = C
+                        ))
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to process change signature $i: ${e.message}")
                     }
-                } else {
-                    Log.e(TAG, "Cannot unblind change - keyset unavailable")
+                }
+
+                if (changeProofs.isNotEmpty()) {
+                    val recoveredChange = changeProofs.sumOf { it.amount }
+                    Log.d(TAG, "✅ Unblinded ${changeProofs.size} change proofs ($recoveredChange sats)")
                 }
             }
 
@@ -2578,6 +2686,63 @@ class CashuBackend(
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to fetch keyset: ${e.message}", e)
+            null
+        }
+    }
+
+    /**
+     * Fetch a specific keyset by its ID.
+     * Used when we need to unblind signatures using a specific keyset,
+     * not necessarily the current "active" one.
+     *
+     * @param keysetId The keyset ID to fetch
+     * @return MintKeyset if successful, null otherwise
+     */
+    private suspend fun fetchKeyset(keysetId: String): MintKeyset? = withContext(Dispatchers.IO) {
+        val mintUrl = currentMintUrl ?: return@withContext null
+
+        try {
+            Log.d(TAG, "Fetching keyset: $keysetId")
+
+            val keysRequest = Request.Builder()
+                .url("$mintUrl/v1/keys/$keysetId")
+                .get()
+                .build()
+
+            client.newCall(keysRequest).execute().use { response ->
+                if (!response.isSuccessful) {
+                    Log.e(TAG, "Failed to fetch keyset $keysetId: ${response.code}")
+                    return@withContext null
+                }
+
+                val body = response.body?.string() ?: return@withContext null
+                val json = JSONObject(body)
+                val keysetsArray = json.getJSONArray("keysets")
+                if (keysetsArray.length() == 0) return@withContext null
+
+                val keysetJson = keysetsArray.getJSONObject(0)
+                val keysJson = keysetJson.getJSONObject("keys")
+
+                val keys = mutableMapOf<Long, String>()
+                val keyIterator = keysJson.keys()
+                while (keyIterator.hasNext()) {
+                    val amountStr = keyIterator.next()
+                    val pubkey = keysJson.getString(amountStr)
+                    val amount = amountStr.toLongOrNull()
+                    if (amount != null && amount > 0) {
+                        keys[amount] = pubkey
+                    }
+                }
+
+                Log.d(TAG, "Fetched keyset $keysetId with ${keys.size} keys")
+                MintKeyset(
+                    id = keysetId,
+                    unit = "sat",
+                    keys = keys
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to fetch keyset $keysetId: ${e.message}", e)
             null
         }
     }
@@ -2681,27 +2846,39 @@ class CashuBackend(
                 json.getJSONArray("signatures")
             }
 
-            // Step 7: Unblind signatures to get proofs
+            // Step 7: Unblind signatures to get proofs - CRITICAL: Use keyset ID from response
             // Use minOf to handle edge case where mint returns different count than expected
             val proofs = mutableListOf<CashuProof>()
             val sigCount = minOf(blindedSignatures.length(), preMintSecrets.size)
             if (blindedSignatures.length() != preMintSecrets.size) {
                 Log.w(TAG, "Signature count mismatch: got ${blindedSignatures.length()}, expected ${preMintSecrets.size}")
             }
+
+            val keysetCache = mutableMapOf<String, MintKeyset>()
+            keysetCache[keyset.id] = keyset
+
             for (i in 0 until sigCount) {
                 val sig = blindedSignatures.getJSONObject(i)
                 val pms = preMintSecrets[i]
 
                 val C_ = sig.getString("C_")
-                val mintPubKey = keyset.keys[pms.amount]
-                    ?: throw Exception("No key for amount ${pms.amount}")
+                val responseKeysetId = sig.getString("id")
+                // CRITICAL: Use amount from response for key lookup (like CDK does)
+                val responseAmount = sig.getLong("amount")
+
+                val sigKeyset = keysetCache.getOrPut(responseKeysetId) {
+                    fetchKeyset(responseKeysetId) ?: throw Exception("Failed to fetch keyset $responseKeysetId")
+                }
+
+                val mintPubKey = sigKeyset.keys[responseAmount]
+                    ?: throw Exception("No key for amount $responseAmount")
 
                 val C = CashuCrypto.unblindSignature(C_, pms.blindingFactor, mintPubKey)
                     ?: throw Exception("Failed to unblind signature")
 
                 proofs.add(CashuProof(
-                    amount = pms.amount,
-                    id = keyset.id,
+                    amount = responseAmount,
+                    id = responseKeysetId,
                     secret = pms.secret,
                     C = C
                 ))
@@ -2852,15 +3029,26 @@ class CashuBackend(
                 JSONObject(body).getJSONArray("signatures")
             }
 
-            // Unblind signatures
+            // Unblind signatures - CRITICAL: Use keyset ID and amount from response
             val newProofs = mutableListOf<CashuProof>()
+            val keysetCache = mutableMapOf<String, MintKeyset>()
+            keysetCache[keyset.id] = keyset
+
             for (i in 0 until signatures.length()) {
                 val sig = signatures.getJSONObject(i)
                 val pms = preMintSecrets[i]
                 val C_ = sig.getString("C_")
-                val mintPubKey = keyset.keys[pms.amount] ?: continue
+                val responseKeysetId = sig.getString("id")
+                // CRITICAL: Use amount from response for key lookup (like CDK does)
+                val responseAmount = sig.getLong("amount")
+
+                val sigKeyset = keysetCache.getOrPut(responseKeysetId) {
+                    fetchKeyset(responseKeysetId) ?: continue
+                }
+
+                val mintPubKey = sigKeyset.keys[responseAmount] ?: continue
                 val C = CashuCrypto.unblindSignature(C_, pms.blindingFactor, mintPubKey) ?: continue
-                newProofs.add(CashuProof(pms.amount, keyset.id, pms.secret, C))
+                newProofs.add(CashuProof(responseAmount, responseKeysetId, pms.secret, C))
             }
 
             Log.d(TAG, "Swapped ${proofs.size} proofs for ${newProofs.size} new proofs")

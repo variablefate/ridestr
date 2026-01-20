@@ -564,6 +564,39 @@ if (stateMap != null) {
 ```
 **Location**: `WalletService.kt:817-850`
 
+### "Change proofs invalid after withdrawal" (code 10003 on next spend)
+**Cause**: Unblinding used `pms.amount` (our PreMintSecret) to look up the mint's public key instead of the amount from the response.
+
+**How it happened**: We send outputs `[8, 4, 2, 1]` for change. If mint returns signatures in different order or assigns different amounts, we'd use wrong key for unblinding → invalid C value → proof fails verification on next spend.
+
+**The CDK Pattern** (from `dhke.rs`):
+```rust
+// CDK uses blinded_signature.amount from RESPONSE
+let a: PublicKey = keys.amount_key(blinded_signature.amount)
+```
+
+**The Fix** (all unblinding locations in `CashuBackend.kt`):
+```kotlin
+// Read amount from mint's response, not from our premint
+val responseAmount = sig.getLong("amount")
+
+// Use response amount for key lookup
+val mintPubKey = keyset.keys[responseAmount]
+
+// Store response amount in the proof
+changeProofs.add(CashuProof(responseAmount, responseKeysetId, pms.secret, C))
+```
+
+**Fixed in 8 locations**:
+- Line 471, 653 - HTLC claim
+- Line 837 - HTLC refund
+- Line 1287, 1308 - HTLC token creation
+- Line 2539 - Melt change (withdrawals)
+- Line 2867 - Deposit recovery
+- Line 3043 - Swap
+
+**Key insight**: Only `pms.secret` and `pms.blindingFactor` (r) must come from our PreMintSecret. Everything else (amount, keyset ID, C_) should come from the mint's response.
+
 ### "Balance shows wrong amount"
 1. Go to **Settings → Wallet → Sync Wallet**
 2. `syncWallet()` verifies all NIP-60 proofs with mint, auto-migrates URLs if needed
@@ -672,7 +705,14 @@ Log.d(TAG, "Swap response: ${response.code}")
 | **NUT-05 Melt (Withdrawals)** | |
 | `CashuBackend.kt:2331-2504` | `meltWithProofs()` with change outputs (CRITICAL) |
 | `CashuBackend.kt:2366-2407` | Change blinding (outputs creation) |
-| `CashuBackend.kt:2438-2486` | Change unblinding (signatures → proofs) |
+| `CashuBackend.kt:2532-2588` | Change unblinding - uses response amount (CRITICAL) |
+| **Unblinding (All Locations)** | Uses `sig.getLong("amount")` for key lookup |
+| `CashuBackend.kt:471` | HTLC claim unblinding |
+| `CashuBackend.kt:653` | HTLC claim with proofs unblinding |
+| `CashuBackend.kt:837` | HTLC refund unblinding |
+| `CashuBackend.kt:1287,1308` | HTLC token creation unblinding |
+| `CashuBackend.kt:2867` | Deposit recovery unblinding |
+| `CashuBackend.kt:3043` | Swap unblinding |
 | **NIP-60 Safe Deletion (CRITICAL)** | |
 | `WalletService.kt:444-468` | `syncWallet()` - current mint spent proof cleanup |
 | `WalletService.kt:540-562` | `syncWallet()` - other mint spent proof cleanup |

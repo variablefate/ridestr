@@ -211,6 +211,8 @@ if (stateMap != null) {
 
 7. **Duplicate Confirmation Race Condition** (January 2026): When acceptance arrives, `autoConfirmRide()` launches async. If user taps manual confirm button during async window, TWO Kind 3175 events sent → driver stores first, rider stores second → different `confirmationEventId` → all subsequent events filtered as "different ride". **Fix**: Set `isConfirmingRide = true` BEFORE coroutine launch + add guards in `confirmRide()`.
 
+8. **Unblinding Key Lookup (CDK Pattern)**: When unblinding signatures from mint, use `responseAmount` from the mint's BlindSignature response to look up the public key, NOT `pms.amount` from our PreMintSecret. The mint returns `{amount, id, C_}` for each signature - use that `amount` for `keyset.keys[responseAmount]`. If mint reorders responses or assigns different amounts, using our premint amount would select wrong key → invalid unblinded proof.
+
 ## Profile Sync Architecture
 
 ### Overview
