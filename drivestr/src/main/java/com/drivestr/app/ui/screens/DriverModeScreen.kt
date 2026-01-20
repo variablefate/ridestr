@@ -814,7 +814,7 @@ private fun RideAcceptedContent(
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.secondaryContainer
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
         )
     ) {
         Box(modifier = Modifier.fillMaxWidth()) {
@@ -1027,7 +1027,7 @@ private fun EnRouteContent(
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.tertiaryContainer
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
         )
     ) {
         Column(
@@ -1040,7 +1040,7 @@ private fun EnRouteContent(
                 imageVector = Icons.Default.DirectionsCar,
                 contentDescription = null,
                 modifier = Modifier.size(48.dp),
-                tint = MaterialTheme.colorScheme.tertiary
+                tint = MaterialTheme.colorScheme.primary
             )
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -1054,7 +1054,7 @@ private fun EnRouteContent(
             Text(
                 text = "Heading to Pickup",
                 style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onTertiaryContainer
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
             Spacer(modifier = Modifier.height(8.dp))
@@ -1084,7 +1084,7 @@ private fun EnRouteContent(
                 Text(
                     text = "Opening navigation in $countdown...",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onTertiaryContainer
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 
@@ -1363,7 +1363,7 @@ private fun InRideContent(
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.tertiaryContainer
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
         )
     ) {
         Column(
@@ -1376,7 +1376,7 @@ private fun InRideContent(
                 imageVector = Icons.Default.DirectionsCar,
                 contentDescription = null,
                 modifier = Modifier.size(48.dp),
-                tint = MaterialTheme.colorScheme.tertiary
+                tint = MaterialTheme.colorScheme.primary
             )
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -1412,7 +1412,7 @@ private fun InRideContent(
                 Text(
                     text = "Opening navigation in $countdown...",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onTertiaryContainer
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 

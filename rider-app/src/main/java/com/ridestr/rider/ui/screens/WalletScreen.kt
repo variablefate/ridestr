@@ -87,10 +87,10 @@ fun WalletScreen(
             )
         }
 
-        // Payment Methods Section
-        item {
-            PaymentMethodsCard()
-        }
+        // Payment Methods Section - hidden for now (Bitcoin only)
+        // item {
+        //     PaymentMethodsCard()
+        // }
 
         // Spending History Section - clickable to view full history
         item {
