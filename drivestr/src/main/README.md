@@ -177,6 +177,12 @@ The phantom cancellation bug was caused by not clearing history between rides.
 | Broadcast | `g` (geohash) | `subscribeToBroadcastRideRequests()` | Open auction |
 | Direct | `p` (driver pubkey) | `subscribeToOffers()` | Retry specific driver |
 
+### Confirmation Timeout
+- Driver waits 30 seconds for rider confirmation after accepting (constant `CONFIRMATION_TIMEOUT_MS` at line 73)
+- UI countdown circle uses `confirmationWaitDurationMs` from UI state (line 3145)
+- If no confirmation received, ride is auto-cancelled
+- Both timeout values must match (30 seconds)
+
 ### Deposit/Withdraw
 - Tap wallet card in `WalletScreen.kt` → navigates to `WalletDetailScreen` (common)
 - Deposit and withdraw are **fully functional**

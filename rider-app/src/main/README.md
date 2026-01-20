@@ -169,6 +169,12 @@ Race condition fix prevents duplicate confirmation events:
 - Both paths reset `isConfirmingRide = false` on success or failure
 - **Without this**: User could tap manual confirm during async auto-confirm, causing two Kind 3175 events with different IDs → rider/driver desync
 
+### Auto-Confirm UI (January 2026)
+- When driver accepts, rider UI shows ride summary with "Confirming ride..." spinner
+- No manual confirm button - confirmation happens automatically via `autoConfirmRide()`
+- Driver has 30-second timeout waiting for confirmation
+- Only "Cancel Ride" button available during confirmation
+
 ### Deposit/Withdraw
 - Tap wallet card in `WalletScreen.kt` → navigates to `WalletDetailScreen` (common)
 - Deposit and withdraw are **fully functional**
