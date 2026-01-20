@@ -339,6 +339,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     Log.d(TAG, "Also shared HTLC escrow token")
                 }
                 myRideEventIds.add(eventId)
+                // Mark preimage as shared - driver can now claim payment
+                _uiState.value = _uiState.value.copy(preimageShared = true)
             } else {
                 Log.e(TAG, "Failed to publish preimage share event")
             }
@@ -1534,6 +1536,36 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
         }
+    }
+
+    /**
+     * Attempt to cancel ride. If preimage was already shared with driver,
+     * shows a warning dialog since driver can still claim payment.
+     */
+    fun attemptCancelRide() {
+        val state = _uiState.value
+        if (state.preimageShared || state.pinVerified) {
+            // Show warning - driver has preimage and can claim payment
+            _uiState.value = state.copy(showCancelWarningDialog = true)
+        } else {
+            // Safe to cancel - driver doesn't have preimage
+            clearRide()
+        }
+    }
+
+    /**
+     * Dismiss the cancel warning dialog without cancelling.
+     */
+    fun dismissCancelWarning() {
+        _uiState.value = _uiState.value.copy(showCancelWarningDialog = false)
+    }
+
+    /**
+     * Confirm cancellation after warning - proceeds with cancel even though driver can claim payment.
+     */
+    fun confirmCancelAfterWarning() {
+        _uiState.value = _uiState.value.copy(showCancelWarningDialog = false)
+        clearRide()
     }
 
     /**
@@ -3088,10 +3120,14 @@ data class RiderUiState(
     val showInsufficientFundsDialog: Boolean = false,
     val insufficientFundsAmount: Long = 0,          // How many more sats needed
 
+    // Cancel warning dialog (shown when cancelling after PIN verification)
+    val showCancelWarningDialog: Boolean = false,
+
     // HTLC Escrow state (NUT-14)
     val activePreimage: String? = null,             // Preimage for this ride (shared after PIN)
     val activePaymentHash: String? = null,          // Payment hash sent in offer
     val escrowToken: String? = null,                // HTLC token for this ride
+    val preimageShared: Boolean = false,            // True after preimage shared with driver
 
     // UI
     val statusMessage: String = "Find available drivers",

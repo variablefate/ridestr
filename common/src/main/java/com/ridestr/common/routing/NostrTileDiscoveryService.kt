@@ -1,5 +1,7 @@
 package com.ridestr.common.routing
 
+import android.content.Context
+import android.content.SharedPreferences
 import android.util.Log
 import com.ridestr.common.nostr.events.BoundingBox
 import com.ridestr.common.nostr.relay.RelayManager
@@ -12,12 +14,18 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * Service for discovering available routing tiles from Nostr.
  *
  * Subscribes to kind 1063 (NIP-94 File Metadata) events from the official
  * Ridestr tile publisher to discover available routing tile regions.
+ *
+ * **Caching**: Discovered tiles are cached to SharedPreferences and loaded
+ * immediately on init. Discovery only runs automatically on key creation/import.
+ * Users can manually refresh via pull-to-refresh.
  *
  * Tags parsed (NIP-94 compatible):
  * - x: SHA256 hash of the file
@@ -30,10 +38,14 @@ import kotlinx.coroutines.launch
  * - chunk: For chunked files - [index, sha256, size, url]
  */
 class NostrTileDiscoveryService(
+    context: Context,
     private val relayManager: RelayManager
 ) {
     companion object {
         private const val TAG = "NostrTileDiscovery"
+        private const val PREFS_NAME = "tile_discovery_cache"
+        private const val KEY_CACHED_REGIONS = "cached_regions"
+        private const val KEY_LAST_DISCOVERY_TIME = "last_discovery_time"
 
         // NIP-94 File Metadata kind
         const val KIND_FILE_METADATA = 1063
@@ -42,6 +54,7 @@ class NostrTileDiscoveryService(
         const val OFFICIAL_PUBKEY = "da790ba18e63ae79b16e172907301906957a45f38ef0c9f219d0f016eaf16128"
     }
 
+    private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     // Discovered tile regions from Nostr
@@ -61,6 +74,11 @@ class NostrTileDiscoveryService(
 
     // Keep track of seen event IDs to avoid duplicates
     private val seenEventIds = mutableSetOf<String>()
+
+    init {
+        // Load cached regions immediately on init
+        loadCachedRegions()
+    }
 
     /**
      * Start discovering tile availability from Nostr relays.
@@ -99,6 +117,9 @@ class NostrTileDiscoveryService(
             // Set a timeout for discovery completion
             delay(5000)
             _isDiscovering.value = false
+
+            // Save discovered regions to cache
+            saveCachedRegions()
             Log.d(TAG, "Discovery complete. Found ${_discoveredRegions.value.size} regions")
         }
     }
@@ -276,5 +297,161 @@ class NostrTileDiscoveryService(
      */
     fun findRegionsForLocation(lat: Double, lon: Double): List<TileRegion> {
         return _discoveredRegions.value.filter { it.boundingBox.contains(lat, lon) }
+    }
+
+    /**
+     * Check if we have cached regions available.
+     */
+    fun hasCachedRegions(): Boolean {
+        return _discoveredRegions.value.isNotEmpty()
+    }
+
+    /**
+     * Get the timestamp of the last discovery.
+     */
+    fun getLastDiscoveryTime(): Long {
+        return prefs.getLong(KEY_LAST_DISCOVERY_TIME, 0L)
+    }
+
+    /**
+     * Load cached regions from SharedPreferences.
+     */
+    private fun loadCachedRegions() {
+        try {
+            val json = prefs.getString(KEY_CACHED_REGIONS, null) ?: return
+            val jsonArray = JSONArray(json)
+            val regions = mutableListOf<TileRegion>()
+
+            for (i in 0 until jsonArray.length()) {
+                val obj = jsonArray.getJSONObject(i)
+                val region = deserializeRegion(obj)
+                if (region != null) {
+                    regions.add(region)
+                }
+            }
+
+            if (regions.isNotEmpty()) {
+                _discoveredRegions.value = regions
+                Log.d(TAG, "Loaded ${regions.size} cached tile regions")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to load cached regions: ${e.message}")
+        }
+    }
+
+    /**
+     * Save discovered regions to SharedPreferences cache.
+     */
+    private fun saveCachedRegions() {
+        try {
+            val regions = _discoveredRegions.value
+            if (regions.isEmpty()) return
+
+            val jsonArray = JSONArray()
+            for (region in regions) {
+                jsonArray.put(serializeRegion(region))
+            }
+
+            prefs.edit()
+                .putString(KEY_CACHED_REGIONS, jsonArray.toString())
+                .putLong(KEY_LAST_DISCOVERY_TIME, System.currentTimeMillis())
+                .apply()
+
+            Log.d(TAG, "Cached ${regions.size} tile regions")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to cache regions: ${e.message}")
+        }
+    }
+
+    /**
+     * Serialize a TileRegion to JSON.
+     */
+    private fun serializeRegion(region: TileRegion): JSONObject {
+        return JSONObject().apply {
+            put("id", region.id)
+            put("name", region.name)
+            put("bbox_west", region.boundingBox.west)
+            put("bbox_south", region.boundingBox.south)
+            put("bbox_east", region.boundingBox.east)
+            put("bbox_north", region.boundingBox.north)
+            put("sizeBytes", region.sizeBytes)
+            region.sha256?.let { put("sha256", it) }
+            put("blossomUrls", JSONArray(region.blossomUrls))
+            put("lastUpdated", region.lastUpdated)
+            put("isBundled", region.isBundled)
+            region.assetName?.let { put("assetName", it) }
+
+            // Serialize chunks
+            val chunksArray = JSONArray()
+            for (chunk in region.chunks) {
+                chunksArray.put(JSONObject().apply {
+                    put("index", chunk.index)
+                    put("sha256", chunk.sha256)
+                    put("sizeBytes", chunk.sizeBytes)
+                    put("url", chunk.url)
+                })
+            }
+            put("chunks", chunksArray)
+        }
+    }
+
+    /**
+     * Deserialize a TileRegion from JSON.
+     */
+    private fun deserializeRegion(obj: JSONObject): TileRegion? {
+        return try {
+            val blossomUrls = mutableListOf<String>()
+            val urlsArray = obj.optJSONArray("blossomUrls")
+            if (urlsArray != null) {
+                for (i in 0 until urlsArray.length()) {
+                    blossomUrls.add(urlsArray.getString(i))
+                }
+            }
+
+            val chunks = mutableListOf<TileChunk>()
+            val chunksArray = obj.optJSONArray("chunks")
+            if (chunksArray != null) {
+                for (i in 0 until chunksArray.length()) {
+                    val chunkObj = chunksArray.getJSONObject(i)
+                    chunks.add(TileChunk(
+                        index = chunkObj.getInt("index"),
+                        sha256 = chunkObj.getString("sha256"),
+                        sizeBytes = chunkObj.getLong("sizeBytes"),
+                        url = chunkObj.getString("url")
+                    ))
+                }
+            }
+
+            TileRegion(
+                id = obj.getString("id"),
+                name = obj.getString("name"),
+                boundingBox = BoundingBox(
+                    west = obj.getDouble("bbox_west"),
+                    south = obj.getDouble("bbox_south"),
+                    east = obj.getDouble("bbox_east"),
+                    north = obj.getDouble("bbox_north")
+                ),
+                sizeBytes = obj.getLong("sizeBytes"),
+                sha256 = obj.optString("sha256").takeIf { it.isNotEmpty() },
+                blossomUrls = blossomUrls,
+                chunks = chunks,
+                lastUpdated = obj.optLong("lastUpdated", 0L),
+                isBundled = obj.optBoolean("isBundled", false),
+                assetName = obj.optString("assetName").takeIf { it.isNotEmpty() }
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to deserialize region: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Clear the cache (for logout or testing).
+     */
+    fun clearCache() {
+        prefs.edit().clear().apply()
+        _discoveredRegions.value = emptyList()
+        seenEventIds.clear()
+        Log.d(TAG, "Cleared tile discovery cache")
     }
 }

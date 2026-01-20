@@ -183,6 +183,24 @@ The phantom cancellation bug was caused by not clearing history between rides.
 - If no confirmation received, ride is auto-cancelled
 - Both timeout values must match (30 seconds)
 
+### Claim Payment After Rider Cancellation (January 2026)
+If rider cancels after PIN verification (driver has preimage):
+- `handleRideCancellation()` checks `canSettleEscrow` (line 2063)
+- If driver can claim, shows dialog with fare amount
+- `claimPaymentAfterCancellation()` calls `walletService.claimHtlcPayment()` (line 2089)
+- Ride saved to history with status `cancelled_claimed` or `cancelled`
+- Escrow state preserved until driver decides (cleanup deferred to `performCancellationCleanup()`)
+
+### Availability Broadcast Loop (January 2026)
+Driver broadcasts availability every 5 minutes (`AVAILABILITY_BROADCAST_INTERVAL_MS` at line 66):
+- `startBroadcasting()` at line 2389 launches coroutine loop
+- Each broadcast updates `lastBroadcastTime` in UI state (line 2429)
+- Timer display in `AvailableContent` uses ticker for live updates (lines 638-645)
+- **CRITICAL**: When going back online after ride, must reset broadcast state:
+  - `publishedAvailabilityEventIds.clear()` - prevents deleting already-deleted events
+  - `lastBroadcastLocation = null` - ensures fresh throttle tracking
+  - Done in both `finishAndGoOnline()` (line 970) and `performCancellationCleanup()` (line 2204)
+
 ### Deposit/Withdraw
 - Tap wallet card in `WalletScreen.kt` → navigates to `WalletDetailScreen` (common)
 - Deposit and withdraw are **fully functional**

@@ -393,6 +393,52 @@ fun DriverModeScreen(
             )
         }
 
+        // Rider cancelled claim dialog (shown when rider cancels after PIN verification)
+        if (uiState.showRiderCancelledClaimDialog) {
+            AlertDialog(
+                onDismissRequest = { /* Don't dismiss on outside tap - require explicit choice */ },
+                icon = {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(32.dp)
+                    )
+                },
+                title = { Text("Rider Cancelled") },
+                text = {
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            "The rider cancelled after payment was authorized."
+                        )
+                        uiState.riderCancelledFareAmount?.let { fare ->
+                            Text(
+                                "You can still claim the fare of ${String.format("%.0f", fare)} sats.",
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = { viewModel.claimPaymentAfterCancellation() },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary
+                        )
+                    ) {
+                        Text("Claim Payment")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { viewModel.dismissRiderCancelledDialog() }) {
+                        Text("Skip")
+                    }
+                }
+            )
+        }
+
         // Main content based on driver stage
         when (uiState.stage) {
             DriverStage.OFFLINE -> {
@@ -589,9 +635,18 @@ private fun AvailableContent(
     settingsManager: SettingsManager,
     priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
+    // Ticker for updating "time since last broadcast" display
+    var currentTimeMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1000L) // Update every second
+            currentTimeMs = System.currentTimeMillis()
+        }
+    }
+
     // Filter out stale broadcast requests (older than 2 minutes)
     // This is a UI-level safety net in addition to ViewModel cleanup
-    val currentTimeSeconds = System.currentTimeMillis() / 1000
+    val currentTimeSeconds = currentTimeMs / 1000
     val maxAgeSeconds = 2 * 60 // 2 minutes
     val freshBroadcastRequests = uiState.pendingBroadcastRequests.filter { request ->
         (currentTimeSeconds - request.createdAt) < maxAgeSeconds
@@ -636,7 +691,7 @@ private fun AvailableContent(
             )
 
             uiState.lastBroadcastTime?.let { time ->
-                val secondsAgo = (System.currentTimeMillis() - time) / 1000
+                val secondsAgo = (currentTimeMs - time) / 1000
                 Text(
                     text = "Last broadcast: ${secondsAgo}s ago",
                     style = MaterialTheme.typography.bodySmall,

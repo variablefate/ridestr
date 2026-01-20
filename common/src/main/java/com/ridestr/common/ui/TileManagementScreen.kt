@@ -8,6 +8,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,15 +53,21 @@ fun TileManagementScreen(
     // State for delete confirmation dialog
     var regionToDelete by remember { mutableStateOf<TileRegion?>(null) }
 
-    // Start discovery when screen opens
-    LaunchedEffect(Unit) {
-        discoveryService?.startDiscovery()
-    }
-
     // Update TileManager when discovered regions change
     LaunchedEffect(Unit) {
         discoveryService?.discoveredRegions?.collect { regions ->
             tileManager.updateDiscoveredRegions(regions)
+        }
+    }
+
+    // Background refresh on screen open (only if we have cached data - shows cached immediately)
+    LaunchedEffect(Unit) {
+        if (discoveryService != null && discoveryService.hasCachedRegions()) {
+            // Have cached data - do a silent background refresh
+            discoveryService.startDiscovery()
+        } else if (discoveryService != null && !discoveryService.hasCachedRegions()) {
+            // No cache - need to do initial discovery
+            discoveryService.startDiscovery()
         }
     }
 
@@ -101,84 +108,91 @@ fun TileManagementScreen(
         },
         modifier = modifier
     ) { padding ->
-        LazyColumn(
+        @OptIn(ExperimentalMaterial3Api::class)
+        PullToRefreshBox(
+            isRefreshing = isDiscovering,
+            onRefresh = { discoveryService?.refreshDiscovery() },
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding),
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+                .padding(padding)
         ) {
-            // Storage info card
-            item {
-                StorageInfoCard(
-                    tileManager = tileManager,
-                    downloadedCount = downloadedRegions.size
-                )
-            }
-
-            // Discovery status
-            if (discoveryService != null) {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Storage info card
                 item {
-                    DiscoveryStatusCard(
-                        isDiscovering = isDiscovering,
-                        discoveredCount = discoveredRegions.size,
-                        error = discoveryError
+                    StorageInfoCard(
+                        tileManager = tileManager,
+                        downloadedCount = downloadedRegions.size
                     )
                 }
-            }
 
-            item {
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Available Regions",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                    if (discoveredRegions.isNotEmpty()) {
-                        Text(
-                            text = "${discoveredRegions.size} from Nostr",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.primary
+                // Discovery status (only show when actively discovering or error)
+                if (discoveryService != null && (isDiscovering || discoveryError != null)) {
+                    item {
+                        DiscoveryStatusCard(
+                            isDiscovering = isDiscovering,
+                            discoveredCount = discoveredRegions.size,
+                            error = discoveryError
                         )
                     }
                 }
-            }
 
-            // List of tile regions
-            items(knownRegions) { region ->
-                val isDownloaded = downloadedRegions.contains(region.id)
-                val status = downloadStatus[region.id]
-
-                TileRegionCard(
-                    region = region,
-                    isDownloaded = isDownloaded,
-                    downloadStatus = status,
-                    onDownload = {
-                        scope.launch {
-                            downloadService.downloadRegion(region.id)
+                item {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Available Regions",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        if (discoveredRegions.isNotEmpty()) {
+                            Text(
+                                text = "${discoveredRegions.size} from Nostr",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
                         }
-                    },
-                    onDelete = {
-                        regionToDelete = region
-                    },
-                    onCancel = {
-                        downloadService.cancelDownload(region.id)
                     }
-                )
-            }
+                }
 
-            item {
-                Spacer(modifier = Modifier.height(16.dp))
-                Text(
-                    text = "Tiles enable offline turn-by-turn navigation. Download tiles for regions where you'll be driving.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                // List of tile regions
+                items(knownRegions) { region ->
+                    val isDownloaded = downloadedRegions.contains(region.id)
+                    val status = downloadStatus[region.id]
+
+                    TileRegionCard(
+                        region = region,
+                        isDownloaded = isDownloaded,
+                        downloadStatus = status,
+                        onDownload = {
+                            scope.launch {
+                                downloadService.downloadRegion(region.id)
+                            }
+                        },
+                        onDelete = {
+                            regionToDelete = region
+                        },
+                        onCancel = {
+                            downloadService.cancelDownload(region.id)
+                        }
+                    )
+                }
+
+                item {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = "Tiles enable offline turn-by-turn navigation. Download tiles for regions where you'll be driving. Pull down to refresh.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
         }
     }

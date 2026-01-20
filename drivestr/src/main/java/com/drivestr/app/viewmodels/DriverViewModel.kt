@@ -965,6 +965,13 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Clean up ride events in background (non-blocking)
         cleanupRideEventsInBackground("ride completed")
 
+        // Reset broadcast state for a fresh start
+        // This ensures we don't try to delete already-deleted events
+        publishedAvailabilityEventIds.clear()
+        lastBroadcastLocation = null
+        lastBroadcastTimeMs = 0L
+        Log.d(TAG, "Reset broadcast state before going back online")
+
         // Go online immediately - don't wait for cleanup
         // Use goOnline directly with the captured vehicle (from state at start of function)
         goOnline(location, state.activeVehicle)
@@ -2048,6 +2055,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
     /**
      * Handle ride cancellation from rider.
+     * If driver has preimage/escrow token, shows dialog to offer claiming payment.
      */
     private fun handleRideCancellation(reason: String?) {
         val state = _uiState.value
@@ -2058,33 +2066,111 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         DriverOnlineService.updateStatus(context, DriverStatus.Cancelled)
         Log.d(TAG, "Ride cancelled - notified service")
 
-        // Save cancelled ride to history (only if we had an accepted offer)
-        if (offer != null) {
-            viewModelScope.launch {
-                try {
-                    val vehicle = state.activeVehicle
-                    val historyEntry = RideHistoryEntry(
-                        rideId = state.confirmationEventId ?: state.acceptanceEventId ?: offer.eventId,
-                        timestamp = System.currentTimeMillis() / 1000,
-                        role = "driver",
-                        counterpartyPubKey = offer.riderPubKey,
-                        pickupGeohash = offer.approxPickup.geohash(6),
-                        dropoffGeohash = offer.destination.geohash(6),
-                        distanceMiles = offer.rideRouteKm?.let { it * 0.621371 } ?: 0.0,
-                        durationMinutes = 0,  // Ride was cancelled, no actual duration
-                        fareSats = 0,  // No fare earned for cancelled ride
-                        status = "cancelled",
-                        vehicleMake = vehicle?.make,
-                        vehicleModel = vehicle?.model
-                    )
-                    rideHistoryRepository.addRide(historyEntry)
-                    Log.d(TAG, "Saved rider-cancelled ride to history: ${historyEntry.rideId}")
+        // If driver can claim payment (has preimage + escrow token), show dialog instead of cleaning up
+        if (state.canSettleEscrow && offer != null) {
+            Log.d(TAG, "Rider cancelled after PIN verification - driver can claim payment")
+            _uiState.value = state.copy(
+                showRiderCancelledClaimDialog = true,
+                riderCancelledFareAmount = offer.fareEstimate,
+                error = reason ?: "Rider cancelled the ride"
+            )
+            return  // Don't cleanup yet - wait for driver decision
+        }
 
-                    // Backup to Nostr (encrypted to self)
-                    rideHistoryRepository.backupToNostr(nostrService)
+        // Normal cancellation cleanup (driver can't claim)
+        performCancellationCleanup(state, offer, reason)
+    }
+
+    /**
+     * Claim payment after rider cancelled (driver had preimage).
+     */
+    fun claimPaymentAfterCancellation() {
+        val state = _uiState.value
+        val offer = state.acceptedOffer
+
+        viewModelScope.launch {
+            // Attempt to settle HTLC escrow
+            if (state.canSettleEscrow && state.activePreimage != null && state.activeEscrowToken != null) {
+                Log.d(TAG, "Claiming payment after rider cancellation...")
+                try {
+                    val result = walletService?.claimHtlcPayment(
+                        htlcToken = state.activeEscrowToken,
+                        preimage = state.activePreimage
+                    )
+                    val claimed = result != null
+
+                    if (claimed) {
+                        Log.d(TAG, "Successfully claimed payment after rider cancellation")
+                        // Save to history with fare earned
+                        saveCancelledRideToHistory(state, offer, claimed = true)
+                    } else {
+                        Log.e(TAG, "Failed to claim payment after rider cancellation")
+                        saveCancelledRideToHistory(state, offer, claimed = false)
+                    }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Failed to save cancelled ride to history", e)
+                    Log.e(TAG, "Error claiming payment: ${e.message}", e)
+                    saveCancelledRideToHistory(state, offer, claimed = false)
                 }
+            }
+
+            // Now do cleanup
+            _uiState.value = _uiState.value.copy(showRiderCancelledClaimDialog = false)
+            performCancellationCleanup(state, offer, "Rider cancelled the ride")
+        }
+    }
+
+    /**
+     * Skip claiming payment after rider cancelled.
+     */
+    fun dismissRiderCancelledDialog() {
+        val state = _uiState.value
+        _uiState.value = state.copy(showRiderCancelledClaimDialog = false)
+        performCancellationCleanup(state, state.acceptedOffer, "Rider cancelled the ride")
+    }
+
+    /**
+     * Save cancelled ride to history.
+     */
+    private suspend fun saveCancelledRideToHistory(
+        state: DriverUiState,
+        offer: RideOfferData?,
+        claimed: Boolean
+    ) {
+        if (offer == null) return
+        try {
+            val vehicle = state.activeVehicle
+            val historyEntry = RideHistoryEntry(
+                rideId = state.confirmationEventId ?: state.acceptanceEventId ?: offer.eventId,
+                timestamp = System.currentTimeMillis() / 1000,
+                role = "driver",
+                counterpartyPubKey = offer.riderPubKey,
+                pickupGeohash = offer.approxPickup.geohash(6),
+                dropoffGeohash = offer.destination.geohash(6),
+                distanceMiles = offer.rideRouteKm?.let { it * 0.621371 } ?: 0.0,
+                durationMinutes = 0,
+                fareSats = if (claimed) offer.fareEstimate.toLong() else 0,
+                status = if (claimed) "cancelled_claimed" else "cancelled",
+                vehicleMake = vehicle?.make,
+                vehicleModel = vehicle?.model
+            )
+            rideHistoryRepository.addRide(historyEntry)
+            Log.d(TAG, "Saved cancelled ride to history: ${historyEntry.rideId}, claimed=$claimed")
+            rideHistoryRepository.backupToNostr(nostrService)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to save cancelled ride to history", e)
+        }
+    }
+
+    /**
+     * Perform cancellation cleanup (subscriptions, state, etc.)
+     */
+    private fun performCancellationCleanup(state: DriverUiState, offer: RideOfferData?, reason: String?) {
+        val context = getApplication<Application>()
+
+        // Save cancelled ride to history (only if we had an accepted offer and not already saved)
+        if (offer != null && !state.showRiderCancelledClaimDialog) {
+            viewModelScope.launch {
+                saveCancelledRideToHistory(state, offer, claimed = false)
             }
         }
 
@@ -2114,13 +2200,19 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
         // Resume broadcasting and subscriptions if returning to AVAILABLE
         if (newStage == DriverStage.AVAILABLE && state.currentLocation != null) {
+            // Reset broadcast state for a fresh start (same as finishAndGoOnline)
+            publishedAvailabilityEventIds.clear()
+            lastBroadcastLocation = null
+            lastBroadcastTimeMs = 0L
+            Log.d(TAG, "Reset broadcast state before resuming after cancellation")
+
             startBroadcasting(state.currentLocation)
             subscribeToBroadcastRequests(state.currentLocation)
             subscribeToOffers()
             Log.d(TAG, "Resumed broadcasting after rider cancellation")
         }
 
-        _uiState.value = state.copy(
+        _uiState.value = _uiState.value.copy(
             stage = newStage,
             acceptedOffer = null,
             acceptedBroadcastRequest = null,
@@ -2130,6 +2222,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             isAwaitingPinVerification = false,
             chatMessages = emptyList(),
             pendingBroadcastRequests = emptyList(),
+            // Clear escrow state
+            activePaymentHash = null,
+            activePreimage = null,
+            activeEscrowToken = null,
+            canSettleEscrow = false,
+            riderCancelledFareAmount = null,
             statusMessage = if (newStage == DriverStage.AVAILABLE) "Rider cancelled - waiting for new requests" else "Rider cancelled ride",
             error = reason ?: "Rider cancelled the ride"
         )
@@ -2295,16 +2393,25 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun startBroadcasting(location: Location) {
+        Log.d(TAG, "=== START BROADCASTING ===")
+        Log.d(TAG, "Location: ${location.lat}, ${location.lon}")
+        Log.d(TAG, "Existing event IDs: ${publishedAvailabilityEventIds.size}")
+
         availabilityJob?.cancel()
 
         // Initialize throttle tracking for first broadcast
         if (lastBroadcastLocation == null) {
             lastBroadcastLocation = location
             lastBroadcastTimeMs = System.currentTimeMillis()
+            Log.d(TAG, "Initialized throttle tracking (fresh start)")
         }
 
         availabilityJob = viewModelScope.launch {
+            var loopCount = 0
             while (isActive) {
+                loopCount++
+                Log.d(TAG, "=== BROADCAST LOOP #$loopCount ===")
+
                 val currentLocation = _uiState.value.currentLocation ?: location
                 val activeVehicle = _uiState.value.activeVehicle
 
@@ -2314,24 +2421,27 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
                 val previousEventId = publishedAvailabilityEventIds.lastOrNull()
                 if (previousEventId != null) {
+                    Log.d(TAG, "Deleting previous availability: ${previousEventId.take(16)}...")
                     nostrService.deleteEvent(previousEventId, "superseded")
-                    Log.d(TAG, "Requested deletion of previous availability: $previousEventId")
                 }
 
+                Log.d(TAG, "Broadcasting availability at ${currentLocation.lat}, ${currentLocation.lon}")
                 val eventId = nostrService.broadcastAvailability(currentLocation, activeVehicle)
 
                 if (eventId != null) {
-                    Log.d(TAG, "Broadcast availability: $eventId")
+                    Log.d(TAG, "Broadcast SUCCESS: ${eventId.take(16)}... (total: ${publishedAvailabilityEventIds.size + 1})")
                     publishedAvailabilityEventIds.add(eventId)
                     _uiState.value = _uiState.value.copy(
                         lastBroadcastTime = System.currentTimeMillis()
                     )
                 } else {
-                    Log.w(TAG, "Failed to broadcast availability")
+                    Log.e(TAG, "Broadcast FAILED - no event ID returned")
                 }
 
+                Log.d(TAG, "Next broadcast in ${AVAILABILITY_BROADCAST_INTERVAL_MS / 1000} seconds")
                 delay(AVAILABILITY_BROADCAST_INTERVAL_MS)
             }
+            Log.d(TAG, "Broadcast loop ended (isActive=$isActive)")
         }
     }
 
@@ -3169,7 +3279,11 @@ data class DriverUiState(
 
     // Payment warning dialog (shown when trying to complete without valid escrow)
     val showPaymentWarningDialog: Boolean = false,
-    val paymentWarningStatus: PaymentStatus? = null
+    val paymentWarningStatus: PaymentStatus? = null,
+
+    // Rider cancelled claim dialog (shown when rider cancels after PIN verification)
+    val showRiderCancelledClaimDialog: Boolean = false,
+    val riderCancelledFareAmount: Double? = null  // Fare amount to potentially claim
 ) {
     /** Convenience property for backward compatibility */
     val isAvailable: Boolean get() = stage == DriverStage.AVAILABLE

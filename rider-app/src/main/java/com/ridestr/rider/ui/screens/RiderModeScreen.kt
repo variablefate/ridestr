@@ -203,6 +203,50 @@ fun RiderModeScreen(
         )
     }
 
+    // Cancel warning dialog (shown when cancelling after PIN verification)
+    if (uiState.showCancelWarningDialog) {
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissCancelWarning() },
+            icon = {
+                Icon(
+                    Icons.Default.Warning,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error
+                )
+            },
+            title = { Text("Payment Already Sent") },
+            text = {
+                Column {
+                    Text(
+                        "Your payment has already been authorized to the driver. If you cancel now, the driver can still claim the fare."
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        "Cancelling does not guarantee a refund.",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { viewModel.confirmCancelAfterWarning() },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error
+                    )
+                ) {
+                    Text("Cancel Anyway")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.dismissCancelWarning() }) {
+                    Text("Keep Ride")
+                }
+            }
+        )
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -337,7 +381,7 @@ fun RiderModeScreen(
             RideStage.DRIVER_ACCEPTED -> {
                 DriverAcceptedContent(
                     uiState = uiState,
-                    onCancel = viewModel::clearRide,
+                    onCancel = viewModel::attemptCancelRide,
                     onOpenChat = { showChatSheet = true },
                     chatMessageCount = uiState.chatMessages.size,
                     settingsManager = settingsManager,
@@ -348,7 +392,7 @@ fun RiderModeScreen(
                 DriverOnTheWayContent(
                     uiState = uiState,
                     onOpenChat = { showChatSheet = true },
-                    onCancel = { viewModel.clearRide() },
+                    onCancel = { viewModel.attemptCancelRide() },
                     chatMessageCount = uiState.chatMessages.size
                 )
             }
@@ -356,7 +400,7 @@ fun RiderModeScreen(
                 DriverArrivedContent(
                     uiState = uiState,
                     onOpenChat = { showChatSheet = true },
-                    onCancel = { viewModel.clearRide() },
+                    onCancel = { viewModel.attemptCancelRide() },
                     chatMessageCount = uiState.chatMessages.size
                 )
             }
@@ -364,7 +408,7 @@ fun RiderModeScreen(
                 RideInProgressContent(
                     uiState = uiState,
                     onOpenChat = { showChatSheet = true },
-                    onCancelRide = viewModel::clearRide,
+                    onCancelRide = viewModel::attemptCancelRide,
                     chatMessageCount = uiState.chatMessages.size
                 )
             }

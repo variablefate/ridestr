@@ -175,6 +175,13 @@ Race condition fix prevents duplicate confirmation events:
 - Driver has 30-second timeout waiting for confirmation
 - Only "Cancel Ride" button available during confirmation
 
+### Cancel After PIN Verification (January 2026)
+If rider cancels after preimage was shared with driver:
+- `attemptCancelRide()` checks `preimageShared || pinVerified` (line 1547)
+- Warning dialog shows that payment was already authorized
+- Driver can still claim the fare even after cancellation
+- `preimageShared` set to `true` after successful `sharePreimageWithDriver()` (line 343)
+
 ### Deposit/Withdraw
 - Tap wallet card in `WalletScreen.kt` → navigates to `WalletDetailScreen` (common)
 - Deposit and withdraw are **fully functional**

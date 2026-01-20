@@ -187,7 +187,8 @@ fun DrivestrApp() {
     val tileDownloadService = remember { TileDownloadService(context, tileManager) }
 
     // Tile discovery from Nostr (kind 1063 events from official pubkey)
-    val tileDiscoveryService = remember { NostrTileDiscoveryService(nostrService.relayManager) }
+    // Cached tiles are loaded immediately; discovery runs on key import or pull-to-refresh
+    val tileDiscoveryService = remember { NostrTileDiscoveryService(context, nostrService.relayManager) }
 
     // Sync discovered regions to TileManager for routing
     val discoveredRegions by tileDiscoveryService.discoveredRegions.collectAsState()

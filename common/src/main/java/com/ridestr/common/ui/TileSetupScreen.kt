@@ -85,14 +85,18 @@ fun TileSetupScreen(
         }
     }
 
-    // Check if any recommended tiles are not yet downloaded
-    val hasUndownloadedRecommended = recommendedRegions.any { region ->
-        !downloadedRegions.contains(region.id) && !region.isBundled
+    // Check if user has downloaded at least one tile (non-bundled)
+    val hasUserDownloadedTile = remember(downloadedRegions, allRegions) {
+        allRegions.any { region ->
+            !region.isBundled && downloadedRegions.contains(region.id)
+        }
     }
 
     // Check if any downloads are in progress
-    val hasActiveDownload = downloadStatus.values.any { status ->
-        status.state == DownloadState.DOWNLOADING || status.state == DownloadState.VERIFYING
+    val hasActiveDownload = remember(downloadStatus) {
+        downloadStatus.values.any { status ->
+            status.state == DownloadState.DOWNLOADING || status.state == DownloadState.VERIFYING
+        }
     }
 
     Column(
@@ -266,17 +270,7 @@ fun TileSetupScreen(
                 Spacer(modifier = Modifier.width(8.dp))
                 Text("Downloading...")
             } else {
-                Text(if (hasUndownloadedRecommended) "Continue Anyway" else "Continue")
-            }
-        }
-
-        // Skip option
-        onSkip?.let { skip ->
-            TextButton(
-                onClick = skip,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("Skip for now")
+                Text(if (hasUserDownloadedTile) "Continue" else "Skip for now")
             }
         }
     }
