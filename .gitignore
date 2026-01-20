@@ -73,3 +73,6 @@ ehthumbs.db
 
 # Version control
 vcs.xml
+
+# Claude Code
+.claude/
