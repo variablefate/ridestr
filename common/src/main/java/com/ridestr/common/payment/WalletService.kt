@@ -34,9 +34,9 @@ class WalletService(
         // Default mints with NUT-14 support
         val DEFAULT_MINTS = listOf(
             MintOption(
-                name = "Minibits",
-                description = "Popular, widely used",
-                url = "https://mint.minibits.cash/Bitcoin",
+                name = "The Milk Road",
+                description = "Recommended default",
+                url = "https://mint.themilkroad.org",
                 recommended = true
             ),
             MintOption(
@@ -46,9 +46,9 @@ class WalletService(
                 recommended = false
             ),
             MintOption(
-                name = "Coinos",
-                description = "Reliable alternative",
-                url = "https://cashu.coinos.io",
+                name = "Minibits",
+                description = "Popular, widely used",
+                url = "https://mint.minibits.cash/Bitcoin",
                 recommended = false
             )
         )
