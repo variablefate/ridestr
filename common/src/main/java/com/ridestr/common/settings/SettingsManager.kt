@@ -6,6 +6,7 @@ import com.ridestr.common.nostr.events.SettingsBackup
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 
 /**
  * Currency display preference for fare amounts.
@@ -61,6 +62,11 @@ class SettingsManager(context: Context) {
         private const val KEY_WALLET_SETUP_COMPLETED = "wallet_setup_completed"
         private const val KEY_WALLET_SETUP_SKIPPED = "wallet_setup_skipped"
         private const val KEY_ALWAYS_SHOW_WALLET_DIAGNOSTICS = "always_show_wallet_diagnostics"
+
+        // Payment settings (Issue #13 - multi-mint support)
+        private const val KEY_PAYMENT_METHODS = "payment_methods"
+        private const val KEY_DEFAULT_PAYMENT_METHOD = "default_payment_method"
+        private const val KEY_MINT_URL = "mint_url"
 
         // Default manual location: Las Vegas (Fremont St)
         private const val DEFAULT_MANUAL_LAT = 36.1699
@@ -403,6 +409,66 @@ class SettingsManager(context: Context) {
     }
 
     // ===================
+    // PAYMENT SETTINGS (Issue #13 - Multi-mint support)
+    // ===================
+
+    // Supported payment methods (default: cashu only)
+    private val _paymentMethods = MutableStateFlow(loadPaymentMethods())
+    val paymentMethods: StateFlow<List<String>> = _paymentMethods.asStateFlow()
+
+    private fun loadPaymentMethods(): List<String> {
+        val methodsString = prefs.getString(KEY_PAYMENT_METHODS, null)
+        return if (methodsString.isNullOrBlank()) {
+            listOf("cashu") // Default to cashu
+        } else {
+            methodsString.split(",").filter { it.isNotBlank() }
+        }
+    }
+
+    /**
+     * Set supported payment methods.
+     */
+    fun setPaymentMethods(methods: List<String>) {
+        if (methods.isEmpty()) {
+            prefs.edit().remove(KEY_PAYMENT_METHODS).apply()
+            _paymentMethods.value = listOf("cashu")
+        } else {
+            prefs.edit().putString(KEY_PAYMENT_METHODS, methods.joinToString(",")).apply()
+            _paymentMethods.value = methods
+        }
+    }
+
+    // Default payment method for new rides (default: cashu)
+    private val _defaultPaymentMethod = MutableStateFlow(
+        prefs.getString(KEY_DEFAULT_PAYMENT_METHOD, "cashu") ?: "cashu"
+    )
+    val defaultPaymentMethod: StateFlow<String> = _defaultPaymentMethod.asStateFlow()
+
+    /**
+     * Set the default payment method for new rides.
+     */
+    fun setDefaultPaymentMethod(method: String) {
+        prefs.edit().putString(KEY_DEFAULT_PAYMENT_METHOD, method).apply()
+        _defaultPaymentMethod.value = method
+    }
+
+    // Current Cashu mint URL (for backup/restore purposes)
+    private val _mintUrl = MutableStateFlow<String?>(prefs.getString(KEY_MINT_URL, null))
+    val mintUrl: StateFlow<String?> = _mintUrl.asStateFlow()
+
+    /**
+     * Set the current mint URL (called when user changes mint in wallet settings).
+     */
+    fun setMintUrl(url: String?) {
+        if (url == null) {
+            prefs.edit().remove(KEY_MINT_URL).apply()
+        } else {
+            prefs.edit().putString(KEY_MINT_URL, url).apply()
+        }
+        _mintUrl.value = url
+    }
+
+    // ===================
     // RELAY MANAGEMENT
     // ===================
 
@@ -500,6 +566,35 @@ class SettingsManager(context: Context) {
     }
 
     // ===================
+    // SYNCABLE SETTINGS HASH (for auto-backup observer)
+    // ===================
+
+    /**
+     * Combined hash of all settings that are synced to Nostr.
+     * Observe this to trigger auto-backup when any synced setting changes.
+     * Uses combine() to merge all syncable settings into a single hash value.
+     */
+    val syncableSettingsHash = combine(
+        _displayCurrency,
+        _distanceUnit,
+        _notificationSoundEnabled,
+        _notificationVibrationEnabled,
+        _autoOpenNavigation
+    ) { dc, du, ns, nv, ao ->
+        listOf(dc.ordinal, du.ordinal, ns, nv, ao).hashCode()
+    }.combine(combine(
+        _alwaysAskVehicle,
+        _customRelays,
+        _paymentMethods,
+        _defaultPaymentMethod,
+        _mintUrl
+    ) { aav, cr, pm, dpm, mu ->
+        listOf(aav, cr, pm, dpm, mu).hashCode()
+    }) { hash1, hash2 ->
+        hash1 * 31 + hash2
+    }
+
+    // ===================
     // BACKUP / RESTORE (Nostr Profile Sync)
     // ===================
 
@@ -515,7 +610,11 @@ class SettingsManager(context: Context) {
             notificationVibrationEnabled = _notificationVibrationEnabled.value,
             autoOpenNavigation = _autoOpenNavigation.value,
             alwaysAskVehicle = _alwaysAskVehicle.value,
-            customRelays = _customRelays.value
+            customRelays = _customRelays.value,
+            // Payment settings (Issue #13)
+            paymentMethods = _paymentMethods.value,
+            defaultPaymentMethod = _defaultPaymentMethod.value,
+            mintUrl = _mintUrl.value
         )
     }
 
@@ -538,6 +637,11 @@ class SettingsManager(context: Context) {
         } else {
             resetRelaysToDefault()
         }
+
+        // Restore payment settings (Issue #13)
+        setPaymentMethods(backup.paymentMethods)
+        setDefaultPaymentMethod(backup.defaultPaymentMethod)
+        setMintUrl(backup.mintUrl)
     }
 
     /**
@@ -564,5 +668,9 @@ class SettingsManager(context: Context) {
         _walletSetupCompleted.value = false
         _walletSetupSkipped.value = false
         _alwaysShowWalletDiagnostics.value = false
+        // Payment settings (Issue #13)
+        _paymentMethods.value = listOf("cashu")
+        _defaultPaymentMethod.value = "cashu"
+        _mintUrl.value = null
     }
 }

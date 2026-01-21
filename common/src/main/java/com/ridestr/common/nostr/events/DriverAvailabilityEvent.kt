@@ -4,6 +4,7 @@ import android.util.Log
 import com.ridestr.common.data.Vehicle
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
+import org.json.JSONArray
 import org.json.JSONObject
 
 private const val TAG = "DriverAvailability"
@@ -32,12 +33,16 @@ object DriverAvailabilityEvent {
      * @param location Current driver location
      * @param status Driver status (STATUS_AVAILABLE or STATUS_OFFLINE)
      * @param vehicle Optional vehicle info to include in the event
+     * @param mintUrl Driver's Cashu mint URL (for multi-mint support)
+     * @param paymentMethods Supported payment methods (e.g., ["cashu", "fiat_cash"])
      */
     suspend fun create(
         signer: NostrSigner,
         location: Location,
         status: String = STATUS_AVAILABLE,
-        vehicle: Vehicle? = null
+        vehicle: Vehicle? = null,
+        mintUrl: String? = null,
+        paymentMethods: List<String> = listOf("cashu")
     ): Event {
         val approxLocation = location.approximate()
         val content = JSONObject().apply {
@@ -49,6 +54,11 @@ object DriverAvailabilityEvent {
                 put("car_model", it.model)
                 put("car_color", it.color)
                 put("car_year", it.year.toString())
+            }
+            // Payment info for multi-mint support (Issue #13)
+            mintUrl?.let { put("mint_url", it) }
+            if (paymentMethods.isNotEmpty()) {
+                put("payment_methods", JSONArray(paymentMethods))
             }
         }.toString()
 
@@ -98,7 +108,7 @@ object DriverAvailabilityEvent {
     }
 
     /**
-     * Parse a driver availability event to extract the location, status, and vehicle info.
+     * Parse a driver availability event to extract the location, status, vehicle, and payment info.
      */
     fun parse(event: Event): DriverAvailabilityData? {
         if (event.kind != RideshareEventKinds.DRIVER_AVAILABILITY) return null
@@ -116,6 +126,20 @@ object DriverAvailabilityEvent {
             val carColor = json.optString("car_color", null)
             val carYear = json.optString("car_year", null)
 
+            // Extract payment info (Issue #13 - multi-mint support)
+            val mintUrl = json.optString("mint_url", null).takeIf { !it.isNullOrBlank() }
+            val paymentMethods = mutableListOf<String>()
+            val paymentMethodsArray = json.optJSONArray("payment_methods")
+            if (paymentMethodsArray != null) {
+                for (i in 0 until paymentMethodsArray.length()) {
+                    paymentMethods.add(paymentMethodsArray.getString(i))
+                }
+            }
+            // Default to cashu if not specified (backwards compatibility)
+            if (paymentMethods.isEmpty()) {
+                paymentMethods.add("cashu")
+            }
+
             location?.let {
                 DriverAvailabilityData(
                     eventId = event.id,
@@ -126,7 +150,9 @@ object DriverAvailabilityEvent {
                     carMake = carMake,
                     carModel = carModel,
                     carColor = carColor,
-                    carYear = carYear
+                    carYear = carYear,
+                    mintUrl = mintUrl,
+                    paymentMethods = paymentMethods
                 )
             }
         } catch (e: Exception) {
@@ -148,7 +174,10 @@ data class DriverAvailabilityData(
     val carMake: String? = null,
     val carModel: String? = null,
     val carColor: String? = null,
-    val carYear: String? = null
+    val carYear: String? = null,
+    // Payment info (Issue #13 - multi-mint support)
+    val mintUrl: String? = null,
+    val paymentMethods: List<String> = listOf("cashu")
 ) {
     /** Returns true if the driver is available */
     val isAvailable: Boolean

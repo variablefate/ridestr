@@ -11,9 +11,20 @@ sealed class ProfileSyncState {
     object Idle : ProfileSyncState()
 
     /**
+     * Checking if there's any Ridestr data to restore.
+     */
+    object Checking : ProfileSyncState()
+
+    /**
      * Connecting to Nostr relays.
      */
     object Connecting : ProfileSyncState()
+
+    /**
+     * No Ridestr data found on relays.
+     * User can continue with fresh profile.
+     */
+    object NoDataFound : ProfileSyncState()
 
     /**
      * Fetching data from Nostr (restore flow).
@@ -34,8 +45,12 @@ sealed class ProfileSyncState {
     /**
      * Sync completed successfully.
      * @param itemsRestored Total number of items restored across all data types
+     * @param restoredData Breakdown of what was restored
      */
-    data class Complete(val itemsRestored: Int) : ProfileSyncState()
+    data class Complete(
+        val itemsRestored: Int,
+        val restoredData: RestoredProfileData = RestoredProfileData()
+    ) : ProfileSyncState()
 
     /**
      * Error during sync operation.
@@ -47,3 +62,15 @@ sealed class ProfileSyncState {
         val retryable: Boolean = true
     ) : ProfileSyncState()
 }
+
+/**
+ * Detailed breakdown of what profile data was restored.
+ * Used to show user what was found during sync.
+ */
+data class RestoredProfileData(
+    val walletBalance: Long? = null,      // Sats restored from NIP-60
+    val vehicleCount: Int = 0,             // Vehicles restored (driver)
+    val savedLocationCount: Int = 0,       // Saved locations restored (rider)
+    val rideHistoryCount: Int = 0,         // Ride history entries restored
+    val settingsRestored: Boolean = false  // Whether settings were restored
+)

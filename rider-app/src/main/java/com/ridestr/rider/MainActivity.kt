@@ -62,7 +62,9 @@ import com.ridestr.common.payment.WalletService
 import com.ridestr.common.payment.cashu.Nip60WalletSync
 import com.ridestr.common.sync.ProfileSyncManager
 import com.ridestr.common.sync.ProfileSyncState
+import com.ridestr.common.sync.RestoredProfileData
 import com.ridestr.common.sync.Nip60WalletSyncAdapter
+import com.ridestr.common.ui.ProfileSyncScreen
 import com.ridestr.common.sync.RideHistorySyncAdapter
 import com.ridestr.common.sync.ProfileSyncAdapter
 import com.ridestr.common.data.SavedLocationRepository
@@ -86,6 +88,7 @@ enum class Tab {
  */
 enum class Screen {
     ONBOARDING,
+    PROFILE_SYNC,       // Sync profile data on key import (before profile setup)
     PROFILE_SETUP,
     WALLET_SETUP,       // Wallet onboarding (after profile, before location)
     LOCATION_PERMISSION,
@@ -194,6 +197,40 @@ fun RidestrApp() {
     // Observable sync state for potential UI feedback
     val syncState by profileSyncManager.syncState.collectAsState()
 
+    // Auto-backup saved locations when they change (debounced)
+    val savedLocations by savedLocationRepo.savedLocations.collectAsState()
+    var lastLocationBackupHash by remember { mutableStateOf(0) }
+    LaunchedEffect(savedLocations, uiState.isLoggedIn) {
+        if (!uiState.isLoggedIn) return@LaunchedEffect
+        if (savedLocations.isEmpty()) return@LaunchedEffect
+        val currentHash = savedLocations.hashCode()
+        if (currentHash == lastLocationBackupHash) return@LaunchedEffect
+        // Debounce: wait 2 seconds before backing up
+        kotlinx.coroutines.delay(2000)
+        // Verify data hasn't changed during debounce
+        if (savedLocations.hashCode() == currentHash) {
+            lastLocationBackupHash = currentHash
+            profileSyncManager.backupProfileData()
+        }
+    }
+
+    // Auto-backup settings to Nostr when they change (with debounce)
+    val settingsHash by settingsManager.syncableSettingsHash.collectAsState(initial = 0)
+    var lastSettingsBackupHash by remember { mutableStateOf(0) }
+    LaunchedEffect(settingsHash, uiState.isLoggedIn) {
+        if (!uiState.isLoggedIn) return@LaunchedEffect
+        if (settingsHash == 0) return@LaunchedEffect
+        val currentHash = settingsHash
+        if (currentHash == lastSettingsBackupHash) return@LaunchedEffect
+        // Debounce: wait 2 seconds before backing up
+        kotlinx.coroutines.delay(2000)
+        // After debounce, check if settingsHash changed (would trigger new LaunchedEffect)
+        // If we get here and weren't cancelled, proceed with backup
+        lastSettingsBackupHash = currentHash
+        android.util.Log.d("MainActivity", "Auto-backing up settings to Nostr...")
+        profileSyncManager.backupProfileData()
+    }
+
     // Start Bitcoin price auto-refresh for USD display
     LaunchedEffect(Unit) {
         bitcoinPriceService.startAutoRefresh()
@@ -261,24 +298,12 @@ fun RidestrApp() {
         }
     }
 
-    // Sync all profile data from Nostr on login (for fresh installs importing existing key)
-    // Uses ProfileSyncManager for coordinated, ordered sync of wallet, history, and locations
-    LaunchedEffect(uiState.isLoggedIn) {
-        if (uiState.isLoggedIn) {
-            // Only sync if local data is empty (fresh install with imported key)
-            val needsSync = !rideHistoryRepo.hasRides() && !savedLocationRepo.hasLocations()
-            if (needsSync) {
-                // CRITICAL: Refresh KeyManagers from storage
-                // OnboardingViewModel has a separate KeyManager instance that imported the keys,
-                // so other KeyManagers need to reload from SharedPreferences
-                nostrService.keyManager.refreshFromStorage()
-                profileSyncManager.keyManager.refreshFromStorage()
+    // Track if we're doing a key import (vs new key generation) for sync flow
+    var isKeyImport by remember { mutableStateOf(false) }
 
-                android.util.Log.d("MainActivity", "Starting ProfileSyncManager sync (fresh install)")
-                profileSyncManager.onKeyImported()
-            }
-        }
-    }
+    // Note: Profile sync is now handled by the PROFILE_SYNC screen during onboarding,
+    // not by a background LaunchedEffect. This ensures the sync completes before
+    // the user sees onboarding screens that depend on synced data (like saved locations).
 
     // Check if already logged in on first composition (only if not already at MAIN)
     // IMPORTANT: Don't navigate if showBackupReminder is true - let OnboardingScreen handle that
@@ -312,9 +337,55 @@ fun RidestrApp() {
             Screen.ONBOARDING -> {
                 OnboardingScreen(
                     viewModel = onboardingViewModel,
-                    onComplete = {
+                    onComplete = { wasKeyImport ->
                         nostrService.connect()
-                        // After login, go to profile setup or location permission
+
+                        if (wasKeyImport) {
+                            // Key import - need to sync profile from Nostr first
+                            // CRITICAL: Refresh KeyManagers so they can read the imported key
+                            nostrService.keyManager.refreshFromStorage()
+                            profileSyncManager.keyManager.refreshFromStorage()
+                            isKeyImport = true
+                            currentScreen = Screen.PROFILE_SYNC
+                        } else {
+                            // New key generation - no profile to sync, go straight to setup
+                            isKeyImport = false
+                            currentScreen = if (uiState.isProfileCompleted) {
+                                Screen.LOCATION_PERMISSION
+                            } else {
+                                Screen.PROFILE_SETUP
+                            }
+                        }
+                    },
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
+
+            Screen.PROFILE_SYNC -> {
+                // Check for Ridestr data and sync if found (wallet handled separately by WalletSetupScreen)
+                LaunchedEffect(Unit) {
+                    profileSyncManager.checkAndSyncRidestrData()
+                }
+
+                ProfileSyncScreen(
+                    syncState = syncState,
+                    isDriverApp = false,  // Rider app
+                    onComplete = { restoredData ->
+                        profileSyncManager.resetSyncState()
+                        // After sync, navigate to next onboarding step
+                        currentScreen = if (uiState.isProfileCompleted) {
+                            if (settingsManager.isWalletSetupDone()) {
+                                Screen.LOCATION_PERMISSION
+                            } else {
+                                Screen.WALLET_SETUP
+                            }
+                        } else {
+                            Screen.PROFILE_SETUP
+                        }
+                    },
+                    onSkip = {
+                        profileSyncManager.resetSyncState()
+                        // Skip sync, proceed with normal onboarding
                         currentScreen = if (uiState.isProfileCompleted) {
                             Screen.LOCATION_PERMISSION
                         } else {
@@ -489,6 +560,12 @@ fun RidestrApp() {
                     },
                     onOpenWalletSettings = {
                         currentScreen = Screen.WALLET_SETTINGS
+                    },
+                    onSyncProfile = {
+                        profileSyncManager.checkAndSyncRidestrData()
+                    },
+                    onRefreshSavedLocations = {
+                        profileSyncManager.checkAndSyncRidestrData()
                     },
                     modifier = Modifier.padding(innerPadding)
                 )
@@ -682,6 +759,8 @@ fun MainScreen(
     onSetupWallet: () -> Unit,
     onOpenWalletDetail: () -> Unit,
     onOpenWalletSettings: () -> Unit,
+    onSyncProfile: (suspend () -> Unit)? = null,
+    onRefreshSavedLocations: (suspend () -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val connectedCount = connectionStates.values.count { it == RelayConnectionState.CONNECTED }
@@ -796,6 +875,7 @@ fun MainScreen(
                     settingsManager = settingsManager,
                     onOpenTiles = onOpenTiles,
                     onOpenWallet = { currentTab = Tab.WALLET },
+                    onRefreshSavedLocations = onRefreshSavedLocations,
                     modifier = Modifier.padding(innerPadding)
                 )
             }
@@ -827,6 +907,7 @@ fun MainScreen(
                     onOpenTiles = onOpenTiles,
                     onOpenDevOptions = onOpenDevOptions,
                     onOpenWalletSettings = onOpenWalletSettings,
+                    onSyncProfile = onSyncProfile,
                     modifier = Modifier.padding(innerPadding)
                 )
             }

@@ -1591,6 +1591,164 @@ class WalletService(
         return Result.failure(Exception("Payment not confirmed"))
     }
 
+    // === Cross-Mint Bridge Payment ===
+
+    /**
+     * Bridge payment to an external mint via Lightning.
+     * Used when rider and driver use different Cashu mints.
+     *
+     * Flow:
+     * 1. Get melt quote from rider's mint for the driver's invoice
+     * 2. Select proofs from NIP-60
+     * 3. Execute melt (pay Lightning invoice)
+     * 4. Handle change proofs
+     * 5. Clean up spent NIP-60 events safely
+     *
+     * @param driverInvoice BOLT11 invoice from driver's mint
+     * @return BridgeResult with success status and fee details
+     */
+    suspend fun bridgePayment(driverInvoice: String): BridgeResult {
+        if (!_isConnected.value) {
+            return BridgeResult(success = false, error = "Not connected to wallet")
+        }
+
+        val sync = nip60Sync
+        val mintUrl = cashuBackend.getCurrentMintUrl()
+
+        if (sync == null) {
+            return BridgeResult(success = false, error = "Wallet sync not ready")
+        }
+
+        if (mintUrl == null) {
+            return BridgeResult(success = false, error = "Not connected to mint")
+        }
+
+        try {
+            // Step 1: Get melt quote from rider's mint for the driver's invoice
+            Log.d(TAG, "Getting melt quote for cross-mint bridge...")
+            val quote = cashuBackend.getMeltQuote(driverInvoice)
+            if (quote == null) {
+                return BridgeResult(success = false, error = "Failed to get melt quote")
+            }
+
+            val totalNeeded = quote.totalAmount  // amount + feeReserve
+            Log.d(TAG, "Bridge payment: amount=${quote.amount}, fees=${quote.feeReserve}, total=$totalNeeded sats")
+
+            // Step 2: Select proofs from NIP-60
+            val selection = sync.selectProofsForSpending(totalNeeded, mintUrl)
+            if (selection == null) {
+                return BridgeResult(
+                    success = false,
+                    error = "Insufficient funds. Need $totalNeeded sats (including ${quote.feeReserve} sats fees)"
+                )
+            }
+
+            val proofs = selection.proofs.map { it.toCashuProof() }
+            Log.d(TAG, "Selected ${proofs.size} proofs from NIP-60 (${selection.totalAmount} sats)")
+
+            // Step 3: Execute melt (pay the Lightning invoice)
+            val result = cashuBackend.meltWithProofs(quote.quote, proofs, totalNeeded)
+            if (result == null) {
+                return BridgeResult(success = false, error = "Melt operation failed - mint error")
+            }
+
+            if (!result.paid) {
+                return BridgeResult(success = false, error = "Lightning payment failed")
+            }
+
+            // Step 4: Safe NIP-60 cleanup - republish remaining proofs before deleting
+            val spentSecrets = selection.proofs.map { it.secret }.toSet()
+            val affectedEventIds = selection.proofs.map { it.eventId }.distinct()
+
+            // Fetch all current proofs to find remaining (not spent) proofs in affected events
+            val allProofs = sync.fetchProofs(forceRefresh = true)
+            val remainingProofsToRepublish = allProofs.filter { proof ->
+                proof.eventId in affectedEventIds && proof.secret !in spentSecrets
+            }
+
+            if (remainingProofsToRepublish.isNotEmpty()) {
+                Log.d(TAG, "Republishing ${remainingProofsToRepublish.size} remaining proofs before cleanup")
+                val cashuProofs = remainingProofsToRepublish.map { it.toCashuProof() }
+                var newEventId: String? = null
+                var attempts = 0
+                while (newEventId == null && attempts < 3) {
+                    attempts++
+                    newEventId = sync.publishProofs(cashuProofs, mintUrl)
+                    if (newEventId == null && attempts < 3) {
+                        kotlinx.coroutines.delay(2000)
+                    }
+                }
+                if (newEventId != null) {
+                    Log.d(TAG, "Republished remaining proofs to: $newEventId")
+                } else {
+                    Log.e(TAG, "CRITICAL: Failed to republish remaining proofs!")
+                    // Store in cdk-kotlin as fallback
+                    try {
+                        cashuBackend.storeRecoveredProofs(cashuProofs, mintUrl)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "cdk-kotlin fallback also failed: ${e.message}")
+                    }
+                }
+            }
+
+            // Now safe to delete old events
+            sync.deleteProofEvents(affectedEventIds)
+
+            // Step 5: Publish change proofs with retry
+            if (result.change.isNotEmpty()) {
+                val changeAmount = result.change.sumOf { it.amount }
+                var changeEventId: String? = null
+                var publishAttempts = 0
+
+                while (changeEventId == null && publishAttempts < 3) {
+                    publishAttempts++
+                    Log.d(TAG, "Publishing change proofs (attempt $publishAttempts/3)")
+                    changeEventId = sync.publishProofs(result.change, mintUrl)
+                    if (changeEventId == null && publishAttempts < 3) {
+                        kotlinx.coroutines.delay(2000)
+                    }
+                }
+
+                if (changeEventId != null) {
+                    Log.d(TAG, "Published change: ${result.change.size} proofs ($changeAmount sats)")
+                } else {
+                    Log.e(TAG, "CRITICAL: Failed to publish change proofs!")
+                    // Store in cdk-kotlin as fallback
+                    try {
+                        cashuBackend.storeRecoveredProofs(result.change, mintUrl)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Change fallback failed: ${e.message}")
+                    }
+                }
+            }
+
+            // Refresh balance
+            sync.clearCache()
+            val newProofs = sync.fetchProofs(forceRefresh = true)
+            val newBalance = newProofs.sumOf { it.amount }
+
+            _balance.value = WalletBalance(
+                availableSats = newBalance,
+                pendingSats = _balance.value.pendingSats,
+                lastUpdated = System.currentTimeMillis()
+            )
+            walletStorage.cacheBalance(_balance.value)
+            updateDiagnostics()
+
+            Log.d(TAG, "Bridge payment complete: ${quote.amount} sats + ${quote.feeReserve} sats fees")
+
+            return BridgeResult(
+                success = true,
+                amountSats = quote.amount,
+                feesSats = quote.feeReserve,
+                preimage = result.paymentPreimage
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Bridge payment failed", e)
+            return BridgeResult(success = false, error = e.message ?: "Unknown error")
+        }
+    }
+
     /**
      * Resolve a Lightning address to a BOLT11 invoice.
      *
@@ -2130,6 +2288,28 @@ class WalletService(
      * Get the saved mint URL.
      */
     fun getSavedMintUrl(): String? = walletStorage.getMintUrl()
+
+    /**
+     * Get the current connected mint URL.
+     * Returns null if not connected to a mint.
+     */
+    fun getCurrentMintUrl(): String? = cashuBackend.getCurrentMintUrl()
+
+    /**
+     * Get a deposit invoice from the connected mint.
+     * Used by driver for cross-mint bridge - rider pays this invoice via Lightning.
+     *
+     * @param amountSats Amount to deposit in satoshis
+     * @return MintQuote with invoice, or null if failed
+     */
+    suspend fun getDepositInvoice(amountSats: Long): MintQuote? {
+        val mintUrl = cashuBackend.getCurrentMintUrl()
+        if (mintUrl == null) {
+            Log.e(TAG, "Cannot get deposit invoice - not connected to mint")
+            return null
+        }
+        return cashuBackend.getMintQuoteAtMint(amountSats, mintUrl)
+    }
 
     /**
      * Fetch and update wallet diagnostics.

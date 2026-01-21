@@ -127,6 +127,73 @@ object RideshareEventKinds {
 }
 
 /**
+ * Payment methods supported by the rideshare protocol.
+ * Used in profile backup (supported methods) and ride events (requested method).
+ */
+enum class PaymentMethod(val value: String) {
+    CASHU("cashu"),           // Cashu ecash (NUT-14 HTLC)
+    LIGHTNING("lightning"),   // Lightning Network direct
+    FIAT_CASH("fiat_cash");   // Cash on delivery
+
+    companion object {
+        fun fromString(s: String): PaymentMethod? =
+            entries.find { it.value == s }
+
+        fun fromStringList(list: List<String>): List<PaymentMethod> =
+            list.mapNotNull { fromString(it) }
+
+        fun toStringList(methods: List<PaymentMethod>): List<String> =
+            methods.map { it.value }
+    }
+}
+
+/**
+ * Payment path determined by comparing rider and driver mints.
+ * Used to select the appropriate payment flow for a ride.
+ */
+enum class PaymentPath {
+    /** Both rider and driver use the same Cashu mint - zero-fee HTLC flow */
+    SAME_MINT,
+    /** Rider and driver use different mints - Lightning bridge at pickup */
+    CROSS_MINT,
+    /** Cash payment - no digital escrow */
+    FIAT_CASH,
+    /** Wallet not connected or payment methods incompatible */
+    NO_PAYMENT;
+
+    companion object {
+        /**
+         * Determine the payment path based on rider/driver mint URLs and payment method.
+         */
+        fun determine(
+            riderMintUrl: String?,
+            driverMintUrl: String?,
+            paymentMethod: String
+        ): PaymentPath {
+            // Handle non-ecash payment methods
+            if (paymentMethod == "fiat_cash") return FIAT_CASH
+            if (paymentMethod == "lightning") return CROSS_MINT  // Always Lightning bridge
+
+            // For cashu: check mint compatibility
+            if (paymentMethod == "cashu") {
+                if (riderMintUrl == null || driverMintUrl == null) return NO_PAYMENT
+
+                val normalizedRider = riderMintUrl.trimEnd('/').lowercase()
+                val normalizedDriver = driverMintUrl.trimEnd('/').lowercase()
+
+                return if (normalizedRider == normalizedDriver) {
+                    SAME_MINT
+                } else {
+                    CROSS_MINT
+                }
+            }
+
+            return NO_PAYMENT
+        }
+    }
+}
+
+/**
  * Status values for driver ride state (Kind 30180).
  */
 object DriverStatusType {

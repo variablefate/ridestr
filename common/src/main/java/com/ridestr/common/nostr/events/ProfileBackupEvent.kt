@@ -175,7 +175,11 @@ data class SettingsBackup(
     val notificationVibrationEnabled: Boolean = true,
     val autoOpenNavigation: Boolean = true,
     val alwaysAskVehicle: Boolean = true,
-    val customRelays: List<String> = emptyList()
+    val customRelays: List<String> = emptyList(),
+    // Payment settings for multi-mint support (Issue #13)
+    val paymentMethods: List<String> = listOf("cashu"),  // Supported payment methods
+    val defaultPaymentMethod: String = "cashu",          // Preferred method for new rides
+    val mintUrl: String? = null                          // Current Cashu mint URL
 ) {
     /**
      * Serialize to JSON.
@@ -183,6 +187,9 @@ data class SettingsBackup(
     fun toJson(): JSONObject {
         val relaysArray = JSONArray()
         customRelays.forEach { relaysArray.put(it) }
+
+        val paymentMethodsArray = JSONArray()
+        paymentMethods.forEach { paymentMethodsArray.put(it) }
 
         return JSONObject().apply {
             put("displayCurrency", displayCurrency.name)
@@ -192,6 +199,10 @@ data class SettingsBackup(
             put("autoOpenNavigation", autoOpenNavigation)
             put("alwaysAskVehicle", alwaysAskVehicle)
             put("customRelays", relaysArray)
+            // Payment settings (Issue #13)
+            put("paymentMethods", paymentMethodsArray)
+            put("defaultPaymentMethod", defaultPaymentMethod)
+            mintUrl?.let { put("mintUrl", it) }
         }
     }
 
@@ -209,6 +220,19 @@ data class SettingsBackup(
                 }
             }
 
+            // Parse payment methods array
+            val paymentMethods = mutableListOf<String>()
+            val paymentMethodsArray = json.optJSONArray("paymentMethods")
+            if (paymentMethodsArray != null) {
+                for (i in 0 until paymentMethodsArray.length()) {
+                    paymentMethods.add(paymentMethodsArray.getString(i))
+                }
+            }
+            // Default to cashu if empty (backwards compatibility)
+            if (paymentMethods.isEmpty()) {
+                paymentMethods.add("cashu")
+            }
+
             return SettingsBackup(
                 displayCurrency = try {
                     DisplayCurrency.valueOf(json.optString("displayCurrency", DisplayCurrency.USD.name))
@@ -224,7 +248,11 @@ data class SettingsBackup(
                 notificationVibrationEnabled = json.optBoolean("notificationVibrationEnabled", true),
                 autoOpenNavigation = json.optBoolean("autoOpenNavigation", true),
                 alwaysAskVehicle = json.optBoolean("alwaysAskVehicle", true),
-                customRelays = relays
+                customRelays = relays,
+                // Payment settings (Issue #13)
+                paymentMethods = paymentMethods,
+                defaultPaymentMethod = json.optString("defaultPaymentMethod", "cashu"),
+                mintUrl = json.optString("mintUrl", null).takeIf { !it.isNullOrBlank() }
             )
         }
     }

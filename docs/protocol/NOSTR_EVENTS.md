@@ -1,7 +1,7 @@
 # Ridestr Nostr Event Protocol
 
-**Version**: 1.1
-**Last Updated**: 2026-01-19
+**Version**: 1.2
+**Last Updated**: 2026-01-21
 
 This document defines all Nostr event kinds used in the Ridestr rideshare application.
 
@@ -64,9 +64,15 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 {
   "status": "available" | "unavailable",
   "geohash": "<precision_5_geohash>",
-  "timestamp": <unix_timestamp>
+  "timestamp": <unix_timestamp>,
+  "mint_url": "<cashu_mint_url>",
+  "payment_methods": ["cashu", "fiat_cash"]
 }
 ```
+
+**Multi-Mint Fields** (Issue #13):
+- `mint_url`: Driver's Cashu mint URL for multi-mint payment routing
+- `payment_methods`: Array of supported payment methods (`cashu`, `lightning`, `fiat_cash`)
 
 **Lifecycle**:
 1. Published when driver goes online (`goOnline()`)
@@ -285,7 +291,10 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
     "notificationVibrationEnabled": true,
     "autoOpenNavigation": true,
     "alwaysAskVehicle": false,
-    "customRelays": ["wss://relay.example.com"]
+    "customRelays": ["wss://relay.example.com"],
+    "paymentMethods": ["cashu", "fiat_cash"],
+    "defaultPaymentMethod": "cashu",
+    "mintUrl": "https://mint.example.com"
   },
   "updated_at": <unix_timestamp>
 }
@@ -360,13 +369,19 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
   "ride_route_km": <distance>,
   "ride_route_min": <duration>,
   "payment_hash": "<sha256_of_preimage>",
-  "destination_geohash": "<geohash_for_settlement>"
+  "destination_geohash": "<geohash_for_settlement>",
+  "mint_url": "<rider_cashu_mint_url>",
+  "payment_method": "cashu"
 }
 ```
 
 **Payment Fields** (implemented):
 - `payment_hash`: SHA256 hash of preimage for HTLC escrow verification
 - `destination_geohash`: Used for settlement location verification
+
+**Multi-Mint Fields** (Issue #13):
+- `mint_url`: Rider's Cashu mint URL for multi-mint payment routing
+- `payment_method`: Payment method for this ride (`cashu`, `lightning`, `fiat_cash`)
 
 **Note**: Precise coordinates are NOT shared in the offer. Only revealed progressively after confirmation.
 
@@ -395,7 +410,9 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
   "wallet_pubkey": "<driver_wallet_pubkey_for_p2pk>",
   "escrow_type": "cashu_nut14",
   "escrow_invoice": "<htlc_token_if_provided>",
-  "escrow_expiry": <unix_timestamp>
+  "escrow_expiry": <unix_timestamp>,
+  "mint_url": "<driver_cashu_mint_url>",
+  "payment_method": "cashu"
 }
 ```
 
@@ -404,6 +421,10 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 - `escrow_type`: Currently `"cashu_nut14"` for Cashu NUT-14 HTLC
 - `escrow_invoice`: HTLC token or BOLT11 invoice (if provided upfront)
 - `escrow_expiry`: When escrow expires and can be refunded to rider
+
+**Multi-Mint Fields** (Issue #13):
+- `mint_url`: Driver's Cashu mint URL for multi-mint payment routing
+- `payment_method`: Confirms accepted payment method (`cashu`, `lightning`, `fiat_cash`)
 
 ---
 
@@ -699,41 +720,51 @@ RIDER                           NOSTR RELAY                         DRIVER
 
 ---
 
-## Future: Protocol Interoperability
+## Protocol Interoperability (Issue #13)
 
 See [GitHub Issue #13](https://github.com/variablefate/ridestr/issues/13) for the full interoperability roadmap.
 
-### Planned Protocol Enhancements
+### Implemented (Phase 1 - January 2026)
 
-**1. Payment Method Extensibility**
-- Add `payment_methods` array to profile backup (Kind 30177)
-- Add `payment_method` field to ride offers (Kind 3173)
-- Standardized values: `cashu`, `lightning`, `fiat_stripe`, `fiat_cash`
-- Enables apps to filter incompatible drivers/riders
+**1. Payment Method Fields** ✅
+- `payment_methods` array in profile backup (Kind 30177 settings)
+- `payment_method` field in ride offers (Kind 3173) and acceptances (Kind 3174)
+- `mint_url` field in availability (Kind 30173), offers (Kind 3173), and acceptances (Kind 3174)
+- Standardized values: `cashu`, `lightning`, `fiat_cash`
+- `PaymentMethod` enum in `RideshareEventKinds.kt`
 
-**2. Protocol Versioning**
+### Planned Enhancements
+
+**2. Multi-Mint Payment Bridge** (Phase 2-3)
+- Cross-mint payment via Lightning bridge at pickup
+- Fee estimation and display
+- Same-mint detection for zero-fee HTLC flow
+
+**3. Protocol Versioning**
 - Add `protocol_version` field to all backup events
 - Format: `NIP-014173-1.0`
 - Apps can gracefully handle older/newer versions
 
-**3. Extension Fields Convention**
+**4. Extension Fields Convention**
 - `ext_` prefix marks optional app-specific fields
 - Apps MUST ignore unknown `ext_*` fields
 - Example: `ext_strictapp_drivers_license`, `ext_strictapp_insurance_verified`
 - Allows stricter apps to add requirements without breaking protocol
 
-**4. Public Profile (Proposed Kind 30178)**
+**5. Public Profile (Proposed Kind 30178)**
 - Optional public driver/rider profile for discoverability
 - Fields: display_name, rating, rides_completed, payment_methods, verification_level
 - Cross-app reputation sharing
 
 ### Implementation Priority
 
-| Priority | Enhancement |
-|----------|-------------|
-| P0 | `payment_methods` in profile, `payment_method` in offers |
-| P1 | `protocol_version`, `ext_*` convention documentation |
-| P2 | Public profile event (Kind 30178) |
+| Priority | Enhancement | Status |
+|----------|-------------|--------|
+| P0 | `payment_methods` in profile, `payment_method` in offers | ✅ COMPLETE |
+| P0 | `mint_url` in availability, offers, acceptances | ✅ COMPLETE |
+| P1 | Multi-mint Lightning bridge | 🚧 IN PROGRESS |
+| P2 | `protocol_version`, `ext_*` convention documentation | Planned |
+| P3 | Public profile event (Kind 30178) | Planned |
 
 ---
 

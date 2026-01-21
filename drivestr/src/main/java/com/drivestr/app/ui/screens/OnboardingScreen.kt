@@ -19,29 +19,42 @@ import androidx.compose.ui.unit.dp
 import com.drivestr.app.viewmodels.OnboardingUiState
 import com.drivestr.app.viewmodels.OnboardingViewModel
 
+/**
+ * @param onComplete Called when onboarding completes. The boolean indicates if the
+ *                   user imported an existing key (true) vs generated a new one (false).
+ */
 @Composable
 fun OnboardingScreen(
     viewModel: OnboardingViewModel,
-    onComplete: () -> Unit,
+    onComplete: (wasKeyImport: Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val uiState by viewModel.uiState.collectAsState()
+
+    // Track whether this was a key import (for profile sync)
+    var wasKeyImport by remember { mutableStateOf(false) }
 
     // Use snapshotFlow to ensure we read current state values, not stale ones
     LaunchedEffect(Unit) {
         snapshotFlow { uiState.isLoggedIn to uiState.showBackupReminder }
             .collect { (isLoggedIn, showBackupReminder) ->
                 if (isLoggedIn && !showBackupReminder) {
-                    onComplete()
+                    // If no backup reminder shown, this was a key import (imports skip the reminder)
+                    // Note: wasKeyImport is set in KeySetupScreen when import button is clicked
+                    onComplete(wasKeyImport)
                 }
             }
     }
 
     when {
         uiState.showBackupReminder -> {
+            // New key generation - backup reminder is shown
             BackupReminderScreen(
                 nsec = viewModel.getNsecForBackup() ?: "",
-                onDismiss = { viewModel.dismissBackupReminder() }
+                onDismiss = {
+                    wasKeyImport = false  // This was a new key, not import
+                    viewModel.dismissBackupReminder()
+                }
             )
         }
         uiState.isLoggedIn -> {
@@ -55,8 +68,14 @@ fun OnboardingScreen(
         else -> {
             KeySetupScreen(
                 uiState = uiState,
-                onGenerateKey = { viewModel.generateNewKey() },
-                onImportKey = { viewModel.importKey(it) },
+                onGenerateKey = {
+                    wasKeyImport = false
+                    viewModel.generateNewKey()
+                },
+                onImportKey = {
+                    wasKeyImport = true  // This IS an import
+                    viewModel.importKey(it)
+                },
                 modifier = modifier
             )
         }

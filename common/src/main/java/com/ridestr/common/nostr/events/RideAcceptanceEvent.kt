@@ -21,6 +21,8 @@ object RideAcceptanceEvent {
      * @param escrowType Type of escrow: "cashu_nut14" or "hodl" (null for non-escrow)
      * @param escrowInvoice HTLC token or BOLT11 invoice (null if escrow not used)
      * @param escrowExpiry Unix timestamp when escrow expires (null if no escrow)
+     * @param mintUrl Driver's Cashu mint URL (for multi-mint support)
+     * @param paymentMethod Accepted payment method (confirms rider's request)
      */
     suspend fun create(
         signer: NostrSigner,
@@ -29,7 +31,9 @@ object RideAcceptanceEvent {
         walletPubKey: String? = null,
         escrowType: String? = null,
         escrowInvoice: String? = null,
-        escrowExpiry: Long? = null
+        escrowExpiry: Long? = null,
+        mintUrl: String? = null,
+        paymentMethod: String? = null
     ): Event {
         val content = JSONObject().apply {
             put("status", "accepted")
@@ -39,6 +43,9 @@ object RideAcceptanceEvent {
             escrowType?.let { put("escrow_type", it) }
             escrowInvoice?.let { put("escrow_invoice", it) }
             escrowExpiry?.let { put("escrow_expiry", it) }
+            // Multi-mint support (Issue #13)
+            mintUrl?.let { put("mint_url", it) }
+            paymentMethod?.let { put("payment_method", it) }
         }.toString()
 
         // Add NIP-40 expiration (10 minutes)
@@ -77,6 +84,10 @@ object RideAcceptanceEvent {
             val escrowInvoice = if (json.has("escrow_invoice")) json.getString("escrow_invoice") else null
             val escrowExpiry = if (json.has("escrow_expiry")) json.getLong("escrow_expiry") else null
 
+            // Parse multi-mint fields (Issue #13)
+            val mintUrl = json.optString("mint_url", null).takeIf { !it.isNullOrBlank() }
+            val paymentMethod = json.optString("payment_method", null).takeIf { !it.isNullOrBlank() }
+
             var offerEventId: String? = null
             var riderPubKey: String? = null
 
@@ -99,7 +110,9 @@ object RideAcceptanceEvent {
                 walletPubKey = walletPubKey,
                 escrowType = escrowType,
                 escrowInvoice = escrowInvoice,
-                escrowExpiry = escrowExpiry
+                escrowExpiry = escrowExpiry,
+                mintUrl = mintUrl,
+                paymentMethod = paymentMethod
             )
         } catch (e: Exception) {
             null
@@ -122,5 +135,8 @@ data class RideAcceptanceData(
     // Payment rails escrow fields (null for legacy non-escrow rides)
     val escrowType: String? = null,      // "cashu_nut14" or "hodl"
     val escrowInvoice: String? = null,   // HTLC token or BOLT11 invoice
-    val escrowExpiry: Long? = null       // Unix timestamp when escrow expires
+    val escrowExpiry: Long? = null,      // Unix timestamp when escrow expires
+    // Multi-mint support (Issue #13)
+    val mintUrl: String? = null,         // Driver's Cashu mint URL
+    val paymentMethod: String? = null    // Accepted payment method
 )

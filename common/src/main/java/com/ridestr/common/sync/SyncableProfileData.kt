@@ -109,8 +109,12 @@ sealed class SyncResult {
     /**
      * Successfully synced data.
      * @param itemCount Number of items synced (proofs, rides, vehicles, etc.)
+     * @param metadata Optional metadata about what was synced (for UI display)
      */
-    data class Success(val itemCount: Int) : SyncResult()
+    data class Success(
+        val itemCount: Int,
+        val metadata: SyncMetadata? = null
+    ) : SyncResult()
 
     /**
      * No data found on relays (not an error - user may be new or data deleted).
@@ -127,4 +131,28 @@ sealed class SyncResult {
         val message: String,
         val exception: Exception? = null
     ) : SyncResult()
+}
+
+/**
+ * Metadata about synced data, used for UI display.
+ */
+sealed class SyncMetadata {
+    /** Wallet sync result with balance */
+    data class Wallet(val balanceSats: Long) : SyncMetadata()
+
+    /** Vehicle sync result */
+    data class Vehicles(val count: Int) : SyncMetadata()
+
+    /** Saved locations sync result */
+    data class SavedLocations(val count: Int) : SyncMetadata()
+
+    /** Ride history sync result */
+    data class RideHistory(val count: Int) : SyncMetadata()
+
+    /** Profile sync result (may include vehicles, locations, settings) */
+    data class Profile(
+        val vehicleCount: Int = 0,
+        val savedLocationCount: Int = 0,
+        val settingsRestored: Boolean = false
+    ) : SyncMetadata()
 }

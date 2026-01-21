@@ -59,11 +59,13 @@ import com.ridestr.common.notification.NotificationHelper
 import com.ridestr.common.ui.theme.RidestrTheme
 import com.ridestr.common.ui.WalletDetailScreen
 import com.ridestr.common.ui.WalletSetupScreen
+import com.ridestr.common.ui.ProfileSyncScreen
 import com.ridestr.common.payment.WalletKeyManager
 import com.ridestr.common.payment.WalletService
 import com.ridestr.common.payment.cashu.Nip60WalletSync
 import com.ridestr.common.sync.ProfileSyncManager
 import com.ridestr.common.sync.ProfileSyncState
+import com.ridestr.common.sync.RestoredProfileData
 import com.ridestr.common.sync.Nip60WalletSyncAdapter
 import com.ridestr.common.sync.RideHistorySyncAdapter
 import com.ridestr.common.sync.ProfileSyncAdapter
@@ -85,6 +87,7 @@ enum class Tab {
  */
 enum class Screen {
     ONBOARDING,
+    PROFILE_SYNC,       // Sync profile data on key import (before profile setup)
     PROFILE_SETUP,
     VEHICLE_SETUP,      // Vehicle onboarding for drivers without vehicles
     WALLET_SETUP,       // Wallet onboarding (after vehicle, before location)
@@ -245,23 +248,50 @@ fun DrivestrApp() {
         }
     }
 
-    // Sync all profile data from Nostr on login (for fresh installs importing existing key)
-    // Uses ProfileSyncManager for coordinated, ordered sync of wallet, history, and vehicles
-    LaunchedEffect(uiState.isLoggedIn) {
-        if (uiState.isLoggedIn) {
-            // Only sync if local data is empty (fresh install with imported key)
-            val needsSync = !rideHistoryRepository.hasRides() && !vehicleRepository.hasVehicles()
-            if (needsSync) {
-                // CRITICAL: Refresh KeyManagers from storage
-                // OnboardingViewModel has a separate KeyManager instance that imported the keys,
-                // so other KeyManagers need to reload from SharedPreferences
-                nostrService.keyManager.refreshFromStorage()
-                profileSyncManager.keyManager.refreshFromStorage()
+    // Track if we're doing a key import (vs new key generation) for sync flow
+    var isKeyImport by remember { mutableStateOf(false) }
 
-                android.util.Log.d("MainActivity", "Starting ProfileSyncManager sync (fresh install)")
-                profileSyncManager.onKeyImported()
-            }
+    // Note: Profile sync is now handled by the PROFILE_SYNC screen during onboarding,
+    // not by a background LaunchedEffect. This ensures the sync completes before
+    // the user sees onboarding screens that depend on synced data (like vehicles).
+
+    // Auto-backup vehicles to Nostr when they change (with debounce)
+    val vehicles by vehicleRepository.vehicles.collectAsState()
+    var lastVehicleBackupHash by remember { mutableStateOf(0) }
+    LaunchedEffect(vehicles, uiState.isLoggedIn) {
+        if (!uiState.isLoggedIn) return@LaunchedEffect
+        if (vehicles.isEmpty()) return@LaunchedEffect
+
+        // Use hash to detect actual changes (not just recomposition)
+        val currentHash = vehicles.hashCode()
+        if (currentHash == lastVehicleBackupHash) return@LaunchedEffect
+
+        // Debounce: wait 2 seconds after last change before backing up
+        kotlinx.coroutines.delay(2000)
+
+        // Check hash again after debounce (in case more changes happened)
+        if (vehicles.hashCode() == currentHash) {
+            lastVehicleBackupHash = currentHash
+            android.util.Log.d("MainActivity", "Auto-backing up vehicles to Nostr...")
+            profileSyncManager.backupProfileData()
         }
+    }
+
+    // Auto-backup settings to Nostr when they change (with debounce)
+    val settingsHash by settingsManager.syncableSettingsHash.collectAsState(initial = 0)
+    var lastSettingsBackupHash by remember { mutableStateOf(0) }
+    LaunchedEffect(settingsHash, uiState.isLoggedIn) {
+        if (!uiState.isLoggedIn) return@LaunchedEffect
+        if (settingsHash == 0) return@LaunchedEffect
+        val currentHash = settingsHash
+        if (currentHash == lastSettingsBackupHash) return@LaunchedEffect
+        // Debounce: wait 2 seconds before backing up
+        kotlinx.coroutines.delay(2000)
+        // After debounce, check if settingsHash changed (would trigger new LaunchedEffect)
+        // If we get here and weren't cancelled, proceed with backup
+        lastSettingsBackupHash = currentHash
+        android.util.Log.d("MainActivity", "Auto-backing up settings to Nostr...")
+        profileSyncManager.backupProfileData()
     }
 
     // Check if already logged in on first composition (only if not already at MAIN)
@@ -298,9 +328,57 @@ fun DrivestrApp() {
 
                 OnboardingScreen(
                     viewModel = onboardingViewModel,
-                    onComplete = {
+                    onComplete = { wasKeyImport ->
                         nostrService.connect()
-                        // After login, check each step in order
+
+                        if (wasKeyImport) {
+                            // Key import - need to sync profile from Nostr first
+                            // CRITICAL: Refresh KeyManagers so they can read the imported key
+                            nostrService.keyManager.refreshFromStorage()
+                            profileSyncManager.keyManager.refreshFromStorage()
+                            isKeyImport = true
+                            currentScreen = Screen.PROFILE_SYNC
+                        } else {
+                            // New key generation - no profile to sync, go straight to setup
+                            isKeyImport = false
+                            currentScreen = when {
+                                !uiState.isProfileCompleted -> Screen.PROFILE_SETUP
+                                !hasVehicles -> Screen.VEHICLE_SETUP
+                                !settingsManager.isWalletSetupDone() -> Screen.WALLET_SETUP
+                                else -> Screen.LOCATION_PERMISSION
+                            }
+                        }
+                    },
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
+
+            Screen.PROFILE_SYNC -> {
+                // Check for Ridestr data and sync if found (wallet handled separately by WalletSetupScreen)
+                LaunchedEffect(Unit) {
+                    profileSyncManager.checkAndSyncRidestrData()
+                }
+
+                ProfileSyncScreen(
+                    syncState = syncState,
+                    isDriverApp = true,
+                    onComplete = { restoredData ->
+                        profileSyncManager.resetSyncState()
+                        // After sync, check what was restored and navigate appropriately
+                        val hasVehicles = restoredData.vehicleCount > 0 ||
+                                vehicleRepository.vehicles.value.isNotEmpty()
+
+                        currentScreen = when {
+                            !uiState.isProfileCompleted -> Screen.PROFILE_SETUP
+                            !hasVehicles -> Screen.VEHICLE_SETUP
+                            !settingsManager.isWalletSetupDone() -> Screen.WALLET_SETUP
+                            else -> Screen.LOCATION_PERMISSION
+                        }
+                    },
+                    onSkip = {
+                        profileSyncManager.resetSyncState()
+                        // Skip sync, proceed with normal onboarding
+                        val hasVehicles = vehicleRepository.vehicles.value.isNotEmpty()
                         currentScreen = when {
                             !uiState.isProfileCompleted -> Screen.PROFILE_SETUP
                             !hasVehicles -> Screen.VEHICLE_SETUP
@@ -505,6 +583,12 @@ fun DrivestrApp() {
                     onOpenWalletSettings = {
                         currentScreen = Screen.WALLET_SETTINGS
                     },
+                    onSyncProfile = {
+                        profileSyncManager.checkAndSyncRidestrData()
+                    },
+                    onRefreshVehicles = {
+                        profileSyncManager.checkAndSyncRidestrData()
+                    },
                     modifier = Modifier.padding(innerPadding)
                 )
             }
@@ -684,6 +768,8 @@ fun MainScreen(
     onSetupWallet: () -> Unit,
     onOpenWalletDetail: () -> Unit,
     onOpenWalletSettings: () -> Unit,
+    onSyncProfile: (suspend () -> Unit)? = null,
+    onRefreshVehicles: (suspend () -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val connectedCount = connectionStates.values.count { it == RelayConnectionState.CONNECTED }
@@ -836,6 +922,7 @@ fun MainScreen(
                         vehicleRepository.setPrimaryVehicle(it)
                         settingsManager.setActiveVehicleId(it)  // Keep activeVehicleId in sync
                     },
+                    onRefresh = onRefreshVehicles,
                     modifier = Modifier.padding(innerPadding)
                 )
             }
@@ -847,6 +934,7 @@ fun MainScreen(
                     onOpenTiles = onOpenTiles,
                     onOpenDevOptions = onOpenDevOptions,
                     onOpenWalletSettings = onOpenWalletSettings,
+                    onSyncProfile = onSyncProfile,
                     modifier = Modifier.padding(innerPadding)
                 )
             }

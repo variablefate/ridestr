@@ -29,6 +29,8 @@ object RideOfferEvent {
      * @param fareEstimate Fare in sats
      * @param routeDistanceKm Route distance in kilometers
      * @param routeDurationMin Route duration in minutes
+     * @param mintUrl Rider's Cashu mint URL (for multi-mint support)
+     * @param paymentMethod Payment method for this ride (e.g., "cashu", "fiat_cash")
      */
     suspend fun createBroadcast(
         signer: NostrSigner,
@@ -36,7 +38,9 @@ object RideOfferEvent {
         destination: Location,
         fareEstimate: Double,
         routeDistanceKm: Double,
-        routeDurationMin: Double
+        routeDurationMin: Double,
+        mintUrl: String? = null,
+        paymentMethod: String = "cashu"
     ): Event {
         val content = JSONObject().apply {
             put("fare_estimate", fareEstimate)
@@ -44,6 +48,9 @@ object RideOfferEvent {
             put("destination_area", destination.approximate().toJson())
             put("route_distance_km", routeDistanceKm)
             put("route_duration_min", routeDurationMin)
+            // Multi-mint support (Issue #13)
+            mintUrl?.let { put("mint_url", it) }
+            put("payment_method", paymentMethod)
         }.toString()
 
         // Build tags with geohash for geographic filtering
@@ -85,6 +92,8 @@ object RideOfferEvent {
      * @param pickupRouteMin Optional pre-calculated driver→pickup duration in minutes
      * @param rideRouteKm Optional pre-calculated pickup→destination distance in km
      * @param rideRouteMin Optional pre-calculated pickup→destination duration in minutes
+     * @param mintUrl Rider's Cashu mint URL (for multi-mint support)
+     * @param paymentMethod Payment method for this ride (e.g., "cashu", "fiat_cash")
      */
     suspend fun create(
         signer: NostrSigner,
@@ -99,7 +108,10 @@ object RideOfferEvent {
         rideRouteMin: Double? = null,
         // Payment rails fields
         paymentHash: String? = null,
-        destinationGeohash: String? = null
+        destinationGeohash: String? = null,
+        // Multi-mint support (Issue #13)
+        mintUrl: String? = null,
+        paymentMethod: String = "cashu"
     ): Event {
         // Build plaintext content
         val plaintext = JSONObject().apply {
@@ -114,6 +126,9 @@ object RideOfferEvent {
             // Payment rails: hash for HTLC escrow, geohash for settlement verification
             paymentHash?.let { put("payment_hash", it) }
             destinationGeohash?.let { put("destination_geohash", it) }
+            // Multi-mint support (Issue #13)
+            mintUrl?.let { put("mint_url", it) }
+            put("payment_method", paymentMethod)
         }.toString()
 
         // Encrypt using NIP-44 so only the target driver can read it
@@ -170,6 +185,10 @@ object RideOfferEvent {
                 }
             }
 
+            // Extract multi-mint fields (Issue #13)
+            val mintUrl = json.optString("mint_url", null).takeIf { !it.isNullOrBlank() }
+            val paymentMethod = json.optString("payment_method", "cashu")
+
             BroadcastRideOfferData(
                 eventId = event.id,
                 riderPubKey = event.pubKey,
@@ -179,7 +198,9 @@ object RideOfferEvent {
                 routeDistanceKm = routeDistanceKm,
                 routeDurationMin = routeDurationMin,
                 createdAt = event.createdAt,
-                geohashes = geohashes
+                geohashes = geohashes,
+                mintUrl = mintUrl,
+                paymentMethod = paymentMethod
             )
         } catch (e: Exception) {
             null
@@ -256,6 +277,10 @@ object RideOfferEvent {
             val paymentHash = if (json.has("payment_hash")) json.getString("payment_hash") else null
             val destinationGeohash = if (json.has("destination_geohash")) json.getString("destination_geohash") else null
 
+            // Parse multi-mint fields (Issue #13)
+            val mintUrl = json.optString("mint_url", null).takeIf { !it.isNullOrBlank() }
+            val paymentMethod = json.optString("payment_method", "cashu")
+
             RideOfferData(
                 eventId = encryptedData.eventId,
                 riderPubKey = encryptedData.riderPubKey,
@@ -270,7 +295,9 @@ object RideOfferEvent {
                 rideRouteKm = rideRouteKm,
                 rideRouteMin = rideRouteMin,
                 paymentHash = paymentHash,
-                destinationGeohash = destinationGeohash
+                destinationGeohash = destinationGeohash,
+                mintUrl = mintUrl,
+                paymentMethod = paymentMethod
             )
         } catch (e: Exception) {
             Log.e(TAG, "Failed to decrypt direct offer", e)
@@ -373,7 +400,10 @@ data class RideOfferData(
     val rideRouteMin: Double? = null,
     // Payment rails fields (null for legacy non-escrow rides)
     val paymentHash: String? = null,
-    val destinationGeohash: String? = null
+    val destinationGeohash: String? = null,
+    // Multi-mint support (Issue #13)
+    val mintUrl: String? = null,
+    val paymentMethod: String = "cashu"
 )
 
 /**
@@ -388,5 +418,8 @@ data class BroadcastRideOfferData(
     val routeDistanceKm: Double,
     val routeDurationMin: Double,
     val createdAt: Long,
-    val geohashes: List<String>
+    val geohashes: List<String>,
+    // Multi-mint support (Issue #13)
+    val mintUrl: String? = null,
+    val paymentMethod: String = "cashu"
 )

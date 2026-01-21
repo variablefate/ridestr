@@ -16,6 +16,7 @@ import androidx.compose.ui.unit.dp
 import com.ridestr.common.settings.DisplayCurrency
 import com.ridestr.common.settings.DistanceUnit
 import com.ridestr.common.settings.SettingsManager
+import kotlinx.coroutines.launch
 
 /**
  * Settings screen with back navigation (for modal use).
@@ -65,12 +66,18 @@ fun SettingsContent(
     onOpenTiles: () -> Unit,
     onOpenDevOptions: () -> Unit,
     onOpenWalletSettings: () -> Unit = {},
+    onSyncProfile: (suspend () -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val displayCurrency by settingsManager.displayCurrency.collectAsState()
     val distanceUnit by settingsManager.distanceUnit.collectAsState()
     val notificationSoundEnabled by settingsManager.notificationSoundEnabled.collectAsState()
     val notificationVibrationEnabled by settingsManager.notificationVibrationEnabled.collectAsState()
+
+    // Sync state
+    var isSyncing by remember { mutableStateOf(false) }
+    var syncResult by remember { mutableStateOf<String?>(null) }
+    val coroutineScope = rememberCoroutineScope()
 
     Column(
         modifier = modifier
@@ -161,6 +168,40 @@ fun SettingsContent(
                 icon = Icons.Default.Code,
                 onClick = onOpenDevOptions
             )
+
+            // Profile Sync Section (last item)
+            if (onSyncProfile != null) {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+                Text(
+                    text = "Data Sync",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(vertical = 8.dp)
+                )
+
+                SettingsActionRow(
+                    title = "Sync Profile Data",
+                    description = if (isSyncing) "Syncing..." else syncResult ?: "Sync saved locations and ride history from Nostr",
+                    icon = Icons.Default.CloudSync,
+                    isLoading = isSyncing,
+                    onClick = {
+                        if (!isSyncing) {
+                            coroutineScope.launch {
+                                isSyncing = true
+                                syncResult = null
+                                try {
+                                    onSyncProfile()
+                                    syncResult = "Sync complete"
+                                } catch (e: Exception) {
+                                    syncResult = "Sync failed: ${e.message}"
+                                }
+                                isSyncing = false
+                            }
+                        }
+                    }
+                )
+            }
     }
 }
 
@@ -264,5 +305,54 @@ private fun SettingsNavigationRow(
             contentDescription = "Navigate",
             tint = MaterialTheme.colorScheme.onSurfaceVariant
         )
+    }
+}
+
+@Composable
+private fun SettingsActionRow(
+    title: String,
+    description: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    isLoading: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable(enabled = !isLoading, onClick = onClick)
+            .padding(vertical = 12.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.weight(1f)
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(24.dp)
+            )
+            Spacer(modifier = Modifier.width(16.dp))
+            Column {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Text(
+                    text = description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        if (isLoading) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(24.dp),
+                strokeWidth = 2.dp
+            )
+        }
     }
 }

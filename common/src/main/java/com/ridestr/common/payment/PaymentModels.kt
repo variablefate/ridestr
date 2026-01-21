@@ -173,6 +173,23 @@ data class EscrowLock(
 )
 
 /**
+ * Result of a cross-mint bridge payment.
+ *
+ * @property success Whether the payment was successful
+ * @property amountSats Amount paid (not including fees)
+ * @property feesSats Fees paid (melt fee + Lightning routing)
+ * @property preimage Lightning payment preimage (proof of payment)
+ * @property error Error message if payment failed
+ */
+data class BridgeResult(
+    val success: Boolean,
+    val amountSats: Long = 0,
+    val feesSats: Long = 0,
+    val preimage: String? = null,
+    val error: String? = null
+)
+
+/**
  * Pending HTLC escrow that needs tracking for potential refund.
  *
  * Saved when rider locks funds so they can reclaim after locktime expires

@@ -45,7 +45,7 @@ class RideHistorySyncAdapter(
             if (success) {
                 val rideCount = rideHistoryRepo.rides.value.size
                 Log.d(TAG, "Restored $rideCount rides from Nostr")
-                SyncResult.Success(rideCount)
+                SyncResult.Success(rideCount, SyncMetadata.RideHistory(rideCount))
             } else {
                 Log.d(TAG, "No ride history found on Nostr")
                 SyncResult.NoData("No ride history backup found")

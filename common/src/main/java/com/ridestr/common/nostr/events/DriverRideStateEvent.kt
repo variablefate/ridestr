@@ -27,6 +27,7 @@ object DriverRideStateEvent {
         const val STATUS = "status"
         const val PIN_SUBMIT = "pin_submit"
         const val SETTLEMENT = "settlement"  // Payment rails: records successful escrow settlement
+        const val DEPOSIT_INVOICE_SHARE = "deposit_invoice_share"  // Cross-mint: driver shares deposit invoice
     }
 
     /**
@@ -242,6 +243,23 @@ sealed class DriverRideAction {
         }
     }
 
+    /**
+     * Deposit invoice share action (Cross-Mint).
+     * Driver shares their mint's deposit invoice with rider for Lightning bridge payment.
+     */
+    data class DepositInvoiceShare(
+        val invoice: String,           // BOLT11 invoice from driver's mint
+        val amount: Long,              // Amount in satoshis
+        override val at: Long
+    ) : DriverRideAction() {
+        override fun toJson(): JSONObject = JSONObject().apply {
+            put("action", DriverRideStateEvent.ActionType.DEPOSIT_INVOICE_SHARE)
+            put("invoice", invoice)
+            put("amount", amount)
+            put("at", at)
+        }
+    }
+
     companion object {
         fun fromJson(json: JSONObject): DriverRideAction? {
             return try {
@@ -275,6 +293,15 @@ sealed class DriverRideAction {
                         Settlement(
                             settlementProof = settlementProof,
                             settledAmount = settledAmount,
+                            at = at
+                        )
+                    }
+                    DriverRideStateEvent.ActionType.DEPOSIT_INVOICE_SHARE -> {
+                        val invoice = json.getString("invoice")
+                        val amount = json.getLong("amount")
+                        DepositInvoiceShare(
+                            invoice = invoice,
+                            amount = amount,
                             at = at
                         )
                     }

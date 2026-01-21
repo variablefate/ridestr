@@ -42,7 +42,10 @@ class Nip60WalletSyncAdapter(
 
             if (walletState != null && walletState.proofCount > 0) {
                 Log.d(TAG, "Restored wallet: ${walletState.proofCount} proofs, ${walletState.balance.availableSats} sats")
-                SyncResult.Success(walletState.proofCount)
+                SyncResult.Success(
+                    walletState.proofCount,
+                    SyncMetadata.Wallet(walletState.balance.availableSats)
+                )
             } else if (walletState != null) {
                 Log.d(TAG, "Wallet metadata found but no proofs")
                 SyncResult.NoData("Wallet found but empty (0 proofs)")

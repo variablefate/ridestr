@@ -7,6 +7,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -15,6 +16,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.drivestr.app.viewmodels.DriverStage
 import com.ridestr.common.data.Vehicle
+import kotlinx.coroutines.launch
 
 /**
  * Screen for managing driver's vehicles.
@@ -35,6 +37,7 @@ fun VehiclesScreen(
     onUpdateVehicle: (Vehicle) -> Unit,
     onDeleteVehicle: (String) -> Unit,
     onSetPrimary: (String) -> Unit,
+    onRefresh: (suspend () -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     // Block vehicle changes during an active ride
@@ -48,7 +51,27 @@ fun VehiclesScreen(
     var showAddDialog by remember { mutableStateOf(false) }
     var editingVehicle by remember { mutableStateOf<Vehicle?>(null) }
 
-    Box(modifier = modifier.fillMaxSize()) {
+    // Pull-to-refresh state
+    var isRefreshing by remember { mutableStateOf(false) }
+    val coroutineScope = rememberCoroutineScope()
+
+    PullToRefreshBox(
+        isRefreshing = isRefreshing,
+        onRefresh = {
+            if (onRefresh != null) {
+                coroutineScope.launch {
+                    isRefreshing = true
+                    try {
+                        onRefresh()
+                    } finally {
+                        isRefreshing = false
+                    }
+                }
+            }
+        },
+        modifier = modifier.fillMaxSize()
+    ) {
+    Box(modifier = Modifier.fillMaxSize()) {
         if (vehicles.isEmpty()) {
             // Empty state
             Column(
@@ -146,6 +169,7 @@ fun VehiclesScreen(
             }
         }
     }
+    } // End PullToRefreshBox
 
     // Add Vehicle Dialog
     if (showAddDialog) {

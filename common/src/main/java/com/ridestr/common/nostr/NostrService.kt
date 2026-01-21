@@ -110,7 +110,12 @@ class NostrService(
      * @param location Current driver location
      * @return The event ID if successful, null on failure
      */
-    suspend fun broadcastAvailability(location: Location, vehicle: Vehicle? = null): String? {
+    suspend fun broadcastAvailability(
+        location: Location,
+        vehicle: Vehicle? = null,
+        mintUrl: String? = null,
+        paymentMethods: List<String> = listOf("cashu")
+    ): String? {
         val signer = keyManager.getSigner()
         if (signer == null) {
             Log.e(TAG, "Cannot broadcast availability: Not logged in")
@@ -118,9 +123,15 @@ class NostrService(
         }
 
         return try {
-            val event = DriverAvailabilityEvent.create(signer, location, vehicle = vehicle)
+            val event = DriverAvailabilityEvent.create(
+                signer = signer,
+                location = location,
+                vehicle = vehicle,
+                mintUrl = mintUrl,
+                paymentMethods = paymentMethods
+            )
             relayManager.publish(event)
-            Log.d(TAG, "Broadcast availability: ${event.id}, vehicle: ${vehicle?.shortName() ?: "none"}")
+            Log.d(TAG, "Broadcast availability: ${event.id}, vehicle: ${vehicle?.shortName() ?: "none"}, mint: ${mintUrl ?: "none"}")
             event.id
         } catch (e: Exception) {
             Log.e(TAG, "Failed to broadcast availability", e)
@@ -577,7 +588,12 @@ class NostrService(
      * @param walletPubKey Driver's wallet pubkey for P2PK escrow (separate from Nostr key)
      * @return The event ID if successful, null on failure
      */
-    suspend fun acceptRide(offer: RideOfferData, walletPubKey: String? = null): String? {
+    suspend fun acceptRide(
+        offer: RideOfferData,
+        walletPubKey: String? = null,
+        mintUrl: String? = null,
+        paymentMethod: String? = null
+    ): String? {
         val signer = keyManager.getSigner()
         if (signer == null) {
             Log.e(TAG, "Cannot accept ride: Not logged in")
@@ -589,10 +605,12 @@ class NostrService(
                 signer = signer,
                 offerEventId = offer.eventId,
                 riderPubKey = offer.riderPubKey,
-                walletPubKey = walletPubKey
+                walletPubKey = walletPubKey,
+                mintUrl = mintUrl,
+                paymentMethod = paymentMethod
             )
             relayManager.publish(event)
-            Log.d(TAG, "Accepted ride: ${event.id}")
+            Log.d(TAG, "Accepted ride: ${event.id}, mint: ${mintUrl ?: "none"}, method: ${paymentMethod ?: "none"}")
             event.id
         } catch (e: Exception) {
             Log.e(TAG, "Failed to accept ride", e)
@@ -887,7 +905,9 @@ class NostrService(
         pickupRouteMin: Double? = null,
         rideRouteKm: Double? = null,
         rideRouteMin: Double? = null,
-        paymentHash: String? = null  // HTLC payment hash for escrow
+        paymentHash: String? = null,  // HTLC payment hash for escrow
+        mintUrl: String? = null,
+        paymentMethod: String = "cashu"
     ): String? {
         val signer = keyManager.getSigner()
         if (signer == null) {
@@ -907,10 +927,12 @@ class NostrService(
                 pickupRouteMin = pickupRouteMin,
                 rideRouteKm = rideRouteKm,
                 rideRouteMin = rideRouteMin,
-                paymentHash = paymentHash
+                paymentHash = paymentHash,
+                mintUrl = mintUrl,
+                paymentMethod = paymentMethod
             )
             relayManager.publish(event)
-            Log.d(TAG, "Sent ride offer: ${event.id}${paymentHash?.let { " with payment hash" } ?: ""}")
+            Log.d(TAG, "Sent ride offer: ${event.id}${paymentHash?.let { " with payment hash" } ?: ""}, method: $paymentMethod")
             event.id
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send ride offer", e)
@@ -968,7 +990,9 @@ class NostrService(
         destination: Location,
         fareEstimate: Double,
         routeDistanceKm: Double,
-        routeDurationMin: Double
+        routeDurationMin: Double,
+        mintUrl: String? = null,
+        paymentMethod: String = "cashu"
     ): String? {
         val signer = keyManager.getSigner()
         if (signer == null) {
@@ -983,10 +1007,12 @@ class NostrService(
                 destination = destination,
                 fareEstimate = fareEstimate,
                 routeDistanceKm = routeDistanceKm,
-                routeDurationMin = routeDurationMin
+                routeDurationMin = routeDurationMin,
+                mintUrl = mintUrl,
+                paymentMethod = paymentMethod
             )
             relayManager.publish(event)
-            Log.d(TAG, "Broadcast ride request: ${event.id} (fare=$fareEstimate sats)")
+            Log.d(TAG, "Broadcast ride request: ${event.id} (fare=$fareEstimate sats, method=$paymentMethod)")
             event.id
         } catch (e: Exception) {
             Log.e(TAG, "Failed to broadcast ride request", e)
@@ -1073,7 +1099,12 @@ class NostrService(
      * @param walletPubKey Driver's wallet pubkey for P2PK escrow (separate from Nostr key)
      * @return The event ID if successful, null on failure
      */
-    suspend fun acceptBroadcastRide(request: BroadcastRideOfferData, walletPubKey: String? = null): String? {
+    suspend fun acceptBroadcastRide(
+        request: BroadcastRideOfferData,
+        walletPubKey: String? = null,
+        mintUrl: String? = null,
+        paymentMethod: String? = null
+    ): String? {
         val signer = keyManager.getSigner()
         if (signer == null) {
             Log.e(TAG, "Cannot accept broadcast ride: Not logged in")
@@ -1085,10 +1116,12 @@ class NostrService(
                 signer = signer,
                 offerEventId = request.eventId,
                 riderPubKey = request.riderPubKey,
-                walletPubKey = walletPubKey
+                walletPubKey = walletPubKey,
+                mintUrl = mintUrl,
+                paymentMethod = paymentMethod
             )
             relayManager.publish(event)
-            Log.d(TAG, "Accepted broadcast ride: ${event.id}")
+            Log.d(TAG, "Accepted broadcast ride: ${event.id}, mint: ${mintUrl ?: "none"}, method: ${paymentMethod ?: "none"}")
             event.id
         } catch (e: Exception) {
             Log.e(TAG, "Failed to accept broadcast ride", e)

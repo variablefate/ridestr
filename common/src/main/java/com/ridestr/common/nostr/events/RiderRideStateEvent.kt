@@ -27,6 +27,7 @@ object RiderRideStateEvent {
         const val LOCATION_REVEAL = "location_reveal"
         const val PIN_VERIFY = "pin_verify"
         const val PREIMAGE_SHARE = "preimage_share"  // Payment rails: shares escrow preimage
+        const val BRIDGE_COMPLETE = "bridge_complete"  // Cross-mint: confirms Lightning bridge payment
     }
 
     /**
@@ -189,6 +190,27 @@ object RiderRideStateEvent {
             at = System.currentTimeMillis() / 1000
         )
     }
+
+    /**
+     * Helper to create a bridge complete action.
+     * Called after successful cross-mint Lightning bridge payment.
+     *
+     * @param preimage Lightning payment preimage (64-char hex, proves payment)
+     * @param amountSats Amount paid in satoshis
+     * @param feesSats Fees paid (melt fee + Lightning routing)
+     */
+    fun createBridgeCompleteAction(
+        preimage: String,
+        amountSats: Long,
+        feesSats: Long
+    ): RiderRideAction.BridgeComplete {
+        return RiderRideAction.BridgeComplete(
+            preimage = preimage,
+            amountSats = amountSats,
+            feesSats = feesSats,
+            at = System.currentTimeMillis() / 1000
+        )
+    }
 }
 
 /**
@@ -254,6 +276,26 @@ sealed class RiderRideAction {
         }
     }
 
+    /**
+     * Bridge complete action (Cross-Mint).
+     * Records successful Lightning bridge payment when rider and driver use different mints.
+     * The preimage proves payment was made to driver's mint.
+     */
+    data class BridgeComplete(
+        val preimage: String,       // Lightning payment preimage (proof of payment)
+        val amountSats: Long,       // Amount paid to driver's mint
+        val feesSats: Long,         // Total fees (melt + routing)
+        override val at: Long
+    ) : RiderRideAction() {
+        override fun toJson(): JSONObject = JSONObject().apply {
+            put("action", RiderRideStateEvent.ActionType.BRIDGE_COMPLETE)
+            put("preimage", preimage)
+            put("amount", amountSats)
+            put("fees", feesSats)
+            put("at", at)
+        }
+    }
+
     companion object {
         fun fromJson(json: JSONObject): RiderRideAction? {
             return try {
@@ -285,6 +327,17 @@ sealed class RiderRideAction {
                         PreimageShare(
                             preimageEncrypted = preimageEncrypted,
                             escrowTokenEncrypted = escrowTokenEncrypted,
+                            at = at
+                        )
+                    }
+                    RiderRideStateEvent.ActionType.BRIDGE_COMPLETE -> {
+                        val preimage = json.getString("preimage")
+                        val amount = json.getLong("amount")
+                        val fees = json.getLong("fees")
+                        BridgeComplete(
+                            preimage = preimage,
+                            amountSats = amount,
+                            feesSats = fees,
                             at = at
                         )
                     }
@@ -371,5 +424,20 @@ data class RiderRideStateData(
      */
     fun isPreimageShared(): Boolean {
         return getPreimageShare() != null
+    }
+
+    /**
+     * Get the bridge complete action if present.
+     * Present when cross-mint Lightning bridge was used for payment.
+     */
+    fun getBridgeComplete(): RiderRideAction.BridgeComplete? {
+        return history.filterIsInstance<RiderRideAction.BridgeComplete>().lastOrNull()
+    }
+
+    /**
+     * Check if cross-mint bridge payment was completed.
+     */
+    fun isBridgeComplete(): Boolean {
+        return getBridgeComplete() != null
     }
 }

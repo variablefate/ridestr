@@ -393,6 +393,46 @@ fun DriverModeScreen(
             )
         }
 
+        // Wallet not set up warning (shown when going online without wallet configured)
+        if (uiState.showWalletNotSetupWarning) {
+            AlertDialog(
+                onDismissRequest = { viewModel.dismissWalletWarning() },
+                icon = {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(32.dp)
+                    )
+                },
+                title = { Text("Wallet Not Set Up") },
+                text = {
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            "Your Cashu wallet is not configured. Riders using Cashu payments won't be able to complete rides with you."
+                        )
+                        Text(
+                            "Set up your wallet in Settings → Wallet to receive payments.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { viewModel.proceedWithoutWallet() }) {
+                        Text("Go Online Anyway")
+                    }
+                },
+                dismissButton = {
+                    Button(onClick = { viewModel.dismissWalletWarning() }) {
+                        Text("Set Up Wallet")
+                    }
+                }
+            )
+        }
+
         // Rider cancelled claim dialog (shown when rider cancels after PIN verification)
         if (uiState.showRiderCancelledClaimDialog) {
             AlertDialog(

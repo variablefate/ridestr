@@ -20,6 +20,7 @@ import com.ridestr.common.nostr.events.DriverRideAction
 import com.ridestr.common.nostr.events.DriverRideStateData
 import com.ridestr.common.nostr.events.DriverStatusType
 import com.ridestr.common.nostr.events.Geohash
+import com.ridestr.common.nostr.events.PaymentPath
 import com.ridestr.common.nostr.events.Location
 import com.ridestr.common.nostr.events.RideAcceptanceData
 import com.ridestr.common.nostr.events.RiderRideAction
@@ -1042,6 +1043,10 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             Log.d(TAG, "Pre-calculated routes for direct offer: " +
                 "pickup=${pickupRoute?.distanceKm}km, ride=${rideRoute?.distanceKm}km")
 
+            // Get rider's mint URL and payment method for multi-mint support
+            val riderMintUrl = walletService?.getSavedMintUrl()
+            val paymentMethod = settingsManager.defaultPaymentMethod.value
+
             val eventId = nostrService.sendRideOffer(
                 driverAvailability = driver,
                 pickup = pickup,
@@ -1051,7 +1056,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 pickupRouteMin = pickupRoute?.let { it.durationSeconds / 60.0 },
                 rideRouteKm = rideRoute?.distanceKm,
                 rideRouteMin = rideRoute?.let { it.durationSeconds / 60.0 },
-                paymentHash = paymentHash  // Include in offer for HTLC escrow
+                paymentHash = paymentHash,  // Include in offer for HTLC escrow
+                mintUrl = riderMintUrl,
+                paymentMethod = paymentMethod
             )
 
             if (eventId != null) {
@@ -1175,6 +1182,10 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 )
             } else null
 
+            // Get rider's mint URL and payment method for multi-mint support
+            val riderMintUrl = walletService?.getSavedMintUrl()
+            val paymentMethod = settingsManager.defaultPaymentMethod.value
+
             // Resend offer to same driver with new fare and route metrics
             val eventId = nostrService.sendRideOffer(
                 driverAvailability = driver,
@@ -1184,7 +1195,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 pickupRouteKm = pickupRoute?.distanceKm,
                 pickupRouteMin = pickupRoute?.let { it.durationSeconds / 60.0 },
                 rideRouteKm = rideRoute?.distanceKm,
-                rideRouteMin = rideRoute?.let { it.durationSeconds / 60.0 }
+                rideRouteMin = rideRoute?.let { it.durationSeconds / 60.0 },
+                mintUrl = riderMintUrl,
+                paymentMethod = paymentMethod
             )
 
             if (eventId != null) {
@@ -1253,12 +1266,18 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             val approxDestination = destination.approximate()
             Log.d(TAG, "Broadcasting with approximate locations - pickup: ${approxPickup.lat},${approxPickup.lon}, dest: ${approxDestination.lat},${approxDestination.lon}")
 
+            // Get rider's mint URL and payment method for multi-mint support
+            val riderMintUrl = walletService?.getSavedMintUrl()
+            val paymentMethod = settingsManager.defaultPaymentMethod.value
+
             val eventId = nostrService.broadcastRideRequest(
                 pickup = approxPickup,
                 destination = approxDestination,
                 fareEstimate = fareEstimate,
                 routeDistanceKm = routeResult.distanceKm,
-                routeDurationMin = routeResult.durationSeconds / 60.0
+                routeDurationMin = routeResult.durationSeconds / 60.0,
+                mintUrl = riderMintUrl,
+                paymentMethod = paymentMethod
             )
 
             if (eventId != null) {
@@ -1711,7 +1730,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         Log.d(TAG, "Subscribing to drivers - geohash: $currentSubscriptionGeohash, expanded: $expandSearch")
 
         driverSubscriptionId = nostrService.subscribeToDrivers(filterLocation, expandSearch) { driver ->
-            Log.d(TAG, "Found driver: ${driver.driverPubKey.take(8)}... status=${driver.status}")
+            Log.d(TAG, "Found driver: ${driver.driverPubKey.take(8)}... status=${driver.status}, methods=${driver.paymentMethods}")
 
             val currentDrivers = _uiState.value.availableDrivers.toMutableList()
             val existingIndex = currentDrivers.indexOfFirst { it.driverPubKey == driver.driverPubKey }
@@ -1733,7 +1752,19 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             } else {
-                // Driver is available - add or update
+                // Check payment method compatibility before showing driver
+                val riderMethods = settingsManager.paymentMethods.value
+                if (!isPaymentCompatible(riderMethods, driver.paymentMethods)) {
+                    Log.d(TAG, "Filtering out driver ${driver.driverPubKey.take(8)} - incompatible payment methods: rider=$riderMethods, driver=${driver.paymentMethods}")
+                    // Remove if they were already in the list (e.g., updated their methods)
+                    if (existingIndex >= 0) {
+                        currentDrivers.removeAt(existingIndex)
+                        unsubscribeFromDriverProfile(driver.driverPubKey)
+                    }
+                    return@subscribeToDrivers
+                }
+
+                // Driver is available and compatible - add or update
                 if (existingIndex >= 0) {
                     // Update existing driver
                     currentDrivers[existingIndex] = driver
@@ -1898,6 +1929,13 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             }
             Log.d(TAG, "Sending pickup: ${pickupToSend.lat}, ${pickupToSend.lon} (precise: ${pickup.lat}, ${pickup.lon}, driver close: $driverAlreadyClose)")
 
+            // Determine payment path (same mint vs cross-mint)
+            val riderMintUrl = walletService?.getCurrentMintUrl()
+            val driverMintUrl = acceptance.mintUrl
+            val paymentMethod = acceptance.paymentMethod ?: "cashu"
+            val paymentPath = PaymentPath.determine(riderMintUrl, driverMintUrl, paymentMethod)
+            Log.d(TAG, "PaymentPath: $paymentPath (rider: $riderMintUrl, driver: $driverMintUrl)")
+
             // Lock HTLC escrow NOW using driver's wallet pubkey from acceptance
             // This ensures the P2PK condition matches the key the driver will sign with
             val paymentHash = _uiState.value.activePaymentHash
@@ -1908,33 +1946,40 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             // If driver sent x-only pubkey (32 bytes = 64 hex), add "02" prefix
             val driverP2pkKey = if (rawDriverKey.length == 64) "02$rawDriverKey" else rawDriverKey
 
-            // HTLC Escrow Locking - detailed logging to diagnose failures
-            Log.d(TAG, "=== ATTEMPTING ESCROW LOCK ===")
-            Log.d(TAG, "fareAmount=$fareAmount, paymentHash=${paymentHash?.take(16)}...")
-            Log.d(TAG, "driverP2pkKey (${driverP2pkKey.length} chars)=${driverP2pkKey.take(16)}...")
-            Log.d(TAG, "walletService available: ${walletService != null}")
+            // HTLC Escrow Locking - only for SAME_MINT path
+            // For CROSS_MINT, payment happens via Lightning bridge at pickup
+            val escrowToken = if (paymentPath == PaymentPath.SAME_MINT) {
+                Log.d(TAG, "=== ATTEMPTING ESCROW LOCK (SAME_MINT) ===")
+                Log.d(TAG, "fareAmount=$fareAmount, paymentHash=${paymentHash?.take(16)}...")
+                Log.d(TAG, "driverP2pkKey (${driverP2pkKey.length} chars)=${driverP2pkKey.take(16)}...")
+                Log.d(TAG, "walletService available: ${walletService != null}")
 
-            val escrowToken = if (paymentHash != null && fareAmount > 0) {
-                try {
-                    walletService?.lockForRide(
-                        amountSats = fareAmount,
-                        paymentHash = paymentHash,
-                        driverPubKey = driverP2pkKey,
-                        expirySeconds = 7200L  // 2 hours
-                    )?.htlcToken
-                } catch (e: Exception) {
-                    Log.e(TAG, "Exception during lockForRide: ${e.message}", e)
+                if (paymentHash != null && fareAmount > 0) {
+                    try {
+                        walletService?.lockForRide(
+                            amountSats = fareAmount,
+                            paymentHash = paymentHash,
+                            driverPubKey = driverP2pkKey,
+                            expirySeconds = 7200L  // 2 hours
+                        )?.htlcToken
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Exception during lockForRide: ${e.message}", e)
+                        null
+                    }
+                } else {
+                    Log.w(TAG, "Cannot lock escrow: paymentHash=$paymentHash, fareAmount=$fareAmount")
                     null
                 }
             } else {
-                Log.w(TAG, "Cannot lock escrow: paymentHash=$paymentHash, fareAmount=$fareAmount")
-                null
+                Log.d(TAG, "=== SKIPPING ESCROW LOCK (${paymentPath.name}) ===")
+                Log.d(TAG, "Payment will be handled via ${if (paymentPath == PaymentPath.CROSS_MINT) "Lightning bridge" else paymentPath.name}")
+                null  // No escrow token for cross-mint - payment happens at pickup
             }
 
             if (escrowToken != null) {
                 Log.d(TAG, "=== ESCROW LOCK SUCCESS ===")
                 Log.d(TAG, "Token length: ${escrowToken.length}")
-            } else {
+            } else if (paymentPath == PaymentPath.SAME_MINT) {
                 Log.e(TAG, "=== ESCROW LOCK FAILED ===")
                 Log.e(TAG, "lockForRide returned null - ride will proceed WITHOUT payment security")
             }
@@ -1964,7 +2009,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     precisePickupShared = driverAlreadyClose,  // Mark as shared if sent precise in confirmation
                     rideStage = RideStage.RIDE_CONFIRMED,
                     statusMessage = "Ride confirmed! Tell driver PIN: $pickupPin",
-                    escrowToken = escrowToken  // HTLC token locked with driver's wallet pubkey
+                    escrowToken = escrowToken,  // HTLC token locked with driver's wallet pubkey
+                    paymentPath = paymentPath,
+                    driverMintUrl = driverMintUrl
                 )
 
                 // Save ride state for persistence
@@ -2081,6 +2128,11 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     // TODO: Handle settlement confirmation from driver (Stage 5)
                     Log.d(TAG, "Received settlement confirmation: ${action.settledAmount} sats")
                 }
+                is DriverRideAction.DepositInvoiceShare -> {
+                    // Store deposit invoice for cross-mint bridge payment
+                    Log.d(TAG, "Received deposit invoice from driver: ${action.amount} sats")
+                    handleDepositInvoiceShare(action)
+                }
             }
         }
     }
@@ -2187,20 +2239,41 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             if (isCorrect) {
                 Log.d(TAG, "PIN verified successfully!")
 
-                // CRITICAL: Add delay to ensure distinct timestamp for PreimageShare event
+                // CRITICAL: Add delay to ensure distinct timestamp for payment/preimage events
                 // NIP-33 replaceable events use timestamp (seconds) + event ID for ordering.
-                // Without delay, events in same second use event ID (random hash) as tiebreaker,
-                // causing PreimageShare to sometimes be rejected as "have newer event".
                 delay(1100L)
 
-                // Share preimage and escrow token with driver for HTLC settlement
-                val preimage = state.activePreimage
-                val escrowToken = state.escrowToken
-                Log.d(TAG, "Preparing preimage share: preimage=${preimage != null}, escrowToken=${escrowToken != null}")
-                if (preimage != null) {
-                    sharePreimageWithDriver(confirmationEventId, driverPubKey, preimage, escrowToken)
-                } else {
-                    Log.w(TAG, "No preimage to share - escrow was not set up")
+                // Branch based on payment path
+                when (state.paymentPath) {
+                    PaymentPath.SAME_MINT -> {
+                        // SAME_MINT: Share preimage and escrow token with driver for HTLC settlement
+                        val preimage = state.activePreimage
+                        val escrowToken = state.escrowToken
+                        Log.d(TAG, "SAME_MINT: Preparing preimage share: preimage=${preimage != null}, escrowToken=${escrowToken != null}")
+                        if (preimage != null) {
+                            sharePreimageWithDriver(confirmationEventId, driverPubKey, preimage, escrowToken)
+                        } else {
+                            Log.w(TAG, "No preimage to share - escrow was not set up")
+                        }
+                    }
+                    PaymentPath.CROSS_MINT -> {
+                        // CROSS_MINT: Execute Lightning bridge payment to driver's mint
+                        val depositInvoice = state.driverDepositInvoice
+                        Log.d(TAG, "CROSS_MINT: Preparing bridge payment, invoice=${depositInvoice != null}")
+                        if (depositInvoice != null) {
+                            executeBridgePayment(confirmationEventId, driverPubKey, depositInvoice)
+                        } else {
+                            Log.w(TAG, "No deposit invoice from driver - cannot execute bridge payment")
+                            // TODO: Show error to user - driver didn't share deposit invoice
+                        }
+                    }
+                    PaymentPath.FIAT_CASH -> {
+                        // FIAT_CASH: No digital payment needed
+                        Log.d(TAG, "FIAT_CASH: No digital payment required")
+                    }
+                    PaymentPath.NO_PAYMENT -> {
+                        Log.w(TAG, "NO_PAYMENT: Ride proceeding without payment setup")
+                    }
                 }
 
                 // Update service status to in progress
@@ -2220,7 +2293,6 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 saveRideState()
 
                 // CRITICAL: Add delay to ensure distinct timestamp for LocationReveal event
-                // Same reason as PreimageShare delay above - NIP-33 timestamp ordering
                 delay(1100L)
 
                 // Reveal precise destination to driver now that ride is starting
@@ -2278,6 +2350,83 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             }
+        }
+    }
+
+    /**
+     * Handle deposit invoice share from driver (for cross-mint bridge payment).
+     * Stores the invoice so it can be used when PIN is verified.
+     */
+    private fun handleDepositInvoiceShare(action: DriverRideAction.DepositInvoiceShare) {
+        Log.d(TAG, "Storing deposit invoice for bridge payment: ${action.invoice.take(20)}... (${action.amount} sats)")
+        _uiState.value = _uiState.value.copy(
+            driverDepositInvoice = action.invoice
+        )
+    }
+
+    /**
+     * Execute cross-mint bridge payment via Lightning.
+     * Melts rider's tokens to pay driver's deposit invoice.
+     *
+     * @param confirmationEventId The ride confirmation event ID
+     * @param driverPubKey The driver's public key
+     * @param depositInvoice BOLT11 invoice from driver's mint
+     */
+    private suspend fun executeBridgePayment(
+        confirmationEventId: String,
+        driverPubKey: String,
+        depositInvoice: String
+    ) {
+        Log.d(TAG, "=== EXECUTING CROSS-MINT BRIDGE ===")
+        _uiState.value = _uiState.value.copy(bridgeInProgress = true)
+
+        try {
+            val result = walletService?.bridgePayment(depositInvoice)
+
+            if (result?.success == true) {
+                Log.d(TAG, "Bridge payment successful: ${result.amountSats} sats + ${result.feesSats} fees")
+
+                // Publish BridgeComplete action to rider ride state
+                val bridgeAction = RiderRideStateEvent.createBridgeCompleteAction(
+                    preimage = result.preimage ?: "",
+                    amountSats = result.amountSats,
+                    feesSats = result.feesSats
+                )
+
+                val eventId = historyMutex.withLock {
+                    riderStateHistory.add(bridgeAction)
+                    nostrService.publishRiderRideState(
+                        confirmationEventId = confirmationEventId,
+                        driverPubKey = driverPubKey,
+                        currentPhase = currentRiderPhase,
+                        history = riderStateHistory.toList()
+                    )
+                }
+
+                if (eventId != null) {
+                    Log.d(TAG, "Published BridgeComplete action: $eventId")
+                    myRideEventIds.add(eventId)
+                    _uiState.value = _uiState.value.copy(
+                        bridgeInProgress = false,
+                        bridgeComplete = true
+                    )
+                } else {
+                    Log.e(TAG, "Failed to publish BridgeComplete action")
+                    _uiState.value = _uiState.value.copy(bridgeInProgress = false)
+                }
+            } else {
+                Log.e(TAG, "Bridge payment failed: ${result?.error}")
+                _uiState.value = _uiState.value.copy(
+                    bridgeInProgress = false,
+                    error = "Payment failed: ${result?.error ?: "Unknown error"}"
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception during bridge payment: ${e.message}", e)
+            _uiState.value = _uiState.value.copy(
+                bridgeInProgress = false,
+                error = "Payment failed: ${e.message}"
+            )
         }
     }
 
@@ -2845,6 +2994,19 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Check if rider and driver have at least one compatible payment method.
+     * Used to filter drivers in the available list.
+     */
+    private fun isPaymentCompatible(
+        riderMethods: List<String>,
+        driverMethods: List<String>
+    ): Boolean {
+        // If either list is empty, assume compatibility (fallback to default cashu)
+        if (riderMethods.isEmpty() || driverMethods.isEmpty()) return true
+        return riderMethods.any { it in driverMethods }
+    }
+
     private fun calculateRouteIfReady() {
         val state = _uiState.value
         val pickup = state.pickupLocation ?: return
@@ -3128,6 +3290,13 @@ data class RiderUiState(
     val activePaymentHash: String? = null,          // Payment hash sent in offer
     val escrowToken: String? = null,                // HTLC token for this ride
     val preimageShared: Boolean = false,            // True after preimage shared with driver
+
+    // Multi-mint payment (Issue #13)
+    val paymentPath: PaymentPath = PaymentPath.NO_PAYMENT,  // How payment will be handled
+    val driverMintUrl: String? = null,                       // Driver's mint (from acceptance)
+    val driverDepositInvoice: String? = null,                // BOLT11 invoice from driver's mint (for cross-mint)
+    val bridgeInProgress: Boolean = false,                   // True during cross-mint bridge
+    val bridgeComplete: Boolean = false,                     // True after bridge payment succeeded
 
     // UI
     val statusMessage: String = "Find available drivers",

@@ -2126,6 +2126,66 @@ class CashuBackend(
     }
 
     /**
+     * Get mint quote from an EXTERNAL mint (not the one cdk-kotlin is connected to).
+     * Used for cross-mint bridge: get deposit invoice from driver's mint.
+     *
+     * NUT-04: POST /v1/mint/quote/bolt11
+     * Request: {"amount": <sats>, "unit": "sat"}
+     * Response: {"quote": "<id>", "request": "<bolt11>", "state": "UNPAID", "expiry": <unix_ts>}
+     *
+     * @param amountSats Amount in satoshis
+     * @param mintUrl The external mint URL
+     * @return MintQuote with Lightning invoice, or null on failure
+     */
+    suspend fun getMintQuoteAtMint(amountSats: Long, mintUrl: String): MintQuote? = withContext(Dispatchers.IO) {
+        try {
+            val normalizedUrl = mintUrl.trimEnd('/')
+            Log.d(TAG, "Requesting mint quote from external mint: $normalizedUrl for $amountSats sats")
+
+            val requestBody = JSONObject().apply {
+                put("amount", amountSats)
+                put("unit", "sat")
+            }.toString()
+
+            val request = Request.Builder()
+                .url("$normalizedUrl/v1/mint/quote/bolt11")
+                .post(requestBody.toRequestBody(JSON_MEDIA_TYPE))
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    val errorBody = response.body?.string() ?: "No error body"
+                    Log.e(TAG, "External mint quote failed: ${response.code} - $errorBody")
+                    return@withContext null
+                }
+
+                val body = response.body?.string() ?: return@withContext null
+                val json = JSONObject(body)
+
+                val state = when (json.optString("state", "UNPAID").uppercase()) {
+                    "PAID" -> MintQuoteState.PAID
+                    "ISSUED" -> MintQuoteState.ISSUED
+                    else -> MintQuoteState.UNPAID
+                }
+
+                val quote = MintQuote(
+                    quote = json.getString("quote"),
+                    request = json.getString("request"),
+                    amount = amountSats,
+                    state = state,
+                    expiry = json.optLong("expiry", 0L)
+                )
+
+                Log.d(TAG, "Got mint quote from external mint: ${quote.quote}, invoice: ${quote.request.take(50)}...")
+                quote
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get mint quote from external mint: $mintUrl", e)
+            null
+        }
+    }
+
+    /**
      * Parse quote state string to enum, handling various formats.
      */
     private fun parseQuoteState(stateStr: String): MintQuoteState {

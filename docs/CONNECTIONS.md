@@ -1,6 +1,6 @@
 # Ridestr Module Connections
 
-**Last Updated**: 2026-01-19
+**Last Updated**: 2026-01-21
 
 This document provides a comprehensive view of how all modules connect in the Ridestr codebase. Use this as a reference when making changes to understand what might be affected.
 
@@ -310,26 +310,36 @@ Profile Sync
 │   ├── Depends on: KeyManager (shared)
 │   ├── Depends on: RelayManager (shared)
 │   ├── Manages: All registered SyncAdapters
-│   └── Used by: MainActivity (both apps)
+│   ├── Used by: MainActivity (both apps)
+│   └── backupProfileData() - called by auto-backup observers
 │
 ├── Nip60WalletSyncAdapter (order=0)
 │   ├── Depends on: Nip60WalletSync
 │   └── Restores: Cashu proofs (Kind 7375)
 │
-├── RideHistorySyncAdapter (order=1)
+├── ProfileSyncAdapter (order=1) ★ UNIFIED
+│   ├── Depends on: VehicleRepository (driver)
+│   ├── Depends on: SavedLocationRepository (rider)
+│   ├── Depends on: SettingsManager (settings sync)
+│   ├── Depends on: NostrService
+│   └── Restores: Kind 30177 (vehicles + locations + settings)
+│
+├── RideHistorySyncAdapter (order=2)
 │   ├── Depends on: RideHistoryRepository
 │   ├── Depends on: NostrService
 │   └── Restores: Ride history (Kind 30174)
 │
-├── VehicleSyncAdapter (order=2, driver only)
-│   ├── Depends on: VehicleRepository
-│   ├── Depends on: NostrService
-│   └── Restores: Vehicles (Kind 30175)
+├── ~~VehicleSyncAdapter~~ (DEPRECATED - use ProfileSyncAdapter)
 │
-└── SavedLocationSyncAdapter (order=3, rider only)
-    ├── Depends on: SavedLocationRepository
-    ├── Depends on: NostrService
-    └── Restores: Saved locations (Kind 30176)
+└── ~~SavedLocationSyncAdapter~~ (DEPRECATED - use ProfileSyncAdapter)
+
+Auto-Backup Flow (MainActivity observers):
+├── Driver: vehicleRepository.vehicles → backupProfileData()
+├── Rider: savedLocationRepo.savedLocations → backupProfileData()
+└── Both: settingsManager.syncableSettingsHash → backupProfileData()
+    └── syncableSettingsHash combines: displayCurrency, distanceUnit,
+        notificationSettings, autoOpenNavigation, alwaysAskVehicle,
+        paymentMethods, defaultPaymentMethod, mintUrl, customRelays
 ```
 
 ### State Machines
@@ -359,17 +369,18 @@ State Machines
 
 | Kind | Name | Publisher | Subscriber | Purpose |
 |------|------|-----------|------------|---------|
-| 30173 | Driver Availability | Driver | Rider | Driver broadcasts location/status |
-| 3173 | Ride Offer | Rider | Driver | Rider requests ride (encrypted) |
-| 3174 | Ride Acceptance | Driver | Rider | Driver accepts offer |
+| 30173 | Driver Availability | Driver | Rider | Driver broadcasts location/status + mint_url/payment_methods |
+| 3173 | Ride Offer | Rider | Driver | Rider requests ride + mint_url/payment_method (encrypted) |
+| 3174 | Ride Acceptance | Driver | Rider | Driver accepts + mint_url/payment_method |
 | 3175 | Ride Confirmation | Rider | Driver | Rider confirms with PIN |
 | 30180 | Driver Ride State | Driver | Rider | Status updates, PIN submission |
 | 30181 | Rider Ride State | Rider | Driver | Location reveal, PIN verify, preimage |
 | 3178 | Chat | Both | Both | In-ride messaging (encrypted) |
 | 3179 | Cancellation | Both | Both | Ride cancellation |
 | 30174 | Ride History | Self | Self | Backup (encrypted to self) |
-| 30175 | Vehicles | Driver | Driver | Backup (encrypted to self) |
-| 30176 | Saved Locations | Rider | Rider | Backup (encrypted to self) |
+| 30177 | Unified Profile | Self | Self | Vehicles, locations, settings + payment prefs |
+| 30175 | Vehicles | Driver | Driver | DEPRECATED - use 30177 |
+| 30176 | Saved Locations | Rider | Rider | DEPRECATED - use 30177 |
 | 7375 | Wallet Proofs | Self | Self | NIP-60 wallet proofs (encrypted) |
 | 17375 | Wallet Metadata | Self | Self | NIP-60 wallet metadata (encrypted) |
 
@@ -386,6 +397,23 @@ State Machines
 ```
 
 Both are NIP-44 encrypted to user's pubkey. The `mnemonic` field is a custom extension for cdk-kotlin recovery.
+
+### Multi-Mint Support (Issue #13 - Phase 1)
+
+Protocol events now include payment method fields for multi-mint compatibility:
+
+```
+PaymentMethod enum (RideshareEventKinds.kt)
+├── CASHU - Cashu ecash (NUT-14 HTLC)
+├── LIGHTNING - Lightning Network direct
+└── FIAT_CASH - Cash on delivery
+
+Fields added to events:
+├── Kind 30173 (Availability): mint_url, payment_methods[]
+├── Kind 3173 (Offer): mint_url, payment_method
+├── Kind 3174 (Acceptance): mint_url, payment_method
+└── Kind 30177 (Profile): settings.paymentMethods[], settings.defaultPaymentMethod, settings.mintUrl
+```
 
 ---
 

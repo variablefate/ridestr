@@ -45,19 +45,21 @@ The `common` module contains all shared code used by both rider and driver apps:
 | `RideHistoryEvent.kt` | 30174 | Ride history backup (encrypted to self) |
 | `VehicleBackupEvent.kt` | 30175 | Vehicle list backup (driver) |
 | `SavedLocationBackupEvent.kt` | 30176 | Saved locations backup (rider) |
-| `RideshareEventKinds.kt` | - | Kind constants and expiration times |
+| `ProfileBackupEvent.kt` | 30177 | Unified profile backup (vehicles, locations, settings) |
+| `RideshareEventKinds.kt` | - | Kind constants, expiration times, `PaymentMethod` enum |
 
 ### Sync System (`java/com/ridestr/common/sync/`)
 
 | File | Purpose | Sync Order |
 |------|---------|------------|
-| `ProfileSyncManager.kt` | Central orchestrator | Manages all adapters, coordinates restore |
+| `ProfileSyncManager.kt` | Central orchestrator | Manages all adapters, coordinates restore + auto-backup |
 | `SyncableProfileData.kt` | Interface | Contract for sync adapters |
 | `ProfileSyncState.kt` | Observable state | UI feedback for sync progress |
 | `Nip60WalletSyncAdapter.kt` | Wallet sync | **0** (highest priority) |
-| `RideHistorySyncAdapter.kt` | History sync | **1** |
-| `VehicleSyncAdapter.kt` | Vehicle sync (driver) | **2** |
-| `SavedLocationSyncAdapter.kt` | Location sync (rider) | **3** |
+| `ProfileSyncAdapter.kt` | **Unified profile sync** (vehicles, locations, settings) | **1** |
+| `RideHistorySyncAdapter.kt` | History sync | **2** |
+| ~~`VehicleSyncAdapter.kt`~~ | ~~DEPRECATED~~ | Use ProfileSyncAdapter |
+| ~~`SavedLocationSyncAdapter.kt`~~ | ~~DEPRECATED~~ | Use ProfileSyncAdapter |
 
 ### Data Repositories (`java/com/ridestr/common/data/`)
 
@@ -99,7 +101,7 @@ The `common` module contains all shared code used by both rider and driver apps:
 | `location/GeocodingService.kt` | Address search/reverse geocoding |
 | `notification/NotificationHelper.kt` | Push notification management |
 | `notification/SoundManager.kt` | Sound effects for ride events |
-| `settings/SettingsManager.kt` | App settings persistence |
+| `settings/SettingsManager.kt` | App settings persistence + `syncableSettingsHash` for auto-backup |
 
 ---
 
@@ -119,10 +121,11 @@ The `common` module contains all shared code used by both rider and driver apps:
 | `ProfileSyncManager` | All SyncAdapters | Coordinated restore | `syncable.fetchFromNostr()` |
 | `RideHistorySyncAdapter` | `RideHistoryRepository` | Data source | `repo.syncFromNostr()` |
 | `RideHistorySyncAdapter` | `NostrService` | Backup publishing | `nostrService.publishRideHistoryBackup()` |
-| `VehicleSyncAdapter` | `VehicleRepository` | Data source | `repo.restoreFromBackup()` |
-| `VehicleSyncAdapter` | `NostrService` | Backup publishing | `nostrService.backupVehicles()` |
-| `SavedLocationSyncAdapter` | `SavedLocationRepository` | Data source | `repo.restoreFromBackup()` |
-| `SavedLocationSyncAdapter` | `NostrService` | Backup publishing | `nostrService.backupSavedLocations()` |
+| `ProfileSyncAdapter` | `VehicleRepository` | Vehicle data (driver) | `repo.restoreFromBackup()` |
+| `ProfileSyncAdapter` | `SavedLocationRepository` | Location data (rider) | `repo.restoreFromBackup()` |
+| `ProfileSyncAdapter` | `SettingsManager` | Settings sync | `settingsManager.restoreFromBackup()` |
+| `ProfileSyncAdapter` | `NostrService` | Unified backup (Kind 30177) | `nostrService.backupProfile()` |
+| `SettingsManager` | MainActivity | Auto-backup observer | `syncableSettingsHash` Flow triggers backup |
 | `WalletDetailScreen` | `WalletService` | Deposit/Withdraw | `walletService.requestDeposit()` |
 | `RelayManager` | Nostr Relays (WebSocket) | Event transport | WebSocket connections |
 
@@ -199,6 +202,38 @@ Both wallet event types are fully NIP-60 compliant:
 ### Profile Sync Order
 When user imports existing key, sync happens in this order:
 1. **Wallet** (order=0) - Highest priority, needed for payments
-2. **Ride History** (order=1) - May reference payments
-3. **Vehicles** (order=2, driver only) - Profile data
-4. **Saved Locations** (order=3, rider only) - Convenience data
+2. **Profile** (order=1) - Unified: vehicles, saved locations, settings (Kind 30177)
+3. **Ride History** (order=2) - May reference payments
+
+### Auto-Backup Observer Pattern (January 2026)
+Both apps automatically backup profile data when it changes:
+
+**MainActivity observers:**
+- `vehicles` → Watches `VehicleRepository.vehicles` (driver app)
+- `savedLocations` → Watches `SavedLocationRepository.savedLocations` (rider app)
+- `settingsHash` → Watches `SettingsManager.syncableSettingsHash` (both apps)
+
+**Pattern:**
+```kotlin
+val settingsHash by settingsManager.syncableSettingsHash.collectAsState(initial = 0)
+LaunchedEffect(settingsHash, uiState.isLoggedIn) {
+    if (!uiState.isLoggedIn) return@LaunchedEffect
+    kotlinx.coroutines.delay(2000) // Debounce
+    profileSyncManager.backupProfileData()
+}
+```
+
+**`syncableSettingsHash`** combines all synced settings into a single hash:
+- Display currency, distance unit, notification preferences
+- Auto-open navigation, always-ask-vehicle
+- Payment methods, default payment method, mint URL
+- Custom relays
+
+When ANY setting changes, the hash changes, triggering auto-backup to Nostr.
+
+### Multi-Mint Support (Issue #13 - Phase 1)
+Protocol events now include payment method fields for multi-mint compatibility:
+- `PaymentMethod` enum: `CASHU`, `LIGHTNING`, `FIAT_CASH` in `RideshareEventKinds.kt`
+- `mint_url` and `payment_methods` in Driver Availability (Kind 30173)
+- `mint_url` and `payment_method` in Ride Offer (Kind 3173) and Acceptance (Kind 3174)
+- `paymentMethods`, `defaultPaymentMethod`, `mintUrl` in SettingsBackup (Kind 30177)

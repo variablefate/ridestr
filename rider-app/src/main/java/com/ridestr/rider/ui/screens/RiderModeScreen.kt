@@ -87,6 +87,7 @@ fun RiderModeScreen(
     settingsManager: SettingsManager,
     onOpenTiles: () -> Unit,
     onOpenWallet: () -> Unit = {},
+    onRefreshSavedLocations: (suspend () -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -347,7 +348,8 @@ fun RiderModeScreen(
                     onUpdateNickname = viewModel::updateFavoriteNickname,
                     onUnpinFavorite = viewModel::unpinFavorite,
                     onDeleteSavedLocation = viewModel::removeSavedLocation,
-                    onSwapAddresses = viewModel::swapAddresses
+                    onSwapAddresses = viewModel::swapAddresses,
+                    onRefreshSavedLocations = onRefreshSavedLocations
                 )
             }
             RideStage.BROADCASTING_REQUEST -> {
@@ -455,7 +457,8 @@ private fun IdleContent(
     onUpdateNickname: (String, String?) -> Unit,
     onUnpinFavorite: (String) -> Unit,
     onDeleteSavedLocation: (String) -> Unit,
-    onSwapAddresses: () -> Unit
+    onSwapAddresses: () -> Unit,
+    onRefreshSavedLocations: (suspend () -> Unit)? = null
 ) {
     // Track whether driver selection sheet is shown
     var showDriverSelectionSheet by remember { mutableStateOf(false) }
@@ -568,7 +571,8 @@ private fun IdleContent(
                     onUpdateNickname = onUpdateNickname,
                     onUnpinFavorite = onUnpinFavorite,
                     onDeleteSavedLocation = onDeleteSavedLocation,
-                    onSwapAddresses = onSwapAddresses
+                    onSwapAddresses = onSwapAddresses,
+                    onRefreshSavedLocations = onRefreshSavedLocations
                 )
             } else {
                 ManualLocationInputCard(
@@ -622,7 +626,8 @@ private fun GeocodingLocationInputCard(
     onUpdateNickname: (String, String?) -> Unit,
     onUnpinFavorite: (String) -> Unit,
     onDeleteSavedLocation: (String) -> Unit,
-    onSwapAddresses: () -> Unit
+    onSwapAddresses: () -> Unit,
+    onRefreshSavedLocations: (suspend () -> Unit)? = null
 ) {
     val context = LocalContext.current
     var pickupQuery by rememberSaveable { mutableStateOf("") }
@@ -928,6 +933,52 @@ private fun GeocodingLocationInputCard(
                 Spacer(modifier = Modifier.height(16.dp))
                 HorizontalDivider()
                 Spacer(modifier = Modifier.height(12.dp))
+
+                // Saved Locations header with refresh button
+                var isRefreshing by remember { mutableStateOf(false) }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Saved Places",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (onRefreshSavedLocations != null) {
+                        IconButton(
+                            onClick = {
+                                if (!isRefreshing) {
+                                    scope.launch {
+                                        isRefreshing = true
+                                        try {
+                                            onRefreshSavedLocations()
+                                        } finally {
+                                            isRefreshing = false
+                                        }
+                                    }
+                                }
+                            },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            if (isRefreshing) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.Refresh,
+                                    contentDescription = "Refresh saved locations",
+                                    modifier = Modifier.size(18.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
 
                 // Determine which field to populate when tapping
                 // Fill pickup only if:

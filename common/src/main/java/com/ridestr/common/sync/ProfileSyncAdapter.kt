@@ -55,13 +55,16 @@ class ProfileSyncAdapter(
             if (profileData != null) {
                 // Restore from unified backup
                 var itemsRestored = 0
+                var restoredVehicles = 0
+                var restoredLocations = 0
 
                 // Restore vehicles (driver app)
                 if (profileData.vehicles.isNotEmpty()) {
                     vehicleRepository?.let { repo ->
                         restoreVehicles(repo, profileData.vehicles)
-                        itemsRestored += profileData.vehicles.size
-                        Log.d(TAG, "Restored ${profileData.vehicles.size} vehicles")
+                        restoredVehicles = profileData.vehicles.size
+                        itemsRestored += restoredVehicles
+                        Log.d(TAG, "Restored $restoredVehicles vehicles")
                     }
                 }
 
@@ -69,20 +72,28 @@ class ProfileSyncAdapter(
                 if (profileData.savedLocations.isNotEmpty()) {
                     savedLocationRepository?.let { repo ->
                         restoreLocations(repo, profileData.savedLocations)
-                        itemsRestored += profileData.savedLocations.size
-                        Log.d(TAG, "Restored ${profileData.savedLocations.size} saved locations")
+                        restoredLocations = profileData.savedLocations.size
+                        itemsRestored += restoredLocations
+                        Log.d(TAG, "Restored $restoredLocations saved locations")
                     }
                 }
 
                 // Restore settings
+                val hadSettings = profileData.settings != null
                 settingsManager.restoreFromBackup(profileData.settings)
                 Log.d(TAG, "Restored settings")
 
+                val metadata = SyncMetadata.Profile(
+                    vehicleCount = restoredVehicles,
+                    savedLocationCount = restoredLocations,
+                    settingsRestored = hadSettings
+                )
+
                 if (itemsRestored > 0) {
-                    SyncResult.Success(itemsRestored)
+                    SyncResult.Success(itemsRestored, metadata)
                 } else {
                     // Settings were restored but no vehicles/locations
-                    SyncResult.Success(1)  // Count settings as 1 item
+                    SyncResult.Success(1, metadata)  // Count settings as 1 item
                 }
             } else {
                 // No unified profile found - try legacy migration
