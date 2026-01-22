@@ -62,6 +62,32 @@ The `common` module contains all shared code used by both rider and driver apps:
 | ~~`VehicleSyncAdapter.kt`~~ | ~~DEPRECATED~~ | Use ProfileSyncAdapter |
 | ~~`SavedLocationSyncAdapter.kt`~~ | ~~DEPRECATED~~ | Use ProfileSyncAdapter |
 
+### State Machine (`java/com/ridestr/common/state/`)
+
+Formal state machine implementation following the AtoB pattern with named guards and actions.
+
+| File | Purpose | Key Components |
+|------|---------|----------------|
+| `RideState.kt` | Unified state enum | `CREATED`, `ACCEPTED`, `CONFIRMED`, `EN_ROUTE`, `ARRIVED`, `IN_PROGRESS`, `COMPLETED`, `CANCELLED` |
+| `RideEvent.kt` | Event types sealed class | `Accept`, `Confirm`, `StartRoute`, `Arrive`, `VerifyPin`, `StartRide`, `Complete`, `Cancel`, etc. |
+| `RideContext.kt` | Guard/action evaluation context | Participant identity, ride IDs, location data, payment data, PIN state |
+| `RideTransition.kt` | Transition table (16 transitions) | `from`, `eventType`, `to`, `guard`, `action` |
+| `RideGuards.kt` | Named guard functions | `isRider`, `isDriver`, `isPinVerified`, `hasEscrowLocked`, `canSettle`, etc. |
+| `RideActions.kt` | Named action functions | `assignDriver`, `lockEscrow`, `startRideAfterPin`, `settlePayment` |
+| `RideStateMachine.kt` | Main processor | `processEvent()`, `canTransition()`, `availableEvents()` |
+
+**State Flow:**
+```
+CREATED → ACCEPTED → CONFIRMED → EN_ROUTE → ARRIVED → IN_PROGRESS → COMPLETED
+   ↓         ↓          ↓           ↓          ↓           ↓
+   └─────────┴──────────┴───────────┴──────────┴───────────┴──→ CANCELLED
+```
+
+**Integration (Phase 1 - Validation Only):**
+- ViewModels create `RideContext` and call `validateTransition()` before state changes
+- Invalid transitions logged as warnings but don't block existing behavior
+- Guards evaluate authorization (e.g., only rider can confirm, only driver can complete)
+
 ### Data Repositories (`java/com/ridestr/common/data/`)
 
 | File | Purpose | Key Methods |
@@ -140,6 +166,10 @@ The `common` module contains all shared code used by both rider and driver apps:
 | `SettingsManager` | MainActivity | Auto-backup observer | `syncableSettingsHash` Flow triggers backup |
 | `WalletDetailScreen` | `WalletService` | Deposit/Withdraw | `walletService.requestDeposit()` |
 | `RelayManager` | Nostr Relays (WebSocket) | Event transport | WebSocket connections |
+| `RideStateMachine` | `DriverViewModel` | Transition validation | `stateMachine.processEvent(event, state, context)` |
+| `RideStateMachine` | `RiderViewModel` | Transition validation | `stateMachine.canTransition(state, "CONFIRM", context)` |
+| `RideGuards` | `RideContext` | Authorization evaluation | `Guards.isRider(context)` |
+| `RideActions` | `ActionHandler` | Side effect execution | `handler.assignDriver(context, event)` |
 
 ---
 

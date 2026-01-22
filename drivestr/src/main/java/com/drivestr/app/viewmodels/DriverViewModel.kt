@@ -33,6 +33,13 @@ import com.ridestr.common.payment.PaymentCrypto
 import com.ridestr.common.payment.WalletService
 import com.ridestr.common.routing.RouteResult
 import com.ridestr.common.routing.ValhallaRoutingService
+import com.ridestr.common.state.RideContext
+import com.ridestr.common.state.RideEvent
+import com.ridestr.common.state.RideState
+import com.ridestr.common.state.RideStateMachine
+import com.ridestr.common.state.TransitionResult
+import com.ridestr.common.state.fromDriverStage
+import com.ridestr.common.state.toDriverStageName
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -183,6 +190,55 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
     // Rider profile subscription tracking
     private val riderProfileSubscriptionIds = mutableMapOf<String, String>()
+
+    // === STATE MACHINE (Phase 1: Validation Only) ===
+    // The state machine validates transitions but doesn't control flow yet.
+    // It logs warnings when existing code attempts invalid transitions.
+    private val stateMachine = RideStateMachine()
+    private var rideState: RideState = RideState.CANCELLED  // No active ride
+    private var rideContext: RideContext? = null
+
+    /**
+     * Validate a state transition without executing it.
+     * Returns true if valid, logs warning and returns false if invalid.
+     */
+    private fun validateTransition(event: RideEvent): Boolean {
+        val ctx = rideContext ?: RideContext(
+            riderPubkey = "",
+            inputterPubkey = nostrService.getPubKeyHex() ?: ""
+        )
+        val canTransition = stateMachine.canTransition(rideState, ctx, event)
+        if (!canTransition) {
+            Log.w(TAG, "STATE_MACHINE: Invalid transition attempted - " +
+                      "State: $rideState, Event: ${event.eventType}")
+        }
+        return canTransition
+    }
+
+    /**
+     * Update the state machine state (for tracking only in Phase 1).
+     */
+    private fun updateStateMachineState(newState: RideState, newContext: RideContext? = null) {
+        val oldState = rideState
+        rideState = newState
+        if (newContext != null) {
+            rideContext = newContext
+        }
+        Log.d(TAG, "STATE_MACHINE: $oldState -> $newState")
+    }
+
+    /**
+     * Map current DriverStage to RideState.
+     */
+    private fun currentRideState(): RideState = when (_uiState.value.stage) {
+        DriverStage.OFFLINE -> RideState.CANCELLED
+        DriverStage.AVAILABLE -> RideState.CREATED  // Waiting for acceptance = pre-created
+        DriverStage.RIDE_ACCEPTED -> RideState.ACCEPTED
+        DriverStage.EN_ROUTE_TO_PICKUP -> RideState.EN_ROUTE
+        DriverStage.ARRIVED_AT_PICKUP -> RideState.ARRIVED
+        DriverStage.IN_RIDE -> RideState.IN_PROGRESS
+        DriverStage.RIDE_COMPLETED -> RideState.COMPLETED
+    }
 
     /**
      * Helper to add a status action to history and publish driver ride state.
@@ -853,6 +909,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Guard: Not in an active ride
         if (state.stage == DriverStage.OFFLINE || state.stage == DriverStage.AVAILABLE) return
 
+        // STATE_MACHINE: Validate CANCEL transition
+        val myPubkey = nostrService.getPubKeyHex() ?: ""
+        validateTransition(RideEvent.Cancel(myPubkey, "Driver cancelled"))
+
         // Set cancelling flag IMMEDIATELY (synchronous) to prevent race conditions
         _uiState.value = state.copy(isCancelling = true)
 
@@ -1094,6 +1154,27 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             // Without this, history from ride #1 (e.g., CANCELLED) would pollute ride #2's events
             clearDriverStateHistory()
 
+            // STATE_MACHINE: Initialize context for new ride and validate ACCEPT transition
+            val myPubkey = nostrService.getPubKeyHex() ?: ""
+            val newContext = RideContext.forOffer(
+                riderPubkey = offer.riderPubKey,
+                approxPickup = offer.approxPickup,
+                destination = offer.destination,
+                fareEstimateSats = offer.fareEstimate.toLong(),
+                offerEventId = offer.eventId,
+                paymentHash = offer.paymentHash,
+                riderMintUrl = offer.mintUrl,
+                paymentMethod = offer.paymentMethod ?: "cashu"
+            )
+            rideContext = newContext
+            rideState = RideState.CREATED  // Offer exists = CREATED state
+            validateTransition(RideEvent.Accept(
+                inputterPubkey = myPubkey,
+                driverPubkey = myPubkey,
+                walletPubkey = walletService?.getWalletPubKey(),
+                mintUrl = walletService?.getSavedMintUrl()
+            ))
+
             _uiState.value = _uiState.value.copy(isProcessingOffer = true)
 
             // Get wallet pubkey for P2PK escrow (driver will sign with this key to claim)
@@ -1155,6 +1236,16 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     crossMintPaymentComplete = false,  // Reset for new ride
                     pendingDepositQuoteId = null,      // Reset pending deposit
                     pendingDepositAmount = null
+                )
+
+                // STATE_MACHINE: Update state after successful acceptance
+                updateStateMachineState(
+                    RideState.ACCEPTED,
+                    rideContext?.withDriver(
+                        driverPubkey = myPubkey,
+                        driverWalletPubkey = walletPubKey,
+                        driverMintUrl = driverMintUrl
+                    )
                 )
 
                 // Save ride state for persistence
@@ -1927,6 +2018,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         val state = _uiState.value
         if (state.stage != DriverStage.IN_RIDE) return
 
+        // STATE_MACHINE: Validate COMPLETE transition
+        val myPubkey = nostrService.getPubKeyHex() ?: ""
+        validateTransition(RideEvent.Complete(myPubkey, state.acceptedOffer?.fareEstimate?.toLong()))
+
         val paymentStatus = getPaymentStatus()
         Log.d(TAG, "completeRide: paymentStatus=$paymentStatus")
 
@@ -2084,6 +2179,15 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             _uiState.value = _uiState.value.copy(
                 confirmationEventId = confirmation.eventId,
                 precisePickupLocation = confirmation.precisePickup
+            )
+
+            // STATE_MACHINE: Update state to CONFIRMED after receiving confirmation
+            updateStateMachineState(
+                RideState.CONFIRMED,
+                rideContext?.withConfirmation(
+                    confirmationEventId = confirmation.eventId,
+                    precisePickup = confirmation.precisePickup
+                )
             )
 
             // Subscribe to chat messages for this ride

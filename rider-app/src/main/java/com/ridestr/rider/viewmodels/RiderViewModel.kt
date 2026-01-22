@@ -41,6 +41,11 @@ import com.ridestr.common.settings.SettingsManager
 import com.ridestr.common.routing.ValhallaRoutingService
 import com.ridestr.common.payment.PaymentCrypto
 import com.ridestr.common.payment.WalletService
+import com.ridestr.common.state.RideContext
+import com.ridestr.common.state.RideEvent
+import com.ridestr.common.state.RideState
+import com.ridestr.common.state.RideStateMachine
+import com.ridestr.common.state.TransitionResult
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -173,6 +178,56 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
     // Current phase for rider ride state
     private var currentRiderPhase = RiderRideStateEvent.Phase.AWAITING_DRIVER
+
+    // === STATE MACHINE (Phase 1: Validation Only) ===
+    // The state machine validates transitions but doesn't control flow yet.
+    // It logs warnings when existing code attempts invalid transitions.
+    private val stateMachine = RideStateMachine()
+    private var rideState: RideState = RideState.CANCELLED  // No active ride
+    private var rideContext: RideContext? = null
+
+    /**
+     * Validate a state transition without executing it.
+     * Returns true if valid, logs warning and returns false if invalid.
+     */
+    private fun validateTransition(event: RideEvent): Boolean {
+        val ctx = rideContext ?: RideContext(
+            riderPubkey = nostrService.getPubKeyHex() ?: "",
+            inputterPubkey = nostrService.getPubKeyHex() ?: ""
+        )
+        val canTransition = stateMachine.canTransition(rideState, ctx, event)
+        if (!canTransition) {
+            Log.w(TAG, "STATE_MACHINE: Invalid transition attempted - " +
+                      "State: $rideState, Event: ${event.eventType}")
+        }
+        return canTransition
+    }
+
+    /**
+     * Update the state machine state (for tracking only in Phase 1).
+     */
+    private fun updateStateMachineState(newState: RideState, newContext: RideContext? = null) {
+        val oldState = rideState
+        rideState = newState
+        if (newContext != null) {
+            rideContext = newContext
+        }
+        Log.d(TAG, "STATE_MACHINE: $oldState -> $newState")
+    }
+
+    /**
+     * Map current RideStage to RideState.
+     */
+    private fun currentRideState(): RideState = when (_uiState.value.rideStage) {
+        RideStage.IDLE -> RideState.CANCELLED
+        RideStage.BROADCASTING_REQUEST -> RideState.CREATED
+        RideStage.WAITING_FOR_ACCEPTANCE -> RideState.CREATED
+        RideStage.DRIVER_ACCEPTED -> RideState.ACCEPTED
+        RideStage.RIDE_CONFIRMED -> RideState.CONFIRMED
+        RideStage.DRIVER_ARRIVED -> RideState.ARRIVED
+        RideStage.IN_PROGRESS -> RideState.IN_PROGRESS
+        RideStage.COMPLETED -> RideState.COMPLETED
+    }
 
     /**
      * Close all ride-related subscriptions.
@@ -1031,6 +1086,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isSendingOffer = true)
 
+            // STATE_MACHINE: Reset state for new ride
+            rideState = RideState.CANCELLED  // Will be set to CREATED after offer sent
+
             // Generate HTLC preimage and payment hash for escrow
             val preimage = PaymentCrypto.generatePreimage()
             val paymentHash = PaymentCrypto.computePaymentHash(preimage)
@@ -1099,6 +1157,20 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     activePaymentHash = paymentHash
                     // escrowToken is set in autoConfirmRide after we get driver's wallet pubkey
                 )
+
+                // STATE_MACHINE: Update state to CREATED after offer sent
+                val myPubkey = nostrService.getPubKeyHex() ?: ""
+                val newContext = RideContext.forOffer(
+                    riderPubkey = myPubkey,
+                    approxPickup = pickup,
+                    destination = destination,
+                    fareEstimateSats = fareAmount,
+                    offerEventId = eventId,
+                    paymentHash = paymentHash,
+                    riderMintUrl = riderMintUrl,
+                    paymentMethod = paymentMethod ?: "cashu"
+                )
+                updateStateMachineState(RideState.CREATED, newContext)
             } else {
                 // Clear escrow on failure
                 _uiState.value = _uiState.value.copy(
@@ -1606,6 +1678,12 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun clearRide() {
         val state = _uiState.value
+
+        // STATE_MACHINE: Validate CANCEL transition (clearRide is rider's cancel)
+        val myPubkey = nostrService.getPubKeyHex() ?: ""
+        if (state.rideStage != RideStage.IDLE && state.rideStage != RideStage.COMPLETED) {
+            validateTransition(RideEvent.Cancel(myPubkey, "Rider cleared ride"))
+        }
 
         // DEBUG: Log cancellation with stack trace to help identify phantom cancellations
         Log.w(TAG, "=== CLEAR RIDE CALLED ===")
