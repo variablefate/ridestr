@@ -11,8 +11,16 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
+import com.ridestr.common.nostr.relay.RelayConnectionState
 import com.ridestr.common.settings.SettingsManager
+import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * Standalone relay management screen accessible from:
@@ -26,9 +34,12 @@ fun RelayManagementScreen(
     settingsManager: SettingsManager,
     connectedCount: Int,
     totalRelays: Int,
+    connectionStates: Map<String, RelayConnectionState> = emptyMap(),
     onBack: () -> Unit,
+    onReconnect: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
+    var isReconnecting by remember { mutableStateOf(false) }
     // Relay management state - derive effectiveRelays reactively from customRelays
     val customRelays by settingsManager.customRelays.collectAsState()
     val effectiveRelays = remember(customRelays) {
@@ -105,9 +116,106 @@ fun RelayManagementScreen(
                         totalRelays = totalRelays
                     )
                 }
+
+                // Reconnect button
+                if (onReconnect != null) {
+                    Button(
+                        onClick = {
+                            isReconnecting = true
+                            onReconnect()
+                            // Reset after a brief delay (reconnection is async)
+                            MainScope().launch {
+                                delay(2000)
+                                isReconnecting = false
+                            }
+                        },
+                        enabled = !isReconnecting,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp)
+                            .padding(bottom = 16.dp)
+                    ) {
+                        if (isReconnecting) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onPrimary
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Reconnecting...")
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.Refresh,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Reconnect to Relays")
+                        }
+                    }
+                }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            // Individual Relay Status (with green/red dots)
+            if (connectionStates.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp)
+                    ) {
+                        Text(
+                            text = "Connection Details",
+                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.padding(bottom = 12.dp)
+                        )
+
+                        connectionStates.forEach { (url, state) ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                // Status dot
+                                Box(
+                                    modifier = Modifier
+                                        .size(10.dp)
+                                        .clip(CircleShape)
+                                        .background(
+                                            when (state) {
+                                                RelayConnectionState.CONNECTED -> Color(0xFF4CAF50)
+                                                RelayConnectionState.CONNECTING -> Color(0xFFFFC107)
+                                                RelayConnectionState.DISCONNECTING -> Color(0xFFFFC107)
+                                                RelayConnectionState.DISCONNECTED -> Color(0xFFF44336)
+                                            }
+                                        )
+                                )
+
+                                Spacer(modifier = Modifier.width(12.dp))
+
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = url.removePrefix("wss://"),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                    Text(
+                                        text = state.name.lowercase().replace('_', ' '),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
 
             // Relay Info
             Text(

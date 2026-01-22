@@ -46,6 +46,7 @@ fun WalletSettingsScreen(
     val balance by walletService.balance.collectAsState()
     val mintName by walletService.currentMintName.collectAsState()
     val diagnostics by walletService.diagnostics.collectAsState()
+    val hasRecoveryTokens by walletService.hasRecoveryTokens.collectAsState()
 
     val scope = rememberCoroutineScope()
 
@@ -82,6 +83,99 @@ fun WalletSettingsScreen(
                 .verticalScroll(rememberScrollState())
         ) {
             Spacer(modifier = Modifier.height(8.dp))
+
+            // === Recovery Notification Banner ===
+            if (hasRecoveryTokens) {
+                var isRecovering by remember { mutableStateOf(false) }
+                var recoveryResult by remember { mutableStateOf<String?>(null) }
+
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Warning,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Funds Need Recovery",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onErrorContainer
+                                )
+                                Text(
+                                    text = "Some funds failed to sync. Tap to recover them.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onErrorContainer
+                                )
+                            }
+                        }
+
+                        recoveryResult?.let { result ->
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = result,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (result.contains("Recovered") || result.contains("success", ignoreCase = true))
+                                    MaterialTheme.colorScheme.primary
+                                else
+                                    MaterialTheme.colorScheme.error
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Button(
+                            onClick = {
+                                scope.launch {
+                                    isRecovering = true
+                                    recoveryResult = null
+                                    try {
+                                        val result = walletService.recoverSavedTokens()
+                                        recoveryResult = if (result.success && result.claimedCount > 0) {
+                                            "Recovered ${result.claimedCount} token(s): ${result.totalSats} sats"
+                                        } else if (result.claimedCount == 0 && result.error == null) {
+                                            "No tokens to recover"
+                                        } else {
+                                            result.error ?: "Recovery failed"
+                                        }
+                                    } catch (e: Exception) {
+                                        recoveryResult = "Error: ${e.message}"
+                                    }
+                                    isRecovering = false
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !isRecovering && isConnected
+                        ) {
+                            if (isRecovering) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.onPrimary
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Recovering...")
+                            } else {
+                                Icon(Icons.Default.Refresh, contentDescription = null)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Recover Funds")
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+            }
 
             // === Section: Mint Connection ===
             Text(
@@ -556,6 +650,106 @@ fun WalletSettingsScreen(
 
                     HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
 
+                    // Recover from Seed (NUT-13/NUT-09)
+                    var isSeedRecovering by remember { mutableStateOf(false) }
+                    var seedRecoveryResult by remember { mutableStateOf<String?>(null) }
+                    var showSeedRecoveryConfirm by remember { mutableStateOf(false) }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Recover from Seed",
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                            Text(
+                                text = "Scans mint for all funds using your mnemonic (NUT-13/NUT-09).",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        TextButton(
+                            onClick = { showSeedRecoveryConfirm = true },
+                            enabled = !isSeedRecovering && isConnected
+                        ) {
+                            if (isSeedRecovering) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Text("Scan Mint")
+                            }
+                        }
+                    }
+
+                    seedRecoveryResult?.let { result ->
+                        Text(
+                            text = result,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (result.contains("Recovered"))
+                                MaterialTheme.colorScheme.primary
+                            else
+                                MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
+                    }
+
+                    // Seed Recovery Confirmation Dialog
+                    if (showSeedRecoveryConfirm) {
+                        AlertDialog(
+                            onDismissRequest = { showSeedRecoveryConfirm = false },
+                            title = { Text("Recover Funds from Mint") },
+                            text = {
+                                Column {
+                                    Text("This will scan the connected mint for any funds that belong to your wallet seed.")
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text(
+                                        "Use this if:",
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                    Text("• You lost your NIP-60 data")
+                                    Text("• You reinstalled the app")
+                                    Text("• Proofs are missing from relays")
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text(
+                                        "This may take a few minutes.",
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            },
+                            confirmButton = {
+                                TextButton(
+                                    onClick = {
+                                        showSeedRecoveryConfirm = false
+                                        scope.launch {
+                                            isSeedRecovering = true
+                                            seedRecoveryResult = null
+                                            try {
+                                                val result = walletService.recoverFromSeed()
+                                                seedRecoveryResult = result.message
+                                            } catch (e: Exception) {
+                                                seedRecoveryResult = "Error: ${e.message}"
+                                            }
+                                            isSeedRecovering = false
+                                        }
+                                    }
+                                ) {
+                                    Text("Start Recovery")
+                                }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { showSeedRecoveryConfirm = false }) {
+                                    Text("Cancel")
+                                }
+                            }
+                        )
+                    }
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+
                     // Reset Local Cache
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -777,6 +971,38 @@ fun WalletSettingsScreen(
                                 }
                             )
                         }
+                    }
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+
+                    // Manual Deposit Recovery
+                    var showManualClaimDialog by remember { mutableStateOf(false) }
+
+                    Text(
+                        text = "Manual Deposit Recovery",
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Text(
+                        text = "Recover a deposit using its quote ID if the app lost track of it.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+
+                    OutlinedButton(
+                        onClick = { showManualClaimDialog = true },
+                        modifier = Modifier.padding(top = 8.dp)
+                    ) {
+                        Icon(Icons.Default.Search, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Claim by Quote ID")
+                    }
+
+                    if (showManualClaimDialog) {
+                        ManualDepositClaimDialog(
+                            walletService = walletService,
+                            onDismiss = { showManualClaimDialog = false }
+                        )
                     }
                 }
             }
@@ -1253,4 +1479,130 @@ private fun MintSelectionSettingsRow(
             }
         }
     }
+}
+
+/**
+ * Dialog for manually claiming a deposit by quote ID.
+ * Used for recovery when the app lost track of a paid deposit.
+ */
+@Composable
+private fun ManualDepositClaimDialog(
+    walletService: WalletService,
+    onDismiss: () -> Unit
+) {
+    var quoteId by remember { mutableStateOf("") }
+    var isClaiming by remember { mutableStateOf(false) }
+    var resultMessage by remember { mutableStateOf<String?>(null) }
+    var isSuccess by remember { mutableStateOf(false) }
+
+    val scope = rememberCoroutineScope()
+
+    AlertDialog(
+        onDismissRequest = { if (!isClaiming) onDismiss() },
+        title = { Text("Claim Deposit by Quote ID") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    text = "Enter the quote ID from your deposit. You can find this in your Lightning wallet payment history or screenshot.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                OutlinedTextField(
+                    value = quoteId,
+                    onValueChange = {
+                        quoteId = it.trim()
+                        resultMessage = null
+                    },
+                    label = { Text("Quote ID") },
+                    placeholder = { Text("e.g., abc123...") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    enabled = !isClaiming
+                )
+
+                resultMessage?.let { message ->
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (isSuccess)
+                                MaterialTheme.colorScheme.primaryContainer
+                            else
+                                MaterialTheme.colorScheme.errorContainer
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = if (isSuccess) Icons.Default.CheckCircle else Icons.Default.Warning,
+                                contentDescription = null,
+                                tint = if (isSuccess)
+                                    MaterialTheme.colorScheme.primary
+                                else
+                                    MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = message,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (quoteId.isBlank()) {
+                        resultMessage = "Please enter a quote ID"
+                        isSuccess = false
+                        return@Button
+                    }
+
+                    scope.launch {
+                        isClaiming = true
+                        resultMessage = null
+
+                        try {
+                            val result = walletService.claimDepositByQuoteId(quoteId)
+                            isSuccess = result.success
+                            resultMessage = if (result.success) {
+                                "Claimed ${result.totalSats} sats!"
+                            } else {
+                                result.error ?: "Unknown error"
+                            }
+                        } catch (e: Exception) {
+                            isSuccess = false
+                            resultMessage = "Error: ${e.message}"
+                        }
+
+                        isClaiming = false
+                    }
+                },
+                enabled = !isClaiming && quoteId.isNotBlank()
+            ) {
+                if (isClaiming) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Claiming...")
+                } else {
+                    Text("Claim")
+                }
+            }
+        },
+        dismissButton = {
+            if (!isClaiming) {
+                TextButton(onClick = onDismiss) {
+                    Text(if (isSuccess) "Done" else "Cancel")
+                }
+            }
+        }
+    )
 }

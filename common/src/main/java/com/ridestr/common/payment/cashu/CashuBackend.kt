@@ -58,10 +58,13 @@ class CashuBackend(
     private var cdkWallet: CdkWallet? = null
     private var cdkDatabase: CdkWalletSqliteDatabase? = null
 
+    // NUT-13: BIP-39 seed for deterministic secret derivation
+    private var walletSeed: ByteArray? = null
+
     private val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
-        .writeTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
     private var currentMintUrl: String? = null
@@ -71,7 +74,7 @@ class CashuBackend(
      * Verify mint capabilities via NUT-06 info endpoint.
      * Checks for NUT-14 (HTLC), NUT-05 (Melt), NUT-07 (Proof state check).
      *
-     * @param mintUrl The mint URL (e.g., "https://mint.lnserver.com/")
+     * @param mintUrl The mint URL (e.g., "https://mint.minibits.cash/Bitcoin")
      * @return MintCapabilities if successful, null on failure
      */
     suspend fun verifyMintCapabilities(mintUrl: String): MintCapabilities? = withContext(Dispatchers.IO) {
@@ -156,6 +159,11 @@ class CashuBackend(
             cdkDatabase = CdkWalletSqliteDatabase(dbPath)
 
             val mnemonic = walletKeyManager.getOrCreateMnemonic()
+
+            // NUT-13: Derive BIP-39 seed for deterministic secret generation
+            walletSeed = CashuCrypto.mnemonicToSeed(mnemonic)
+            Log.d(TAG, "Derived wallet seed from mnemonic (${walletSeed!!.size} bytes)")
+
             val walletConfig = CdkWalletConfig(16u) // targetProofCount
 
             cdkWallet = CdkWallet(
@@ -180,6 +188,66 @@ class CashuBackend(
      * Get current mint URL.
      */
     fun getCurrentMintUrl(): String? = currentMintUrl
+
+    /**
+     * Get the wallet seed (for NUT-09 recovery).
+     */
+    fun getSeed(): ByteArray? = walletSeed
+
+    /**
+     * Generate deterministic PreMintSecrets for a list of amounts.
+     * Uses NUT-13 derivation from wallet seed and increments counters.
+     *
+     * @param amounts List of amounts for the proofs
+     * @param keysetId The keyset ID to use for derivation
+     * @return List of PreMintSecrets, or null if seed not available
+     */
+    private fun generateDeterministicPreMints(
+        amounts: List<Long>,
+        keysetId: String
+    ): List<PreMintSecret>? {
+        val seed = walletSeed ?: run {
+            Log.e(TAG, "generateDeterministicPreMints: wallet seed not available, falling back to random")
+            return null
+        }
+
+        return amounts.map { amount ->
+            // Get next counter and increment atomically
+            val counter = walletStorage.getCounter(keysetId)
+            walletStorage.setCounter(keysetId, counter + 1)
+
+            // Derive deterministic PreMintSecret
+            CashuCrypto.derivePreMintSecret(seed, keysetId, counter, amount)
+                ?: throw Exception("Failed to derive PreMintSecret for counter $counter")
+        }
+    }
+
+    /**
+     * Generate PreMintSecrets for amounts - deterministic if seed available, random fallback.
+     * This is the primary method for creating outputs.
+     *
+     * @param amounts List of amounts for the proofs
+     * @param keysetId The keyset ID
+     * @return List of PreMintSecrets
+     */
+    private fun generatePreMintSecrets(
+        amounts: List<Long>,
+        keysetId: String
+    ): List<PreMintSecret> {
+        // Use deterministic derivation (NUT-13) - no fallback to random
+        val deterministicResult = generateDeterministicPreMints(amounts, keysetId)
+        if (deterministicResult != null) {
+            Log.d(TAG, "Generated ${deterministicResult.size} deterministic PreMintSecrets for keyset $keysetId")
+            return deterministicResult
+        }
+
+        // No seed available - fail loudly instead of creating non-recoverable proofs
+        Log.e(TAG, "CRITICAL: Cannot generate PreMintSecrets - wallet seed not available!")
+        throw IllegalStateException(
+            "Wallet seed not initialized. Cannot create recoverable proofs. " +
+            "Ensure wallet is fully connected before attempting mint operations."
+        )
+    }
 
     /**
      * Get cached mint capabilities.
@@ -430,17 +498,9 @@ class CashuBackend(
                 return@withContext null
             }
 
-            // Step 4: Create plain output secrets
+            // Step 4: Create plain output secrets (NUT-13 deterministic)
             val outputAmounts = splitAmount(totalAmount)
-            val outputPremints = outputAmounts.map { amount ->
-                val secret = CashuCrypto.generateSecret()
-                val blindingFactor = CashuCrypto.generateBlindingFactor()
-                val Y = CashuCrypto.hashToCurve(secret)
-                    ?: throw Exception("hashToCurve failed")
-                val B_ = CashuCrypto.blindMessage(Y, blindingFactor)
-                    ?: throw Exception("blindMessage failed")
-                PreMintSecret(amount, secret, blindingFactor, Y, B_)
-            }
+            val outputPremints = generatePreMintSecrets(outputAmounts, keyset.id)
 
             // Step 5: Build swap request with HTLC inputs + per-proof witness
             // Each proof needs its own signature: SHA256(secret || C) signed with wallet key
@@ -639,15 +699,9 @@ class CashuBackend(
             }
             Log.d(TAG, "Using keyset: ${keyset.id}")
 
-            // Create output secrets
+            // Create output secrets (NUT-13 deterministic)
             val outputAmounts = splitAmount(totalAmount)
-            val outputPremints = outputAmounts.map { amount ->
-                val secret = CashuCrypto.generateSecret()
-                val blindingFactor = CashuCrypto.generateBlindingFactor()
-                val Y = CashuCrypto.hashToCurve(secret) ?: throw Exception("hashToCurve failed")
-                val B_ = CashuCrypto.blindMessage(Y, blindingFactor) ?: throw Exception("blindMessage failed")
-                PreMintSecret(amount, secret, blindingFactor, Y, B_)
-            }
+            val outputPremints = generatePreMintSecrets(outputAmounts, keyset.id)
 
             // Build swap request with per-proof witness signatures
             val inputsArray = JSONArray()
@@ -851,17 +905,9 @@ class CashuBackend(
                 return@withContext null
             }
 
-            // Step 5: Create plain output secrets
+            // Step 5: Create plain output secrets (NUT-13 deterministic)
             val outputAmounts = splitAmount(totalAmount)
-            val outputPremints = outputAmounts.map { amount ->
-                val secret = CashuCrypto.generateSecret()
-                val blindingFactor = CashuCrypto.generateBlindingFactor()
-                val Y = CashuCrypto.hashToCurve(secret)
-                    ?: throw Exception("hashToCurve failed")
-                val B_ = CashuCrypto.blindMessage(Y, blindingFactor)
-                    ?: throw Exception("blindMessage failed")
-                PreMintSecret(amount, secret, blindingFactor, Y, B_)
-            }
+            val outputPremints = generatePreMintSecrets(outputAmounts, keyset.id)
 
             // Step 6: Build swap request with refund witness
             // Refund path: signature only (no preimage needed)
@@ -1331,14 +1377,12 @@ class CashuBackend(
                 Triple(PreMintSecret(amount, htlcSecret, blindingFactor, Y, B_), htlcSecret, true)
             }
 
-            // Create change outputs (plain proofs back to rider)
+            // Create change outputs (plain proofs back to rider, NUT-13 deterministic)
             val changeOutputs = if (changeAmount > 0) {
-                splitAmount(changeAmount).map { amount ->
-                    val secret = CashuCrypto.generateSecret()
-                    val blindingFactor = CashuCrypto.generateBlindingFactor()
-                    val Y = CashuCrypto.hashToCurve(secret) ?: throw Exception("hashToCurve failed")
-                    val B_ = CashuCrypto.blindMessage(Y, blindingFactor) ?: throw Exception("blindMessage failed")
-                    Triple(PreMintSecret(amount, secret, blindingFactor, Y, B_), secret, false)
+                val changeAmounts = splitAmount(changeAmount)
+                val changePremints = generatePreMintSecrets(changeAmounts, keyset.id)
+                changePremints.map { pms ->
+                    Triple(pms, pms.secret, false)
                 }
             } else emptyList()
 
@@ -2436,9 +2480,25 @@ class CashuBackend(
      * @return Updated MintQuote, or null on failure
      */
     suspend fun checkMintQuote(quoteId: String): MintQuote? = withContext(Dispatchers.IO) {
+        when (val result = checkMintQuoteWithResult(quoteId)) {
+            is MintQuoteResult.Found -> result.quote
+            is MintQuoteResult.NotFound -> null
+            is MintQuoteResult.Error -> null
+        }
+    }
+
+    /**
+     * Check mint quote status with detailed result.
+     * Distinguishes between "quote not found" (404) and network errors.
+     *
+     * Use this when you need to know WHY a quote check failed:
+     * - NotFound = quote definitely doesn't exist at mint (safe to clean up)
+     * - Error = network/parsing error (DON'T clean up - quote may exist)
+     */
+    suspend fun checkMintQuoteWithResult(quoteId: String): MintQuoteResult = withContext(Dispatchers.IO) {
         val mintUrl = currentMintUrl ?: run {
             Log.e(TAG, "checkMintQuote: No mint URL configured")
-            return@withContext null
+            return@withContext MintQuoteResult.Error("No mint URL configured")
         }
 
         try {
@@ -2450,10 +2510,21 @@ class CashuBackend(
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     Log.e(TAG, "Check mint quote failed: ${response.code}")
-                    return@withContext null
+                    // 404 = quote definitively doesn't exist
+                    // Other errors (500, timeout, etc.) = don't know
+                    return@withContext if (response.code == 404) {
+                        Log.d(TAG, "Quote $quoteId not found at mint (404)")
+                        MintQuoteResult.NotFound
+                    } else {
+                        MintQuoteResult.Error("HTTP ${response.code}")
+                    }
                 }
 
-                val body = response.body?.string() ?: return@withContext null
+                val body = response.body?.string()
+                if (body == null) {
+                    return@withContext MintQuoteResult.Error("Empty response body")
+                }
+
                 Log.d(TAG, "Check quote $quoteId response: $body")
                 val json = JSONObject(body)
 
@@ -2461,7 +2532,7 @@ class CashuBackend(
                 val state = parseQuoteState(stateStr)
                 Log.d(TAG, "Quote $quoteId state: '$stateStr' -> $state (isPaid=${state == MintQuoteState.PAID || state == MintQuoteState.ISSUED})")
 
-                MintQuote(
+                val quote = MintQuote(
                     quote = json.getString("quote"),
                     request = json.optString("request", ""),
                     amount = json.getLong("amount"),
@@ -2469,10 +2540,17 @@ class CashuBackend(
                     // Handle null expiry - some mints return null instead of a timestamp
                     expiry = if (json.isNull("expiry")) 0L else json.optLong("expiry", 0L)
                 )
+                MintQuoteResult.Found(quote)
             }
+        } catch (e: java.net.SocketTimeoutException) {
+            Log.e(TAG, "Timeout checking mint quote: ${e.message}")
+            MintQuoteResult.Error("Network timeout")
+        } catch (e: java.io.IOException) {
+            Log.e(TAG, "Network error checking mint quote: ${e.message}")
+            MintQuoteResult.Error("Network error: ${e.message}")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to check mint quote: ${e.message}", e)
-            null
+            MintQuoteResult.Error("Error: ${e.message}")
         }
     }
 
@@ -2662,21 +2740,11 @@ class CashuBackend(
                     val changeAmounts = splitAmount(expectedChange)
                     Log.d(TAG, "Change denominations: $changeAmounts")
 
-                    // Create blinded messages for each denomination
-                    for (amount in changeAmounts) {
-                        val secret = CashuCrypto.generateSecret()
-                        val blindingFactor = CashuCrypto.generateBlindingFactor()
-                        val Y = CashuCrypto.hashToCurve(secret)
-                        if (Y == null) {
-                            Log.e(TAG, "hashToCurve failed for change output")
-                            continue
-                        }
-                        val B_ = CashuCrypto.blindMessage(Y, blindingFactor)
-                        if (B_ == null) {
-                            Log.e(TAG, "blindMessage failed for change output")
-                            continue
-                        }
-                        changePremints.add(PreMintSecret(amount, secret, blindingFactor, Y, B_))
+                    // Create blinded messages (NUT-13 deterministic)
+                    try {
+                        changePremints.addAll(generatePreMintSecrets(changeAmounts, keyset.id))
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to generate change PreMintSecrets: ${e.message}")
                     }
 
                     if (changePremints.isNotEmpty()) {
@@ -3003,7 +3071,7 @@ class CashuBackend(
      * @param keysetId The keyset ID to fetch
      * @return MintKeyset if successful, null otherwise
      */
-    private suspend fun fetchKeyset(keysetId: String): MintKeyset? = withContext(Dispatchers.IO) {
+    internal suspend fun fetchKeyset(keysetId: String): MintKeyset? = withContext(Dispatchers.IO) {
         val mintUrl = currentMintUrl ?: return@withContext null
 
         try {
@@ -3099,23 +3167,8 @@ class CashuBackend(
             val amounts = splitAmount(amountSats)
             Log.d(TAG, "Split into ${amounts.size} outputs: $amounts")
 
-            // Step 4: Generate pre-mint secrets for each output
-            val preMintSecrets = amounts.map { amount ->
-                val secret = CashuCrypto.generateSecret()
-                val blindingFactor = CashuCrypto.generateBlindingFactor()
-                val Y = CashuCrypto.hashToCurve(secret)
-                    ?: throw Exception("hashToCurve failed for secret")
-                val B_ = CashuCrypto.blindMessage(Y, blindingFactor)
-                    ?: throw Exception("blindMessage failed")
-
-                PreMintSecret(
-                    amount = amount,
-                    secret = secret,
-                    blindingFactor = blindingFactor,
-                    Y = Y,
-                    B_ = B_
-                )
-            }
+            // Step 4: Generate pre-mint secrets (NUT-13 deterministic if seed available)
+            val preMintSecrets = generatePreMintSecrets(amounts, keyset.id)
 
             // Step 5: Create blinded outputs for mint request
             val outputsArray = JSONArray()
@@ -3297,6 +3350,173 @@ class CashuBackend(
         private set
 
     /**
+     * Result of swapping proofs to an exact amount.
+     * Contains both the exact proofs for the target amount and remaining proofs (change).
+     */
+    data class SwapToExactResult(
+        val exactProofs: List<CashuProof>,      // Proofs totaling exactly the target amount
+        val remainingProofs: List<CashuProof>,  // Change proofs (already received from swap)
+        val pendingOpId: String? = null         // Pending operation ID for cleanup
+    )
+
+    /**
+     * Swap proofs to get an exact amount, returning both exact and remaining proofs.
+     *
+     * This is used before melt operations to eliminate change loss risk:
+     * - Swap returns ALL outputs immediately (unlike melt which can lose change if pending)
+     * - After swap, melt with exact amount = no change needed = no change to lose
+     *
+     * @param proofs Input proofs (must total >= exactAmount)
+     * @param exactAmount The exact amount needed for subsequent melt
+     * @param mintUrl The mint URL for the swap
+     * @return SwapToExactResult with exact and remaining proofs, or null on failure
+     */
+    suspend fun swapToExactAmount(
+        proofs: List<CashuProof>,
+        exactAmount: Long,
+        mintUrl: String
+    ): SwapToExactResult? = withContext(Dispatchers.IO) {
+        try {
+            val keyset = getActiveKeyset() ?: run {
+                Log.e(TAG, "swapToExactAmount: no active keyset")
+                return@withContext null
+            }
+
+            val totalAmount = proofs.sumOf { it.amount }
+            if (totalAmount < exactAmount) {
+                Log.e(TAG, "swapToExactAmount: insufficient funds ($totalAmount < $exactAmount)")
+                return@withContext null
+            }
+
+            if (totalAmount == exactAmount) {
+                // Already exact, no swap needed
+                Log.d(TAG, "swapToExactAmount: already exact amount, no swap needed")
+                return@withContext SwapToExactResult(
+                    exactProofs = proofs,
+                    remainingProofs = emptyList()
+                )
+            }
+
+            val remainingAmount = totalAmount - exactAmount
+            Log.d(TAG, "swapToExactAmount: $totalAmount -> $exactAmount exact + $remainingAmount remaining")
+
+            // Create outputs for exact amount + remaining (NUT-13 deterministic)
+            val exactAmounts = splitAmount(exactAmount)
+            val remainingAmounts = splitAmount(remainingAmount)
+            val allAmounts = exactAmounts + remainingAmounts
+
+            val preMintSecrets = generatePreMintSecrets(allAmounts, keyset.id)
+
+            // Build swap request
+            val inputsArray = JSONArray()
+            proofs.forEach { proof -> inputsArray.put(proof.toJson()) }
+
+            val outputsArray = JSONArray()
+            preMintSecrets.forEach { pms ->
+                outputsArray.put(JSONObject().apply {
+                    put("amount", pms.amount)
+                    put("id", keyset.id)
+                    put("B_", pms.B_)
+                })
+            }
+
+            val swapRequest = JSONObject().apply {
+                put("inputs", inputsArray)
+                put("outputs", outputsArray)
+            }.toString()
+
+            // CRITICAL: Save pending operation BEFORE sending request
+            val operationId = java.util.UUID.randomUUID().toString()
+            val pendingOp = PendingBlindedOperation(
+                id = operationId,
+                operationType = BlindedOperationType.SWAP,
+                mintUrl = mintUrl,
+                quoteId = null,
+                inputSecrets = proofs.map { it.secret },
+                outputPremints = preMintSecrets.map { pms ->
+                    SerializedPreMint(
+                        amount = pms.amount,
+                        secret = pms.secret,
+                        blindingFactor = pms.blindingFactor,
+                        Y = pms.Y,
+                        B_ = pms.B_
+                    )
+                },
+                amountSats = totalAmount,
+                createdAt = System.currentTimeMillis(),
+                expiresAt = System.currentTimeMillis() + (24 * 60 * 60 * 1000L), // 24 hours
+                status = PendingOperationStatus.STARTED
+            )
+            walletStorage.savePendingBlindedOp(pendingOp)
+            Log.d(TAG, "Saved pending swap-to-exact operation: $operationId")
+
+            val request = Request.Builder()
+                .url("$mintUrl/v1/swap")
+                .post(swapRequest.toRequestBody(JSON_MEDIA_TYPE))
+                .build()
+
+            val signatures = client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    Log.e(TAG, "Swap-to-exact failed: ${response.code}")
+                    // Keep pending operation for recovery
+                    return@withContext null
+                }
+                val body = response.body?.string() ?: return@withContext null
+                JSONObject(body).getJSONArray("signatures")
+            }
+
+            // Unblind signatures
+            val allNewProofs = mutableListOf<CashuProof>()
+            val keysetCache = mutableMapOf<String, MintKeyset>()
+            keysetCache[keyset.id] = keyset
+
+            for (i in 0 until signatures.length()) {
+                val sig = signatures.getJSONObject(i)
+                val pms = preMintSecrets[i]
+                val C_ = sig.getString("C_")
+                val responseKeysetId = sig.getString("id")
+                val responseAmount = sig.getLong("amount")
+
+                val sigKeyset = keysetCache.getOrPut(responseKeysetId) {
+                    fetchKeyset(responseKeysetId) ?: continue
+                }
+
+                val mintPubKey = sigKeyset.keys[responseAmount] ?: continue
+                val C = CashuCrypto.unblindSignature(C_, pms.blindingFactor, mintPubKey) ?: continue
+                allNewProofs.add(CashuProof(responseAmount, responseKeysetId, pms.secret, C))
+            }
+
+            // Split proofs into exact and remaining
+            val exactProofs = allNewProofs.take(exactAmounts.size)
+            val remainingProofs = allNewProofs.drop(exactAmounts.size)
+
+            val exactTotal = exactProofs.sumOf { it.amount }
+            val remainingTotal = remainingProofs.sumOf { it.amount }
+
+            Log.d(TAG, "Swap-to-exact complete: $exactTotal exact + $remainingTotal remaining")
+
+            if (exactTotal != exactAmount) {
+                Log.e(TAG, "CRITICAL: Exact proofs don't match expected amount! $exactTotal != $exactAmount")
+                // Keep pending operation
+                return@withContext null
+            }
+
+            // SUCCESS: Update pending operation status (caller will remove after NIP-60 publish)
+            walletStorage.updateBlindedOpStatus(operationId, PendingOperationStatus.COMPLETED)
+            Log.d(TAG, "Swap-to-exact operation completed: $operationId")
+
+            return@withContext SwapToExactResult(
+                exactProofs = exactProofs,
+                remainingProofs = remainingProofs,
+                pendingOpId = operationId
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Swap-to-exact failed: ${e.message}", e)
+            return@withContext null
+        }
+    }
+
+    /**
      * Swap recovered proofs with mint to get fresh proofs.
      * This allows cdk-kotlin to track the new proofs.
      */
@@ -3309,15 +3529,9 @@ class CashuBackend(
             val keyset = getActiveKeyset() ?: return null
             val totalAmount = proofs.sumOf { it.amount }
 
-            // Create new outputs for the swap
+            // Create new outputs for the swap (NUT-13 deterministic)
             val amounts = splitAmount(totalAmount)
-            val preMintSecrets = amounts.map { amount ->
-                val secret = CashuCrypto.generateSecret()
-                val blindingFactor = CashuCrypto.generateBlindingFactor()
-                val Y = CashuCrypto.hashToCurve(secret) ?: throw Exception("hashToCurve failed")
-                val B_ = CashuCrypto.blindMessage(Y, blindingFactor) ?: throw Exception("blindMessage failed")
-                PreMintSecret(amount, secret, blindingFactor, Y, B_)
-            }
+            val preMintSecrets = generatePreMintSecrets(amounts, keyset.id)
 
             // Build swap request
             val inputsArray = JSONArray()
@@ -3416,6 +3630,212 @@ class CashuBackend(
             Log.e(TAG, "Swap failed: ${e.message}", e)
             // Keep pending operation for recovery
             return null
+        }
+    }
+
+    // ==================== NUT-09 RESTORE ====================
+
+    /**
+     * Restore proofs from mint using NUT-09 /v1/restore endpoint.
+     * This allows recovery of funds when you know the deterministic secrets.
+     *
+     * NUT-09 spec: https://github.com/cashubtc/nuts/blob/main/09.md
+     *
+     * Request: {"outputs": [{"amount": n, "id": "keyset_id", "B_": "blinded_message"}, ...]}
+     * Response: {"outputs": [{"amount": n, "id": "keyset_id", "B_": "..."}, ...],
+     *            "signatures": [{"amount": n, "id": "keyset_id", "C_": "..."}, ...]}
+     *
+     * The mint returns signatures for any outputs it has previously signed.
+     *
+     * @param preMintSecrets List of deterministic secrets with their blinding factors
+     * @param keyset The keyset to use for restoration
+     * @return List of recovered proofs (unspent status not yet verified)
+     */
+    suspend fun restoreProofs(
+        preMintSecrets: List<PreMintSecret>,
+        keyset: MintKeyset
+    ): List<CashuProof> = withContext(Dispatchers.IO) {
+        val mintUrl = currentMintUrl ?: run {
+            Log.e(TAG, "restoreProofs: No mint URL configured")
+            return@withContext emptyList()
+        }
+
+        if (preMintSecrets.isEmpty()) {
+            return@withContext emptyList()
+        }
+
+        try {
+            Log.d(TAG, "Restoring ${preMintSecrets.size} potential proofs from keyset ${keyset.id}")
+
+            // Build blinded messages
+            val outputs = JSONArray()
+            for (pms in preMintSecrets) {
+                // Calculate Y = hashToCurve(secret) and B_ = Y + r*G
+                val Y = CashuCrypto.hashToCurve(pms.secret) ?: continue
+                val B_ = CashuCrypto.blindMessage(Y, pms.blindingFactor) ?: continue
+
+                outputs.put(JSONObject().apply {
+                    put("amount", pms.amount)
+                    put("id", keyset.id)
+                    put("B_", B_)
+                })
+            }
+
+            if (outputs.length() == 0) {
+                Log.w(TAG, "restoreProofs: No valid blinded messages generated")
+                return@withContext emptyList()
+            }
+
+            val requestBody = JSONObject().apply {
+                put("outputs", outputs)
+            }.toString()
+
+            val request = Request.Builder()
+                .url("$mintUrl/v1/restore")
+                .post(requestBody.toRequestBody(JSON_MEDIA_TYPE))
+                .build()
+
+            val (returnedOutputs, signatures) = client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    val errorBody = response.body?.string() ?: "No error body"
+                    Log.e(TAG, "Restore failed: ${response.code} - $errorBody")
+                    return@withContext emptyList()
+                }
+
+                val body = response.body?.string() ?: return@withContext emptyList()
+                val json = JSONObject(body)
+
+                val outputsArr = json.optJSONArray("outputs") ?: JSONArray()
+                val sigsArr = json.optJSONArray("signatures") ?: JSONArray()
+
+                Pair(outputsArr, sigsArr)
+            }
+
+            Log.d(TAG, "Restore returned ${signatures.length()} signatures for ${returnedOutputs.length()} outputs")
+
+            if (signatures.length() == 0) {
+                return@withContext emptyList()
+            }
+
+            // Build a map from B_ -> PreMintSecret for matching
+            val b_ToSecret = mutableMapOf<String, PreMintSecret>()
+            for (pms in preMintSecrets) {
+                val Y = CashuCrypto.hashToCurve(pms.secret) ?: continue
+                val B_ = CashuCrypto.blindMessage(Y, pms.blindingFactor) ?: continue
+                b_ToSecret[B_] = pms
+            }
+
+            // Match returned outputs to our secrets and unblind
+            val recoveredProofs = mutableListOf<CashuProof>()
+            val keysetCache = mutableMapOf<String, MintKeyset>()
+            keysetCache[keyset.id] = keyset
+
+            for (i in 0 until signatures.length()) {
+                val sig = signatures.getJSONObject(i)
+                val C_ = sig.getString("C_")
+                val responseKeysetId = sig.getString("id")
+                val responseAmount = sig.getLong("amount")
+
+                // Get the corresponding output to find our PreMintSecret
+                if (i >= returnedOutputs.length()) continue
+                val output = returnedOutputs.getJSONObject(i)
+                val B_ = output.getString("B_")
+
+                val pms = b_ToSecret[B_] ?: continue
+
+                // Get keyset for this signature
+                val sigKeyset = keysetCache.getOrPut(responseKeysetId) {
+                    fetchKeyset(responseKeysetId) ?: continue
+                }
+
+                // Get mint's public key for this amount
+                val mintPubKey = sigKeyset.keys[responseAmount]
+                if (mintPubKey == null) {
+                    Log.w(TAG, "No public key for amount $responseAmount in keyset $responseKeysetId")
+                    continue
+                }
+
+                // Unblind the signature: C = C_ - r*K
+                val C = CashuCrypto.unblindSignature(C_, pms.blindingFactor, mintPubKey)
+                if (C == null) {
+                    Log.w(TAG, "Failed to unblind signature for amount $responseAmount")
+                    continue
+                }
+
+                recoveredProofs.add(CashuProof(responseAmount, responseKeysetId, pms.secret, C))
+            }
+
+            Log.d(TAG, "Recovered ${recoveredProofs.size} proofs")
+            recoveredProofs
+        } catch (e: Exception) {
+            Log.e(TAG, "restoreProofs failed: ${e.message}", e)
+            emptyList()
+        }
+    }
+
+    /**
+     * Filter proofs to only unspent ones using NUT-07.
+     *
+     * @param proofs List of proofs to check
+     * @return List of proofs that are still unspent
+     */
+    suspend fun filterUnspentProofs(proofs: List<CashuProof>): List<CashuProof> = withContext(Dispatchers.IO) {
+        if (proofs.isEmpty()) return@withContext emptyList()
+
+        val secrets = proofs.map { it.secret }
+        val stateMap = verifyProofStatesBySecret(secrets)
+
+        if (stateMap == null) {
+            Log.w(TAG, "filterUnspentProofs: Could not verify proof states, returning all")
+            return@withContext proofs
+        }
+
+        proofs.filter { proof ->
+            stateMap[proof.secret] == ProofStateResult.UNSPENT
+        }
+    }
+
+    /**
+     * Get all active keysets from the mint.
+     * NUT-02: GET /v1/keysets
+     *
+     * @return List of keyset IDs, or empty list on failure
+     */
+    suspend fun getActiveKeysetIds(): List<String> = withContext(Dispatchers.IO) {
+        val mintUrl = currentMintUrl ?: return@withContext emptyList()
+
+        try {
+            val request = Request.Builder()
+                .url("$mintUrl/v1/keysets")
+                .get()
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    Log.e(TAG, "getActiveKeysetIds failed: ${response.code}")
+                    return@withContext emptyList()
+                }
+
+                val body = response.body?.string() ?: return@withContext emptyList()
+                val json = JSONObject(body)
+                val keysetsArray = json.optJSONArray("keysets") ?: return@withContext emptyList()
+
+                val ids = mutableListOf<String>()
+                for (i in 0 until keysetsArray.length()) {
+                    val keyset = keysetsArray.getJSONObject(i)
+                    val id = keyset.getString("id")
+                    val active = keyset.optBoolean("active", true)
+                    if (active) {
+                        ids.add(id)
+                    }
+                }
+
+                Log.d(TAG, "Found ${ids.size} active keysets")
+                ids
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "getActiveKeysetIds failed: ${e.message}", e)
+            emptyList()
         }
     }
 

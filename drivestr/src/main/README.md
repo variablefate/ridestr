@@ -30,7 +30,6 @@ The driver Android app allows users to go online, receive ride offers, navigate 
 | `OnboardingScreen.kt` | Login/signup flow |
 | `ProfileSetupScreen.kt` | Profile name and picture setup |
 | `KeyBackupScreen.kt` | nsec backup display |
-| `DebugScreen.kt` | Developer diagnostics |
 
 ### Services (`java/com/drivestr/app/service/`)
 

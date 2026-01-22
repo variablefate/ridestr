@@ -28,7 +28,6 @@ The rider Android app allows users to request rides, track driver location in re
 | `ProfileSetupScreen.kt` | Profile name and picture setup |
 | `KeyBackupScreen.kt` | nsec backup display |
 | `TipScreen.kt` | Post-ride tipping UI |
-| `DebugScreen.kt` | Developer diagnostics |
 
 ### Services (`java/com/ridestr/rider/service/`)
 

@@ -1,9 +1,13 @@
 package com.drivestr.app
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.Location
+import android.net.Uri
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -22,7 +26,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.google.android.gms.location.LocationServices
-import com.drivestr.app.ui.screens.DebugScreen
 import com.drivestr.app.ui.screens.DriverModeScreen
 import com.drivestr.app.ui.screens.KeyBackupScreen
 import com.drivestr.app.ui.screens.OnboardingScreen
@@ -98,7 +101,6 @@ enum class Screen {
     WALLET_SETTINGS,// Wallet management settings
     EARNINGS,       // Full earnings history (navigated from wallet)
     RIDE_DETAIL,    // Detail view for single ride
-    DEBUG,
     BACKUP_KEYS,
     TILES,
     DEV_OPTIONS,
@@ -127,6 +129,22 @@ fun DrivestrApp() {
     // Initialize notification channels once on startup
     LaunchedEffect(Unit) {
         NotificationHelper.createDriverChannels(context)
+    }
+
+    // Request battery optimization exemption for reliable background operations
+    LaunchedEffect(Unit) {
+        val powerManager = context.getSystemService(android.content.Context.POWER_SERVICE) as? PowerManager
+        if (powerManager != null && !powerManager.isIgnoringBatteryOptimizations(context.packageName)) {
+            // Request exemption - shows system dialog
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = Uri.parse("package:${context.packageName}")
+            }
+            try {
+                context.startActivity(intent)
+            } catch (e: Exception) {
+                android.util.Log.w("MainActivity", "Could not request battery optimization exemption: ${e.message}")
+            }
+        }
     }
 
     // Settings manager (created first to get custom relays)
@@ -159,7 +177,8 @@ fun DrivestrApp() {
         Nip60WalletSync(
             relayManager = nostrService.relayManager,
             keyManager = nostrService.keyManager,
-            walletKeyManager = walletKeyManager
+            walletKeyManager = walletKeyManager,
+            walletStorage = walletService.walletStorage  // For NUT-13 counter backup
         ).also { sync ->
             walletService.setNip60Sync(sync)
         }
@@ -568,9 +587,6 @@ fun DrivestrApp() {
                     onOpenDevOptions = {
                         currentScreen = Screen.DEV_OPTIONS
                     },
-                    onOpenDebug = {
-                        currentScreen = Screen.DEBUG
-                    },
                     onOpenEarnings = {
                         currentScreen = Screen.EARNINGS
                     },
@@ -608,32 +624,6 @@ fun DrivestrApp() {
                 }
             }
 
-            Screen.DEBUG -> {
-                val useGeocodingSearch by settingsManager.useGeocodingSearch.collectAsState()
-                val useManualDriverLocation by settingsManager.useManualDriverLocation.collectAsState()
-                val manualDriverLat by settingsManager.manualDriverLat.collectAsState()
-                val manualDriverLon by settingsManager.manualDriverLon.collectAsState()
-
-                DebugScreen(
-                    npub = onboardingViewModel.getKeyManager().getNpub(),
-                    pubKeyHex = onboardingViewModel.getKeyManager().getPubKeyHex(),
-                    connectionStates = connectionStates,
-                    recentEvents = recentEvents,
-                    notices = notices,
-                    useGeocodingSearch = useGeocodingSearch,
-                    useManualDriverLocation = useManualDriverLocation,
-                    manualDriverLat = manualDriverLat,
-                    manualDriverLon = manualDriverLon,
-                    onToggleGeocodingSearch = { settingsManager.toggleUseGeocodingSearch() },
-                    onToggleManualDriverLocation = { settingsManager.toggleUseManualDriverLocation() },
-                    onSetManualDriverLocation = { lat, lon -> settingsManager.setManualDriverLocation(lat, lon) },
-                    onConnect = { nostrService.connect() },
-                    onDisconnect = { nostrService.disconnect() },
-                    onBack = { currentScreen = Screen.MAIN },
-                    modifier = Modifier.padding(innerPadding)
-                )
-            }
-
             Screen.BACKUP_KEYS -> {
                 KeyBackupScreen(
                     npub = onboardingViewModel.getKeyManager().getNpub(),
@@ -657,7 +647,7 @@ fun DrivestrApp() {
                 DeveloperOptionsScreen(
                     settingsManager = settingsManager,
                     isDriverApp = true,
-                    onOpenDebug = { currentScreen = Screen.DEBUG },
+                    onOpenRelaySettings = { currentScreen = Screen.RELAY_SETTINGS },
                     onBack = { currentScreen = Screen.MAIN },
                     modifier = Modifier.padding(innerPadding)
                 )
@@ -682,7 +672,12 @@ fun DrivestrApp() {
                     settingsManager = settingsManager,
                     connectedCount = connectedCount,
                     totalRelays = totalRelays,
+                    connectionStates = connectionStates,
                     onBack = { currentScreen = Screen.MAIN },
+                    onReconnect = {
+                        nostrService.relayManager.disconnectAll()
+                        nostrService.relayManager.connectAll()
+                    },
                     modifier = Modifier.padding(innerPadding)
                 )
             }
@@ -764,7 +759,6 @@ fun MainScreen(
     onOpenRelaySettings: () -> Unit,
     onOpenTiles: () -> Unit,
     onOpenDevOptions: () -> Unit,
-    onOpenDebug: () -> Unit,
     onOpenEarnings: () -> Unit,
     onSetupWallet: () -> Unit,
     onOpenWalletDetail: () -> Unit,

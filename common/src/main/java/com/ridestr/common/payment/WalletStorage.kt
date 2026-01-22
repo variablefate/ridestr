@@ -37,6 +37,7 @@ class WalletStorage(private val context: Context) {
         private const val KEY_PENDING_BRIDGE_PAYMENTS = "pending_bridge_payments"
         private const val KEY_RECOVERY_TOKENS = "recovery_tokens"
         private const val KEY_PENDING_BLINDED_OPS = "pending_blinded_operations"
+        private const val KEY_KEYSET_COUNTERS = "keyset_counters"
     }
 
     private val prefs: SharedPreferences
@@ -459,6 +460,7 @@ class WalletStorage(private val context: Context) {
         paymentId: String,
         status: BridgePaymentStatus,
         meltQuoteId: String? = null,
+        amountSats: Long? = null,
         feeReserveSats: Long? = null,
         proofsUsed: List<String>? = null,
         changeProofsReceived: Boolean? = null,
@@ -471,6 +473,7 @@ class WalletStorage(private val context: Context) {
                     status = status,
                     updatedAt = System.currentTimeMillis(),
                     meltQuoteId = meltQuoteId ?: payment.meltQuoteId,
+                    amountSats = amountSats ?: payment.amountSats,
                     feeReserveSats = feeReserveSats ?: payment.feeReserveSats,
                     proofsUsed = proofsUsed ?: payment.proofsUsed,
                     changeProofsReceived = changeProofsReceived ?: payment.changeProofsReceived,
@@ -952,6 +955,118 @@ class WalletStorage(private val context: Context) {
             Log.e(TAG, "Failed to parse transaction", e)
             null
         }
+    }
+
+    // === NUT-13 Keyset Counters ===
+
+    /**
+     * Get the current counter for a keyset.
+     * Returns 0 if no counter is stored (first use of this keyset).
+     *
+     * @param keysetId The keyset ID
+     * @return Current counter value
+     */
+    fun getCounter(keysetId: String): Long {
+        val counters = loadCounters()
+        return counters[keysetId] ?: 0L
+    }
+
+    /**
+     * Set the counter for a keyset.
+     *
+     * @param keysetId The keyset ID
+     * @param counter The counter value
+     */
+    fun setCounter(keysetId: String, counter: Long) {
+        val counters = loadCounters().toMutableMap()
+        counters[keysetId] = counter
+        saveCounters(counters)
+        Log.d(TAG, "Set counter for keyset $keysetId to $counter")
+    }
+
+    /**
+     * Increment the counter for a keyset and return the NEW value.
+     * Thread-safe via synchronized block.
+     *
+     * @param keysetId The keyset ID
+     * @return The NEW counter value (after increment)
+     */
+    @Synchronized
+    fun incrementCounter(keysetId: String): Long {
+        val counters = loadCounters().toMutableMap()
+        val currentValue = counters[keysetId] ?: 0L
+        val newValue = currentValue + 1
+        counters[keysetId] = newValue
+        saveCounters(counters)
+        Log.d(TAG, "Incremented counter for keyset $keysetId: $currentValue -> $newValue")
+        return newValue
+    }
+
+    /**
+     * Get all keyset counters.
+     * Used for NIP-60 backup.
+     *
+     * @return Map of keysetId to counter value
+     */
+    fun getAllCounters(): Map<String, Long> {
+        return loadCounters()
+    }
+
+    /**
+     * Restore counters from NIP-60 backup.
+     * Only updates counters that are higher than current local values
+     * to prevent counter reuse.
+     *
+     * @param counters Map of keysetId to counter value from backup
+     */
+    fun restoreCounters(counters: Map<String, Long>) {
+        val current = loadCounters().toMutableMap()
+        var updated = false
+
+        for ((keysetId, backupCounter) in counters) {
+            val localCounter = current[keysetId] ?: 0L
+            if (backupCounter > localCounter) {
+                current[keysetId] = backupCounter
+                updated = true
+                Log.d(TAG, "Restored counter for keyset $keysetId: $localCounter -> $backupCounter")
+            }
+        }
+
+        if (updated) {
+            saveCounters(current)
+        }
+    }
+
+    /**
+     * Clear all counters. Use with caution - only for wallet reset.
+     */
+    fun clearCounters() {
+        prefs.edit().remove(KEY_KEYSET_COUNTERS).apply()
+        Log.d(TAG, "Cleared all keyset counters")
+    }
+
+    private fun loadCounters(): Map<String, Long> {
+        val json = prefs.getString(KEY_KEYSET_COUNTERS, null) ?: return emptyMap()
+        return try {
+            val jsonObj = JSONObject(json)
+            val result = mutableMapOf<String, Long>()
+            jsonObj.keys().forEach { key ->
+                result[key] = jsonObj.getLong(key)
+            }
+            result
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to load keyset counters", e)
+            emptyMap()
+        }
+    }
+
+    private fun saveCounters(counters: Map<String, Long>) {
+        val json = JSONObject().apply {
+            counters.forEach { (keysetId, counter) ->
+                put(keysetId, counter)
+            }
+        }
+        prefs.edit().putString(KEY_KEYSET_COUNTERS, json.toString()).apply()
     }
 }
 

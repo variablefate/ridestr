@@ -28,6 +28,7 @@ import com.ridestr.common.nostr.events.RiderRideStateEvent
 import com.ridestr.common.nostr.events.RideshareChatData
 import com.ridestr.common.nostr.events.RideshareEventKinds
 import com.ridestr.common.nostr.events.UserProfile
+import com.ridestr.common.payment.ClaimResult
 import com.ridestr.common.payment.PaymentCrypto
 import com.ridestr.common.payment.WalletService
 import com.ridestr.common.routing.RouteResult
@@ -1797,15 +1798,43 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
 
-        // Claim tokens from mint in background
+        // Claim tokens from mint in background with retries
+        // Lightning settlement can take a few seconds, so we retry
         viewModelScope.launch {
             try {
                 Log.d(TAG, "Claiming tokens from mint: quoteId=$quoteId, amount=$amount")
-                val result = walletService?.mintTokens(quoteId, amount)
 
-                if (result?.success == true) {
-                    Log.d(TAG, "Successfully minted ${result.proofs.size} proofs totaling ${result.totalSats} sats")
+                // Use claimDepositByQuoteId with retries - it has better error handling
+                // and waits for Lightning settlement
+                val delays = listOf(0L, 2000L, 4000L, 8000L) // Immediate, then 2s, 4s, 8s
+                var claimResult: ClaimResult? = null
 
+                for ((attempt, delay) in delays.withIndex()) {
+                    if (delay > 0) {
+                        Log.d(TAG, "Waiting ${delay}ms before claim attempt ${attempt + 1}...")
+                        kotlinx.coroutines.delay(delay)
+                    }
+
+                    Log.d(TAG, "Claim attempt ${attempt + 1}/${delays.size}")
+                    claimResult = walletService?.claimDepositByQuoteId(quoteId)
+
+                    if (claimResult?.success == true && claimResult.claimedCount > 0) {
+                        Log.d(TAG, "Successfully claimed ${claimResult.totalSats} sats on attempt ${attempt + 1}")
+                        break
+                    } else if (claimResult?.error?.contains("not paid yet") == true) {
+                        Log.d(TAG, "Quote not paid yet, will retry...")
+                        // Continue retrying - Lightning hasn't settled
+                    } else if (claimResult?.error != null) {
+                        Log.e(TAG, "Claim error: ${claimResult.error}")
+                        // If it's a permanent error (not found, already claimed), stop retrying
+                        if (claimResult.error?.contains("not found") == true ||
+                            claimResult.error?.contains("already issued") == true) {
+                            break
+                        }
+                    }
+                }
+
+                if (claimResult?.success == true && claimResult.claimedCount > 0) {
                     _uiState.value = _uiState.value.copy(
                         activePreimage = bridgeComplete.preimage,
                         canSettleEscrow = false,
@@ -1815,10 +1844,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                         pendingDepositAmount = null
                     )
 
-                    Log.d(TAG, "Cross-mint payment complete: received ${result.totalSats} sats")
+                    Log.d(TAG, "Cross-mint payment complete: received ${claimResult.totalSats} sats")
                 } else {
-                    Log.e(TAG, "Failed to mint tokens - result was null or unsuccessful")
-                    // Still mark as complete to let ride proceed, but log the issue
+                    Log.e(TAG, "Failed to claim tokens after all retries")
+                    Log.e(TAG, "Last result: ${claimResult?.error ?: "null"}")
+                    // Still mark as complete to let ride proceed
+                    // User can claim manually via Wallet Settings > Claim by Quote ID
                     _uiState.value = _uiState.value.copy(
                         activePreimage = bridgeComplete.preimage,
                         canSettleEscrow = false,

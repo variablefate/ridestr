@@ -24,7 +24,7 @@ import com.ridestr.common.settings.SettingsManager
 fun DeveloperOptionsScreen(
     settingsManager: SettingsManager,
     isDriverApp: Boolean,
-    onOpenDebug: () -> Unit,
+    onOpenRelaySettings: () -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -38,14 +38,6 @@ fun DeveloperOptionsScreen(
     // Manual location input state (driver only)
     var latInput by remember(manualDriverLat) { mutableStateOf(manualDriverLat.toString()) }
     var lonInput by remember(manualDriverLon) { mutableStateOf(manualDriverLon.toString()) }
-
-    // Relay management state - derive effectiveRelays reactively from customRelays
-    val customRelays by settingsManager.customRelays.collectAsState()
-    val effectiveRelays = remember(customRelays) {
-        if (customRelays.isEmpty()) SettingsManager.DEFAULT_RELAYS else customRelays
-    }
-    var newRelayInput by remember { mutableStateOf("") }
-    val maxRelays = 10
 
     Scaffold(
         topBar = {
@@ -152,111 +144,13 @@ fun DeveloperOptionsScreen(
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
-            // Debug Info Navigation
+            // Relay Settings Navigation
             SettingsNavigationRow(
-                title = "Debug Info",
-                description = "View relay status and Nostr events",
-                icon = Icons.Filled.Info,
-                onClick = onOpenDebug
+                title = "Relay Settings",
+                description = "Manage relay connections and configuration",
+                icon = Icons.Filled.Cloud,
+                onClick = onOpenRelaySettings
             )
-
-            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-
-            // Relay Management Section
-            Text(
-                text = "Relay Management",
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(vertical = 8.dp)
-            )
-
-            Text(
-                text = if (customRelays.isEmpty()) "Using default relays" else "Using custom relays",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(bottom = 8.dp)
-            )
-
-            // Current relays list
-            effectiveRelays.forEach { relay ->
-                Surface(
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    shape = MaterialTheme.shapes.small,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 2.dp)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = relay.removePrefix("wss://"),
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace,
-                            modifier = Modifier.weight(1f)
-                        )
-                        IconButton(
-                            onClick = { settingsManager.removeRelay(relay) },
-                            modifier = Modifier.size(32.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Close,
-                                contentDescription = "Remove",
-                                tint = MaterialTheme.colorScheme.error,
-                                modifier = Modifier.size(16.dp)
-                            )
-                        }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Add new relay
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                OutlinedTextField(
-                    value = newRelayInput,
-                    onValueChange = { newRelayInput = it },
-                    label = { Text("relay.example.com") },
-                    modifier = Modifier.weight(1f),
-                    singleLine = true,
-                    textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace)
-                )
-                Button(
-                    onClick = {
-                        settingsManager.addRelay(newRelayInput)
-                        newRelayInput = ""
-                    },
-                    enabled = newRelayInput.isNotBlank() && effectiveRelays.size < maxRelays
-                ) {
-                    Icon(Icons.Default.Add, contentDescription = "Add")
-                }
-            }
-
-            // Relay count hint
-            Text(
-                text = "${effectiveRelays.size}/$maxRelays relays",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 4.dp)
-            )
-
-            // Reset to defaults button
-            if (customRelays.isNotEmpty()) {
-                TextButton(
-                    onClick = { settingsManager.resetRelaysToDefault() },
-                    modifier = Modifier.padding(top = 8.dp)
-                ) {
-                    Text("Reset to defaults")
-                }
-            }
 
             // Bottom padding for scroll
             Spacer(modifier = Modifier.height(32.dp))

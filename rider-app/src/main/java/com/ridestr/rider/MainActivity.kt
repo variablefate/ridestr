@@ -1,9 +1,13 @@
 package com.ridestr.rider
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.Location
+import android.net.Uri
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -21,7 +25,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.google.android.gms.location.LocationServices
-import com.ridestr.rider.ui.screens.DebugScreen
 import com.ridestr.rider.ui.screens.RiderModeScreen
 import com.ridestr.rider.ui.screens.HistoryScreen
 import com.ridestr.rider.ui.screens.KeyBackupScreen
@@ -98,7 +101,6 @@ enum class Screen {
     WALLET_SETTINGS,// Wallet management settings
     RIDE_DETAIL,    // Detail view for single ride
     TIP,            // Tip driver screen
-    DEBUG,
     BACKUP_KEYS,
     TILES,
     DEV_OPTIONS,
@@ -127,6 +129,22 @@ fun RidestrApp() {
     // Initialize notification channels once on startup
     LaunchedEffect(Unit) {
         NotificationHelper.createRiderChannels(context)
+    }
+
+    // Request battery optimization exemption for reliable background operations
+    LaunchedEffect(Unit) {
+        val powerManager = context.getSystemService(android.content.Context.POWER_SERVICE) as? PowerManager
+        if (powerManager != null && !powerManager.isIgnoringBatteryOptimizations(context.packageName)) {
+            // Request exemption - shows system dialog
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = Uri.parse("package:${context.packageName}")
+            }
+            try {
+                context.startActivity(intent)
+            } catch (e: Exception) {
+                android.util.Log.w("MainActivity", "Could not request battery optimization exemption: ${e.message}")
+            }
+        }
     }
 
     // Settings manager (created first to get custom relays)
@@ -167,7 +185,8 @@ fun RidestrApp() {
         Nip60WalletSync(
             relayManager = nostrService.relayManager,
             keyManager = nostrService.keyManager,
-            walletKeyManager = walletKeyManager
+            walletKeyManager = walletKeyManager,
+            walletStorage = walletService.walletStorage  // For NUT-13 counter backup
         ).also { sync ->
             walletService.setNip60Sync(sync)
         }
@@ -545,9 +564,6 @@ fun RidestrApp() {
                     onOpenDevOptions = {
                         currentScreen = Screen.DEV_OPTIONS
                     },
-                    onOpenDebug = {
-                        currentScreen = Screen.DEBUG
-                    },
                     onOpenRideDetail = { ride ->
                         selectedRide = ride
                         currentScreen = Screen.RIDE_DETAIL
@@ -586,24 +602,6 @@ fun RidestrApp() {
                 }
             }
 
-            Screen.DEBUG -> {
-                val useGeocodingSearch by settingsManager.useGeocodingSearch.collectAsState()
-
-                DebugScreen(
-                    npub = onboardingViewModel.getKeyManager().getNpub(),
-                    pubKeyHex = onboardingViewModel.getKeyManager().getPubKeyHex(),
-                    connectionStates = connectionStates,
-                    recentEvents = recentEvents,
-                    notices = notices,
-                    useGeocodingSearch = useGeocodingSearch,
-                    onToggleGeocodingSearch = { settingsManager.toggleUseGeocodingSearch() },
-                    onConnect = { nostrService.connect() },
-                    onDisconnect = { nostrService.disconnect() },
-                    onBack = { currentScreen = Screen.MAIN },
-                    modifier = Modifier.padding(innerPadding)
-                )
-            }
-
             Screen.BACKUP_KEYS -> {
                 KeyBackupScreen(
                     npub = onboardingViewModel.getKeyManager().getNpub(),
@@ -627,7 +625,7 @@ fun RidestrApp() {
                 DeveloperOptionsScreen(
                     settingsManager = settingsManager,
                     isDriverApp = false,
-                    onOpenDebug = { currentScreen = Screen.DEBUG },
+                    onOpenRelaySettings = { currentScreen = Screen.RELAY_SETTINGS },
                     onBack = { currentScreen = Screen.MAIN },
                     modifier = Modifier.padding(innerPadding)
                 )
@@ -652,7 +650,12 @@ fun RidestrApp() {
                     settingsManager = settingsManager,
                     connectedCount = connectedCount,
                     totalRelays = totalRelays,
+                    connectionStates = connectionStates,
                     onBack = { currentScreen = Screen.MAIN },
+                    onReconnect = {
+                        nostrService.relayManager.disconnectAll()
+                        nostrService.relayManager.connectAll()
+                    },
                     modifier = Modifier.padding(innerPadding)
                 )
             }
@@ -755,7 +758,6 @@ fun MainScreen(
     onOpenRelaySettings: () -> Unit,
     onOpenTiles: () -> Unit,
     onOpenDevOptions: () -> Unit,
-    onOpenDebug: () -> Unit,
     onOpenRideDetail: (RideHistoryEntry) -> Unit,
     onSetupWallet: () -> Unit,
     onOpenWalletDetail: () -> Unit,

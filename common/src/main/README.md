@@ -90,13 +90,13 @@ The `common` module contains all shared code used by both rider and driver apps:
 | `AccountSafetyScreen.kt` | Key backup, account recovery options |
 | `ChatBottomSheet.kt` | In-ride messaging UI |
 | `ChatView.kt` | Chat message rendering component |
-| `DeveloperOptionsScreen.kt` | Debug/diagnostic toggles |
+| `DeveloperOptionsScreen.kt` | Debug toggles (geocoding, manual location) + link to Relay Settings |
 | `FareDisplay.kt` | Fare breakdown display |
 | `LocationPermissionScreen.kt` | Location permission request flow |
 | `LocationSearchField.kt` | Address search input with geocoding |
 | `ProfilePictureEditor.kt` | Profile image editing |
 | `ProfileSyncScreen.kt` | Onboarding sync UI for existing key import |
-| `RelayManagementScreen.kt` | Custom relay configuration |
+| `RelayManagementScreen.kt` | Custom relay configuration, per-relay status dots, reconnect button |
 | `RelaySignalIndicator.kt` | Relay connection status indicator |
 | `RideDetailScreen.kt` | Ride history detail view |
 | `SavedLocationComponents.kt` | Saved location chips and lists |

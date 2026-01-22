@@ -302,6 +302,20 @@ data class MintQuote(
 }
 
 /**
+ * Result of checking a mint quote - distinguishes between definitive "not found" vs network errors.
+ */
+sealed class MintQuoteResult {
+    /** Quote found at mint */
+    data class Found(val quote: MintQuote) : MintQuoteResult()
+
+    /** Quote definitively doesn't exist at mint (404 or explicit error) */
+    data object NotFound : MintQuoteResult()
+
+    /** Network or parsing error - quote may or may not exist */
+    data class Error(val message: String) : MintQuoteResult()
+}
+
+/**
  * Melt quote state per NUT-05.
  */
 enum class MeltQuoteState {

@@ -39,7 +39,8 @@ import org.json.JSONObject
 class Nip60WalletSync(
     private val relayManager: RelayManager,
     private val keyManager: KeyManager,
-    private val walletKeyManager: WalletKeyManager
+    private val walletKeyManager: WalletKeyManager,
+    private val walletStorage: com.ridestr.common.payment.WalletStorage? = null
 ) {
     companion object {
         private const val TAG = "Nip60WalletSync"
@@ -90,15 +91,19 @@ class Nip60WalletSync(
      * Publish proofs to Nostr as Kind 7375 events.
      * Content is NIP-44 encrypted to self.
      *
-     * Includes retry logic if no relays are connected initially.
+     * NIP-60 COMPLIANT: When proofs replace old proofs (spending), include the
+     * old event IDs in the `del` array. This is atomic - one event both creates
+     * new proofs AND marks old ones as consumed.
      *
      * @param proofs List of Cashu proofs to publish
      * @param mintUrl The mint URL these proofs are from
+     * @param deletedEventIds Event IDs being replaced/consumed by this publish (for `del` array)
      * @return Event ID if successful, null otherwise
      */
     suspend fun publishProofs(
         proofs: List<CashuProof>,
-        mintUrl: String
+        mintUrl: String,
+        deletedEventIds: List<String> = emptyList()
     ): String? = withContext(Dispatchers.IO) {
         val signer = keyManager.getSigner()
         val myPubKey = keyManager.getPubKeyHex()
@@ -113,7 +118,8 @@ class Nip60WalletSync(
             return@withContext null
         }
 
-        Log.d(TAG, "Publishing ${proofs.size} proofs (${proofs.sumOf { it.amount }} sats) to ${relayManager.connectedCount()} relays")
+        val delInfo = if (deletedEventIds.isNotEmpty()) " (replacing ${deletedEventIds.size} events)" else ""
+        Log.d(TAG, "Publishing ${proofs.size} proofs (${proofs.sumOf { it.amount }} sats)$delInfo to ${relayManager.connectedCount()} relays")
 
         try {
             // Build content as per NIP-60
@@ -130,6 +136,11 @@ class Nip60WalletSync(
             val content = JSONObject().apply {
                 put("mint", mintUrl)
                 put("proofs", proofsArray)
+                // NIP-60: Include `del` array with event IDs being replaced
+                if (deletedEventIds.isNotEmpty()) {
+                    put("del", JSONArray(deletedEventIds))
+                    Log.d(TAG, "Including del array: ${deletedEventIds.joinToString(", ") { it.take(8) }}...")
+                }
             }.toString()
 
             // Encrypt to self using NIP-44
@@ -197,8 +208,11 @@ class Nip60WalletSync(
      * Fetch all unspent proofs from Nostr.
      * Queries Kind 7375 events authored by this user.
      *
+     * NIP-60 COMPLIANT: Parses `del` arrays from all events to determine which
+     * events have been consumed/replaced. Proofs from deleted events are filtered out.
+     *
      * @param forceRefresh If true, bypass cache
-     * @return List of proofs with their event IDs
+     * @return List of proofs with their event IDs (only unspent/valid proofs)
      */
     suspend fun fetchProofs(forceRefresh: Boolean = false): List<Nip60Proof> = withContext(Dispatchers.IO) {
         val signer = keyManager.getSigner()
@@ -226,6 +240,7 @@ class Nip60WalletSync(
 
         val proofs = mutableListOf<Nip60Proof>()
         val seenEventIds = mutableSetOf<String>()  // Track seen events to avoid duplicate parsing
+        val deletedEventIds = mutableSetOf<String>()  // NIP-60: Track events marked as deleted via `del` arrays
 
         try {
             val subscriptionId = relayManager.subscribe(
@@ -248,6 +263,20 @@ class Nip60WalletSync(
                     val mintUrl = json.getString("mint")
                     val proofsArray = json.getJSONArray("proofs")
 
+                    // NIP-60: Parse `del` array if present - these events are consumed
+                    if (json.has("del")) {
+                        val delArray = json.getJSONArray("del")
+                        synchronized(deletedEventIds) {
+                            for (i in 0 until delArray.length()) {
+                                val deletedId = delArray.getString(i)
+                                deletedEventIds.add(deletedId)
+                            }
+                        }
+                        if (delArray.length() > 0) {
+                            Log.d(TAG, "Event ${event.id.take(8)} deletes ${delArray.length()} previous events")
+                        }
+                    }
+
                     for (i in 0 until proofsArray.length()) {
                         val p = proofsArray.getJSONObject(i)
                         proofs.add(Nip60Proof(
@@ -260,7 +289,7 @@ class Nip60WalletSync(
                             createdAt = event.createdAt
                         ))
                     }
-                    Log.d(TAG, "Parsed ${proofsArray.length()} proofs from event ${event.id}")
+                    Log.d(TAG, "Parsed ${proofsArray.length()} proofs from event ${event.id.take(8)}")
                 } catch (e: Exception) {
                     Log.w(TAG, "Failed to parse token event ${event.id}: ${e.message}")
                 }
@@ -270,27 +299,41 @@ class Nip60WalletSync(
             delay(QUERY_TIMEOUT_MS)
             relayManager.closeSubscription(subscriptionId)
 
+            // NIP-60: Filter out proofs from events that are in `del` arrays
+            val rawTotal = proofs.sumOf { it.amount }
+            val rawEventIds = proofs.map { it.eventId }.distinct()
+            Log.d(TAG, "Raw: ${proofs.size} proofs from ${rawEventIds.size} events, $rawTotal sats")
+
+            val activeProofs = if (deletedEventIds.isNotEmpty()) {
+                val beforeCount = proofs.size
+                val filtered = proofs.filter { it.eventId !in deletedEventIds }
+                val deletedCount = beforeCount - filtered.size
+                val deletedSats = proofs.filter { it.eventId in deletedEventIds }.sumOf { it.amount }
+                if (deletedCount > 0) {
+                    Log.d(TAG, "NIP-60 del: Filtered out $deletedCount proofs ($deletedSats sats) from ${deletedEventIds.size} deleted events")
+                }
+                filtered
+            } else {
+                proofs
+            }
+
             // Deduplicate by secret (unique identifier for each proof)
             // Keep the proof from the most recent event to handle stale events
-            val rawTotal = proofs.sumOf { it.amount }
-            val eventIds = proofs.map { it.eventId }.distinct()
-            Log.d(TAG, "Raw: ${proofs.size} proofs from ${eventIds.size} events, $rawTotal sats")
-
-            val uniqueProofs = proofs
+            val uniqueProofs = activeProofs
                 .groupBy { it.secret }
                 .map { (_, duplicates) -> duplicates.maxByOrNull { it.createdAt } ?: duplicates.first() }
 
-            val duplicateCount = proofs.size - uniqueProofs.size
+            val duplicateCount = activeProofs.size - uniqueProofs.size
             val uniqueTotal = uniqueProofs.sumOf { it.amount }
             if (duplicateCount > 0) {
-                Log.w(TAG, "Deduplicated $duplicateCount duplicate proofs (raw=$rawTotal, unique=$uniqueTotal sats)")
+                Log.w(TAG, "Deduplicated $duplicateCount duplicate proofs")
             }
 
             // Update cache
             cachedProofs = uniqueProofs.toMutableList()
             lastFetchTime = System.currentTimeMillis()
 
-            Log.d(TAG, "Fetched ${uniqueProofs.size} unique proofs, $uniqueTotal sats (from ${proofs.size} raw)")
+            Log.d(TAG, "Fetched ${uniqueProofs.size} unspent proofs, $uniqueTotal sats")
             uniqueProofs
         } catch (e: CancellationException) {
             // Scope was cancelled (e.g., user navigated away) - not an error
@@ -524,6 +567,19 @@ class Nip60WalletSync(
                 Log.d(TAG, "Including mnemonic in backup")
             }
 
+            // Add NUT-13 keyset counters (for deterministic secret recovery)
+            val counters = walletStorage?.getAllCounters()
+            if (!counters.isNullOrEmpty()) {
+                // Format: ["counters", "keysetId1:value1", "keysetId2:value2", ...]
+                contentArray.put(JSONArray().apply {
+                    put("counters")
+                    counters.forEach { (keysetId, value) ->
+                        put("$keysetId:$value")
+                    }
+                })
+                Log.d(TAG, "Including ${counters.size} keyset counters in backup")
+            }
+
             val content = contentArray.toString()
 
             // NIP-44 encrypt entire content to user's own pubkey
@@ -637,6 +693,7 @@ class Nip60WalletSync(
         var mintUrl: String? = null
         var walletPrivKey: String? = null
         var mnemonic: String? = null
+        var counters: Map<String, Long> = emptyMap()
 
         val metaSubId = relayManager.subscribe(
             kinds = listOf(KIND_WALLET),
@@ -653,8 +710,9 @@ class Nip60WalletSync(
                 mintUrl = parsed.mintUrl
                 walletPrivKey = parsed.privkey
                 mnemonic = parsed.mnemonic
+                counters = parsed.counters
 
-                Log.d(TAG, "Decrypted wallet metadata: mint=$mintUrl, hasWalletKey=${walletPrivKey != null}, hasMnemonic=${mnemonic != null}")
+                Log.d(TAG, "Decrypted wallet metadata: mint=$mintUrl, hasWalletKey=${walletPrivKey != null}, hasMnemonic=${mnemonic != null}, counters=${counters.size}")
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to parse wallet metadata: ${e.message}")
             }
@@ -685,7 +743,13 @@ class Nip60WalletSync(
             }
         }
 
-        // 4. Fetch all proofs
+        // 4. Restore NUT-13 keyset counters if found
+        if (counters.isNotEmpty() && walletStorage != null) {
+            walletStorage.restoreCounters(counters)
+            Log.d(TAG, "Restored ${counters.size} keyset counters from NIP-60 backup")
+        }
+
+        // 5. Fetch all proofs
         val proofs = fetchProofs(forceRefresh = true)
         val totalBalance = proofs.sumOf { it.amount }
 
@@ -711,6 +775,7 @@ class Nip60WalletSync(
         var mintUrl: String? = null
         var privkey: String? = null
         var mnemonic: String? = null
+        val counters = mutableMapOf<String, Long>()
 
         val trimmed = decrypted.trim()
 
@@ -726,10 +791,25 @@ class Nip60WalletSync(
                         "privkey" -> privkey = pair.getString(1).takeIf { it.isNotBlank() }
                         "mint" -> mintUrl = mintUrl ?: pair.getString(1) // Take first mint
                         "mnemonic" -> mnemonic = pair.getString(1).takeIf { it.isNotBlank() }
+                        "counters" -> {
+                            // Parse counters: ["counters", "keysetId1:value1", "keysetId2:value2", ...]
+                            for (j in 1 until pair.length()) {
+                                val counterStr = pair.optString(j) ?: continue
+                                val parts = counterStr.split(":")
+                                if (parts.size == 2) {
+                                    val keysetId = parts[0]
+                                    val value = parts[1].toLongOrNull()
+                                    if (value != null) {
+                                        counters[keysetId] = value
+                                    }
+                                }
+                            }
+                            Log.d(TAG, "Parsed ${counters.size} keyset counters from backup")
+                        }
                     }
                 }
                 Log.d(TAG, "Parsed NIP-60 standard format metadata")
-                return WalletMetadataParsed(mintUrl, privkey, mnemonic)
+                return WalletMetadataParsed(mintUrl, privkey, mnemonic, counters)
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to parse as NIP-60 array format: ${e.message}")
             }
@@ -771,7 +851,8 @@ class Nip60WalletSync(
     private data class WalletMetadataParsed(
         val mintUrl: String?,
         val privkey: String?,
-        val mnemonic: String?
+        val mnemonic: String?,
+        val counters: Map<String, Long> = emptyMap()
     )
 
     /**

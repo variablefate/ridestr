@@ -42,12 +42,6 @@ class WalletService(
                 recommended = true
             ),
             MintOption(
-                name = "LN Server",
-                description = "Best rated on cashumints.space",
-                url = "https://mint.lnserver.com/",
-                recommended = false
-            ),
-            MintOption(
                 name = "Minibits",
                 description = "Popular, widely used",
                 url = "https://mint.minibits.cash/Bitcoin",
@@ -56,8 +50,11 @@ class WalletService(
         )
     }
 
-    private val walletStorage = WalletStorage(context)
-    private val cashuBackend = CashuBackend(context, walletKeyManager, walletStorage)
+    private val _walletStorage = WalletStorage(context)
+    private val cashuBackend = CashuBackend(context, walletKeyManager, _walletStorage)
+
+    // Expose walletStorage for NIP-60 counter backup
+    val walletStorage: WalletStorage get() = _walletStorage
 
     // Lazy init for NIP-60 sync (requires NostrService which may not be available at init)
     private var nip60Sync: Nip60WalletSync? = null
@@ -82,6 +79,10 @@ class WalletService(
     private val _diagnostics = MutableStateFlow<WalletDiagnostics?>(null)
     val diagnostics: StateFlow<WalletDiagnostics?> = _diagnostics.asStateFlow()
 
+    // Recovery tokens notification - UI can observe this to show recovery banner
+    private val _hasRecoveryTokens = MutableStateFlow(false)
+    val hasRecoveryTokens: StateFlow<Boolean> = _hasRecoveryTokens.asStateFlow()
+
     init {
         // Load cached balance
         _balance.value = walletStorage.getCachedBalance()
@@ -92,6 +93,9 @@ class WalletService(
         if (savedMintUrl != null) {
             _currentMintName.value = DEFAULT_MINTS.find { it.url == savedMintUrl }?.name ?: "Custom"
         }
+
+        // Check for existing recovery tokens
+        _hasRecoveryTokens.value = walletStorage.getRecoveryTokens().isNotEmpty()
     }
 
     /**
@@ -449,12 +453,35 @@ class WalletService(
             walletStorage.cleanupExpiredDeposits()
 
             // Also check for stale deposits with unknown quotes at mint
+            // IMPORTANT: Only remove deposits with DEFINITIVE "not found" response (404)
+            // Do NOT remove on network errors - the deposit may still be valid!
             val pendingDeposits = walletStorage.getPendingDeposits().filter { !it.minted && !it.isExpired() }
             for (deposit in pendingDeposits) {
-                val quote = cashuBackend.checkMintQuote(deposit.quoteId)
-                if (quote == null) {
-                    Log.w(TAG, "syncWallet: Removing stale deposit ${deposit.quoteId} (quote not found at mint)")
-                    walletStorage.removePendingDeposit(deposit.quoteId)
+                val quoteResult = cashuBackend.checkMintQuoteWithResult(deposit.quoteId)
+                when (quoteResult) {
+                    is MintQuoteResult.Found -> {
+                        // Quote exists - try to claim if paid
+                        if (quoteResult.quote.isPaid()) {
+                            Log.d(TAG, "syncWallet: Found paid deposit ${deposit.quoteId} - attempting to claim")
+                            try {
+                                val claimResult = checkDepositStatus(deposit.quoteId)
+                                if (claimResult.isSuccess && claimResult.getOrNull() == true) {
+                                    Log.d(TAG, "syncWallet: Successfully claimed deposit ${deposit.quoteId}")
+                                }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "syncWallet: Failed to claim deposit ${deposit.quoteId}: ${e.message}")
+                            }
+                        }
+                    }
+                    is MintQuoteResult.NotFound -> {
+                        // Quote definitively doesn't exist - safe to remove
+                        Log.w(TAG, "syncWallet: Removing stale deposit ${deposit.quoteId} (404 - not found at mint)")
+                        walletStorage.removePendingDeposit(deposit.quoteId)
+                    }
+                    is MintQuoteResult.Error -> {
+                        // Network error - DON'T remove, quote may still be valid
+                        Log.w(TAG, "syncWallet: Keeping deposit ${deposit.quoteId} (error: ${quoteResult.message})")
+                    }
                 }
             }
 
@@ -515,15 +542,17 @@ class WalletService(
                     if (remainingProofsToRepublish.isNotEmpty()) {
                         Log.d(TAG, "Republishing ${remainingProofsToRepublish.size} remaining proofs before delete")
                         val cashuProofs = remainingProofsToRepublish.map { it.toCashuProof() }
-                        val newEventId = sync.publishProofs(cashuProofs, mintUrl)
+                        // Include del array to atomically mark old events as consumed
+                        val newEventId = sync.publishProofs(cashuProofs, mintUrl, spentEventIds)
                         if (newEventId == null) {
                             // Fallback: save recovery token for manual recovery
                             saveRecoveryTokenFallback(cashuProofs, mintUrl, "nip60_republish_failed_syncwallet")
                         } else {
-                            Log.d(TAG, "Republished remaining proofs to new event: $newEventId")
+                            Log.d(TAG, "Republished remaining proofs to new event: $newEventId (del: ${spentEventIds.size} events)")
                         }
                     }
 
+                    // NIP-09 deletion as backup (del arrays are primary)
                     sync.deleteProofEvents(spentEventIds)
                     sync.clearCache()
                     Log.d(TAG, "Deleted ${spentEventIds.size} spent proof events")
@@ -609,15 +638,17 @@ class WalletService(
                                 if (remainingProofsToRepublish.isNotEmpty()) {
                                     Log.d(TAG, "Republishing ${remainingProofsToRepublish.size} remaining proofs before delete")
                                     val cashuProofs = remainingProofsToRepublish.map { it.toCashuProof() }
-                                    val newEventId = sync.publishProofs(cashuProofs, otherMintUrl)
+                                    // Include del array to atomically mark old events as consumed
+                                    val newEventId = sync.publishProofs(cashuProofs, otherMintUrl, spentEventIds)
                                     if (newEventId == null) {
                                         // Fallback: save recovery token for manual recovery
                                         saveRecoveryTokenFallback(cashuProofs, otherMintUrl, "nip60_republish_failed_mintswitch")
                                     } else {
-                                        Log.d(TAG, "Republished remaining proofs to new event: $newEventId")
+                                        Log.d(TAG, "Republished remaining proofs to new event: $newEventId (del: ${spentEventIds.size} events)")
                                     }
                                 }
 
+                                // NIP-09 deletion as backup (del arrays are primary)
                                 sync.deleteProofEvents(spentEventIds)
                                 sync.clearCache()
                             }
@@ -794,7 +825,10 @@ class WalletService(
 
         walletStorage.saveRecoveryToken(recoveryToken)
         Log.w(TAG, "⚠️ Saved recovery token: $totalAmount sats (reason: $reason)")
-        Log.w(TAG, "   Use Developer Options > 'Recover Saved Tokens' to reclaim funds")
+        Log.w(TAG, "   Tap 'Recover Funds' in Wallet Settings to reclaim")
+
+        // Notify UI that recovery tokens exist
+        _hasRecoveryTokens.value = true
 
         // Also store in cdk-kotlin as additional backup
         cashuBackend.storeRecoveredProofs(proofs, mintUrl)
@@ -932,16 +966,18 @@ class WalletService(
                 if (remainingProofsToRepublish.isNotEmpty()) {
                     Log.d(TAG, "Republishing ${remainingProofsToRepublish.size} remaining proofs before delete")
                     val cashuProofs = remainingProofsToRepublish.map { it.toCashuProof() }
-                    val newEventId = sync.publishProofs(cashuProofs, mintUrl)
+                    // Include del array to atomically mark old events as consumed
+                    val newEventId = sync.publishProofs(cashuProofs, mintUrl, spentEventIds)
                     if (newEventId == null) {
                         // Fallback: save recovery token for manual recovery
                         saveRecoveryTokenFallback(cashuProofs, mintUrl, "nip60_republish_failed_lockforride")
                     } else {
-                        Log.d(TAG, "Republished remaining proofs to new event: $newEventId")
+                        Log.d(TAG, "Republished remaining proofs to new event: $newEventId (del: ${spentEventIds.size} events)")
                     }
                 }
 
                 Log.d(TAG, "Deleting ${spentEventIds.size} stale NIP-60 events")
+                // NIP-09 deletion as backup (del arrays are primary)
                 sync.deleteProofEvents(spentEventIds)
                 sync.clearCache()
 
@@ -1020,10 +1056,11 @@ class WalletService(
             Log.d(TAG, "Remaining: ${remainingProofsToRepublish.sumOf { it.amount }} sats")
 
             // Republish remaining proofs to a NEW event before deleting old
+            // NIP-60: Include `del` array with original event IDs being replaced
             val cashuProofs = remainingProofsToRepublish.map { it.toCashuProof() }
-            val newEventId = sync.publishProofs(cashuProofs, mintUrl)
+            val newEventId = sync.publishProofs(cashuProofs, mintUrl, affectedEventIds)
             if (newEventId != null) {
-                Log.d(TAG, "Republished remaining proofs to new event: $newEventId")
+                Log.d(TAG, "Republished remaining proofs to new event: $newEventId (with del: ${affectedEventIds.size} events)")
             } else {
                 Log.e(TAG, "CRITICAL: Failed to republish remaining proofs!")
                 Log.e(TAG, "Remaining amount: ${remainingProofsToRepublish.sumOf { it.amount }} sats")
@@ -1032,11 +1069,12 @@ class WalletService(
             }
         }
 
-        // NOW safe to delete old events (remaining proofs are in new event)
-        Log.d(TAG, "Deleting ${affectedEventIds.size} old NIP-60 events")
+        // NOW safe to delete old events (remaining proofs are in new event, or del array references them)
+        Log.d(TAG, "Deleting ${affectedEventIds.size} old NIP-60 events (NIP-09 backup)")
         sync.deleteProofEvents(affectedEventIds)
 
         // Step 4: Publish change proofs to NIP-60 with retry
+        // NIP-60: Include `del` with affected event IDs
         if (changeProofs.isNotEmpty()) {
             var changeEventId: String? = null
             var publishAttempts = 0
@@ -1045,7 +1083,7 @@ class WalletService(
 
             while (changeEventId == null && publishAttempts < maxAttempts) {
                 publishAttempts++
-                changeEventId = sync.publishProofs(changeProofs, mintUrl)
+                changeEventId = sync.publishProofs(changeProofs, mintUrl, affectedEventIds)
                 if (changeEventId == null && publishAttempts < maxAttempts) {
                     Log.w(TAG, "Change publish failed, retrying...")
                     kotlinx.coroutines.delay(1000)
@@ -1053,7 +1091,7 @@ class WalletService(
             }
 
             if (changeEventId != null) {
-                Log.d(TAG, "Published ${changeProofs.size} change proofs ($changeAmount sats) to NIP-60: $changeEventId")
+                Log.d(TAG, "Published ${changeProofs.size} change proofs ($changeAmount sats) to NIP-60: $changeEventId (with del)")
             } else {
                 Log.e(TAG, "Failed to publish change proofs after $maxAttempts attempts")
                 // Save recovery token for manual recovery
@@ -1657,29 +1695,28 @@ class WalletService(
             if (mintResult != null && mintResult.success) {
                 // Publish proofs to NIP-60 - THIS MUST SUCCEED for NIP-60 primary architecture
                 if (mintResult.proofs.isNotEmpty()) {
-                    // Try publishing with retry (relay connection can be flaky)
+                    // Try publishing with exponential backoff retry (relay connection can be flaky)
                     var eventId: String? = null
-                    var publishAttempts = 0
-                    val maxAttempts = 3
+                    val delays = listOf(1000L, 2000L, 4000L)  // Exponential backoff: 1s, 2s, 4s
 
-                    while (eventId == null && publishAttempts < maxAttempts) {
-                        publishAttempts++
-                        Log.d(TAG, "Publishing proofs to NIP-60 (attempt $publishAttempts/$maxAttempts)")
+                    for ((attempt, delay) in delays.withIndex()) {
+                        Log.d(TAG, "Publishing proofs to NIP-60 (attempt ${attempt + 1}/${delays.size})")
                         eventId = sync.publishProofs(mintResult.proofs, mintUrl)
-
-                        if (eventId == null && publishAttempts < maxAttempts) {
-                            Log.w(TAG, "NIP-60 publish failed, retrying in 2 seconds...")
-                            kotlinx.coroutines.delay(2000)
+                        if (eventId != null) break
+                        if (attempt < delays.lastIndex) {
+                            Log.w(TAG, "NIP-60 publish failed, retrying in ${delay}ms...")
+                            kotlinx.coroutines.delay(delay)
                         }
                     }
 
                     if (eventId != null) {
                         Log.d(TAG, "Published ${mintResult.proofs.size} proofs to NIP-60: $eventId")
                     } else {
-                        // NIP-60 publish failed after retries but proofs are in cdk-kotlin
-                        // This is a degraded state but not a total failure
-                        Log.e(TAG, "CRITICAL: Failed to publish proofs to NIP-60 after $maxAttempts attempts!")
-                        Log.e(TAG, "Proofs are in cdk-kotlin local storage. Use 'Recover Local Funds' to recover.")
+                        // NIP-60 publish failed after retries - save recovery token
+                        Log.e(TAG, "CRITICAL: Failed to publish proofs to NIP-60 after all attempts!")
+                        Log.e(TAG, "Saving recovery token for ${mintResult.proofs.sumOf { it.amount }} sats")
+                        saveRecoveryTokenFallback(mintResult.proofs, mintUrl, "deposit_nip60_failed")
+                        // Still mark deposit as complete - tokens are safely saved for recovery
                     }
                 }
 
@@ -1890,10 +1927,58 @@ class WalletService(
             return Result.failure(Exception("Insufficient funds"))
         }
 
-        val proofs = selection.proofs.map { it.toCashuProof() }
-        Log.d(TAG, "Selected ${proofs.size} proofs from NIP-60 (${selection.totalAmount} sats) for ${quote.totalAmount} sats withdrawal")
+        var proofs = selection.proofs.map { it.toCashuProof() }
+        val selectedAmount = selection.totalAmount
+        val affectedEventIds = selection.proofs.map { it.eventId }.distinct()
+        Log.d(TAG, "Selected ${proofs.size} proofs from NIP-60 ($selectedAmount sats) for ${quote.totalAmount} sats withdrawal")
 
-        // Execute melt with NIP-60 proofs
+        // === PRE-SWAP FOR EXACT AMOUNT (Prevents change loss on pending melt) ===
+        // If we have more than needed, swap to get exact amount + remaining.
+        // Swap returns ALL outputs immediately, so no change can be lost.
+        var swapPendingOpId: String? = null
+        if (selectedAmount > quote.totalAmount) {
+            Log.d(TAG, "Pre-swap: need exact ${quote.totalAmount} sats, have $selectedAmount sats")
+
+            val swapResult = cashuBackend.swapToExactAmount(proofs, quote.totalAmount, mintUrl)
+            if (swapResult == null) {
+                Log.e(TAG, "Pre-swap failed - falling back to standard melt with change")
+                // Fall through to standard melt (may lose change if pending)
+            } else {
+                swapPendingOpId = swapResult.pendingOpId
+
+                // Publish remaining proofs to NIP-60 BEFORE melt (already received from swap)
+                // NIP-60: Include `del` array with original event IDs being replaced
+                if (swapResult.remainingProofs.isNotEmpty()) {
+                    val remainingAmount = swapResult.remainingProofs.sumOf { it.amount }
+                    Log.d(TAG, "Pre-swap: publishing $remainingAmount sats remaining to NIP-60 (replacing ${affectedEventIds.size} events)")
+
+                    var remainingEventId: String? = null
+                    val delays = listOf(1000L, 2000L, 4000L)  // Exponential backoff
+                    for ((attempt, delay) in delays.withIndex()) {
+                        remainingEventId = sync.publishProofs(swapResult.remainingProofs, mintUrl, affectedEventIds)
+                        if (remainingEventId != null) break
+                        if (attempt < delays.lastIndex) {
+                            Log.w(TAG, "Remaining proofs publish failed, retrying in ${delay}ms...")
+                            kotlinx.coroutines.delay(delay)
+                        }
+                    }
+
+                    if (remainingEventId != null) {
+                        Log.d(TAG, "Pre-swap: remaining proofs published to NIP-60: $remainingEventId")
+                    } else {
+                        Log.e(TAG, "CRITICAL: Failed to publish remaining proofs after pre-swap!")
+                        saveRecoveryTokenFallback(swapResult.remainingProofs, mintUrl, "preswap_remaining_failed")
+                        // Continue anyway - we still have exact proofs for melt
+                    }
+                }
+
+                // Use exact proofs for melt - NO CHANGE NEEDED
+                proofs = swapResult.exactProofs
+                Log.d(TAG, "Pre-swap complete: using ${proofs.size} exact proofs (${proofs.sumOf { it.amount }} sats)")
+            }
+        }
+
+        // Execute melt with proofs (either exact from swap, or original with potential change)
         val result = cashuBackend.meltWithProofs(quote.quote, proofs, quote.totalAmount)
 
         if (result == null) {
@@ -1910,75 +1995,104 @@ class WalletService(
         }
 
         if (result.paid) {
-            // CRITICAL: Don't just delete events - republish remaining proofs first!
-            // One event can contain MANY proofs. If we delete the event, we lose ALL proofs in it.
-            // We must: 1) Find remaining proofs in affected events, 2) Republish them, 3) Delete old events
-            val spentSecrets = selection.proofs.map { it.secret }.toSet()
-            val affectedEventIds = selection.proofs.map { it.eventId }.distinct()
+            // Track events to delete - only delete AFTER all proofs are safely published
+            val eventsToDelete = mutableListOf<String>()
+            var allPublishesSucceeded = true
 
-            // Fetch all current proofs to find remaining (not spent) proofs in affected events
-            val allProofs = sync.fetchProofs(forceRefresh = true)
-            val remainingProofsToRepublish = allProofs.filter { proof ->
-                proof.eventId in affectedEventIds && proof.secret !in spentSecrets
-            }
+            // === Handle remaining proofs from original NIP-60 events ===
+            // (Only needed if we didn't pre-swap, since pre-swap already published remaining)
+            if (swapPendingOpId == null) {
+                // Standard melt path - need to republish remaining proofs from affected events
+                val spentSecrets = selection.proofs.map { it.secret }.toSet()
 
-            if (remainingProofsToRepublish.isNotEmpty()) {
-                Log.d(TAG, "IMPORTANT: ${remainingProofsToRepublish.size} remaining proofs in affected events need republishing")
-                Log.d(TAG, "Remaining: ${remainingProofsToRepublish.sumOf { it.amount }} sats")
-
-                // Republish remaining proofs to a NEW event before deleting old
-                val cashuProofs = remainingProofsToRepublish.map { it.toCashuProof() }
-                val newEventId = sync.publishProofs(cashuProofs, mintUrl)
-                if (newEventId != null) {
-                    Log.d(TAG, "Republished remaining proofs to new event: $newEventId")
-                } else {
-                    Log.e(TAG, "CRITICAL: Failed to republish remaining proofs!")
-                    Log.e(TAG, "Remaining amount: ${remainingProofsToRepublish.sumOf { it.amount }} sats")
-                    // Save recovery token for manual recovery
-                    saveRecoveryTokenFallback(cashuProofs, mintUrl, "nip60_republish_failed_claimhtlc")
+                // Fetch all current proofs to find remaining (not spent) proofs in affected events
+                val allProofs = sync.fetchProofs(forceRefresh = true)
+                val remainingProofsToRepublish = allProofs.filter { proof ->
+                    proof.eventId in affectedEventIds && proof.secret !in spentSecrets
                 }
+
+                if (remainingProofsToRepublish.isNotEmpty()) {
+                    Log.d(TAG, "Republishing ${remainingProofsToRepublish.size} remaining proofs (${remainingProofsToRepublish.sumOf { it.amount }} sats)")
+
+                    val cashuProofs = remainingProofsToRepublish.map { it.toCashuProof() }
+                    var newEventId: String? = null
+                    val delays = listOf(1000L, 2000L, 4000L)  // Exponential backoff
+
+                    for ((attempt, delay) in delays.withIndex()) {
+                        // NIP-60: Include `del` array with original event IDs being replaced
+                        newEventId = sync.publishProofs(cashuProofs, mintUrl, affectedEventIds)
+                        if (newEventId != null) break
+                        if (attempt < delays.lastIndex) {
+                            Log.w(TAG, "Remaining proofs publish failed, retrying in ${delay}ms...")
+                            kotlinx.coroutines.delay(delay)
+                        }
+                    }
+
+                    if (newEventId != null) {
+                        Log.d(TAG, "Republished remaining proofs: $newEventId (with del: ${affectedEventIds.size} events)")
+                        eventsToDelete.addAll(affectedEventIds)
+                    } else {
+                        Log.e(TAG, "CRITICAL: Failed to republish remaining proofs!")
+                        saveRecoveryTokenFallback(cashuProofs, mintUrl, "nip60_republish_failed_withdraw")
+                        allPublishesSucceeded = false
+                        // DON'T delete old events - we need those proofs!
+                    }
+                } else {
+                    // No remaining proofs in affected events - change proofs will carry the del reference
+                    eventsToDelete.addAll(affectedEventIds)
+                }
+            } else {
+                // Pre-swap path - remaining proofs already published, original events can be deleted
+                eventsToDelete.addAll(affectedEventIds)
+
+                // Clean up swap pending operation
+                walletStorage.removePendingBlindedOp(swapPendingOpId)
+                Log.d(TAG, "Cleared pre-swap pending operation: $swapPendingOpId")
             }
 
-            // NOW safe to delete old events (remaining proofs are in new event)
-            sync.deleteProofEvents(affectedEventIds)
-            Log.d(TAG, "Deleted ${affectedEventIds.size} old NIP-60 proof events")
-
-            // Publish change proofs to NIP-60 with retry (CRITICAL - don't lose change!)
+            // === Handle change proofs from melt (if not pre-swapped) ===
+            // NIP-60: Include `del` with affected event IDs (especially if no remaining proofs)
             if (result.change.isNotEmpty()) {
-                var changeEventId: String? = null
-                var publishAttempts = 0
-                val maxAttempts = 3
                 val changeAmount = result.change.sumOf { it.amount }
+                Log.d(TAG, "Publishing $changeAmount sats change proofs to NIP-60")
 
-                while (changeEventId == null && publishAttempts < maxAttempts) {
-                    publishAttempts++
-                    Log.d(TAG, "Publishing change proofs to NIP-60 (attempt $publishAttempts/$maxAttempts)")
-                    changeEventId = sync.publishProofs(result.change, mintUrl)
+                var changeEventId: String? = null
+                val delays = listOf(1000L, 2000L, 4000L)  // Exponential backoff
 
-                    if (changeEventId == null && publishAttempts < maxAttempts) {
-                        Log.w(TAG, "Change publish failed, retrying in 2 seconds...")
-                        kotlinx.coroutines.delay(2000)
+                for ((attempt, delay) in delays.withIndex()) {
+                    // Include del array - ensures old events are marked as consumed
+                    changeEventId = sync.publishProofs(result.change, mintUrl, affectedEventIds)
+                    if (changeEventId != null) break
+                    if (attempt < delays.lastIndex) {
+                        Log.w(TAG, "Change publish failed, retrying in ${delay}ms...")
+                        kotlinx.coroutines.delay(delay)
                     }
                 }
 
                 if (changeEventId != null) {
-                    Log.d(TAG, "Published ${result.change.size} change proofs ($changeAmount sats) to NIP-60: $changeEventId")
+                    Log.d(TAG, "Published change proofs ($changeAmount sats): $changeEventId (with del: ${affectedEventIds.size} events)")
                 } else {
-                    Log.e(TAG, "CRITICAL: Failed to publish change proofs to NIP-60 after $maxAttempts attempts!")
-                    Log.e(TAG, "Change amount: $changeAmount sats")
-                    // Save recovery token for manual recovery
-                    saveRecoveryTokenFallback(result.change, mintUrl, "nip60_change_failed_claimhtlc")
+                    Log.e(TAG, "CRITICAL: Failed to publish change proofs!")
+                    saveRecoveryTokenFallback(result.change, mintUrl, "nip60_change_failed_withdraw")
+                    allPublishesSucceeded = false
                 }
+            }
 
-                // NOW safe to clear pending op - proofs are persisted (NIP-60 or RecoveryToken)
-                if (result.pendingOpId != null) {
-                    walletStorage.removePendingBlindedOp(result.pendingOpId)
-                    Log.d(TAG, "Cleared pending melt operation: ${result.pendingOpId}")
+            // === Atomic deletion: Only delete old events AFTER all publishes succeeded ===
+            if (eventsToDelete.isNotEmpty()) {
+                if (allPublishesSucceeded) {
+                    sync.deleteProofEvents(eventsToDelete)
+                    Log.d(TAG, "Deleted ${eventsToDelete.size} old NIP-60 proof events")
+                } else {
+                    Log.w(TAG, "Skipping deletion of ${eventsToDelete.size} events - some publishes failed")
+                    // Events will be cleaned up on next sync when proofs are verified
                 }
-            } else if (result.pendingOpId != null) {
-                // No change proofs, still safe to clear pending op
+            }
+
+            // Clear melt pending operation (if any)
+            if (result.pendingOpId != null) {
                 walletStorage.removePendingBlindedOp(result.pendingOpId)
-                Log.d(TAG, "Cleared pending melt operation (no change): ${result.pendingOpId}")
+                Log.d(TAG, "Cleared melt pending operation: ${result.pendingOpId}")
             }
 
             // Clear cache and refresh balance from NIP-60
@@ -2075,10 +2189,11 @@ class WalletService(
             val totalNeeded = quote.totalAmount  // amount + feeReserve
             Log.d(TAG, "[BRIDGE $bridgePaymentId] Quote received: amount=${quote.amount}, fees=${quote.feeReserve}, total=$totalNeeded sats")
 
-            // Update tracking with quote info
+            // Update tracking with quote info (including the actual amount)
             walletStorage.updateBridgePaymentStatus(
                 bridgePaymentId, BridgePaymentStatus.MELT_QUOTE_OBTAINED,
                 meltQuoteId = quote.quote,
+                amountSats = quote.amount,
                 feeReserveSats = quote.feeReserve
             )
 
@@ -2148,13 +2263,14 @@ class WalletService(
                 var attempts = 0
                 while (newEventId == null && attempts < 3) {
                     attempts++
-                    newEventId = sync.publishProofs(cashuProofs, mintUrl)
+                    // Include del array to atomically mark old events as consumed
+                    newEventId = sync.publishProofs(cashuProofs, mintUrl, affectedEventIds)
                     if (newEventId == null && attempts < 3) {
                         kotlinx.coroutines.delay(2000)
                     }
                 }
                 if (newEventId != null) {
-                    Log.d(TAG, "Republished remaining proofs to: $newEventId")
+                    Log.d(TAG, "Republished remaining proofs to: $newEventId (del: ${affectedEventIds.size} events)")
                 } else {
                     Log.e(TAG, "CRITICAL: Failed to republish remaining proofs!")
                     // Save recovery token for manual recovery
@@ -2162,7 +2278,7 @@ class WalletService(
                 }
             }
 
-            // Now safe to delete old events
+            // NIP-09 deletion as backup (del arrays are primary)
             sync.deleteProofEvents(affectedEventIds)
 
             // Step 5: Publish change proofs with retry
@@ -2175,7 +2291,8 @@ class WalletService(
                 while (changeEventId == null && publishAttempts < 3) {
                     publishAttempts++
                     Log.d(TAG, "[BRIDGE $bridgePaymentId] Publishing change proofs (attempt $publishAttempts/3)")
-                    changeEventId = sync.publishProofs(result.change, mintUrl)
+                    // Include del array to atomically mark old events as consumed
+                    changeEventId = sync.publishProofs(result.change, mintUrl, affectedEventIds)
                     if (changeEventId == null && publishAttempts < 3) {
                         kotlinx.coroutines.delay(2000)
                     }
@@ -2291,6 +2408,152 @@ class WalletService(
             return true
         }
         return false
+    }
+
+    /**
+     * Recover wallet from seed using NUT-09 /v1/restore endpoint.
+     * This is the nuclear option when NIP-60 data is lost but you have the mnemonic.
+     *
+     * NUT-13: Deterministic secrets allow scanning the mint for all proofs
+     * NUT-09: Restore endpoint returns signatures for previously-signed outputs
+     *
+     * Process:
+     * 1. Get all active keysets from mint
+     * 2. For each keyset, iterate through counter values (0, 100, 200, ...)
+     * 3. Generate deterministic blinded messages for each batch
+     * 4. Call /v1/restore to get any signatures mint has
+     * 5. Unblind signatures to get proofs
+     * 6. Filter unspent proofs via NUT-07
+     * 7. Publish unspent proofs to NIP-60
+     *
+     * @return RecoveryResult with success status and recovered amount
+     */
+    suspend fun recoverFromSeed(): SeedRecoveryResult {
+        Log.d(TAG, "=== RECOVER FROM SEED (NUT-09/NUT-13) ===")
+
+        val sync = nip60Sync
+        if (sync == null) {
+            Log.e(TAG, "recoverFromSeed: NIP-60 not initialized")
+            return SeedRecoveryResult(false, "NIP-60 not initialized", 0)
+        }
+
+        val seed = cashuBackend.getSeed()
+        if (seed == null) {
+            Log.e(TAG, "recoverFromSeed: No seed available (wallet not connected?)")
+            return SeedRecoveryResult(false, "Wallet not connected", 0)
+        }
+
+        val mintUrl = cashuBackend.getCurrentMintUrl()
+        if (mintUrl == null) {
+            Log.e(TAG, "recoverFromSeed: No mint URL")
+            return SeedRecoveryResult(false, "Not connected to mint", 0)
+        }
+
+        try {
+            // Get all active keysets
+            val keysetIds = cashuBackend.getActiveKeysetIds()
+            if (keysetIds.isEmpty()) {
+                Log.w(TAG, "recoverFromSeed: No active keysets found")
+                return SeedRecoveryResult(false, "No active keysets at mint", 0)
+            }
+
+            Log.d(TAG, "Found ${keysetIds.size} active keysets: $keysetIds")
+
+            var totalRecovered = 0L
+            var totalProofsFound = 0
+
+            for (keysetId in keysetIds) {
+                // Fetch full keyset
+                val keyset = cashuBackend.fetchKeyset(keysetId)
+                if (keyset == null) {
+                    Log.w(TAG, "Could not fetch keyset $keysetId, skipping")
+                    continue
+                }
+
+                Log.d(TAG, "Scanning keyset $keysetId...")
+
+                var counter = 0L
+                var emptyBatches = 0
+                val BATCH_SIZE = 100
+                val MAX_EMPTY_BATCHES = 3  // Stop after 3 consecutive empty batches
+
+                while (emptyBatches < MAX_EMPTY_BATCHES) {
+                    // Generate batch of deterministic secrets for all denominations
+                    val preMintSecrets = mutableListOf<com.ridestr.common.payment.cashu.PreMintSecret>()
+
+                    // For each counter value, try all standard denominations (1, 2, 4, 8, ..., up to 2^20)
+                    for (i in 0 until BATCH_SIZE) {
+                        val currentCounter = counter + i
+                        // Try common denominations
+                        for (power in 0..20) {
+                            val amount = 1L shl power  // 1, 2, 4, 8, ..., 1048576
+                            val pms = com.ridestr.common.payment.cashu.CashuCrypto.derivePreMintSecret(
+                                seed, keysetId, currentCounter * 21 + power, amount
+                            )
+                            if (pms != null) {
+                                preMintSecrets.add(pms)
+                            }
+                        }
+                    }
+
+                    Log.d(TAG, "Trying ${preMintSecrets.size} blinded messages at counter $counter")
+
+                    // Call restore endpoint
+                    val restoredProofs = cashuBackend.restoreProofs(preMintSecrets, keyset)
+
+                    if (restoredProofs.isEmpty()) {
+                        emptyBatches++
+                        Log.d(TAG, "No proofs found at counter $counter (empty batches: $emptyBatches)")
+                    } else {
+                        emptyBatches = 0  // Reset on successful find
+
+                        // Filter to unspent only
+                        val unspentProofs = cashuBackend.filterUnspentProofs(restoredProofs)
+                        Log.d(TAG, "Found ${restoredProofs.size} proofs, ${unspentProofs.size} unspent")
+
+                        if (unspentProofs.isNotEmpty()) {
+                            // Publish to NIP-60
+                            val eventId = sync.publishProofs(unspentProofs, mintUrl)
+                            if (eventId != null) {
+                                val batchTotal = unspentProofs.sumOf { it.amount }
+                                totalRecovered += batchTotal
+                                totalProofsFound += unspentProofs.size
+                                Log.d(TAG, "Published ${unspentProofs.size} proofs ($batchTotal sats) to NIP-60")
+                            }
+                        }
+                    }
+
+                    counter += BATCH_SIZE
+                }
+
+                // Update counter storage to highest scanned value
+                _walletStorage.setCounter(keysetId, counter)
+                Log.d(TAG, "Keyset $keysetId scan complete, counter set to $counter")
+            }
+
+            // Update balance
+            val newBalance = WalletBalance(
+                availableSats = _balance.value.availableSats + totalRecovered,
+                pendingSats = 0,
+                lastUpdated = System.currentTimeMillis()
+            )
+            _balance.value = newBalance
+            _walletStorage.cacheBalance(newBalance)
+
+            // Sync counters to NIP-60 metadata
+            sync.publishWalletMetadata(mintUrl)
+
+            Log.d(TAG, "=== RECOVERY COMPLETE: $totalRecovered sats in $totalProofsFound proofs ===")
+            return SeedRecoveryResult(
+                success = true,
+                message = "Recovered $totalRecovered sats",
+                recoveredSats = totalRecovered,
+                proofCount = totalProofsFound
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "recoverFromSeed failed: ${e.message}", e)
+            return SeedRecoveryResult(false, "Recovery failed: ${e.message}", 0)
+        }
     }
 
     /**
@@ -2585,15 +2848,16 @@ class WalletService(
                 )
             }
 
-            // Step 4: Delete old NIP-60 events
-            Log.d(TAG, "Step 4: Deleting ${nip60EventIds.size} old NIP-60 events...")
+            // Step 4: Publish verified proofs to NIP-60 with del array (atomic replacement)
+            Log.d(TAG, "Step 4: Publishing ${verifiedProofs.size} verified proofs to NIP-60...")
+            // Include del array to atomically mark old events as consumed
+            val eventId = sync.publishProofs(verifiedProofs, mintUrl, nip60EventIds)
+
+            // Step 5: NIP-09 deletion as backup (del arrays are primary)
+            Log.d(TAG, "Step 5: Deleting ${nip60EventIds.size} old NIP-60 events (NIP-09 backup)...")
             if (nip60EventIds.isNotEmpty()) {
                 sync.deleteProofEvents(nip60EventIds)
             }
-
-            // Step 5: Publish verified proofs to NIP-60
-            Log.d(TAG, "Step 5: Publishing ${verifiedProofs.size} verified proofs to NIP-60...")
-            val eventId = sync.publishProofs(verifiedProofs, mintUrl)
 
             if (eventId == null) {
                 Log.e(TAG, "Failed to publish proofs to NIP-60")
@@ -2913,6 +3177,144 @@ class WalletService(
     }
 
     /**
+     * Manually claim a deposit by quote ID.
+     *
+     * Use this to recover funds when:
+     * - The pending deposit record was lost
+     * - Imported key to a new device
+     * - App crashed and lost track of the deposit
+     *
+     * @param quoteId The mint quote ID (from the original deposit)
+     * @return ClaimResult with success status and amount
+     */
+    suspend fun claimDepositByQuoteId(quoteId: String): ClaimResult {
+        if (!_isConnected.value) {
+            return ClaimResult(success = false, error = "Not connected to wallet")
+        }
+
+        val sync = nip60Sync
+        val mintUrl = cashuBackend.getCurrentMintUrl()
+
+        if (sync == null) {
+            return ClaimResult(success = false, error = "Wallet sync not ready")
+        }
+
+        if (mintUrl == null) {
+            return ClaimResult(success = false, error = "Not connected to mint")
+        }
+
+        Log.d(TAG, "=== MANUAL DEPOSIT CLAIM ===")
+        Log.d(TAG, "Attempting to claim quote: $quoteId")
+
+        try {
+            // Check quote status at mint
+            val quoteResult = cashuBackend.checkMintQuoteWithResult(quoteId)
+
+            when (quoteResult) {
+                is MintQuoteResult.NotFound -> {
+                    return ClaimResult(success = false, error = "Quote not found at mint. It may have expired or been claimed already.")
+                }
+                is MintQuoteResult.Error -> {
+                    return ClaimResult(success = false, error = "Cannot reach mint: ${quoteResult.message}")
+                }
+                is MintQuoteResult.Found -> {
+                    val quote = quoteResult.quote
+                    Log.d(TAG, "Quote found: state=${quote.state}, amount=${quote.amount} sats")
+
+                    if (!quote.isPaid()) {
+                        return ClaimResult(
+                            success = false,
+                            error = "Quote not paid yet (state: ${quote.state}). Pay the invoice first."
+                        )
+                    }
+
+                    // Quote is paid - mint the tokens
+                    Log.d(TAG, "Quote is paid, minting ${quote.amount} sats...")
+
+                    var proofsToPublish: List<com.ridestr.common.payment.cashu.CashuProof>? = null
+
+                    // Try cdk-kotlin first
+                    val mintResult = cashuBackend.mintTokens(quoteId, quote.amount)
+                    if (mintResult != null && mintResult.success) {
+                        proofsToPublish = mintResult.proofs
+                        Log.d(TAG, "Minted ${proofsToPublish.size} proofs via cdk-kotlin")
+                    } else {
+                        // Fallback to HTTP recovery
+                        Log.w(TAG, "cdk-kotlin mint failed, trying HTTP recovery...")
+                        proofsToPublish = cashuBackend.recoverDeposit(quoteId, quote.amount)
+                        if (proofsToPublish != null) {
+                            Log.d(TAG, "Recovered ${proofsToPublish.size} proofs via HTTP")
+                        }
+                    }
+
+                    if (proofsToPublish == null || proofsToPublish.isEmpty()) {
+                        // Tokens may have already been minted - check if quote is ISSUED
+                        if (quote.state == MintQuoteState.ISSUED) {
+                            return ClaimResult(
+                                success = false,
+                                error = "Tokens already issued for this quote. They may be in your wallet already - try Sync Wallet."
+                            )
+                        }
+                        return ClaimResult(success = false, error = "Failed to mint tokens")
+                    }
+
+                    // Publish to NIP-60
+                    var eventId: String? = null
+                    val delays = listOf(1000L, 2000L, 4000L)
+
+                    for ((attempt, delay) in delays.withIndex()) {
+                        eventId = sync.publishProofs(proofsToPublish, mintUrl)
+                        if (eventId != null) break
+                        if (attempt < delays.lastIndex) {
+                            kotlinx.coroutines.delay(delay)
+                        }
+                    }
+
+                    if (eventId != null) {
+                        Log.d(TAG, "Published ${proofsToPublish.size} proofs to NIP-60: $eventId")
+                    } else {
+                        // Save recovery token as fallback
+                        saveRecoveryTokenFallback(proofsToPublish, mintUrl, "manual_claim_nip60_failed")
+                        return ClaimResult(
+                            success = false,
+                            error = "Minted but failed to sync. Funds saved for recovery."
+                        )
+                    }
+
+                    // Remove any pending deposit record for this quote
+                    walletStorage.removePendingDeposit(quoteId)
+
+                    // Record transaction
+                    addTransaction(PaymentTransaction(
+                        id = quoteId,
+                        type = TransactionType.DEPOSIT,
+                        amountSats = quote.amount,
+                        timestamp = System.currentTimeMillis(),
+                        rideId = null,
+                        counterpartyPubKey = null,
+                        status = "Manually claimed"
+                    ))
+
+                    // Refresh balance
+                    sync.clearCache()
+                    refreshBalance()
+
+                    Log.d(TAG, "Successfully claimed ${quote.amount} sats from quote $quoteId")
+
+                    return ClaimResult(
+                        success = true,
+                        claimedCount = 1,
+                        totalSats = quote.amount
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error claiming deposit $quoteId: ${e.message}", e)
+            return ClaimResult(success = false, error = "Error: ${e.message}")
+        }
+    }
+
+    /**
      * Get count of saved recovery tokens.
      * Used by UI to show if there are tokens to recover.
      */
@@ -3004,6 +3406,9 @@ class WalletService(
             sync.clearCache()
             refreshBalance()
         }
+
+        // Update recovery tokens flag
+        _hasRecoveryTokens.value = walletStorage.getRecoveryTokens().isNotEmpty()
 
         Log.d(TAG, "Recovery complete: $recoveredCount tokens, $totalSats sats")
 
@@ -3323,16 +3728,18 @@ class WalletService(
                                 Log.d(TAG, "Republishing ${remainingProofsToRepublish.size} remaining proofs before delete")
                                 val cashuProofsToRepublish = remainingProofsToRepublish.map { it.toCashuProof() }
                                 val currentMintUrl = cashuBackend.getCurrentMintUrl() ?: remainingProofsToRepublish.first().mintUrl
-                                val newEventId = sync.publishProofs(cashuProofsToRepublish, currentMintUrl)
+                                // Include del array to atomically mark old events as consumed
+                                val newEventId = sync.publishProofs(cashuProofsToRepublish, currentMintUrl, spentEventIds)
                                 if (newEventId == null) {
                                     // Save recovery token for manual recovery
                                     saveRecoveryTokenFallback(cashuProofsToRepublish, currentMintUrl, "nip60_republish_failed_smartresync")
                                 } else {
-                                    Log.d(TAG, "Republished remaining proofs to new event: $newEventId")
+                                    Log.d(TAG, "Republished remaining proofs to new event: $newEventId (del: ${spentEventIds.size} events)")
                                 }
                             }
 
                             Log.d(TAG, "Deleting ${spentEventIds.size} spent NIP-60 events")
+                            // NIP-09 deletion as backup (del arrays are primary)
                             sync.deleteProofEvents(spentEventIds)
                             sync.clearCache()
                         }
@@ -3516,4 +3923,14 @@ data class SyncResult(
     val unverifiedBalance: Long = 0,
     val spentCount: Int = 0,
     val mintReachable: Boolean = true
+)
+
+/**
+ * Result of NUT-13/NUT-09 seed-based recovery.
+ */
+data class SeedRecoveryResult(
+    val success: Boolean,
+    val message: String,
+    val recoveredSats: Long,
+    val proofCount: Int = 0
 )
