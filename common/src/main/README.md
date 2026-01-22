@@ -12,13 +12,13 @@ The `common` module contains all shared code used by both rider and driver apps:
 
 | File | Purpose | Key Methods |
 |------|---------|-------------|
-| `WalletService.kt` | Orchestration layer (⚠️ safe deletion pattern required - see cashu-wallet skill) | `syncWallet()`, `requestDeposit()`, `checkDepositStatus()`, `getMeltQuote()`, `executeWithdraw()`, `lockForRide()`, `claimHtlcPayment()`, `checkAndRefundExpiredHtlcs()`, `changeMintUrl()` |
-| `cashu/CashuBackend.kt` | Mint operations (NUT-04/05) | `getMintQuote()`, `mintTokens()`, `getMeltQuote()`, `meltTokens()`, `createHtlcTokenFromProofs()` |
+| `WalletService.kt` | Orchestration layer (⚠️ safe deletion pattern required - see cashu-wallet skill) | `syncWallet()`, `requestDeposit()`, `checkDepositStatus()`, `getMeltQuote()`, `executeWithdraw()`, `lockForRide()`, `claimHtlcPayment()`, `mintTokens()`, `claimUnclaimedDeposits()`, `changeMintUrl()`, `recoverPendingOperations()`, `bridgePayment()` |
+| `cashu/CashuBackend.kt` | Mint operations (NUT-04/05/14) | `getMintQuote()`, `mintTokens()`, `getMeltQuote()`, `meltWithProofs()`, `createHtlcTokenFromProofs()`, `claimHtlcTokenWithProofs()`, `refundExpiredHtlc()` |
 | `cashu/Nip60WalletSync.kt` | Cross-device wallet sync (NIP-60 compliant) | `publishProofs()`, `publishWalletMetadata()`, `restoreFromNostr()`, `hasExistingWallet()` |
 | `WalletKeyManager.kt` | Wallet keypair + signing | `getPrivateKeyBytes()`, `signSchnorr()`, `getWalletPubKeyHex()`, `importPrivateKey()`, `importMnemonic()` |
-| `WalletStorage.kt` | Local persistence | `savePendingDeposit()`, `getCachedBalance()`, `saveMintUrl()` |
+| `WalletStorage.kt` | Local persistence | `savePendingDeposit()`, `getPendingDeposits()`, `removePendingDeposit()`, `getCachedBalance()`, `saveMintUrl()`, `savePendingBlindedOp()`, `getRecoverableBlindedOps()`, `savePendingHtlc()`, `getRefundableHtlcs()` |
 | `PaymentCrypto.kt` | Preimage/hash generation | `generatePreimage()`, `hashPreimage()` |
-| `PaymentModels.kt` | Data classes | `MintQuote`, `MeltQuote`, `PaymentTransaction`, `EscrowLock` |
+| `PaymentModels.kt` | Data classes | `MintQuote`, `MeltQuote`, `PaymentTransaction`, `EscrowLock`, `PendingDeposit`, `ClaimResult`, `WalletBalance`, `PendingHtlc`, `PendingBlindedOperation` |
 
 ### Nostr Layer (`java/com/ridestr/common/nostr/`)
 
@@ -65,7 +65,7 @@ The `common` module contains all shared code used by both rider and driver apps:
 
 | File | Purpose | Key Methods |
 |------|---------|-------------|
-| `RideHistoryRepository.kt` | Ride history storage | `addRide()`, `syncFromNostr()`, `backupToNostr()` |
+| `RideHistoryRepository.kt` | Ride history storage (with grace period protection) | `addRide()`, `syncFromNostr()`, `backupToNostr()`, `clearAllHistoryAndDeleteFromNostr()` |
 | `VehicleRepository.kt` | Driver vehicles | `addVehicle()`, `updateVehicle()`, `setPrimaryVehicle()` |
 | `SavedLocationRepository.kt` | Rider saved locations | `addRecent()`, `pinAsFavorite()`, `restoreFromBackup()` |
 
@@ -87,11 +87,22 @@ The `common` module contains all shared code used by both rider and driver apps:
 | `WalletSettingsScreen.kt` | Wallet management (sync, change mint, diagnostics) |
 | `WalletSetupScreen.kt` | Mint connection setup |
 | `AccountBottomSheet.kt` | Profile, logout, account safety |
+| `AccountSafetyScreen.kt` | Key backup, account recovery options |
 | `ChatBottomSheet.kt` | In-ride messaging UI |
-| `RelayManagementScreen.kt` | Custom relay configuration |
-| `RideDetailScreen.kt` | Ride history detail view |
-| `SlideToConfirm.kt` | Swipe confirmation widget |
+| `ChatView.kt` | Chat message rendering component |
+| `DeveloperOptionsScreen.kt` | Debug/diagnostic toggles |
 | `FareDisplay.kt` | Fare breakdown display |
+| `LocationPermissionScreen.kt` | Location permission request flow |
+| `LocationSearchField.kt` | Address search input with geocoding |
+| `ProfilePictureEditor.kt` | Profile image editing |
+| `ProfileSyncScreen.kt` | Onboarding sync UI for existing key import |
+| `RelayManagementScreen.kt` | Custom relay configuration |
+| `RelaySignalIndicator.kt` | Relay connection status indicator |
+| `RideDetailScreen.kt` | Ride history detail view |
+| `SavedLocationComponents.kt` | Saved location chips and lists |
+| `SlideToConfirm.kt` | Swipe confirmation widget |
+| `TileManagementScreen.kt` | Offline map tile management |
+| `TileSetupScreen.kt` | Tile download region setup |
 
 ### Other Services
 
@@ -179,6 +190,19 @@ Before HTLC swap, proofs are verified with mint to catch stale NIP-60 events:
 - `WalletService.checkAndRefundExpiredHtlcs()` runs on wallet `connect()` to auto-refund expired HTLCs
 - `findHtlcByPaymentHash()` and `markHtlcClaimedByPaymentHash()` track HTLC lifecycle
 - `RiderViewModel.handleRideCompletion()` marks HTLC as claimed to prevent false refund attempts
+- `markHtlcClaimedByPaymentHash()` also clears `pendingSats` from balance (January 2026)
+
+### Ride History Clear Grace Period (January 2026)
+When user clears ride history, a 30-second grace period prevents sync from restoring deleted data:
+- `RideHistoryRepository.clearAllHistory()` sets `lastClearedAt` timestamp
+- `syncFromNostr()` skips restore if within `CLEAR_GRACE_PERIOD_MS` (30 seconds)
+- This allows NIP-09 deletion events to propagate to relays before next sync
+
+### Stale Deposit Cleanup (January 2026)
+Pending deposits are automatically cleaned up when their mint quote no longer exists:
+- `claimUnclaimedDeposits()` removes deposits when quote not found at mint
+- `syncWallet()` checks for and removes stale deposits during balance sync
+- Prevents orphaned "Pending deposit" UI indicators
 
 ### Wallet Sync Architecture
 - **NIP-60 IS the wallet** (source of truth), cdk-kotlin is only for mint API calls
@@ -191,6 +215,33 @@ Before HTLC swap, proofs are verified with mint to catch stale NIP-60 events:
 - `changeMintUrl()` uses `syncWallet()` internally for verification + migration + metadata update
 - UI in `WalletSettingsScreen.kt` (Settings → Wallet → Sync Wallet)
 - Developer Options only contains "Always Show Diagnostics" toggle for wallet
+
+### Pending Blinded Operations Safety (January 2026)
+
+All mint operations that create blinded outputs now follow a safe pattern:
+
+1. **Save premints BEFORE request** - Blinding factors (r values) saved to `PendingBlindedOperation`
+2. **Execute mint operation** - Send request to mint
+3. **Mark as COMPLETED** - Operation succeeded, proofs received
+4. **Persist to NIP-60** - Publish proofs with retry + RecoveryToken fallback
+5. **Clear pending op** - ONLY after NIP-60 persist (or RecoveryToken saved)
+
+**Covered operations:**
+- `lockForRide()` → `createHtlcTokenFromProofs()` (HTLC escrow lock)
+- `claimHtlcPayment()` → `claimHtlcTokenWithProofs()` (driver claims payment)
+- `refundExpiredHtlcs()` → `refundExpiredHtlc()` (rider refunds expired HTLC)
+- `executeWithdraw()` → `meltWithProofs()` (Lightning withdrawal)
+- `bridgePayment()` → `meltWithProofs()` (cross-mint payment)
+
+**Recovery on restart:**
+- `WalletService.connect()` calls `recoverPendingOperations()`
+- Checks for STARTED/PENDING operations, verifies inputs with mint
+- If inputs SPENT → outputs exist at mint → unblind and recover
+
+**Balance tracking:**
+- `pendingSats` tracks funds locked in active HTLCs
+- `lockForRide()` accumulates (adds) to pendingSats
+- `recalculatePendingSats()` recalculates from active HTLCs on `connect()`
 
 ### NIP-60 Compliance (January 2026)
 Both wallet event types are fully NIP-60 compliant:

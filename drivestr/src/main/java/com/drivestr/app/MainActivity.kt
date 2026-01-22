@@ -659,7 +659,6 @@ fun DrivestrApp() {
                     isDriverApp = true,
                     onOpenDebug = { currentScreen = Screen.DEBUG },
                     onBack = { currentScreen = Screen.MAIN },
-                    walletService = walletService,
                     modifier = Modifier.padding(innerPadding)
                 )
             }
@@ -691,6 +690,8 @@ fun DrivestrApp() {
             Screen.WALLET_SETTINGS -> {
                 WalletSettingsScreen(
                     walletService = walletService,
+                    settingsManager = settingsManager,
+                    isDriverApp = true,
                     onBack = { currentScreen = Screen.MAIN },
                     modifier = Modifier.padding(innerPadding)
                 )

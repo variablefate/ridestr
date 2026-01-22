@@ -70,6 +70,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         private const val FALLBACK_SATS_PER_MILE = 2000.0
         // Conversion factor: 1 km = 0.621371 miles
         private const val KM_TO_MILES = 0.621371
+        // Fee buffer for cross-mint payments (Lightning routing + melt fees)
+        private const val FEE_BUFFER_PERCENT = 0.02  // 2% buffer
         // Time after which a driver is considered stale (10 minutes)
         private const val STALE_DRIVER_TIMEOUT_MS = 10 * 60 * 1000L
         // How often to check for stale drivers (30 seconds)
@@ -577,11 +579,13 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             Log.d(TAG, "Restoring ride state: stage=$stage, confirmationId=$confirmationEventId, messages=${chatMessages.size}, escrow=${escrowToken != null}")
 
             // Restore state
+            val fareEstimateWithFees = fareEstimate?.let { it * (1 + FEE_BUFFER_PERCENT) }
             _uiState.value = _uiState.value.copy(
                 rideStage = stage,
                 pickupLocation = pickup,
                 destination = destination,
                 fareEstimate = fareEstimate,
+                fareEstimateWithFees = fareEstimateWithFees,
                 pendingOfferEventId = pendingOfferEventId,
                 acceptance = acceptance,
                 confirmationEventId = confirmationEventId,
@@ -680,7 +684,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.value = _uiState.value.copy(
             pickupLocation = newLocation,
             routeResult = null,
-            fareEstimate = null
+            fareEstimate = null,
+            fareEstimateWithFees = null
         )
 
         // If geohash changed significantly, resubscribe to get local drivers
@@ -722,7 +727,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.value = _uiState.value.copy(
             destination = Location(lat, lon),
             routeResult = null,
-            fareEstimate = null
+            fareEstimate = null,
+            fareEstimateWithFees = null
         )
         calculateRouteIfReady()
     }
@@ -816,7 +822,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.value = _uiState.value.copy(
             pickupLocation = location,
             routeResult = null,
-            fareEstimate = null
+            fareEstimate = null,
+            fareEstimateWithFees = null
         )
 
         // If geohash changed significantly, resubscribe to get local drivers
@@ -835,7 +842,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.value = _uiState.value.copy(
             destination = location,
             routeResult = null,
-            fareEstimate = null
+            fareEstimate = null,
+            fareEstimateWithFees = null
         )
         calculateRouteIfReady()
     }
@@ -959,7 +967,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.value = _uiState.value.copy(
             pickupLocation = null,
             routeResult = null,
-            fareEstimate = null
+            fareEstimate = null,
+            fareEstimateWithFees = null
         )
     }
 
@@ -970,7 +979,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.value = _uiState.value.copy(
             destination = null,
             routeResult = null,
-            fareEstimate = null
+            fareEstimate = null,
+            fareEstimateWithFees = null
         )
     }
 
@@ -1162,15 +1172,17 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             acceptanceSubscriptionId = null
 
             // Update fare in state - reset timeout flag since we're boosting
+            val newFareWithFees = newFare * (1 + FEE_BUFFER_PERCENT)
             _uiState.value = _uiState.value.copy(
                 fareEstimate = newFare,
+                fareEstimateWithFees = newFareWithFees,
                 directOfferBoostSats = state.directOfferBoostSats + boostAmount,
                 pendingOfferEventId = null,
                 directOfferTimedOut = false,
                 isSendingOffer = true
             )
 
-            Log.d(TAG, "Boosting direct offer fare from $currentFare to $newFare sats (total boost: ${state.directOfferBoostSats + boostAmount} sats)")
+            Log.d(TAG, "Boosting direct offer fare from $currentFare to $newFare sats (displayed: $newFareWithFees, total boost: ${state.directOfferBoostSats + boostAmount} sats)")
 
             // Calculate driver→pickup route for accurate metrics
             val pickupRoute = if (routingService.isReady()) {
@@ -1351,8 +1363,10 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             // Update fare in state - store actual sats boosted (not count)
             // Reset broadcastTimedOut AND broadcastStartTimeMs to prevent race condition with UI
             // The explicit null reset ensures LaunchedEffect properly restarts when new time is set
+            val newFareWithFees = newFare * (1 + FEE_BUFFER_PERCENT)
             _uiState.value = _uiState.value.copy(
                 fareEstimate = newFare,
+                fareEstimateWithFees = newFareWithFees,
                 totalBoostSats = state.totalBoostSats + boostAmount,
                 pendingOfferEventId = null,
                 broadcastTimedOut = false,
@@ -1360,7 +1374,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             )
 
             // Re-broadcast with new fare
-            Log.d(TAG, "Boosting fare from $currentFare to $newFare sats (total boost: ${state.totalBoostSats + boostAmount} sats)")
+            Log.d(TAG, "Boosting fare from $currentFare to $newFare sats (displayed: $newFareWithFees, total boost: ${state.totalBoostSats + boostAmount} sats)")
             broadcastRideRequest()
         }
     }
@@ -1592,6 +1606,19 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun clearRide() {
         val state = _uiState.value
+
+        // DEBUG: Log cancellation with stack trace to help identify phantom cancellations
+        Log.w(TAG, "=== CLEAR RIDE CALLED ===")
+        Log.w(TAG, "  confirmationEventId: ${state.confirmationEventId}")
+        Log.w(TAG, "  rideStage: ${state.rideStage}")
+        Log.w(TAG, "  pinVerified: ${state.pinVerified}")
+        Log.w(TAG, "  bridgeInProgress: ${state.bridgeInProgress}")
+        // Print abbreviated stack trace to identify caller
+        val stackTrace = Thread.currentThread().stackTrace
+        val relevantFrames = stackTrace.drop(2).take(5)  // Skip getStackTrace and clearRide itself
+        relevantFrames.forEach { frame ->
+            Log.w(TAG, "    at ${frame.className}.${frame.methodName}(${frame.fileName}:${frame.lineNumber})")
+        }
 
         // Stop chat refresh job
         stopChatRefreshJob()
@@ -2239,6 +2266,11 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             if (isCorrect) {
                 Log.d(TAG, "PIN verified successfully!")
 
+                // CRITICAL: Set pinVerified IMMEDIATELY to prevent race condition
+                // If handlePinSubmission is called twice (from duplicate events), the second call
+                // must see pinVerified=true and skip, otherwise we get double bridge payments
+                _uiState.value = _uiState.value.copy(pinVerified = true)
+
                 // CRITICAL: Add delay to ensure distinct timestamp for payment/preimage events
                 // NIP-33 replaceable events use timestamp (seconds) + event ID for ordering.
                 delay(1100L)
@@ -2276,12 +2308,23 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
 
+                // CRITICAL: Check if ride is still active after async payment operation
+                // If ride was cancelled during bridge/preimage sharing, don't overwrite state
+                val currentState = _uiState.value
+                if (currentState.confirmationEventId != confirmationEventId) {
+                    Log.w(TAG, "Ride was cancelled during payment operation - not updating state to IN_PROGRESS")
+                    Log.w(TAG, "  Expected confirmationEventId: $confirmationEventId")
+                    Log.w(TAG, "  Current confirmationEventId: ${currentState.confirmationEventId}")
+                    return@launch
+                }
+
                 // Update service status to in progress
                 val context = getApplication<Application>()
                 val driverName = _uiState.value.driverProfiles[driverPubKey]?.bestName()?.split(" ")?.firstOrNull()
                 RiderActiveService.updateStatus(context, RiderStatus.RideInProgress(driverName))
 
-                _uiState.value = state.copy(
+                // Use fresh state to preserve any changes made during async operations
+                _uiState.value = _uiState.value.copy(
                     pinAttempts = newAttempts,
                     pinVerified = true,
                     pickupPin = null,  // Clear PIN after verification - no longer needed
@@ -2378,10 +2421,12 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         depositInvoice: String
     ) {
         Log.d(TAG, "=== EXECUTING CROSS-MINT BRIDGE ===")
+        Log.d(TAG, "  rideId=$confirmationEventId")
+        Log.d(TAG, "  invoice=${depositInvoice.take(30)}...")
         _uiState.value = _uiState.value.copy(bridgeInProgress = true)
 
         try {
-            val result = walletService?.bridgePayment(depositInvoice)
+            val result = walletService?.bridgePayment(depositInvoice, rideId = confirmationEventId)
 
             if (result?.success == true) {
                 Log.d(TAG, "Bridge payment successful: ${result.amountSats} sats + ${result.feesSats} fees")
@@ -2415,18 +2460,22 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     _uiState.value = _uiState.value.copy(bridgeInProgress = false)
                 }
             } else {
-                Log.e(TAG, "Bridge payment failed: ${result?.error}")
+                Log.e(TAG, "Bridge payment failed: ${result?.error} - auto-cancelling ride")
                 _uiState.value = _uiState.value.copy(
                     bridgeInProgress = false,
-                    error = "Payment failed: ${result?.error ?: "Unknown error"}"
+                    error = "Payment failed: ${result?.error ?: "Unknown error"}. Ride cancelled."
                 )
+                // Auto-cancel the ride since payment failed
+                clearRide()
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Exception during bridge payment: ${e.message}", e)
+            Log.e(TAG, "Exception during bridge payment: ${e.message} - auto-cancelling ride", e)
             _uiState.value = _uiState.value.copy(
                 bridgeInProgress = false,
-                error = "Payment failed: ${e.message}"
+                error = "Payment failed: ${e.message}. Ride cancelled."
             )
+            // Auto-cancel the ride since payment failed
+            clearRide()
         }
     }
 
@@ -3058,10 +3107,12 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
             if (result != null) {
                 val fareEstimate = calculateFare(result)
+                val fareEstimateWithFees = fareEstimate * (1 + FEE_BUFFER_PERCENT)
                 _uiState.value = _uiState.value.copy(
                     isCalculatingRoute = false,
                     routeResult = result,
-                    fareEstimate = fareEstimate
+                    fareEstimate = fareEstimate,
+                    fareEstimateWithFees = fareEstimateWithFees
                 )
             } else {
                 _uiState.value = _uiState.value.copy(
@@ -3198,7 +3249,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             pickupLocation = newPickup,
             destination = newDest,
             routeResult = null,
-            fareEstimate = null
+            fareEstimate = null,
+            fareEstimateWithFees = null
         )
 
         // Recalculate route if both addresses are now set
@@ -3237,7 +3289,8 @@ data class RiderUiState(
     val pickupLocation: Location? = null,
     val destination: Location? = null,
     val routeResult: RouteResult? = null,
-    val fareEstimate: Double? = null,
+    val fareEstimate: Double? = null,             // Actual fare (sent to driver in offer)
+    val fareEstimateWithFees: Double? = null,     // Displayed fare (fare + 2% buffer for cross-mint fees)
     val isCalculatingRoute: Boolean = false,
     val isRoutingReady: Boolean = false,
 

@@ -158,6 +158,21 @@ data class PendingDeposit(
 }
 
 /**
+ * Result of claiming unclaimed deposits.
+ *
+ * @property success Whether all claims succeeded (no errors)
+ * @property claimedCount Number of deposits successfully claimed
+ * @property totalSats Total sats claimed
+ * @property error Error message if any claims failed
+ */
+data class ClaimResult(
+    val success: Boolean,
+    val claimedCount: Int = 0,
+    val totalSats: Long = 0,
+    val error: String? = null
+)
+
+/**
  * Result of locking funds for a ride.
  *
  * @property escrowId Unique identifier for this escrow
@@ -501,5 +516,92 @@ enum class TransactionType {
     DEPOSIT,
 
     /** Funds sent to external destination */
-    WITHDRAWAL
+    WITHDRAWAL,
+
+    /** Cross-mint bridge payment (rider pays driver's deposit invoice) */
+    BRIDGE_PAYMENT
+}
+
+// ============================================
+// Cross-Mint Bridge Payment Tracking
+// ============================================
+
+/**
+ * Status of a pending bridge payment.
+ */
+enum class BridgePaymentStatus {
+    /** Bridge payment initiated, getting melt quote */
+    STARTED,
+    /** Melt quote obtained, about to execute melt */
+    MELT_QUOTE_OBTAINED,
+    /** Melt executed, waiting for Lightning to route */
+    MELT_EXECUTED,
+    /** Lightning payment confirmed by mint */
+    LIGHTNING_CONFIRMED,
+    /** BridgeComplete published to driver */
+    COMPLETE,
+    /** Payment failed at some stage */
+    FAILED
+}
+
+/**
+ * Tracks a cross-mint bridge payment in progress.
+ * Stored locally to survive app restart and allow recovery/debugging.
+ *
+ * Bridge payment flow:
+ * 1. STARTED - Driver shares deposit invoice, rider begins bridge
+ * 2. MELT_QUOTE_OBTAINED - Got quote from rider's mint (feeReserve known)
+ * 3. MELT_EXECUTED - Proofs sent to mint for melting
+ * 4. LIGHTNING_CONFIRMED - Mint confirms Lightning payment succeeded
+ * 5. COMPLETE - BridgeComplete published to driver
+ *
+ * If app crashes/closes between stages, this record lets us:
+ * - Check melt quote status with mint
+ * - Recover change proofs if melt partially completed
+ * - Show user what happened
+ *
+ * @property id Unique identifier for this bridge payment
+ * @property rideId Associated ride ID
+ * @property driverInvoice The Lightning invoice from driver's mint
+ * @property amountSats Amount being paid (not including fees)
+ * @property feeReserveSats Fee reserve from melt quote (0 if not yet obtained)
+ * @property meltQuoteId Quote ID from rider's mint (null until quote obtained)
+ * @property status Current status
+ * @property createdAt Timestamp when bridge started
+ * @property updatedAt Timestamp of last status update
+ * @property proofsUsed Secrets of proofs sent to mint (for recovery)
+ * @property changeProofsReceived Whether change proofs were received and saved
+ * @property lightningPreimage Preimage from successful Lightning payment
+ * @property errorMessage Error message if failed
+ */
+data class PendingBridgePayment(
+    val id: String,
+    val rideId: String,
+    val driverInvoice: String,
+    val amountSats: Long,
+    val feeReserveSats: Long = 0,
+    val meltQuoteId: String? = null,
+    val status: BridgePaymentStatus = BridgePaymentStatus.STARTED,
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis(),
+    val proofsUsed: List<String> = emptyList(),  // Proof secrets for recovery
+    val changeProofsReceived: Boolean = false,
+    val lightningPreimage: String? = null,
+    val errorMessage: String? = null
+) {
+    /** Check if this bridge payment is still in progress */
+    fun isInProgress(): Boolean = status != BridgePaymentStatus.COMPLETE && status != BridgePaymentStatus.FAILED
+
+    /** Check if this bridge payment failed */
+    fun isFailed(): Boolean = status == BridgePaymentStatus.FAILED
+
+    /** Human-readable status description */
+    fun statusDescription(): String = when (status) {
+        BridgePaymentStatus.STARTED -> "Starting bridge payment..."
+        BridgePaymentStatus.MELT_QUOTE_OBTAINED -> "Got melt quote, executing..."
+        BridgePaymentStatus.MELT_EXECUTED -> "Waiting for Lightning confirmation..."
+        BridgePaymentStatus.LIGHTNING_CONFIRMED -> "Lightning paid, publishing result..."
+        BridgePaymentStatus.COMPLETE -> "Bridge payment complete"
+        BridgePaymentStatus.FAILED -> "Bridge payment failed: ${errorMessage ?: "unknown error"}"
+    }
 }

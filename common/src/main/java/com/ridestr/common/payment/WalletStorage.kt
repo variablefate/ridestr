@@ -34,6 +34,9 @@ class WalletStorage(private val context: Context) {
         private const val KEY_PENDING_DEPOSITS = "pending_deposits"
         private const val KEY_PENDING_HTLCS = "pending_htlcs"
         private const val KEY_UNVERIFIED_PROOFS = "unverified_proofs"
+        private const val KEY_PENDING_BRIDGE_PAYMENTS = "pending_bridge_payments"
+        private const val KEY_RECOVERY_TOKENS = "recovery_tokens"
+        private const val KEY_PENDING_BLINDED_OPS = "pending_blinded_operations"
     }
 
     private val prefs: SharedPreferences
@@ -397,6 +400,180 @@ class WalletStorage(private val context: Context) {
         }
     }
 
+    // === Pending Bridge Payments (cross-mint payment tracking) ===
+
+    /**
+     * Save a pending bridge payment when starting cross-mint flow.
+     * This tracks the entire flow from melt quote to Lightning confirmation.
+     */
+    fun savePendingBridgePayment(payment: PendingBridgePayment) {
+        val payments = getPendingBridgePayments().toMutableList()
+
+        // Replace if same id exists, otherwise add
+        val existingIndex = payments.indexOfFirst { it.id == payment.id }
+        if (existingIndex >= 0) {
+            payments[existingIndex] = payment
+        } else {
+            payments.add(payment)
+        }
+
+        val jsonArray = JSONArray()
+        for (p in payments) {
+            jsonArray.put(bridgePaymentToJson(p))
+        }
+        prefs.edit().putString(KEY_PENDING_BRIDGE_PAYMENTS, jsonArray.toString()).apply()
+        Log.d(TAG, "Saved pending bridge payment: ${payment.id}, status=${payment.status}")
+    }
+
+    /**
+     * Get all pending bridge payments.
+     */
+    fun getPendingBridgePayments(): List<PendingBridgePayment> {
+        val json = prefs.getString(KEY_PENDING_BRIDGE_PAYMENTS, null) ?: return emptyList()
+
+        return try {
+            val jsonArray = JSONArray(json)
+            val payments = mutableListOf<PendingBridgePayment>()
+            for (i in 0 until jsonArray.length()) {
+                val payment = bridgePaymentFromJson(jsonArray.getJSONObject(i))
+                if (payment != null) payments.add(payment)
+            }
+            payments
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to parse pending bridge payments", e)
+            emptyList()
+        }
+    }
+
+    /**
+     * Get only in-progress bridge payments (not complete or failed).
+     */
+    fun getInProgressBridgePayments(): List<PendingBridgePayment> {
+        return getPendingBridgePayments().filter { it.isInProgress() }
+    }
+
+    /**
+     * Update the status of a pending bridge payment.
+     */
+    fun updateBridgePaymentStatus(
+        paymentId: String,
+        status: BridgePaymentStatus,
+        meltQuoteId: String? = null,
+        feeReserveSats: Long? = null,
+        proofsUsed: List<String>? = null,
+        changeProofsReceived: Boolean? = null,
+        lightningPreimage: String? = null,
+        errorMessage: String? = null
+    ) {
+        val payments = getPendingBridgePayments().map { payment ->
+            if (payment.id == paymentId) {
+                payment.copy(
+                    status = status,
+                    updatedAt = System.currentTimeMillis(),
+                    meltQuoteId = meltQuoteId ?: payment.meltQuoteId,
+                    feeReserveSats = feeReserveSats ?: payment.feeReserveSats,
+                    proofsUsed = proofsUsed ?: payment.proofsUsed,
+                    changeProofsReceived = changeProofsReceived ?: payment.changeProofsReceived,
+                    lightningPreimage = lightningPreimage ?: payment.lightningPreimage,
+                    errorMessage = if (status == BridgePaymentStatus.FAILED) errorMessage else payment.errorMessage
+                )
+            } else payment
+        }
+
+        val jsonArray = JSONArray()
+        for (p in payments) {
+            jsonArray.put(bridgePaymentToJson(p))
+        }
+        prefs.edit().putString(KEY_PENDING_BRIDGE_PAYMENTS, jsonArray.toString()).apply()
+        Log.d(TAG, "Updated bridge payment status: $paymentId -> $status")
+    }
+
+    /**
+     * Remove a pending bridge payment (after completion or manual cleanup).
+     */
+    fun removePendingBridgePayment(paymentId: String) {
+        val payments = getPendingBridgePayments().filter { it.id != paymentId }
+
+        val jsonArray = JSONArray()
+        for (p in payments) {
+            jsonArray.put(bridgePaymentToJson(p))
+        }
+        prefs.edit().putString(KEY_PENDING_BRIDGE_PAYMENTS, jsonArray.toString()).apply()
+        Log.d(TAG, "Removed pending bridge payment: $paymentId")
+    }
+
+    /**
+     * Clean up old completed/failed bridge payments (older than 7 days).
+     */
+    fun cleanupOldBridgePayments() {
+        val cutoff = System.currentTimeMillis() - (7 * 24 * 60 * 60 * 1000L)  // 7 days ago
+        val payments = getPendingBridgePayments().filter { payment ->
+            // Keep if still in progress OR created recently
+            payment.isInProgress() || payment.createdAt > cutoff
+        }
+
+        val jsonArray = JSONArray()
+        for (p in payments) {
+            jsonArray.put(bridgePaymentToJson(p))
+        }
+        prefs.edit().putString(KEY_PENDING_BRIDGE_PAYMENTS, jsonArray.toString()).apply()
+    }
+
+    private fun bridgePaymentToJson(payment: PendingBridgePayment): JSONObject {
+        return JSONObject().apply {
+            put("id", payment.id)
+            put("ride_id", payment.rideId)
+            put("driver_invoice", payment.driverInvoice)
+            put("amount_sats", payment.amountSats)
+            put("fee_reserve_sats", payment.feeReserveSats)
+            payment.meltQuoteId?.let { put("melt_quote_id", it) }
+            put("status", payment.status.name)
+            put("created_at", payment.createdAt)
+            put("updated_at", payment.updatedAt)
+            if (payment.proofsUsed.isNotEmpty()) {
+                put("proofs_used", JSONArray(payment.proofsUsed))
+            }
+            put("change_proofs_received", payment.changeProofsReceived)
+            payment.lightningPreimage?.let { put("lightning_preimage", it) }
+            payment.errorMessage?.let { put("error_message", it) }
+        }
+    }
+
+    private fun bridgePaymentFromJson(json: JSONObject): PendingBridgePayment? {
+        return try {
+            val proofsUsed = mutableListOf<String>()
+            val proofsArray = json.optJSONArray("proofs_used")
+            if (proofsArray != null) {
+                for (i in 0 until proofsArray.length()) {
+                    proofsUsed.add(proofsArray.getString(i))
+                }
+            }
+
+            PendingBridgePayment(
+                id = json.getString("id"),
+                rideId = json.getString("ride_id"),
+                driverInvoice = json.getString("driver_invoice"),
+                amountSats = json.getLong("amount_sats"),
+                feeReserveSats = json.optLong("fee_reserve_sats", 0),
+                meltQuoteId = json.optString("melt_quote_id").takeIf { it.isNotBlank() },
+                status = try {
+                    BridgePaymentStatus.valueOf(json.optString("status", "STARTED"))
+                } catch (e: Exception) {
+                    BridgePaymentStatus.STARTED
+                },
+                createdAt = json.optLong("created_at", System.currentTimeMillis()),
+                updatedAt = json.optLong("updated_at", System.currentTimeMillis()),
+                proofsUsed = proofsUsed,
+                changeProofsReceived = json.optBoolean("change_proofs_received", false),
+                lightningPreimage = json.optString("lightning_preimage").takeIf { it.isNotBlank() },
+                errorMessage = json.optString("error_message").takeIf { it.isNotBlank() }
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to parse pending bridge payment", e)
+            null
+        }
+    }
+
     // === Unverified Proof Cache (for when mint is offline) ===
 
     /**
@@ -483,8 +660,267 @@ class WalletStorage(private val context: Context) {
             .remove(KEY_PENDING_DEPOSITS)
             .remove(KEY_PENDING_HTLCS)
             .remove(KEY_UNVERIFIED_PROOFS)
+            .remove(KEY_PENDING_BRIDGE_PAYMENTS)
+            .remove(KEY_RECOVERY_TOKENS)
+            .remove(KEY_PENDING_BLINDED_OPS)
             .apply()
         Log.d(TAG, "Cleared all wallet storage")
+    }
+
+    // === Pending Blinded Operations ===
+    // Critical for fund recovery when operations fail midway
+
+    /**
+     * Save a pending blinded operation BEFORE sending the request.
+     * This stores the blinding factors needed to recover outputs if the operation
+     * succeeds on the mint but we don't receive the response.
+     */
+    fun savePendingBlindedOp(op: PendingBlindedOperation) {
+        val ops = getPendingBlindedOps().toMutableList()
+
+        // Replace if same id exists, otherwise add
+        val existingIndex = ops.indexOfFirst { it.id == op.id }
+        if (existingIndex >= 0) {
+            ops[existingIndex] = op
+        } else {
+            ops.add(op)
+        }
+
+        val jsonArray = JSONArray()
+        for (o in ops) {
+            jsonArray.put(blindedOpToJson(o))
+        }
+        prefs.edit().putString(KEY_PENDING_BLINDED_OPS, jsonArray.toString()).apply()
+        Log.d(TAG, "Saved pending blinded op: ${op.id}, type=${op.operationType}, ${op.amountSats} sats")
+    }
+
+    /**
+     * Get all pending blinded operations.
+     */
+    fun getPendingBlindedOps(): List<PendingBlindedOperation> {
+        val json = prefs.getString(KEY_PENDING_BLINDED_OPS, null) ?: return emptyList()
+
+        return try {
+            val jsonArray = JSONArray(json)
+            val ops = mutableListOf<PendingBlindedOperation>()
+            for (i in 0 until jsonArray.length()) {
+                val op = blindedOpFromJson(jsonArray.getJSONObject(i))
+                if (op != null) ops.add(op)
+            }
+            ops
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to parse pending blinded ops", e)
+            emptyList()
+        }
+    }
+
+    /**
+     * Get pending operations that need recovery (not completed/recovered, not expired).
+     */
+    fun getRecoverableBlindedOps(): List<PendingBlindedOperation> {
+        val now = System.currentTimeMillis()
+        return getPendingBlindedOps().filter { op ->
+            op.status != PendingOperationStatus.COMPLETED &&
+            op.status != PendingOperationStatus.RECOVERED &&
+            op.expiresAt > now
+        }
+    }
+
+    /**
+     * Update the status of a pending blinded operation.
+     */
+    fun updateBlindedOpStatus(opId: String, status: PendingOperationStatus) {
+        val ops = getPendingBlindedOps().map { op ->
+            if (op.id == opId) op.copy(status = status)
+            else op
+        }
+
+        val jsonArray = JSONArray()
+        for (o in ops) {
+            jsonArray.put(blindedOpToJson(o))
+        }
+        prefs.edit().putString(KEY_PENDING_BLINDED_OPS, jsonArray.toString()).apply()
+        Log.d(TAG, "Updated blinded op status: $opId -> $status")
+    }
+
+    /**
+     * Remove a pending blinded operation (after confirmed completion or recovery).
+     */
+    fun removePendingBlindedOp(opId: String) {
+        val ops = getPendingBlindedOps().filter { it.id != opId }
+
+        val jsonArray = JSONArray()
+        for (o in ops) {
+            jsonArray.put(blindedOpToJson(o))
+        }
+        prefs.edit().putString(KEY_PENDING_BLINDED_OPS, jsonArray.toString()).apply()
+        Log.d(TAG, "Removed pending blinded op: $opId")
+    }
+
+    /**
+     * Clean up old expired operations (older than 24 hours past expiry).
+     */
+    fun cleanupExpiredBlindedOps() {
+        val cutoff = System.currentTimeMillis() - (24 * 60 * 60 * 1000L)  // 24 hours ago
+        val ops = getPendingBlindedOps().filter { op ->
+            // Keep if not expired OR completed/recovered recently
+            op.expiresAt > cutoff ||
+            (op.status == PendingOperationStatus.COMPLETED || op.status == PendingOperationStatus.RECOVERED)
+        }
+
+        val jsonArray = JSONArray()
+        for (o in ops) {
+            jsonArray.put(blindedOpToJson(o))
+        }
+        prefs.edit().putString(KEY_PENDING_BLINDED_OPS, jsonArray.toString()).apply()
+    }
+
+    private fun blindedOpToJson(op: PendingBlindedOperation): JSONObject {
+        return JSONObject().apply {
+            put("id", op.id)
+            put("operation_type", op.operationType.name)
+            put("mint_url", op.mintUrl)
+            op.quoteId?.let { put("quote_id", it) }
+            put("input_secrets", JSONArray(op.inputSecrets))
+            put("output_premints", JSONArray().also { arr ->
+                op.outputPremints.forEach { pm ->
+                    arr.put(JSONObject().apply {
+                        put("amount", pm.amount)
+                        put("secret", pm.secret)
+                        put("blinding_factor", pm.blindingFactor)
+                        put("Y", pm.Y)
+                        put("B_", pm.B_)
+                    })
+                }
+            })
+            put("amount_sats", op.amountSats)
+            put("created_at", op.createdAt)
+            put("expires_at", op.expiresAt)
+            put("status", op.status.name)
+        }
+    }
+
+    private fun blindedOpFromJson(json: JSONObject): PendingBlindedOperation? {
+        return try {
+            val inputSecrets = mutableListOf<String>()
+            val inputArray = json.getJSONArray("input_secrets")
+            for (i in 0 until inputArray.length()) {
+                inputSecrets.add(inputArray.getString(i))
+            }
+
+            val outputPremints = mutableListOf<SerializedPreMint>()
+            val outputArray = json.getJSONArray("output_premints")
+            for (i in 0 until outputArray.length()) {
+                val pmJson = outputArray.getJSONObject(i)
+                outputPremints.add(SerializedPreMint(
+                    amount = pmJson.getLong("amount"),
+                    secret = pmJson.getString("secret"),
+                    blindingFactor = pmJson.getString("blinding_factor"),
+                    Y = pmJson.getString("Y"),
+                    B_ = pmJson.getString("B_")
+                ))
+            }
+
+            PendingBlindedOperation(
+                id = json.getString("id"),
+                operationType = BlindedOperationType.valueOf(json.getString("operation_type")),
+                mintUrl = json.getString("mint_url"),
+                quoteId = json.optString("quote_id").takeIf { it.isNotBlank() },
+                inputSecrets = inputSecrets,
+                outputPremints = outputPremints,
+                amountSats = json.getLong("amount_sats"),
+                createdAt = json.getLong("created_at"),
+                expiresAt = json.getLong("expires_at"),
+                status = try {
+                    PendingOperationStatus.valueOf(json.optString("status", "STARTED"))
+                } catch (e: Exception) {
+                    PendingOperationStatus.STARTED
+                }
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to parse pending blinded op", e)
+            null
+        }
+    }
+
+    // === Recovery Tokens ===
+    // Fallback storage for proofs when NIP-60 publish fails
+
+    /**
+     * Save a recovery token when NIP-60 publish fails.
+     * These can be manually recovered later.
+     */
+    fun saveRecoveryToken(token: RecoveryToken) {
+        val tokens = getRecoveryTokens().toMutableList()
+        tokens.add(token)
+        val jsonArray = JSONArray()
+        tokens.forEach { t -> jsonArray.put(recoveryTokenToJson(t)) }
+        prefs.edit().putString(KEY_RECOVERY_TOKENS, jsonArray.toString()).apply()
+        Log.d(TAG, "Saved recovery token: ${token.amount} sats (${token.reason})")
+    }
+
+    /**
+     * Get all saved recovery tokens.
+     */
+    fun getRecoveryTokens(): List<RecoveryToken> {
+        val json = prefs.getString(KEY_RECOVERY_TOKENS, null) ?: return emptyList()
+        return try {
+            val jsonArray = JSONArray(json)
+            (0 until jsonArray.length()).mapNotNull { i ->
+                recoveryTokenFromJson(jsonArray.getJSONObject(i))
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to parse recovery tokens", e)
+            emptyList()
+        }
+    }
+
+    /**
+     * Remove a recovery token after successful import.
+     */
+    fun removeRecoveryToken(id: String) {
+        val tokens = getRecoveryTokens().filter { it.id != id }
+        val jsonArray = JSONArray()
+        tokens.forEach { t -> jsonArray.put(recoveryTokenToJson(t)) }
+        prefs.edit().putString(KEY_RECOVERY_TOKENS, jsonArray.toString()).apply()
+        Log.d(TAG, "Removed recovery token: $id")
+    }
+
+    /**
+     * Get count of pending recovery tokens.
+     */
+    fun getRecoveryTokenCount(): Int = getRecoveryTokens().size
+
+    /**
+     * Get total sats in recovery tokens.
+     */
+    fun getRecoveryTokenTotal(): Long = getRecoveryTokens().sumOf { it.amount }
+
+    private fun recoveryTokenToJson(token: RecoveryToken): JSONObject {
+        return JSONObject().apply {
+            put("id", token.id)
+            put("token", token.token)
+            put("amount", token.amount)
+            put("mint_url", token.mintUrl)
+            put("created_at", token.createdAt)
+            put("reason", token.reason)
+        }
+    }
+
+    private fun recoveryTokenFromJson(json: JSONObject): RecoveryToken? {
+        return try {
+            RecoveryToken(
+                id = json.getString("id"),
+                token = json.getString("token"),
+                amount = json.getLong("amount"),
+                mintUrl = json.getString("mint_url"),
+                createdAt = json.getLong("created_at"),
+                reason = json.optString("reason", "unknown")
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to parse recovery token", e)
+            null
+        }
     }
 
     // === JSON Serialization ===
@@ -531,3 +967,77 @@ data class UnverifiedProof(
     val mintUrl: String,
     val cachedAt: Long = System.currentTimeMillis()
 )
+
+/**
+ * Recovery token for proofs that couldn't be published to NIP-60.
+ * Stored locally for manual recovery when NIP-60 or network issues occur.
+ */
+data class RecoveryToken(
+    val id: String,              // UUID for this recovery token
+    val token: String,           // cashuA... token string (can be imported to any wallet)
+    val amount: Long,            // Total sats in token
+    val mintUrl: String,         // Mint URL these proofs are from
+    val createdAt: Long,         // When this was saved
+    val reason: String           // Why recovery was needed (e.g., "nip60_publish_failed")
+)
+
+/**
+ * Pending blinded operation - stores blinding factors for recovery.
+ *
+ * CRITICAL: This is saved BEFORE sending any operation that creates blinded outputs.
+ * If the operation succeeds on the mint but we lose the response (crash, network error),
+ * we can use these blinding factors to recover the outputs.
+ *
+ * Recovery flow:
+ * 1. Check input proof states (NUT-07)
+ * 2. If inputs are SPENT: operation succeeded, try to recover outputs
+ * 3. If inputs are UNSPENT: operation failed, inputs are still safe
+ * 4. If inputs are PENDING: wait and retry
+ */
+data class PendingBlindedOperation(
+    val id: String,                              // UUID for this operation
+    val operationType: BlindedOperationType,     // What kind of operation
+    val mintUrl: String,                         // Mint URL
+    val quoteId: String? = null,                 // For melt/mint operations (to poll status)
+    val inputSecrets: List<String>,              // Secrets of input proofs (to check state)
+    val outputPremints: List<SerializedPreMint>, // Our blinding factors (to recover outputs)
+    val amountSats: Long,                        // Total amount involved
+    val createdAt: Long,                         // When operation started
+    val expiresAt: Long,                         // When to stop recovery attempts
+    val status: PendingOperationStatus           // Current status
+)
+
+/**
+ * Serialized premint data for storage.
+ * Contains all data needed to unblind a mint signature into a valid proof.
+ */
+data class SerializedPreMint(
+    val amount: Long,           // Requested amount
+    val secret: String,         // The secret (will be proof's secret)
+    val blindingFactor: String, // r value - CRITICAL for unblinding
+    val Y: String,              // hash_to_curve(secret) - for verification
+    val B_: String              // Blinded message sent to mint
+)
+
+/**
+ * Types of operations that create blinded outputs.
+ */
+enum class BlindedOperationType {
+    MELT,           // Withdrawal with change outputs
+    SWAP,           // Token swap (split/merge)
+    MINT,           // Deposit (mint from quote)
+    CLAIM_HTLC,     // Driver claiming HTLC payment
+    REFUND_HTLC,    // Rider refunding expired HTLC
+    LOCK_HTLC       // Rider locking funds for HTLC
+}
+
+/**
+ * Status of a pending blinded operation.
+ */
+enum class PendingOperationStatus {
+    STARTED,        // Operation saved, request being sent
+    PENDING,        // Mint returned pending status (e.g., Lightning payment in progress)
+    COMPLETED,      // Successfully completed, safe to delete
+    FAILED,         // Confirmed failed, inputs verified UNSPENT
+    RECOVERED       // Outputs recovered from stored premints
+}

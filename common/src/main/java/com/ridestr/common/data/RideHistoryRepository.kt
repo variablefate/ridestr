@@ -34,6 +34,11 @@ class RideHistoryRepository(context: Context) {
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
+    // Timestamp of last clear operation - prevents sync from restoring deleted data
+    // for a grace period while NIP-09 deletion propagates to relays
+    private var lastClearedAt: Long = 0
+    private val CLEAR_GRACE_PERIOD_MS = 30_000L  // 30 seconds
+
     init {
         loadRides()
         updateStats()
@@ -129,7 +134,8 @@ class RideHistoryRepository(context: Context) {
         _rides.value = emptyList()
         saveRides()
         updateStats()
-        Log.d(TAG, "Cleared all ride history (local)")
+        lastClearedAt = System.currentTimeMillis()
+        Log.d(TAG, "Cleared all ride history (local), grace period started")
     }
 
     /**
@@ -141,7 +147,8 @@ class RideHistoryRepository(context: Context) {
         _rides.value = emptyList()
         saveRides()
         updateStats()
-        Log.d(TAG, "Cleared all ride history (local)")
+        lastClearedAt = System.currentTimeMillis()
+        Log.d(TAG, "Cleared all ride history (local), grace period started")
 
         // Delete from Nostr relays
         return try {
@@ -231,6 +238,13 @@ class RideHistoryRepository(context: Context) {
      * Use this for pull-to-refresh and initial sync on new devices.
      */
     suspend fun syncFromNostr(nostrService: NostrService): Boolean {
+        // Check if we're in grace period after clearing - don't restore deleted data
+        val timeSinceClear = System.currentTimeMillis() - lastClearedAt
+        if (lastClearedAt > 0 && timeSinceClear < CLEAR_GRACE_PERIOD_MS) {
+            Log.d(TAG, "syncFromNostr: In grace period after clear (${timeSinceClear}ms / ${CLEAR_GRACE_PERIOD_MS}ms), skipping to prevent restoring deleted data")
+            return false
+        }
+
         return try {
             _isLoading.value = true
             val historyData = nostrService.fetchRideHistory()

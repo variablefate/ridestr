@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.ridestr.common.payment.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -42,7 +43,8 @@ import java.util.concurrent.TimeUnit
  */
 class CashuBackend(
     private val context: Context,
-    private val walletKeyManager: WalletKeyManager
+    private val walletKeyManager: WalletKeyManager,
+    private val walletStorage: WalletStorage
 ) {
     companion object {
         private const val TAG = "CashuBackend"
@@ -249,6 +251,62 @@ class CashuBackend(
     }
 
     /**
+     * Check melt quote status via HTTP.
+     * NUT-05: GET /v1/melt/quote/bolt11/{quote_id}
+     *
+     * @param quoteId The melt quote ID to check
+     * @return MeltQuote with updated state, or null on failure
+     */
+    suspend fun checkMeltQuote(quoteId: String): MeltQuote? = withContext(Dispatchers.IO) {
+        val mintUrl = currentMintUrl ?: run {
+            Log.e(TAG, "checkMeltQuote: No mint URL configured")
+            return@withContext null
+        }
+
+        try {
+            val request = Request.Builder()
+                .url("$mintUrl/v1/melt/quote/bolt11/$quoteId")
+                .get()
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    Log.e(TAG, "Check melt quote failed: ${response.code}")
+                    return@withContext null
+                }
+
+                val body = response.body?.string() ?: return@withContext null
+                Log.d(TAG, "Check melt quote $quoteId response: $body")
+                val json = JSONObject(body)
+
+                val stateStr = json.getString("state").uppercase()
+                val state = when {
+                    "PAID" in stateStr -> MeltQuoteState.PAID
+                    "PENDING" in stateStr -> MeltQuoteState.PENDING
+                    else -> MeltQuoteState.UNPAID
+                }
+
+                Log.d(TAG, "Melt quote $quoteId state: $stateStr -> $state")
+
+                MeltQuote(
+                    quote = json.getString("quote"),
+                    request = json.optString("request", ""),
+                    amount = json.getLong("amount"),
+                    unit = json.optString("unit", "sat"),
+                    feeReserve = json.optLong("fee_reserve", 0L),
+                    state = state,
+                    expiry = if (json.isNull("expiry")) 0L else json.optLong("expiry", 0L),
+                    paymentPreimage = if (json.has("payment_preimage") && !json.isNull("payment_preimage"))
+                        json.getString("payment_preimage") else null
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to check melt quote: ${e.message}", e)
+            null
+        }
+    }
+
+    /**
      * Check proof states via NUT-07.
      *
      * @param Ys List of Y values (hash_to_curve(secret)) to check
@@ -423,6 +481,31 @@ class CashuBackend(
 
             Log.d(TAG, "Sending claim swap with ${htlcProofs.size} HTLC inputs, ${outputPremints.size} outputs")
 
+            // CRITICAL: Save pending operation BEFORE sending request
+            val operationId = java.util.UUID.randomUUID().toString()
+            val pendingOp = PendingBlindedOperation(
+                id = operationId,
+                operationType = BlindedOperationType.CLAIM_HTLC,
+                mintUrl = tokenMintUrl.trimEnd('/'),
+                quoteId = null,
+                inputSecrets = htlcProofs.map { it.secret },
+                outputPremints = outputPremints.map { pms ->
+                    SerializedPreMint(
+                        amount = pms.amount,
+                        secret = pms.secret,
+                        blindingFactor = pms.blindingFactor,
+                        Y = pms.Y,
+                        B_ = pms.B_
+                    )
+                },
+                amountSats = totalAmount,
+                createdAt = System.currentTimeMillis(),
+                expiresAt = System.currentTimeMillis() + (24 * 60 * 60 * 1000L), // 24 hours
+                status = PendingOperationStatus.STARTED
+            )
+            walletStorage.savePendingBlindedOp(pendingOp)
+            Log.d(TAG, "Saved pending HTLC claim operation: $operationId ($totalAmount sats)")
+
             // Step 7: Execute swap at mint
             val targetMint = tokenMintUrl.trimEnd('/')
             val request = Request.Builder()
@@ -436,6 +519,7 @@ class CashuBackend(
 
                 if (!response.isSuccessful) {
                     Log.e(TAG, "Claim swap failed: ${response.code} - $responseBody")
+                    // Keep pending operation for recovery
                     return@withContext null
                 }
 
@@ -474,6 +558,11 @@ class CashuBackend(
             Log.d(TAG, "=== HTLC CLAIMED SUCCESSFULLY ===")
             Log.d(TAG, "Received ${plainProofs.size} plain proofs totaling $totalAmount sats")
 
+            // SUCCESS: Remove pending operation
+            walletStorage.updateBlindedOpStatus(operationId, PendingOperationStatus.COMPLETED)
+            walletStorage.removePendingBlindedOp(operationId)
+            Log.d(TAG, "Removed pending HTLC claim operation: $operationId")
+
             // Return settlement proof JSON (for backward compatibility)
             JSONObject().apply {
                 put("preimage", preimage)
@@ -486,6 +575,7 @@ class CashuBackend(
             }.toString()
         } catch (e: Exception) {
             Log.e(TAG, "claimHtlcToken failed: ${e.message}", e)
+            // Keep pending operation for recovery
             null
         }
     }
@@ -597,8 +687,33 @@ class CashuBackend(
 
             Log.d(TAG, "Swap request to mint (${swapRequest.length} chars)")
 
-            // Execute swap
+            // CRITICAL: Save pending operation BEFORE sending request
+            val operationId = java.util.UUID.randomUUID().toString()
             val targetMint = tokenMintUrl.trimEnd('/')
+            val pendingOp = PendingBlindedOperation(
+                id = operationId,
+                operationType = BlindedOperationType.CLAIM_HTLC,
+                mintUrl = targetMint,
+                quoteId = null,
+                inputSecrets = htlcProofs.map { it.secret },
+                outputPremints = outputPremints.map { pms ->
+                    SerializedPreMint(
+                        amount = pms.amount,
+                        secret = pms.secret,
+                        blindingFactor = pms.blindingFactor,
+                        Y = pms.Y,
+                        B_ = pms.B_
+                    )
+                },
+                amountSats = totalAmount,
+                createdAt = System.currentTimeMillis(),
+                expiresAt = System.currentTimeMillis() + (24 * 60 * 60 * 1000L), // 24 hours
+                status = PendingOperationStatus.STARTED
+            )
+            walletStorage.savePendingBlindedOp(pendingOp)
+            Log.d(TAG, "Saved pending HTLC claim operation: $operationId ($totalAmount sats)")
+
+            // Execute swap
             Log.d(TAG, "Executing swap at: $targetMint/v1/swap")
             val request = Request.Builder()
                 .url("$targetMint/v1/swap")
@@ -610,6 +725,7 @@ class CashuBackend(
                 Log.d(TAG, "Swap response: ${response.code}")
                 if (!response.isSuccessful) {
                     Log.e(TAG, "Claim swap failed: ${response.code} - $responseBody")
+                    // Keep pending operation for recovery
                     return@withContext null
                 }
                 Log.d(TAG, "Swap successful, parsing signatures...")
@@ -642,6 +758,10 @@ class CashuBackend(
             Log.d(TAG, "=== HTLC CLAIMED (with proofs) ===")
             Log.d(TAG, "Received ${plainProofs.size} proofs totaling $totalAmount sats")
 
+            // Mark completed but do NOT remove - caller must persist proofs first
+            walletStorage.updateBlindedOpStatus(operationId, PendingOperationStatus.COMPLETED)
+            Log.d(TAG, "Pending HTLC claim op $operationId ready - caller must clear after NIP-60 publish")
+
             val settlementProof = JSONObject().apply {
                 put("preimage", preimage)
                 put("paymentHash", expectedHash)
@@ -656,10 +776,12 @@ class CashuBackend(
                 settlementProof = settlementProof,
                 receivedProofs = plainProofs,
                 amountSats = totalAmount,
-                mintUrl = targetMint
+                mintUrl = targetMint,
+                pendingOpId = operationId
             )
         } catch (e: Exception) {
             Log.e(TAG, "claimHtlcTokenWithProofs failed: ${e.message}", e)
+            // Keep pending operation for recovery
             null
         }
     }
@@ -780,8 +902,33 @@ class CashuBackend(
 
             Log.d(TAG, "Sending refund swap with ${htlcProofs.size} HTLC inputs, ${outputPremints.size} outputs")
 
-            // Step 7: Execute swap at mint
+            // CRITICAL: Save pending operation BEFORE sending request
+            val operationId = java.util.UUID.randomUUID().toString()
             val targetMint = tokenMintUrl.trimEnd('/')
+            val pendingOp = PendingBlindedOperation(
+                id = operationId,
+                operationType = BlindedOperationType.REFUND_HTLC,
+                mintUrl = targetMint,
+                quoteId = null,
+                inputSecrets = htlcProofs.map { it.secret },
+                outputPremints = outputPremints.map { pms ->
+                    SerializedPreMint(
+                        amount = pms.amount,
+                        secret = pms.secret,
+                        blindingFactor = pms.blindingFactor,
+                        Y = pms.Y,
+                        B_ = pms.B_
+                    )
+                },
+                amountSats = totalAmount,
+                createdAt = System.currentTimeMillis(),
+                expiresAt = System.currentTimeMillis() + (24 * 60 * 60 * 1000L), // 24 hours
+                status = PendingOperationStatus.STARTED
+            )
+            walletStorage.savePendingBlindedOp(pendingOp)
+            Log.d(TAG, "Saved pending HTLC refund operation: $operationId ($totalAmount sats)")
+
+            // Step 7: Execute swap at mint
             val request = Request.Builder()
                 .url("$targetMint/v1/swap")
                 .post(swapRequest.toRequestBody(JSON_MEDIA_TYPE))
@@ -793,6 +940,7 @@ class CashuBackend(
 
                 if (!response.isSuccessful) {
                     Log.e(TAG, "Refund swap failed: ${response.code} - $responseBody")
+                    // Keep pending operation for recovery
                     return@withContext null
                 }
 
@@ -833,13 +981,19 @@ class CashuBackend(
 
             Log.d(TAG, "Refund successful! Received ${plainProofs.size} proofs, total $totalAmount sats")
 
+            // Mark as COMPLETED but do NOT remove - caller must clear after NIP-60 publish
+            walletStorage.updateBlindedOpStatus(operationId, PendingOperationStatus.COMPLETED)
+            Log.d(TAG, "Marked pending HTLC refund operation COMPLETED: $operationId (caller must clear after NIP-60 persist)")
+
             HtlcRefundResult(
                 refundedProofs = plainProofs,
                 amountSats = totalAmount,
-                mintUrl = targetMint
+                mintUrl = targetMint,
+                pendingOpId = operationId
             )
         } catch (e: Exception) {
             Log.e(TAG, "refundExpiredHtlc failed: ${e.message}", e)
+            // Keep pending operation for recovery
             null
         }
     }
@@ -850,7 +1004,17 @@ class CashuBackend(
     data class HtlcRefundResult(
         val refundedProofs: List<CashuProof>,
         val amountSats: Long,
-        val mintUrl: String
+        val mintUrl: String,
+        val pendingOpId: String? = null  // ID of pending op - caller must clear after NIP-60 publish
+    )
+
+    /**
+     * Result of creating an HTLC lock (escrow).
+     */
+    data class HtlcLockResult(
+        val htlcToken: String,          // The HTLC-locked token
+        val changeProofs: List<CashuProof>,  // Change proofs back to rider
+        val pendingOpId: String? = null  // ID of pending op - caller must clear after NIP-60 publish
     )
 
     // ========================================
@@ -874,7 +1038,8 @@ class CashuBackend(
         val settlementProof: String,  // JSON proof
         val receivedProofs: List<CashuProof>,  // Plain proofs received
         val amountSats: Long,
-        val mintUrl: String
+        val mintUrl: String,
+        val pendingOpId: String? = null  // ID of pending op - caller must clear after NIP-60 publish
     )
 
     /**
@@ -1124,7 +1289,7 @@ class CashuBackend(
         driverPubKey: String,
         locktime: Long? = null,
         riderPubKey: String? = null
-    ): Pair<String, List<CashuProof>>? = withContext(Dispatchers.IO) {
+    ): HtlcLockResult? = withContext(Dispatchers.IO) {
         val mintUrl = currentMintUrl
         if (mintUrl == null) {
             Log.e(TAG, "createHtlcTokenFromProofs: currentMintUrl is null!")
@@ -1197,6 +1362,32 @@ class CashuBackend(
 
             Log.d(TAG, "Swap: ${inputProofs.size} inputs → ${htlcOutputs.size} HTLC + ${changeOutputs.size} change outputs")
 
+            // CRITICAL: Save pending operation BEFORE sending request
+            val operationId = java.util.UUID.randomUUID().toString()
+            val allOutputPremints = (htlcOutputs + changeOutputs).map { (pms, _, _) ->
+                SerializedPreMint(
+                    amount = pms.amount,
+                    secret = pms.secret,
+                    blindingFactor = pms.blindingFactor,
+                    Y = pms.Y,
+                    B_ = pms.B_
+                )
+            }
+            val pendingOp = PendingBlindedOperation(
+                id = operationId,
+                operationType = BlindedOperationType.LOCK_HTLC,
+                mintUrl = mintUrl,
+                quoteId = null,
+                inputSecrets = inputProofs.map { it.secret },
+                outputPremints = allOutputPremints,
+                amountSats = inputAmount, // Total input amount
+                createdAt = System.currentTimeMillis(),
+                expiresAt = System.currentTimeMillis() + (24 * 60 * 60 * 1000L), // 24 hours
+                status = PendingOperationStatus.STARTED
+            )
+            walletStorage.savePendingBlindedOp(pendingOp)
+            Log.d(TAG, "Saved pending HTLC lock operation: $operationId ($inputAmount sats)")
+
             // Execute swap
             val request = Request.Builder()
                 .url("$mintUrl/v1/swap")
@@ -1207,6 +1398,7 @@ class CashuBackend(
                 val responseBody = response.body?.string()
                 if (!response.isSuccessful) {
                     Log.e(TAG, "HTLC swap failed: ${response.code} - $responseBody")
+                    // Keep pending operation for recovery
                     return@withContext null
                 }
                 JSONObject(responseBody ?: "{}").getJSONArray("signatures")
@@ -1263,9 +1455,14 @@ class CashuBackend(
             Log.d(TAG, "HTLC: ${htlcProofs.size} proofs ($amountSats sats)")
             Log.d(TAG, "Change: ${changeProofs.size} proofs ($changeAmount sats)")
 
-            Pair(htlcToken, changeProofs)
+            // Mark as COMPLETED but do NOT remove - caller must clear after NIP-60 publish
+            walletStorage.updateBlindedOpStatus(operationId, PendingOperationStatus.COMPLETED)
+            Log.d(TAG, "Marked pending HTLC lock operation COMPLETED: $operationId (caller must clear after NIP-60 persist)")
+
+            HtlcLockResult(htlcToken, changeProofs, operationId)
         } catch (e: Exception) {
             Log.e(TAG, "createHtlcTokenFromProofs failed: ${e.message}", e)
+            // Keep pending operation for recovery
             null
         }
     }
@@ -1523,6 +1720,12 @@ class CashuBackend(
                 return@withContext null
             }
 
+            // Log first few Y values for debugging
+            if (yValues.isNotEmpty()) {
+                Log.d(TAG, "verifyProofsBalance: First computed Y: ${yValues.first().second}")
+                Log.d(TAG, "verifyProofsBalance: First secret: ${yValues.first().first.take(32)}...")
+            }
+
             // Make API call to mint
             val requestBody = JSONObject().apply {
                 put("Ys", JSONArray(yValues.map { it.second }))
@@ -1543,32 +1746,60 @@ class CashuBackend(
                 val json = JSONObject(body)
                 val statesArray = json.getJSONArray("states")
 
+                // Log first Y from mint response for comparison
+                if (statesArray.length() > 0) {
+                    val firstState = statesArray.getJSONObject(0)
+                    Log.d(TAG, "verifyProofsBalance: First mint Y: ${firstState.getString("Y")}")
+                    Log.d(TAG, "verifyProofsBalance: First mint state: ${firstState.getString("state")}")
+                }
+
                 // Map Y back to secrets
                 val yToSecret = yValues.associate { it.second to it.first }
 
                 val spentSecrets = mutableListOf<String>()
                 val unspentSecrets = mutableListOf<String>()
+                val pendingSecrets = mutableListOf<String>()
+                var matchedCount = 0
+
                 for (i in 0 until statesArray.length()) {
                     val stateObj = statesArray.getJSONObject(i)
                     val Y = stateObj.getString("Y")
                     val state = stateObj.getString("state").uppercase()
 
                     yToSecret[Y]?.let { secret ->
+                        matchedCount++
                         when (state) {
                             "SPENT" -> spentSecrets.add(secret)
                             "UNSPENT" -> unspentSecrets.add(secret)
+                            "PENDING" -> pendingSecrets.add(secret)
                         }
                     }
                 }
 
-                Log.d(TAG, "verifyProofsBalance: UNSPENT=${unspentSecrets.size}, SPENT=${spentSecrets.size}")
+                Log.d(TAG, "verifyProofsBalance: matched=$matchedCount/${proofs.size}, UNSPENT=${unspentSecrets.size}, SPENT=${spentSecrets.size}, PENDING=${pendingSecrets.size}")
 
-                // Calculate verified balance (unspent proofs)
+                // If we couldn't match ANY proofs, our hashToCurve doesn't match the mint's
+                // Return null to indicate verification failure (don't trust the proofs)
+                if (matchedCount == 0 && proofs.isNotEmpty()) {
+                    Log.e(TAG, "verifyProofsBalance: CRITICAL - No Y values matched! hashToCurve mismatch with mint")
+                    return@withContext null
+                }
+
+                // Calculate verified balance (unspent proofs only)
                 val verifiedBalance = proofs
                     .filter { it.secret in unspentSecrets }
                     .sumOf { it.amount }
 
-                Log.d(TAG, "verifyProofsBalance: $targetMint verified balance = $verifiedBalance sats")
+                // Calculate pending balance for logging (DON'T treat as spent - they may become unspent)
+                val pendingBalance = proofs
+                    .filter { it.secret in pendingSecrets }
+                    .sumOf { it.amount }
+
+                if (pendingSecrets.isNotEmpty()) {
+                    Log.w(TAG, "verifyProofsBalance: ${pendingSecrets.size} proofs ($pendingBalance sats) are PENDING - in-progress operation")
+                }
+
+                Log.d(TAG, "verifyProofsBalance: $targetMint verified balance = $verifiedBalance sats, spent=${spentSecrets.size}, pending=${pendingSecrets.size}")
                 verifiedBalance to spentSecrets
             }
         } catch (e: Exception) {
@@ -2473,6 +2704,34 @@ class CashuBackend(
 
             Log.d(TAG, "Melt request to $mintUrl/v1/melt/bolt11 (outputs=${outputsArray?.length() ?: 0})")
 
+            // CRITICAL: Save pending operation BEFORE sending request
+            // If we crash after mint processes but before we unblind, we can recover
+            val operationId = java.util.UUID.randomUUID().toString()
+            if (changePremints.isNotEmpty()) {
+                val pendingOp = PendingBlindedOperation(
+                    id = operationId,
+                    operationType = BlindedOperationType.MELT,
+                    mintUrl = mintUrl,
+                    quoteId = quoteId,
+                    inputSecrets = proofs.map { it.secret },
+                    outputPremints = changePremints.map { pms ->
+                        SerializedPreMint(
+                            amount = pms.amount,
+                            secret = pms.secret,
+                            blindingFactor = pms.blindingFactor,
+                            Y = pms.Y,
+                            B_ = pms.B_
+                        )
+                    },
+                    amountSats = expectedChange,
+                    createdAt = System.currentTimeMillis(),
+                    expiresAt = System.currentTimeMillis() + (24 * 60 * 60 * 1000L), // 24 hours
+                    status = PendingOperationStatus.STARTED
+                )
+                walletStorage.savePendingBlindedOp(pendingOp)
+                Log.d(TAG, "Saved pending melt operation: $operationId ($expectedChange sats change)")
+            }
+
             val request = Request.Builder()
                 .url("$mintUrl/v1/melt/bolt11")
                 .post(meltRequest.toRequestBody(JSON_MEDIA_TYPE))
@@ -2481,7 +2740,80 @@ class CashuBackend(
             val response = client.newCall(request).execute()
             val responseBody = response.body?.string()
 
+            // Handle non-successful responses - check for pending states
             if (!response.isSuccessful) {
+                Log.w(TAG, "Melt response: ${response.code} - $responseBody")
+
+                // Parse error response to check for pending states
+                try {
+                    val errorJson = JSONObject(responseBody ?: "{}")
+                    val errorCode = errorJson.optInt("code", 0)
+                    val errorDetail = errorJson.optString("detail", "")
+
+                    // NUT-05 error codes:
+                    // 20005 = "Quote pending" - Lightning payment in progress
+                    // 11002 = "Token pending" - Proofs locked for in-progress operation
+                    // 11000 = "Proofs are pending" - Same as above
+                    if (errorCode == 20005 || errorCode == 11002 || errorCode == 11000 ||
+                        errorDetail.contains("pending", ignoreCase = true)) {
+                        Log.d(TAG, "Melt is PENDING (code=$errorCode) - will poll for completion")
+
+                        // Mark operation as pending
+                        if (changePremints.isNotEmpty()) {
+                            walletStorage.updateBlindedOpStatus(operationId, PendingOperationStatus.PENDING)
+                        }
+
+                        // Poll for melt completion (up to 60 seconds)
+                        for (attempt in 1..12) {
+                            delay(5000) // Wait 5 seconds between polls
+                            Log.d(TAG, "Polling melt quote status (attempt $attempt/12)...")
+
+                            val quoteStatus = checkMeltQuote(quoteId)
+                            if (quoteStatus != null) {
+                                Log.d(TAG, "Melt quote status: ${quoteStatus.state}")
+                                when (quoteStatus.state) {
+                                    MeltQuoteState.PAID -> {
+                                        Log.d(TAG, "✅ Melt completed successfully after polling!")
+                                        // CRITICAL: Change proofs are LOST in this path because
+                                        // GET /melt/quote doesn't return signed change outputs.
+                                        // Keep pending operation for potential future recovery.
+                                        if (changePremints.isNotEmpty()) {
+                                            Log.w(TAG, "⚠️ CHANGE LOST: $expectedChange sats change cannot be recovered (no C_ values)")
+                                            // Don't remove pending op - keep premints in case spec adds recovery
+                                        }
+                                        return@withContext MeltResult(
+                                            paid = true,
+                                            paymentPreimage = quoteStatus.paymentPreimage,
+                                            change = emptyList() // Change lost - can't unblind without C_ values
+                                        )
+                                    }
+                                    MeltQuoteState.UNPAID -> {
+                                        // Lightning payment failed - proofs should be released
+                                        Log.w(TAG, "Melt failed after polling - Lightning payment unsuccessful")
+                                        // Mark as failed - input proofs should be UNSPENT
+                                        if (changePremints.isNotEmpty()) {
+                                            walletStorage.updateBlindedOpStatus(operationId, PendingOperationStatus.FAILED)
+                                        }
+                                        return@withContext null
+                                    }
+                                    MeltQuoteState.PENDING -> {
+                                        // Still pending, continue polling
+                                        continue
+                                    }
+                                }
+                            }
+                        }
+                        // Timed out waiting for melt - keep operation as PENDING for later recovery
+                        Log.w(TAG, "Melt still pending after 60s - payment may complete later")
+                        // Keep pending operation status as PENDING
+                        return@withContext MeltResult(paid = false, paymentPreimage = null, change = emptyList(), isPending = true)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to parse melt error response: ${e.message}")
+                }
+
+                // Melt failed - keep pending operation for recovery check
+                // (recovery will verify if inputs are SPENT or UNSPENT)
                 Log.e(TAG, "Melt failed: ${response.code} - $responseBody")
                 return@withContext null
             }
@@ -2563,13 +2895,23 @@ class CashuBackend(
 
             Log.d(TAG, "✅ Melt complete: paid=$paid, change=${changeProofs.size} proofs ($finalChangeAmount sats)")
 
+            // Mark as completed but do NOT remove yet - caller must persist proofs first!
+            // This prevents fund loss if crash occurs before NIP-60 publish.
+            val pendingId = if (changePremints.isNotEmpty()) {
+                walletStorage.updateBlindedOpStatus(operationId, PendingOperationStatus.COMPLETED)
+                Log.d(TAG, "Pending melt op $operationId ready - caller must clear after NIP-60 publish")
+                operationId
+            } else null
+
             MeltResult(
                 paid = paid,
                 paymentPreimage = preimage,
-                change = changeProofs
+                change = changeProofs,
+                pendingOpId = pendingId
             )
         } catch (e: Exception) {
             Log.e(TAG, "meltWithProofs failed: ${e.message}", e)
+            // Keep pending operation for recovery - don't remove it
             null
         }
     }
@@ -2791,6 +3133,31 @@ class CashuBackend(
                 put("outputs", outputsArray)
             }.toString()
 
+            // CRITICAL: Save pending operation BEFORE sending request
+            val operationId = java.util.UUID.randomUUID().toString()
+            val pendingOp = PendingBlindedOperation(
+                id = operationId,
+                operationType = BlindedOperationType.MINT,
+                mintUrl = mintUrl,
+                quoteId = quoteId,
+                inputSecrets = emptyList(), // No inputs for mint operation
+                outputPremints = preMintSecrets.map { pms ->
+                    SerializedPreMint(
+                        amount = pms.amount,
+                        secret = pms.secret,
+                        blindingFactor = pms.blindingFactor,
+                        Y = pms.Y,
+                        B_ = pms.B_
+                    )
+                },
+                amountSats = amountSats,
+                createdAt = System.currentTimeMillis(),
+                expiresAt = System.currentTimeMillis() + (24 * 60 * 60 * 1000L), // 24 hours
+                status = PendingOperationStatus.STARTED
+            )
+            walletStorage.savePendingBlindedOp(pendingOp)
+            Log.d(TAG, "Saved pending mint operation: $operationId ($amountSats sats)")
+
             val mintRequest = Request.Builder()
                 .url("$mintUrl/v1/mint/bolt11")
                 .post(mintRequestBody.toRequestBody(JSON_MEDIA_TYPE))
@@ -2802,6 +3169,7 @@ class CashuBackend(
 
                 if (!response.isSuccessful) {
                     Log.e(TAG, "recoverDeposit: mint request failed: ${response.code}")
+                    // Keep pending operation for recovery
                     return@withContext null
                 }
 
@@ -2855,9 +3223,15 @@ class CashuBackend(
             val totalAmount = proofs.sumOf { it.amount }
             Log.d(TAG, "✅ DEPOSIT RECOVERY SUCCESSFUL: $totalAmount sats (${proofs.size} proofs)")
 
+            // SUCCESS: Remove pending operation
+            walletStorage.updateBlindedOpStatus(operationId, PendingOperationStatus.COMPLETED)
+            walletStorage.removePendingBlindedOp(operationId)
+            Log.d(TAG, "Removed pending mint operation: $operationId")
+
             proofs
         } catch (e: Exception) {
             Log.e(TAG, "recoverDeposit failed: ${e.message}", e)
+            // Keep pending operation for recovery
             null
         }
     }
@@ -2901,25 +3275,13 @@ class CashuBackend(
             lastRecoveredToken = tokenStr
             lastRecoveredAmount = totalAmount
 
-            // Try to import into cdk-kotlin wallet using swap
-            // For now, this is a placeholder - proper integration requires
-            // understanding cdk-kotlin's exact API for receiving external tokens
-            val wallet = cdkWallet
-            if (wallet != null) {
-                try {
-                    // Attempt to receive the token - this swaps proofs with the mint
-                    // to get fresh proofs that cdk-kotlin tracks
-                    val newProofs = swapProofsWithMint(proofs, mintUrl)
-                    if (newProofs != null) {
-                        Log.d(TAG, "Swapped proofs with mint, balance should update on refresh")
-                        return true
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "cdk-kotlin integration failed: ${e.message}")
-                }
-            }
+            // NOTE: Do NOT call swapProofsWithMint() here!
+            // The proofs are valid and will be published to NIP-60 by the caller.
+            // Swapping would SPEND the original proofs at the mint, causing them
+            // to be deleted when verification runs. The swap proofs would never
+            // reach NIP-60, resulting in fund loss.
 
-            // Proofs ARE valid even if we couldn't store in cdk-kotlin
+            // Proofs ARE valid - they will be published to NIP-60 by caller
             Log.d(TAG, "✅ Funds recovered ($totalAmount sats) - token saved for manual import")
             return true
         } catch (e: Exception) {
@@ -2977,6 +3339,31 @@ class CashuBackend(
                 put("outputs", outputsArray)
             }.toString()
 
+            // CRITICAL: Save pending operation BEFORE sending request
+            val operationId = java.util.UUID.randomUUID().toString()
+            val pendingOp = PendingBlindedOperation(
+                id = operationId,
+                operationType = BlindedOperationType.SWAP,
+                mintUrl = mintUrl,
+                quoteId = null,
+                inputSecrets = proofs.map { it.secret },
+                outputPremints = preMintSecrets.map { pms ->
+                    SerializedPreMint(
+                        amount = pms.amount,
+                        secret = pms.secret,
+                        blindingFactor = pms.blindingFactor,
+                        Y = pms.Y,
+                        B_ = pms.B_
+                    )
+                },
+                amountSats = totalAmount,
+                createdAt = System.currentTimeMillis(),
+                expiresAt = System.currentTimeMillis() + (24 * 60 * 60 * 1000L), // 24 hours
+                status = PendingOperationStatus.STARTED
+            )
+            walletStorage.savePendingBlindedOp(pendingOp)
+            Log.d(TAG, "Saved pending swap operation: $operationId ($totalAmount sats)")
+
             val request = Request.Builder()
                 .url("$mintUrl/v1/swap")
                 .post(swapRequest.toRequestBody(JSON_MEDIA_TYPE))
@@ -2985,6 +3372,7 @@ class CashuBackend(
             val signatures = client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     Log.e(TAG, "Swap failed: ${response.code}")
+                    // Keep pending operation for recovery
                     return null
                 }
                 val body = response.body?.string() ?: return null
@@ -3015,12 +3403,18 @@ class CashuBackend(
 
             Log.d(TAG, "Swapped ${proofs.size} proofs for ${newProofs.size} new proofs")
 
+            // SUCCESS: Remove pending operation - we have the new proofs
+            walletStorage.updateBlindedOpStatus(operationId, PendingOperationStatus.COMPLETED)
+            walletStorage.removePendingBlindedOp(operationId)
+            Log.d(TAG, "Removed pending swap operation: $operationId")
+
             // Now create a fresh quote and mint using cdk-kotlin to store these proofs properly
             // This is a workaround since we can't directly import proofs into cdk-kotlin
             // For now, just return the new proofs - they're valid but not in the wallet DB
             return newProofs
         } catch (e: Exception) {
             Log.e(TAG, "Swap failed: ${e.message}", e)
+            // Keep pending operation for recovery
             return null
         }
     }
@@ -3267,7 +3661,9 @@ data class MintTokensResult(
 data class MeltResult(
     val paid: Boolean,
     val paymentPreimage: String?,
-    val change: List<CashuProof> = emptyList()  // Change proofs from overpayment
+    val change: List<CashuProof> = emptyList(),  // Change proofs from overpayment
+    val isPending: Boolean = false,  // True if melt is still pending after timeout
+    val pendingOpId: String? = null  // ID of pending op - caller must clear after NIP-60 publish
 )
 
 /**

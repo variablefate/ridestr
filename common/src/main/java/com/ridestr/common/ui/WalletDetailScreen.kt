@@ -410,6 +410,11 @@ private fun TransactionItem(
             MaterialTheme.colorScheme.secondary,
             "+"
         )
+        TransactionType.BRIDGE_PAYMENT -> Triple(
+            Icons.Default.SwapHoriz,
+            MaterialTheme.colorScheme.tertiary,
+            "-"
+        )
     }
 
     val dateFormat = remember { SimpleDateFormat("MMM d, h:mm a", Locale.getDefault()) }

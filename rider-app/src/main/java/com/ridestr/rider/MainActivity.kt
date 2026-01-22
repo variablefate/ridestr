@@ -629,7 +629,6 @@ fun RidestrApp() {
                     isDriverApp = false,
                     onOpenDebug = { currentScreen = Screen.DEBUG },
                     onBack = { currentScreen = Screen.MAIN },
-                    walletService = walletService,
                     modifier = Modifier.padding(innerPadding)
                 )
             }
@@ -661,6 +660,8 @@ fun RidestrApp() {
             Screen.WALLET_SETTINGS -> {
                 WalletSettingsScreen(
                     walletService = walletService,
+                    settingsManager = settingsManager,
+                    isDriverApp = false,
                     onBack = { currentScreen = Screen.MAIN },
                     modifier = Modifier.padding(innerPadding)
                 )

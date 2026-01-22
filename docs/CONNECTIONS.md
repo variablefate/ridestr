@@ -204,6 +204,59 @@ sequenceDiagram
 
 ---
 
+## Cross-Mint Bridge Payment Flow (Multi-Mint)
+
+When rider and driver use different Cashu mints, payment happens via Lightning bridge:
+
+```mermaid
+sequenceDiagram
+    participant R as Rider
+    participant RVM as RiderViewModel
+    participant RWS as Rider WalletService
+    participant RM as Rider Mint
+    participant DM as Driver Mint
+    participant DWS as Driver WalletService
+    participant DVM as DriverViewModel
+    participant D as Driver
+
+    Note over R,D: Driver accepts ride (different mint detected)
+
+    D->>DVM: Arrive at pickup
+    DVM->>DWS: getDepositInvoice(fareSats)
+    DWS->>DM: POST /v1/mint/quote/bolt11
+    DM-->>DWS: {quote, request: "lnbc..."}
+    DWS->>DWS: savePendingDeposit(quoteId)
+    DVM->>R: Kind 30180 (DEPOSIT_INVOICE_SHARE)
+
+    R->>RVM: Receive deposit invoice
+    RVM->>RWS: bridgePayment(invoice)
+    RWS->>RM: POST /v1/melt/quote/bolt11
+    RM-->>RWS: {quote, fee_reserve}
+    RWS->>RWS: selectProofsForSpending(total)
+    RWS->>RM: POST /v1/melt/bolt11 (pay invoice)
+    RM-->>RWS: {paid: true, preimage}
+    RVM->>D: Kind 30181 (BRIDGE_COMPLETE + preimage)
+
+    D->>DVM: Receive bridge complete
+    DVM->>DWS: mintTokens(quoteId, amount)
+    DWS->>DM: POST /v1/mint/bolt11
+    DM-->>DWS: Cashu proofs
+    DWS->>DWS: publishProofsToNip60()
+    DWS->>DWS: refreshBalance()
+    DVM->>DVM: crossMintPaymentComplete = true
+
+    Note over R,D: Ride proceeds, no HTLC claim needed
+```
+
+**Key Points:**
+- `shareDepositInvoice()` saves quote to `WalletStorage` for recovery
+- `handleBridgeComplete()` calls `mintTokens()` to claim proofs
+- `crossMintPaymentComplete` flag prevents MISSING_ESCROW_TOKEN error at dropoff
+- Unclaimed deposits persist in local storage until claimed or manually cleared
+- Developer Options → "Claim Unclaimed Deposits" for manual recovery
+
+---
+
 ## Profile Sync Flow (Key Import)
 
 ```mermaid
@@ -248,17 +301,21 @@ sequenceDiagram
 Payment System
 ├── WalletService (orchestration layer)
 │   ├── Depends on: CashuBackend (mint operations)
-│   ├── Depends on: WalletStorage (local persistence)
+│   ├── Depends on: WalletStorage (local persistence, pending ops)
 │   ├── Depends on: Nip60WalletSync (cross-device sync)
 │   ├── Depends on: WalletKeyManager (wallet identity)
 │   ├── Key method: syncWallet() - THE sync function (NIP-60 is source of truth)
+│   ├── Key method: recoverPendingOperations() - recover blinded ops on connect
 │   ├── CRITICAL: Safe deletion pattern - always republish remaining proofs before deleteProofEvents()
+│   ├── CRITICAL: pendingOpId must be cleared AFTER NIP-60 publish (or RecoveryToken fallback)
 │   └── Used by: RiderViewModel, DriverViewModel, WalletDetailScreen, WalletSettingsScreen
 │
 ├── CashuBackend (NUT-04/05/14 implementation)
 │   ├── Depends on: cdk-kotlin library
+│   ├── Depends on: WalletStorage (pending blinded operations)
 │   ├── Connects to: Cashu Mint (HTTP REST)
-│   ├── storeRecoveredProofs() - fallback for failed NIP-60 publishes
+│   ├── CRITICAL: All blinded ops save premints BEFORE request, return pendingOpId
+│   ├── Caller clears pendingOpId after persisting proofs (NIP-60 or RecoveryToken)
 │   └── Used by: WalletService
 │
 ├── Nip60WalletSync (NIP-60 wallet backup - FULLY COMPLIANT)

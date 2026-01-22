@@ -1151,7 +1151,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     // Multi-mint support
                     paymentPath = paymentPath,
                     riderMintUrl = riderMintUrl,
-                    crossMintPaymentComplete = false  // Reset for new ride
+                    crossMintPaymentComplete = false,  // Reset for new ride
+                    pendingDepositQuoteId = null,      // Reset pending deposit
+                    pendingDepositAmount = null
                 )
 
                 // Save ride state for persistence
@@ -1326,6 +1328,21 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             }
 
             Log.d(TAG, "Got deposit invoice: ${quote.request.take(30)}...")
+            Log.d(TAG, "Quote ID for claiming tokens: ${quote.quote}")
+
+            // Store the quote ID so we can claim tokens when BridgeComplete arrives
+            _uiState.value = _uiState.value.copy(
+                pendingDepositQuoteId = quote.quote,
+                pendingDepositAmount = amountSats
+            )
+
+            // Also save to WalletStorage for recovery if app restarts
+            walletService?.savePendingDeposit(
+                quoteId = quote.quote,
+                amount = amountSats,
+                invoice = quote.request,
+                expiry = quote.expiry
+            )
 
             // Create DepositInvoiceShare action
             val invoiceAction = DriverRideAction.DepositInvoiceShare(
@@ -1761,19 +1778,62 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         Log.d(TAG, "Preimage: ${bridgeComplete.preimage.take(16)}...")
 
         // The Lightning preimage proves the rider paid the deposit invoice.
-        // For cross-mint, there's no HTLC to claim - payment already completed via Lightning.
-        // The driver's mint should have received the deposit and minted tokens.
+        // Now we need to claim the tokens from our mint using the stored quote ID.
 
-        _uiState.value = _uiState.value.copy(
-            // Store preimage as proof of payment (even though settlement already happened via Lightning)
-            activePreimage = bridgeComplete.preimage,
-            // Mark payment as complete - driver doesn't need to claim HTLC for cross-mint
-            canSettleEscrow = false,  // No escrow to settle - funds already received via Lightning
-            // Mark cross-mint payment as complete (fixes MISSING_ESCROW_TOKEN at dropoff)
-            crossMintPaymentComplete = true
-        )
+        val state = _uiState.value
+        val quoteId = state.pendingDepositQuoteId
+        val amount = state.pendingDepositAmount
 
-        Log.d(TAG, "Cross-mint payment received: ${bridgeComplete.amountSats} sats (${bridgeComplete.feesSats} sats fees paid by rider)")
+        if (quoteId == null || amount == null) {
+            Log.e(TAG, "Cannot claim tokens: missing quote ID or amount")
+            Log.e(TAG, "  pendingDepositQuoteId: $quoteId")
+            Log.e(TAG, "  pendingDepositAmount: $amount")
+            // Still mark as complete so ride can proceed (best effort)
+            _uiState.value = state.copy(
+                activePreimage = bridgeComplete.preimage,
+                canSettleEscrow = false,
+                crossMintPaymentComplete = true
+            )
+            return
+        }
+
+        // Claim tokens from mint in background
+        viewModelScope.launch {
+            try {
+                Log.d(TAG, "Claiming tokens from mint: quoteId=$quoteId, amount=$amount")
+                val result = walletService?.mintTokens(quoteId, amount)
+
+                if (result?.success == true) {
+                    Log.d(TAG, "Successfully minted ${result.proofs.size} proofs totaling ${result.totalSats} sats")
+
+                    _uiState.value = _uiState.value.copy(
+                        activePreimage = bridgeComplete.preimage,
+                        canSettleEscrow = false,
+                        crossMintPaymentComplete = true,
+                        // Clear the pending deposit fields
+                        pendingDepositQuoteId = null,
+                        pendingDepositAmount = null
+                    )
+
+                    Log.d(TAG, "Cross-mint payment complete: received ${result.totalSats} sats")
+                } else {
+                    Log.e(TAG, "Failed to mint tokens - result was null or unsuccessful")
+                    // Still mark as complete to let ride proceed, but log the issue
+                    _uiState.value = _uiState.value.copy(
+                        activePreimage = bridgeComplete.preimage,
+                        canSettleEscrow = false,
+                        crossMintPaymentComplete = true
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Exception claiming tokens: ${e.message}", e)
+                _uiState.value = _uiState.value.copy(
+                    activePreimage = bridgeComplete.preimage,
+                    canSettleEscrow = false,
+                    crossMintPaymentComplete = true
+                )
+            }
+        }
     }
 
     /**
@@ -3271,7 +3331,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     // Multi-mint support
                     paymentPath = paymentPath,
                     riderMintUrl = riderMintUrl,
-                    crossMintPaymentComplete = false  // Reset for new ride
+                    crossMintPaymentComplete = false,  // Reset for new ride
+                    pendingDepositQuoteId = null,      // Reset pending deposit
+                    pendingDepositAmount = null
                 )
 
                 // Save ride state for persistence
@@ -3483,6 +3545,8 @@ data class DriverUiState(
     val paymentPath: PaymentPath = PaymentPath.NO_PAYMENT,  // How payment will be handled
     val riderMintUrl: String? = null,                        // Rider's mint URL (from offer)
     val crossMintPaymentComplete: Boolean = false,           // True when cross-mint bridge payment completed
+    val pendingDepositQuoteId: String? = null,               // Quote ID for cross-mint deposit (to claim tokens)
+    val pendingDepositAmount: Long? = null,                  // Amount for cross-mint deposit
 
     // Payment warning dialog (shown when trying to complete without valid escrow)
     val showPaymentWarningDialog: Boolean = false,

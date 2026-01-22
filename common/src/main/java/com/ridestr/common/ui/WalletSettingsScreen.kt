@@ -13,10 +13,12 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.ridestr.common.payment.*
+import com.ridestr.common.settings.SettingsManager
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
@@ -35,6 +37,8 @@ import java.util.*
 @Composable
 fun WalletSettingsScreen(
     walletService: WalletService,
+    settingsManager: SettingsManager,
+    isDriverApp: Boolean,
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -596,6 +600,300 @@ fun WalletSettingsScreen(
                             enabled = walletService.hasNip60Sync()
                         ) {
                             Text("Delete", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // === Section: Developer Options ===
+            Text(
+                text = "Developer Options",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    // Always show wallet diagnostics toggle
+                    val alwaysShowDiagnostics by settingsManager.alwaysShowWalletDiagnostics.collectAsState()
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Always Show Diagnostics",
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                            Text(
+                                text = if (alwaysShowDiagnostics)
+                                    "Shows sync status icon (green = synced)"
+                                else
+                                    "Only shows icon when there are issues",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(16.dp))
+                        Switch(
+                            checked = alwaysShowDiagnostics,
+                            onCheckedChange = { settingsManager.setAlwaysShowWalletDiagnostics(it) }
+                        )
+                    }
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+
+                    // Unclaimed Deposits
+                    var pendingCount by remember { mutableIntStateOf(walletService.getPendingDepositCount()) }
+                    var isClaimingDeposits by remember { mutableStateOf(false) }
+                    var claimResultMessage by remember { mutableStateOf<String?>(null) }
+
+                    Text(
+                        text = "Unclaimed Deposits",
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Text(
+                        text = if (pendingCount > 0)
+                            "$pendingCount deposit(s) may have funds to claim"
+                        else
+                            "No pending deposits found",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+
+                    if (pendingCount > 0 || claimResultMessage != null) {
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Button(
+                            onClick = {
+                                scope.launch {
+                                    isClaimingDeposits = true
+                                    claimResultMessage = null
+                                    try {
+                                        val result = walletService.claimUnclaimedDeposits()
+                                        claimResultMessage = if (result.success && result.claimedCount > 0) {
+                                            "Claimed ${result.claimedCount} deposit(s): ${result.totalSats} sats"
+                                        } else if (result.claimedCount == 0 && result.error == null) {
+                                            "No deposits were ready to claim"
+                                        } else {
+                                            result.error ?: "Unknown error"
+                                        }
+                                        pendingCount = walletService.getPendingDepositCount()
+                                    } catch (e: Exception) {
+                                        claimResultMessage = "Error: ${e.message}"
+                                    } finally {
+                                        isClaimingDeposits = false
+                                    }
+                                }
+                            },
+                            enabled = !isClaimingDeposits,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            if (isClaimingDeposits) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.onPrimary
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Claiming...")
+                            } else {
+                                Icon(Icons.Filled.Refresh, contentDescription = null)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Claim Unclaimed Deposits")
+                            }
+                        }
+
+                        // Show result message
+                        if (claimResultMessage != null) {
+                            Text(
+                                text = claimResultMessage!!,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (claimResultMessage!!.startsWith("Claimed"))
+                                    MaterialTheme.colorScheme.primary
+                                else
+                                    MaterialTheme.colorScheme.error,
+                                modifier = Modifier.padding(top = 8.dp)
+                            )
+                        }
+                    }
+
+                    // Refresh count button
+                    TextButton(
+                        onClick = {
+                            pendingCount = walletService.getPendingDepositCount()
+                        },
+                        modifier = Modifier.padding(top = 4.dp)
+                    ) {
+                        Text("Refresh count")
+                    }
+
+                    // Clear stale deposits button (only show if there are deposits)
+                    if (pendingCount > 0) {
+                        var showClearConfirmDialog by remember { mutableStateOf(false) }
+
+                        OutlinedButton(
+                            onClick = { showClearConfirmDialog = true },
+                            modifier = Modifier.padding(top = 8.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = MaterialTheme.colorScheme.error
+                            )
+                        ) {
+                            Icon(Icons.Filled.Delete, contentDescription = null)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Clear Stale Deposits")
+                        }
+
+                        if (showClearConfirmDialog) {
+                            AlertDialog(
+                                onDismissRequest = { showClearConfirmDialog = false },
+                                title = { Text("Clear Stale Deposits?") },
+                                text = {
+                                    Text("This will remove $pendingCount pending deposit(s) from tracking. " +
+                                         "Only do this if you've confirmed the invoices were never paid. " +
+                                         "This action cannot be undone.")
+                                },
+                                confirmButton = {
+                                    TextButton(
+                                        onClick = {
+                                            val cleared = walletService.clearStaleDeposits()
+                                            pendingCount = walletService.getPendingDepositCount()
+                                            claimResultMessage = "Cleared $cleared stale deposit(s)"
+                                            showClearConfirmDialog = false
+                                        }
+                                    ) {
+                                        Text("Clear", color = MaterialTheme.colorScheme.error)
+                                    }
+                                },
+                                dismissButton = {
+                                    TextButton(onClick = { showClearConfirmDialog = false }) {
+                                        Text("Cancel")
+                                    }
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Pending Bridge Payments (rider only)
+            if (!isDriverApp) {
+                val bridgePayments = remember { mutableStateOf(walletService.getPendingBridgePayments()) }
+
+                if (bridgePayments.value.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Text(
+                                text = "Bridge Payments",
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                            Text(
+                                text = "Cross-mint payments tracked for recovery. ${bridgePayments.value.size} payment(s).",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            // Show each bridge payment
+                            bridgePayments.value.forEach { payment ->
+                                val statusColor = when (payment.status) {
+                                    BridgePaymentStatus.COMPLETE -> MaterialTheme.colorScheme.primary
+                                    BridgePaymentStatus.FAILED -> MaterialTheme.colorScheme.error
+                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                }
+
+                                Surface(
+                                    color = MaterialTheme.colorScheme.surfaceVariant,
+                                    shape = MaterialTheme.shapes.small,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 4.dp)
+                                ) {
+                                    Column(modifier = Modifier.padding(12.dp)) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Text(
+                                                text = payment.status.name,
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = statusColor
+                                            )
+                                            Text(
+                                                text = "${payment.amountSats} sats",
+                                                style = MaterialTheme.typography.labelMedium
+                                            )
+                                        }
+                                        Text(
+                                            text = "ID: ${payment.id.take(8)}...",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            fontFamily = FontFamily.Monospace
+                                        )
+                                        Text(
+                                            text = "Ride: ${payment.rideId.take(8)}...",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            fontFamily = FontFamily.Monospace
+                                        )
+                                        if (payment.meltQuoteId != null) {
+                                            Text(
+                                                text = "Quote: ${payment.meltQuoteId.take(8)}...",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                fontFamily = FontFamily.Monospace
+                                            )
+                                        }
+                                        if (payment.feeReserveSats > 0) {
+                                            Text(
+                                                text = "Fees: ${payment.feeReserveSats} sats",
+                                                style = MaterialTheme.typography.bodySmall
+                                            )
+                                        }
+                                        if (payment.errorMessage != null) {
+                                            Text(
+                                                text = "Error: ${payment.errorMessage}",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.error
+                                            )
+                                        }
+                                        Text(
+                                            text = payment.statusDescription(),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+
+                            // Clear completed button
+                            val completedCount = bridgePayments.value.count { !it.isInProgress() }
+                            if (completedCount > 0) {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                OutlinedButton(
+                                    onClick = {
+                                        walletService.clearCompletedBridgePayments()
+                                        bridgePayments.value = walletService.getPendingBridgePayments()
+                                    }
+                                ) {
+                                    Text("Clear $completedCount completed/failed")
+                                }
+                            }
+
+                            // Refresh button
+                            TextButton(
+                                onClick = {
+                                    bridgePayments.value = walletService.getPendingBridgePayments()
+                                }
+                            ) {
+                                Text("Refresh")
+                            }
                         }
                     }
                 }

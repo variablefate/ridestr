@@ -548,7 +548,7 @@ private fun IdleContent(
                     usingCurrentLocationForPickup = usingCurrentLocationForPickup,
                     isFetchingLocation = isFetchingLocation,
                     routeResult = uiState.routeResult,
-                    fareEstimate = uiState.fareEstimate,
+                    fareEstimate = uiState.fareEstimateWithFees,  // Display fare including 2% fee buffer
                     isCalculatingRoute = uiState.isCalculatingRoute,
                     isSendingOffer = uiState.isSendingOffer,
                     onSearchPickup = onSearchPickup,
@@ -2179,8 +2179,8 @@ private fun RideWaitingContent(
 
                     Spacer(modifier = Modifier.height(24.dp))
 
-                    // Keep waiting button with current fare
-                    val currentFare = uiState.fareEstimate ?: 0.0
+                    // Keep waiting button with current fare (displayed with fee buffer)
+                    val currentFare = uiState.fareEstimateWithFees ?: 0.0
                     val fareText = formatFare(currentFare, settingsManager, priceService)
                     OutlinedButton(
                         onClick = onContinueWaiting,
@@ -2344,8 +2344,8 @@ private fun RideWaitingContent(
 
                     Spacer(modifier = Modifier.height(16.dp))
 
-                    // Current fare display
-                    val currentFare = uiState.fareEstimate ?: 0.0
+                    // Current fare display (with fee buffer)
+                    val currentFare = uiState.fareEstimateWithFees ?: 0.0
                     Card(
                         colors = CardDefaults.cardColors(
                             containerColor = MaterialTheme.colorScheme.secondaryContainer
@@ -2586,8 +2586,8 @@ private fun DriverAcceptedContent(
                         )
                     }
 
-                    // Fare
-                    uiState.fareEstimate?.let { fare ->
+                    // Fare (displayed with fee buffer)
+                    uiState.fareEstimateWithFees?.let { fare ->
                         Spacer(modifier = Modifier.height(12.dp))
                         HorizontalDivider()
                         Spacer(modifier = Modifier.height(12.dp))
