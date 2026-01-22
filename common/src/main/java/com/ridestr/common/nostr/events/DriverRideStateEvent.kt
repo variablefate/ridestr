@@ -40,6 +40,7 @@ object DriverRideStateEvent {
      * @param history List of all actions in chronological order
      * @param finalFare Final fare in satoshis (for completed rides)
      * @param invoice Lightning invoice (for completed rides)
+     * @param lastTransitionId Event ID of last rider state event processed (for chain integrity)
      */
     suspend fun create(
         signer: NostrSigner,
@@ -48,7 +49,8 @@ object DriverRideStateEvent {
         currentStatus: String,
         history: List<DriverRideAction>,
         finalFare: Long? = null,
-        invoice: String? = null
+        invoice: String? = null,
+        lastTransitionId: String? = null
     ): Event {
         // Build history array
         val historyArray = JSONArray()
@@ -66,7 +68,8 @@ object DriverRideStateEvent {
         // Add NIP-40 expiration (8 hours)
         val expiration = RideshareExpiration.hoursFromNow(RideshareExpiration.DRIVER_STATUS_HOURS)
 
-        val tags = arrayOf(
+        // Build tags list, conditionally including transition tag for chain integrity
+        val tagsList = mutableListOf(
             // d-tag required for parameterized replaceable - use confirmation ID
             arrayOf("d", confirmationEventId),
             arrayOf(RideshareTags.EVENT_REF, confirmationEventId),
@@ -74,6 +77,13 @@ object DriverRideStateEvent {
             arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG),
             arrayOf(RideshareTags.EXPIRATION, expiration.toString())
         )
+
+        // Add transition tag if we have a prior rider state event (AtoB pattern)
+        lastTransitionId?.let {
+            tagsList.add(arrayOf("transition", it))
+        }
+
+        val tags = tagsList.toTypedArray()
 
         return signer.sign<Event>(
             createdAt = System.currentTimeMillis() / 1000,
@@ -109,11 +119,13 @@ object DriverRideStateEvent {
             // Extract tags
             var confirmationEventId: String? = null
             var riderPubKey: String? = null
+            var lastTransitionId: String? = null
 
             for (tag in event.tags) {
                 when (tag.getOrNull(0)) {
                     "d" -> confirmationEventId = tag.getOrNull(1)
                     RideshareTags.PUBKEY_REF -> riderPubKey = tag.getOrNull(1)
+                    "transition" -> lastTransitionId = tag.getOrNull(1)
                 }
             }
 
@@ -128,7 +140,8 @@ object DriverRideStateEvent {
                 history = history,
                 finalFare = finalFare,
                 invoice = invoice,
-                createdAt = event.createdAt
+                createdAt = event.createdAt,
+                lastTransitionId = lastTransitionId
             )
         } catch (e: Exception) {
             null
@@ -326,7 +339,9 @@ data class DriverRideStateData(
     val history: List<DriverRideAction>,
     val finalFare: Long?,
     val invoice: String?,
-    val createdAt: Long
+    val createdAt: Long,
+    /** Event ID of last rider state event that was processed (for chain integrity) */
+    val lastTransitionId: String? = null
 ) {
     fun isCompleted(): Boolean = currentStatus == DriverStatusType.COMPLETED
     fun isCancelled(): Boolean = currentStatus == DriverStatusType.CANCELLED

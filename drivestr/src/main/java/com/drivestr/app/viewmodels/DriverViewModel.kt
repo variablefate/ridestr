@@ -185,6 +185,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     // Track how many rider actions we've processed (to detect new actions)
     private var lastProcessedRiderActionCount = 0
 
+    // Track last received rider state event ID for chain integrity (AtoB pattern)
+    private var lastReceivedRiderStateId: String? = null
+
     // Subscription ID for rider ride state (replaces verificationSubscriptionId and preciseLocationSubscriptionId)
     private var riderRideStateSubscriptionId: String? = null
 
@@ -275,7 +278,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 currentStatus = status,
                 history = driverStateHistory.toList(),
                 finalFare = finalFare,
-                invoice = invoice
+                invoice = invoice,
+                lastTransitionId = lastReceivedRiderStateId
             )
         }
     }
@@ -314,7 +318,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 confirmationEventId = confirmationEventId,
                 riderPubKey = riderPubKey,
                 currentStatus = currentStatus,
-                history = driverStateHistory.toList()
+                history = driverStateHistory.toList(),
+                lastTransitionId = lastReceivedRiderStateId
             )
         }
     }
@@ -325,6 +330,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     private fun clearDriverStateHistory() {
         driverStateHistory.clear()
         lastProcessedRiderActionCount = 0
+        lastReceivedRiderStateId = null  // Reset chain for new ride
     }
 
     /** Track an event for cleanup with diagnostic logging */
@@ -1456,7 +1462,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     confirmationEventId = confirmationEventId,
                     riderPubKey = riderPubKey,
                     currentStatus = currentStatus,
-                    history = driverStateHistory.toList()
+                    history = driverStateHistory.toList(),
+                    lastTransitionId = lastReceivedRiderStateId
                 )
             }
 
@@ -1626,6 +1633,14 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      */
     private fun handleRiderRideState(riderState: RiderRideStateData) {
         Log.d(TAG, "Received rider ride state: phase=${riderState.currentPhase}, actions=${riderState.history.size}")
+
+        // Track for chain integrity (AtoB pattern) - save the event ID we received
+        lastReceivedRiderStateId = riderState.eventId
+
+        // Log chain integrity info for debugging
+        riderState.lastTransitionId?.let { transitionId ->
+            Log.d(TAG, "Chain: Rider state references our previous event: ${transitionId.take(8)}")
+        }
 
         // Process only NEW actions (ones we haven't seen yet)
         val newActions = riderState.history.drop(lastProcessedRiderActionCount)

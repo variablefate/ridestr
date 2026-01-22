@@ -630,6 +630,7 @@ class NostrService(
      * @param history List of all actions in chronological order
      * @param finalFare Final fare in satoshis (for completed rides)
      * @param invoice Lightning invoice (for completed rides)
+     * @param lastTransitionId Event ID of last rider state event processed (for chain integrity)
      * @return The event ID if successful, null on failure
      */
     suspend fun publishDriverRideState(
@@ -638,7 +639,8 @@ class NostrService(
         currentStatus: String,
         history: List<DriverRideAction>,
         finalFare: Long? = null,
-        invoice: String? = null
+        invoice: String? = null,
+        lastTransitionId: String? = null
     ): String? {
         val signer = keyManager.getSigner()
         if (signer == null) {
@@ -654,7 +656,8 @@ class NostrService(
                 currentStatus = currentStatus,
                 history = history,
                 finalFare = finalFare,
-                invoice = invoice
+                invoice = invoice,
+                lastTransitionId = lastTransitionId
             )
             relayManager.publish(event)
             Log.d(TAG, "Published driver ride state: ${event.id} ($currentStatus, ${history.size} actions)")
@@ -704,13 +707,15 @@ class NostrService(
      * @param driverPubKey The driver's public key
      * @param currentPhase Current phase (use RiderRideStateEvent.Phase constants)
      * @param history List of all actions in chronological order
+     * @param lastTransitionId Event ID of last driver state event processed (for chain integrity)
      * @return The event ID if successful, null on failure
      */
     suspend fun publishRiderRideState(
         confirmationEventId: String,
         driverPubKey: String,
         currentPhase: String,
-        history: List<RiderRideAction>
+        history: List<RiderRideAction>,
+        lastTransitionId: String? = null
     ): String? {
         val signer = keyManager.getSigner()
         if (signer == null) {
@@ -724,7 +729,8 @@ class NostrService(
                 confirmationEventId = confirmationEventId,
                 driverPubKey = driverPubKey,
                 currentPhase = currentPhase,
-                history = history
+                history = history,
+                lastTransitionId = lastTransitionId
             )
             relayManager.publish(event)
             Log.d(TAG, "Published rider ride state: ${event.id} ($currentPhase, ${history.size} actions)")
