@@ -1210,6 +1210,31 @@ class NostrService(
     }
 
     /**
+     * Subscribe to a specific driver's availability updates.
+     * Used to monitor if the selected driver goes offline while waiting for acceptance.
+     * @param driverPubKey The driver's public key to monitor
+     * @param onAvailability Called when the driver's availability status changes
+     * @return Subscription ID for closing later
+     */
+    fun subscribeToDriverAvailability(
+        driverPubKey: String,
+        onAvailability: (DriverAvailabilityData) -> Unit
+    ): String {
+        Log.d(TAG, "Subscribing to availability for driver ${driverPubKey.take(8)}")
+
+        return relayManager.subscribe(
+            kinds = listOf(RideshareEventKinds.DRIVER_AVAILABILITY),
+            authors = listOf(driverPubKey),
+            tags = mapOf("t" to listOf(RideshareTags.RIDESHARE_TAG))
+        ) { event, _ ->
+            DriverAvailabilityEvent.parse(event)?.let { data ->
+                Log.d(TAG, "Driver ${driverPubKey.take(8)} availability: ${data.status}")
+                onAvailability(data)
+            }
+        }
+    }
+
+    /**
      * Subscribe to ride offers for the current user (as driver).
      * Direct offers are now NIP-44 encrypted for privacy.
      * Only returns offers from the last 10 minutes to avoid stale requests.

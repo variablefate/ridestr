@@ -250,6 +250,39 @@ fun RiderModeScreen(
         )
     }
 
+    // Driver unavailable dialog (shown when selected driver goes offline)
+    if (uiState.showDriverUnavailableDialog) {
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissDriverUnavailable() },
+            icon = {
+                Icon(
+                    Icons.Default.Warning,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error
+                )
+            },
+            title = { Text("Driver Unavailable") },
+            text = {
+                Column {
+                    Text(
+                        "The driver you selected is no longer available. They may have taken another ride or gone offline."
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        "Please select another driver.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                Button(onClick = { viewModel.dismissDriverUnavailable() }) {
+                    Text("Select Another Driver")
+                }
+            }
+        )
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()

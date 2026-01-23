@@ -150,6 +150,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     private var cancellationSubscriptionId: String? = null
     // Driver ride state subscription (replaces pinSubmissionSubscriptionId and statusSubscriptionId)
     private var driverRideStateSubscriptionId: String? = null
+    // Monitor selected driver's availability while waiting for acceptance
+    private var selectedDriverAvailabilitySubId: String? = null
     private var staleDriverCleanupJob: Job? = null
     private var chatRefreshJob: Job? = null
     private var acceptanceTimeoutJob: Job? = null
@@ -1071,6 +1073,20 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Handle when rider acknowledges driver went unavailable.
+     * Cancels the pending offer and returns to driver selection.
+     */
+    fun dismissDriverUnavailable() {
+        Log.d(TAG, "Rider acknowledged driver unavailable - cancelling offer")
+        // Hide the dialog
+        _uiState.value = _uiState.value.copy(showDriverUnavailableDialog = false)
+        // Cancel the offer (this will handle cleanup and return to IDLE)
+        cancelOffer()
+        // Clear the selected driver
+        clearSelectedDriver()
+    }
+
+    /**
      * Send a ride offer to the selected driver.
      * Pre-calculates driver→pickup route so driver sees accurate metrics immediately.
      */
@@ -1153,6 +1169,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 clearRiderStateHistory()
                 // Subscribe to acceptance for this offer
                 subscribeToAcceptance(eventId)
+                // Monitor driver availability - notify rider if driver goes offline
+                subscribeToSelectedDriverAvailability(driver.driverPubKey)
                 // Start timeout for acceptance
                 startAcceptanceTimeout()
                 _uiState.value = _uiState.value.copy(
@@ -1209,6 +1227,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
         acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
         acceptanceSubscriptionId = null
+        // Stop monitoring driver availability
+        closeDriverAvailabilitySubscription()
 
         viewModelScope.launch {
             // Clean up all our ride events (NIP-09) - AWAIT before state reset
@@ -2001,6 +2021,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
             // Cancel the acceptance timeout - driver responded
             cancelAcceptanceTimeout()
+            // Stop monitoring driver availability - they accepted
+            closeDriverAvailabilitySubscription()
 
             // Only process if we're still waiting for acceptance
             // This prevents duplicate events from resetting the state after confirmation
@@ -2017,6 +2039,46 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             } else {
                 Log.d(TAG, "Ignoring duplicate acceptance - already in stage ${_uiState.value.rideStage}")
             }
+        }
+    }
+
+    /**
+     * Monitor the selected driver's availability while waiting for acceptance.
+     * If driver goes offline (takes another ride, loses connection), notify rider.
+     */
+    private fun subscribeToSelectedDriverAvailability(driverPubKey: String) {
+        // Close any existing subscription
+        selectedDriverAvailabilitySubId?.let { nostrService.closeSubscription(it) }
+
+        Log.d(TAG, "Monitoring availability for selected driver ${driverPubKey.take(8)}")
+
+        selectedDriverAvailabilitySubId = nostrService.subscribeToDriverAvailability(driverPubKey) { availability ->
+            // Only care about this if we're still waiting for acceptance
+            if (_uiState.value.rideStage != RideStage.WAITING_FOR_ACCEPTANCE) {
+                Log.d(TAG, "Ignoring driver availability - not in WAITING_FOR_ACCEPTANCE stage")
+                return@subscribeToDriverAvailability
+            }
+
+            // Check if driver went offline or became unavailable
+            if (!availability.isAvailable) {
+                Log.w(TAG, "Selected driver ${driverPubKey.take(8)} is no longer available (status: ${availability.status})")
+
+                // Show dialog to rider
+                _uiState.value = _uiState.value.copy(
+                    showDriverUnavailableDialog = true,
+                    statusMessage = "Driver is no longer available"
+                )
+            }
+        }
+    }
+
+    /**
+     * Close the driver availability monitoring subscription.
+     */
+    private fun closeDriverAvailabilitySubscription() {
+        selectedDriverAvailabilitySubId?.let {
+            nostrService.closeSubscription(it)
+            selectedDriverAvailabilitySubId = null
         }
     }
 
@@ -3322,6 +3384,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         broadcastTimeoutJob?.cancel()
         driverSubscriptionId?.let { nostrService.closeSubscription(it) }
         acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
+        selectedDriverAvailabilitySubId?.let { nostrService.closeSubscription(it) }
         driverRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
         chatSubscriptionId?.let { nostrService.closeSubscription(it) }
         cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
@@ -3500,6 +3563,9 @@ data class RiderUiState(
     val driverDepositInvoice: String? = null,                // BOLT11 invoice from driver's mint (for cross-mint)
     val bridgeInProgress: Boolean = false,                   // True during cross-mint bridge
     val bridgeComplete: Boolean = false,                     // True after bridge payment succeeded
+
+    // Driver availability (Issue #22)
+    val showDriverUnavailableDialog: Boolean = false,        // Show dialog when driver goes offline
 
     // UI
     val statusMessage: String = "Find available drivers",

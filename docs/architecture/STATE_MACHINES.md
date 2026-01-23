@@ -90,7 +90,7 @@ The rider's ride lifecycle is managed by `RiderStage` enum in `RiderViewModel`.
 | IDLE | `sendRideOffer()` | WAITING_FOR_ACCEPTANCE |
 | IDLE | `broadcastRideRequest()` | BROADCASTING_REQUEST |
 | WAITING_FOR_ACCEPTANCE | Acceptance event (Kind 3174) | DRIVER_ACCEPTED |
-| WAITING_FOR_ACCEPTANCE | 15s timeout / user cancel | IDLE |
+| WAITING_FOR_ACCEPTANCE | 15s timeout / user cancel / driver unavailable | IDLE |
 | BROADCASTING_REQUEST | Acceptance event (Kind 3174) | DRIVER_ACCEPTED |
 | BROADCASTING_REQUEST | 2min timeout / user cancel | IDLE |
 | DRIVER_ACCEPTED | `autoConfirmRide()` (automatic) | RIDE_CONFIRMED |
@@ -106,7 +106,7 @@ The rider's ride lifecycle is managed by `RiderStage` enum in `RiderViewModel`.
 | State | User Can Cancel? | Effect |
 |-------|-----------------|--------|
 | IDLE | N/A | No ride to cancel |
-| WAITING_FOR_ACCEPTANCE | Yes | Return to IDLE, no harm |
+| WAITING_FOR_ACCEPTANCE | Yes | Return to IDLE, no harm (also auto-cancels if driver goes unavailable) |
 | BROADCASTING_REQUEST | Yes | Return to IDLE, no harm |
 | DRIVER_ACCEPTED | Yes | Publish cancellation, return to IDLE |
 | RIDE_CONFIRMED | Yes | Publish cancellation, return to IDLE |
