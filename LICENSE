@@ -20,16 +20,14 @@ cryptocurrencies/tokens. This includes (without limitation):
 
 - Memecoins, pump-and-dump tokens, rug-pull prone assets, joke coins, or any
   tokens primarily designed or marketed for speculation, hype, or gambling-like
-  behavior rather than genuine real-world utility.
+  behavior rather than just being the worlds best money (bitcoin).
 
 Prohibited examples include wallets, trading pairs, swaps, staking, airdrops,
 rewards, or promotional materials tied to such assets.
 
 EXCEPTION: This restriction does NOT apply to fiat-based payment processing,
 fiat on-ramps/off-ramps, traditional financial integrations (e.g., credit/debit
-cards, bank transfers, stable fiat currencies), or non-speculative cryptocurrency
-features that serve genuine utility purposes (such as a basic wallet for value
-transfer in the context of the rideshare protocol itself).
+cards, bank transfers, stable fiat currencies)
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
