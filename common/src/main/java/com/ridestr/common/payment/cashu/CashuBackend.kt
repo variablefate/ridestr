@@ -3,9 +3,13 @@ package com.ridestr.common.payment.cashu
 import android.content.Context
 import android.util.Log
 import com.ridestr.common.payment.*
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -70,6 +74,9 @@ class CashuBackend(
     private var currentMintUrl: String? = null
     private var mintCapabilities: MintCapabilities? = null
 
+    // NUT-17: WebSocket for real-time state updates
+    private var webSocket: CashuWebSocket? = null
+
     /**
      * Verify mint capabilities via NUT-06 info endpoint.
      * Checks for NUT-14 (HTLC), NUT-05 (Melt), NUT-07 (Proof state check).
@@ -96,6 +103,9 @@ class CashuBackend(
 
                 // Parse supported NUTs from the "nuts" object
                 val supportedNuts = mutableSetOf<Int>()
+                var supportsWebSocket = false
+                val webSocketCommands = mutableSetOf<String>()
+
                 if (json.has("nuts")) {
                     val nutsObj = json.getJSONObject("nuts")
                     val keys = nutsObj.keys()
@@ -105,6 +115,33 @@ class CashuBackend(
                             supportedNuts.add(key.toInt())
                         } catch (e: NumberFormatException) {
                             // Skip non-numeric keys
+                        }
+                    }
+
+                    // Parse NUT-17 WebSocket capabilities
+                    // Format: { "17": { "supported": [{ "method": "bolt11", "unit": "sat", "commands": [...] }] } }
+                    if (nutsObj.has("17")) {
+                        try {
+                            val nut17 = nutsObj.getJSONObject("17")
+                            if (nut17.has("supported")) {
+                                val supported = nut17.getJSONArray("supported")
+                                for (i in 0 until supported.length()) {
+                                    val entry = supported.getJSONObject(i)
+                                    // We only care about bolt11/sat for now
+                                    if (entry.optString("method") == "bolt11" &&
+                                        entry.optString("unit") == "sat") {
+                                        supportsWebSocket = true
+                                        val commands = entry.optJSONArray("commands")
+                                        if (commands != null) {
+                                            for (j in 0 until commands.length()) {
+                                                webSocketCommands.add(commands.getString(j))
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Failed to parse NUT-17 capabilities: ${e.message}")
                         }
                     }
                 }
@@ -117,10 +154,12 @@ class CashuBackend(
                     supportedNuts = supportedNuts,
                     supportsHtlc = 14 in supportedNuts,
                     supportsMelt = 5 in supportedNuts,
-                    supportsProofState = 7 in supportedNuts
+                    supportsProofState = 7 in supportedNuts,
+                    supportsWebSocket = supportsWebSocket,
+                    webSocketCommands = webSocketCommands
                 )
 
-                Log.d(TAG, "Mint $normalizedUrl capabilities: NUTs=${supportedNuts}, escrow=${capabilities.supportsEscrow()}")
+                Log.d(TAG, "Mint $normalizedUrl capabilities: NUTs=${supportedNuts}, escrow=${capabilities.supportsEscrow()}, ws=${supportsWebSocket}${if (webSocketCommands.isNotEmpty()) " (${webSocketCommands.joinToString()})" else ""}")
                 capabilities
             }
         } catch (e: Exception) {
@@ -180,7 +219,22 @@ class CashuBackend(
             // The stub methods will still work for UI flow
         }
 
-        Log.d(TAG, "Connected to mint: $mintUrl (escrow=${capabilities.supportsEscrow()})")
+        // NUT-17: Initialize WebSocket if mint supports it
+        if (capabilities.supportsWebSocket) {
+            try {
+                webSocket = CashuWebSocket(mintUrl.trimEnd('/'), client).also { ws ->
+                    ws.connect()
+                    Log.d(TAG, "WebSocket initialized for real-time state updates")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to initialize WebSocket (will fall back to polling): ${e.message}")
+                webSocket = null
+            }
+        } else {
+            Log.d(TAG, "Mint does not support NUT-17 WebSocket, will use polling")
+        }
+
+        Log.d(TAG, "Connected to mint: $mintUrl (escrow=${capabilities.supportsEscrow()}, ws=${webSocket != null})")
         return true
     }
 
@@ -188,6 +242,29 @@ class CashuBackend(
      * Get current mint URL.
      */
     fun getCurrentMintUrl(): String? = currentMintUrl
+
+    /**
+     * Get mint capabilities (NUT-06 info).
+     */
+    fun getMintCapabilities(): MintCapabilities? = mintCapabilities
+
+    /**
+     * Get the WebSocket instance for NUT-17 real-time subscriptions.
+     * Returns null if mint doesn't support WebSocket or connection failed.
+     */
+    fun getWebSocket(): CashuWebSocket? = webSocket
+
+    /**
+     * Check if WebSocket is connected and available.
+     */
+    fun isWebSocketConnected(): Boolean = webSocket?.isConnected() == true
+
+    /**
+     * Check if WebSocket supports a specific subscription kind.
+     */
+    fun supportsWebSocketKind(kind: SubscriptionKind): Boolean {
+        return mintCapabilities?.supportsWebSocketKind(kind.value) == true && webSocket != null
+    }
 
     /**
      * Get the wallet seed (for NUT-09 recovery).
@@ -248,11 +325,6 @@ class CashuBackend(
             "Ensure wallet is fully connected before attempting mint operations."
         )
     }
-
-    /**
-     * Get cached mint capabilities.
-     */
-    fun getMintCapabilities(): MintCapabilities? = mintCapabilities
 
     /**
      * Check if connected to a mint.
@@ -372,6 +444,223 @@ class CashuBackend(
             Log.e(TAG, "Failed to check melt quote: ${e.message}", e)
             null
         }
+    }
+
+    /**
+     * Wait for a melt quote to reach a terminal state (PAID or UNPAID).
+     *
+     * Uses NUT-17 WebSocket subscription if available for instant notifications,
+     * otherwise falls back to polling with exponential backoff.
+     *
+     * @param quoteId The melt quote ID to monitor
+     * @param timeoutMs Maximum time to wait (default 60 seconds)
+     * @return The final MeltQuote state, or null on timeout/error
+     */
+    suspend fun waitForMeltQuoteState(
+        quoteId: String,
+        timeoutMs: Long = 60_000L
+    ): MeltQuote? = withContext(Dispatchers.IO) {
+        val ws = webSocket
+
+        // Try WebSocket subscription if available
+        if (ws != null && ws.isConnected() &&
+            mintCapabilities?.supportsWebSocketKind(SubscriptionKind.BOLT11_MELT_QUOTE.value) == true) {
+
+            Log.d(TAG, "Using WebSocket for melt quote $quoteId")
+
+            val result = CompletableDeferred<MeltQuote?>()
+
+            // Store original callback to restore later
+            val originalCallback = ws.onMeltQuoteUpdate
+
+            // Subscribe to melt quote updates
+            val subId = ws.subscribe(SubscriptionKind.BOLT11_MELT_QUOTE, listOf(quoteId))
+
+            if (subId != null) {
+                try {
+                    // Set up notification handler
+                    ws.onMeltQuoteUpdate = { id, payload ->
+                        if (id == quoteId) {
+                            Log.d(TAG, "WebSocket: melt quote $id -> ${payload.state}")
+                            when (payload.state) {
+                                WsMeltQuoteState.PAID, WsMeltQuoteState.FAILED -> {
+                                    // Convert WebSocket payload to MeltQuote
+                                    // Note: WebSocket payload doesn't have full quote info,
+                                    // so we need to fetch the complete quote
+                                    GlobalScope.launch(Dispatchers.IO) {
+                                        val quote = checkMeltQuote(quoteId)
+                                        result.complete(quote)
+                                    }
+                                }
+                                WsMeltQuoteState.PENDING, WsMeltQuoteState.UNPAID -> {
+                                    // Still waiting
+                                    Log.d(TAG, "WebSocket: melt quote still ${payload.state}")
+                                }
+                            }
+                        }
+                    }
+
+                    // Wait for result with timeout
+                    val quote = withTimeoutOrNull(timeoutMs) {
+                        result.await()
+                    }
+
+                    if (quote != null) {
+                        Log.d(TAG, "WebSocket: got melt quote result: ${quote.state}")
+                        return@withContext quote
+                    }
+
+                    Log.w(TAG, "WebSocket: melt quote timeout after ${timeoutMs}ms")
+                } finally {
+                    // Cleanup
+                    ws.onMeltQuoteUpdate = originalCallback
+                    ws.unsubscribe(subId)
+                }
+            } else {
+                Log.w(TAG, "WebSocket: failed to subscribe to melt quote, falling back to polling")
+            }
+        }
+
+        // Fallback to polling with progressive backoff
+        Log.d(TAG, "Using polling for melt quote $quoteId")
+
+        val pollDelays = listOf(500L, 1000L, 2000L, 3000L, 4000L) + List(9) { 5000L }
+        var elapsedMs = 0L
+
+        for ((attempt, pollDelay) in pollDelays.withIndex()) {
+            if (elapsedMs >= timeoutMs) break
+
+            delay(pollDelay)
+            elapsedMs += pollDelay
+
+            Log.d(TAG, "Polling melt quote status (attempt ${attempt + 1}/${pollDelays.size})...")
+
+            val quote = checkMeltQuote(quoteId)
+            if (quote != null) {
+                when (quote.state) {
+                    MeltQuoteState.PAID, MeltQuoteState.UNPAID -> {
+                        Log.d(TAG, "Melt quote reached terminal state: ${quote.state}")
+                        return@withContext quote
+                    }
+                    MeltQuoteState.PENDING -> {
+                        // Continue polling
+                    }
+                }
+            }
+        }
+
+        Log.w(TAG, "Melt quote polling timed out after ${elapsedMs}ms")
+        null
+    }
+
+    /**
+     * Wait for a mint quote (deposit) to reach PAID or ISSUED state.
+     *
+     * Uses NUT-17 WebSocket subscription if available for instant notifications,
+     * otherwise falls back to polling with exponential backoff.
+     *
+     * @param quoteId The mint quote ID to monitor
+     * @param timeoutMs Maximum time to wait (default 60 seconds)
+     * @return The final MintQuote state, or null on timeout/error
+     */
+    suspend fun waitForMintQuoteState(
+        quoteId: String,
+        timeoutMs: Long = 60_000L
+    ): MintQuote? = withContext(Dispatchers.IO) {
+        val ws = webSocket
+
+        // Try WebSocket subscription if available
+        if (ws != null && ws.isConnected() &&
+            mintCapabilities?.supportsWebSocketKind(SubscriptionKind.BOLT11_MINT_QUOTE.value) == true) {
+
+            Log.d(TAG, "Using WebSocket for mint quote $quoteId")
+
+            val result = CompletableDeferred<MintQuote?>()
+
+            // Store original callback to restore later
+            val originalCallback = ws.onMintQuoteUpdate
+
+            // Subscribe to mint quote updates
+            val subId = ws.subscribe(SubscriptionKind.BOLT11_MINT_QUOTE, listOf(quoteId))
+
+            if (subId != null) {
+                try {
+                    // Set up notification handler
+                    ws.onMintQuoteUpdate = { id, payload ->
+                        if (id == quoteId) {
+                            Log.d(TAG, "WebSocket: mint quote $id -> ${payload.state}")
+                            when (payload.state) {
+                                WsMintQuoteState.PAID, WsMintQuoteState.ISSUED -> {
+                                    // Fetch full quote data
+                                    GlobalScope.launch(Dispatchers.IO) {
+                                        val quote = checkMintQuote(quoteId)
+                                        result.complete(quote)
+                                    }
+                                }
+                                WsMintQuoteState.EXPIRED -> {
+                                    // Quote expired - complete with null
+                                    Log.w(TAG, "WebSocket: mint quote $id expired")
+                                    result.complete(null)
+                                }
+                                WsMintQuoteState.UNPAID -> {
+                                    // Still waiting for payment
+                                    Log.d(TAG, "WebSocket: mint quote still UNPAID")
+                                }
+                            }
+                        }
+                    }
+
+                    // Wait for result with timeout
+                    val quote = withTimeoutOrNull(timeoutMs) {
+                        result.await()
+                    }
+
+                    if (quote != null) {
+                        Log.d(TAG, "WebSocket: got mint quote result: ${quote.state}")
+                        return@withContext quote
+                    }
+
+                    Log.w(TAG, "WebSocket: mint quote timeout after ${timeoutMs}ms")
+                } finally {
+                    // Cleanup
+                    ws.onMintQuoteUpdate = originalCallback
+                    ws.unsubscribe(subId)
+                }
+            } else {
+                Log.w(TAG, "WebSocket: failed to subscribe to mint quote, falling back to polling")
+            }
+        }
+
+        // Fallback to polling with progressive backoff
+        Log.d(TAG, "Using polling for mint quote $quoteId")
+
+        val pollDelays = listOf(500L, 1000L, 2000L, 3000L, 4000L) + List(9) { 5000L }
+        var elapsedMs = 0L
+
+        for ((attempt, pollDelay) in pollDelays.withIndex()) {
+            if (elapsedMs >= timeoutMs) break
+
+            delay(pollDelay)
+            elapsedMs += pollDelay
+
+            Log.d(TAG, "Polling mint quote status (attempt ${attempt + 1}/${pollDelays.size})...")
+
+            val quote = checkMintQuote(quoteId)
+            if (quote != null) {
+                when (quote.state) {
+                    MintQuoteState.PAID, MintQuoteState.ISSUED -> {
+                        Log.d(TAG, "Mint quote reached terminal state: ${quote.state}")
+                        return@withContext quote
+                    }
+                    MintQuoteState.UNPAID -> {
+                        // Continue polling
+                    }
+                }
+            }
+        }
+
+        Log.w(TAG, "Mint quote polling timed out after ${elapsedMs}ms")
+        null
     }
 
     /**
@@ -1985,6 +2274,14 @@ class CashuBackend(
      * Disconnect from current mint.
      */
     fun disconnect() {
+        // Cleanup WebSocket
+        try {
+            webSocket?.disconnect()
+            webSocket = null
+        } catch (e: Exception) {
+            Log.e(TAG, "Error closing WebSocket", e)
+        }
+
         // Cleanup cdk-kotlin resources
         try {
             cdkWallet = null
@@ -2824,58 +3121,53 @@ class CashuBackend(
                     // 11000 = "Proofs are pending" - Same as above
                     if (errorCode == 20005 || errorCode == 11002 || errorCode == 11000 ||
                         errorDetail.contains("pending", ignoreCase = true)) {
-                        Log.d(TAG, "Melt is PENDING (code=$errorCode) - will poll for completion")
+                        Log.d(TAG, "Melt is PENDING (code=$errorCode) - waiting for completion...")
 
                         // Mark operation as pending
                         if (changePremints.isNotEmpty()) {
                             walletStorage.updateBlindedOpStatus(operationId, PendingOperationStatus.PENDING)
                         }
 
-                        // Poll for melt completion with progressive backoff
-                        // Gradual ramp: 0.5s → 1s → 2s → 3s → 4s → 5s...
-                        val pollDelays = listOf(500L, 1000L, 2000L, 3000L, 4000L) + List(9) { 5000L } // Total ~55.5s
-                        for ((attempt, pollDelay) in pollDelays.withIndex()) {
-                            delay(pollDelay)
-                            Log.d(TAG, "Polling melt quote status (attempt ${attempt + 1}/${pollDelays.size}, waited ${pollDelay}ms)...")
+                        // NUT-17: Use WebSocket if available, fall back to polling
+                        val quoteStatus = waitForMeltQuoteState(quoteId, 60_000L)
 
-                            val quoteStatus = checkMeltQuote(quoteId)
-                            if (quoteStatus != null) {
-                                Log.d(TAG, "Melt quote status: ${quoteStatus.state}")
-                                when (quoteStatus.state) {
-                                    MeltQuoteState.PAID -> {
-                                        Log.d(TAG, "✅ Melt completed successfully after polling!")
-                                        // CRITICAL: Change proofs are LOST in this path because
-                                        // GET /melt/quote doesn't return signed change outputs.
-                                        // Keep pending operation for potential future recovery.
-                                        if (changePremints.isNotEmpty()) {
-                                            Log.w(TAG, "⚠️ CHANGE LOST: $expectedChange sats change cannot be recovered (no C_ values)")
-                                            // Don't remove pending op - keep premints in case spec adds recovery
-                                        }
-                                        return@withContext MeltResult(
-                                            paid = true,
-                                            paymentPreimage = quoteStatus.paymentPreimage,
-                                            change = emptyList() // Change lost - can't unblind without C_ values
-                                        )
+                        if (quoteStatus != null) {
+                            Log.d(TAG, "Melt quote status: ${quoteStatus.state}")
+                            when (quoteStatus.state) {
+                                MeltQuoteState.PAID -> {
+                                    Log.d(TAG, "✅ Melt completed successfully!")
+                                    // CRITICAL: Change proofs are LOST in this path because
+                                    // GET /melt/quote doesn't return signed change outputs.
+                                    // Keep pending operation for potential future recovery.
+                                    if (changePremints.isNotEmpty()) {
+                                        Log.w(TAG, "⚠️ CHANGE LOST: $expectedChange sats change cannot be recovered (no C_ values)")
+                                        // Don't remove pending op - keep premints in case spec adds recovery
                                     }
-                                    MeltQuoteState.UNPAID -> {
-                                        // Lightning payment failed - proofs should be released
-                                        Log.w(TAG, "Melt failed after polling - Lightning payment unsuccessful")
-                                        // Mark as failed - input proofs should be UNSPENT
-                                        if (changePremints.isNotEmpty()) {
-                                            walletStorage.updateBlindedOpStatus(operationId, PendingOperationStatus.FAILED)
-                                        }
-                                        return@withContext null
+                                    return@withContext MeltResult(
+                                        paid = true,
+                                        paymentPreimage = quoteStatus.paymentPreimage,
+                                        change = emptyList() // Change lost - can't unblind without C_ values
+                                    )
+                                }
+                                MeltQuoteState.UNPAID -> {
+                                    // Lightning payment failed - proofs should be released
+                                    Log.w(TAG, "Melt failed - Lightning payment unsuccessful")
+                                    // Mark as failed - input proofs should be UNSPENT
+                                    if (changePremints.isNotEmpty()) {
+                                        walletStorage.updateBlindedOpStatus(operationId, PendingOperationStatus.FAILED)
                                     }
-                                    MeltQuoteState.PENDING -> {
-                                        // Still pending, continue polling
-                                        continue
-                                    }
+                                    return@withContext null
+                                }
+                                MeltQuoteState.PENDING -> {
+                                    // Timed out waiting - keep operation as PENDING for later recovery
+                                    Log.w(TAG, "Melt still pending after ~60s - payment may complete later")
+                                    return@withContext MeltResult(paid = false, paymentPreimage = null, change = emptyList(), isPending = true)
                                 }
                             }
                         }
-                        // Timed out waiting for melt - keep operation as PENDING for later recovery
-                        Log.w(TAG, "Melt still pending after ~55s - payment may complete later")
-                        // Keep pending operation status as PENDING
+
+                        // Timed out or error - keep operation as PENDING for later recovery
+                        Log.w(TAG, "Melt quote check timed out - payment may complete later")
                         return@withContext MeltResult(paid = false, paymentPreimage = null, change = emptyList(), isPending = true)
                     }
                 } catch (e: Exception) {
@@ -4099,12 +4391,19 @@ data class MintCapabilities(
     val supportedNuts: Set<Int>,
     val supportsHtlc: Boolean,      // NUT-14
     val supportsMelt: Boolean,      // NUT-05
-    val supportsProofState: Boolean // NUT-07
+    val supportsProofState: Boolean, // NUT-07
+    val supportsWebSocket: Boolean = false, // NUT-17
+    val webSocketCommands: Set<String> = emptySet() // e.g., ["bolt11_mint_quote", "bolt11_melt_quote", "proof_state"]
 ) {
     /**
      * Check if mint supports all required NUTs for escrow functionality.
      */
     fun supportsEscrow(): Boolean = supportsHtlc && supportsMelt && supportsProofState
+
+    /**
+     * Check if mint supports WebSocket subscription for a specific kind.
+     */
+    fun supportsWebSocketKind(kind: String): Boolean = supportsWebSocket && kind in webSocketCommands
 
     /**
      * Get user-friendly description of missing capabilities.
