@@ -10,7 +10,9 @@ import com.ridestr.common.payment.cashu.MintCapabilities
 import com.ridestr.common.payment.cashu.MintTokensResult
 import com.ridestr.common.payment.cashu.Nip60WalletSync
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
@@ -2549,21 +2551,25 @@ class WalletService(
 
                 while (emptyBatches < MAX_EMPTY_BATCHES) {
                     // Generate batch of deterministic secrets for all denominations
-                    val preMintSecrets = mutableListOf<com.ridestr.common.payment.cashu.PreMintSecret>()
+                    // IMPORTANT: Run crypto derivation on background thread to avoid ANR
+                    val preMintSecrets = withContext(Dispatchers.Default) {
+                        val secrets = mutableListOf<com.ridestr.common.payment.cashu.PreMintSecret>()
 
-                    // For each counter value, try all standard denominations (1, 2, 4, 8, ..., up to 2^20)
-                    for (i in 0 until BATCH_SIZE) {
-                        val currentCounter = counter + i
-                        // Try common denominations
-                        for (power in 0..20) {
-                            val amount = 1L shl power  // 1, 2, 4, 8, ..., 1048576
-                            val pms = com.ridestr.common.payment.cashu.CashuCrypto.derivePreMintSecret(
-                                seed, keysetId, currentCounter * 21 + power, amount
-                            )
-                            if (pms != null) {
-                                preMintSecrets.add(pms)
+                        // For each counter value, try all standard denominations (1, 2, 4, 8, ..., up to 2^20)
+                        for (i in 0 until BATCH_SIZE) {
+                            val currentCounter = counter + i
+                            // Try common denominations
+                            for (power in 0..20) {
+                                val amount = 1L shl power  // 1, 2, 4, 8, ..., 1048576
+                                val pms = com.ridestr.common.payment.cashu.CashuCrypto.derivePreMintSecret(
+                                    seed, keysetId, currentCounter * 21 + power, amount
+                                )
+                                if (pms != null) {
+                                    secrets.add(pms)
+                                }
                             }
                         }
+                        secrets
                     }
 
                     Log.d(TAG, "Trying ${preMintSecrets.size} blinded messages at counter $counter")
