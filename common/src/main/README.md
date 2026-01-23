@@ -13,7 +13,9 @@ The `common` module contains all shared code used by both rider and driver apps:
 | File | Purpose | Key Methods |
 |------|---------|-------------|
 | `WalletService.kt` | Orchestration layer (⚠️ safe deletion pattern required - see cashu-wallet skill) | `syncWallet()`, `requestDeposit()`, `checkDepositStatus()`, `getMeltQuote()`, `executeWithdraw()`, `lockForRide()`, `claimHtlcPayment()`, `mintTokens()`, `claimUnclaimedDeposits()`, `changeMintUrl()`, `recoverPendingOperations()`, `bridgePayment()`, `recoverFromSeed()` |
-| `cashu/CashuBackend.kt` | Mint operations (NUT-04/05/14), NUT-13 deterministic secrets, progressive backoff polling | `getMintQuote()`, `mintTokens()`, `getMeltQuote()`, `meltWithProofs()`, `createHtlcTokenFromProofs()`, `claimHtlcTokenWithProofs()`, `refundExpiredHtlc()`, `restoreProofs()`, `getActiveKeysetIds()` |
+| `cashu/CashuBackend.kt` | Mint operations (NUT-04/05/14/17), NUT-13 deterministic secrets, WebSocket state updates | `getMintQuote()`, `mintTokens()`, `getMeltQuote()`, `meltWithProofs()`, `createHtlcTokenFromProofs()`, `claimHtlcTokenWithProofs()`, `refundExpiredHtlc()`, `restoreProofs()`, `getActiveKeysetIds()`, `waitForMeltQuoteState()`, `waitForMintQuoteState()` |
+| `cashu/CashuWebSocket.kt` | NUT-17 WebSocket connection for real-time mint state updates | `connect()`, `disconnect()`, `subscribe()`, `unsubscribe()`, `isConnected()` |
+| `cashu/CashuWebSocketModels.kt` | NUT-17 JSON-RPC 2.0 data classes | `WsRequest`, `WsResponse`, `WsNotification`, `MintQuotePayload`, `MeltQuotePayload`, `SubscriptionKind` |
 | `cashu/CashuCrypto.kt` | Cryptographic operations (NUT-00/13) | `hashToCurve()`, `blindMessage()`, `unblindSignature()`, `mnemonicToSeed()`, `deriveSecrets()`, `derivePreMintSecret()` |
 | `cashu/Nip60WalletSync.kt` | Cross-device wallet sync (NIP-60, EOSE-aware queries) | `publishProofs()`, `fetchProofs()`, `publishWalletMetadata()`, `restoreFromNostr()`, `hasExistingWallet()` (counter backup, EOSE early-exit) |
 | `WalletKeyManager.kt` | Wallet keypair + signing | `getPrivateKeyBytes()`, `signSchnorr()`, `getWalletPubKeyHex()`, `importPrivateKey()`, `importMnemonic()` |

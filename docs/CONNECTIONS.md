@@ -1,6 +1,6 @@
 # Ridestr Module Connections
 
-**Last Updated**: 2026-01-22
+**Last Updated**: 2026-01-23
 
 This document provides a comprehensive view of how all modules connect in the Ridestr codebase. Use this as a reference when making changes to understand what might be affected.
 
@@ -96,11 +96,16 @@ sequenceDiagram
 
     U->>U: Pay Lightning invoice externally
 
-    loop Poll every 5 seconds
-        WDS->>WS: checkDepositStatus(quoteId)
-        WS->>CB: checkMintQuote(quoteId)
-        CB->>M: GET /v1/mint/quote/bolt11/{id}
-        M-->>CB: {paid: true/false}
+    alt NUT-17 WebSocket (if supported)
+        CB->>M: Subscribe bolt11_mint_quote
+        M-->>CB: Notification: {state: PAID}
+    else HTTP Polling (fallback)
+        loop Poll every 5 seconds
+            WDS->>WS: checkDepositStatus(quoteId)
+            WS->>CB: checkMintQuote(quoteId)
+            CB->>M: GET /v1/mint/quote/bolt11/{id}
+            M-->>CB: {paid: true/false}
+        end
     end
 
     M-->>CB: {paid: true}
@@ -140,6 +145,14 @@ sequenceDiagram
     WDS->>WS: executeWithdraw(quote)
     WS->>CB: meltTokens(quoteId)
     CB->>M: POST /v1/melt/bolt11
+    alt NUT-17 WebSocket (if supported)
+        CB->>M: Subscribe bolt11_melt_quote
+        M-->>CB: Notification: {state: PAID}
+    else HTTP Polling (fallback)
+        loop Poll until paid
+            CB->>M: GET /v1/melt/quote/bolt11/{id}
+        end
+    end
     M-->>CB: {paid: true, change: [...]}
     CB-->>WS: Melt complete
     WS-->>WDS: Success
@@ -310,13 +323,23 @@ Payment System
 │   ├── CRITICAL: pendingOpId must be cleared AFTER NIP-60 publish (or RecoveryToken fallback)
 │   └── Used by: RiderViewModel, DriverViewModel, WalletDetailScreen, WalletSettingsScreen
 │
-├── CashuBackend (NUT-04/05/14 implementation)
+├── CashuBackend (NUT-04/05/14/17 implementation)
 │   ├── Depends on: cdk-kotlin library
 │   ├── Depends on: WalletStorage (pending blinded operations)
-│   ├── Connects to: Cashu Mint (HTTP REST)
+│   ├── Depends on: CashuWebSocket (NUT-17 real-time updates)
+│   ├── Connects to: Cashu Mint (HTTP REST + WebSocket)
+│   ├── NUT-17: waitForMeltQuoteState(), waitForMintQuoteState() - WebSocket with polling fallback
 │   ├── CRITICAL: All blinded ops save premints BEFORE request, return pendingOpId
 │   ├── Caller clears pendingOpId after persisting proofs (NIP-60 or RecoveryToken)
 │   └── Used by: WalletService
+│
+├── CashuWebSocket (NUT-17 WebSocket subscriptions)
+│   ├── Depends on: OkHttp WebSocket
+│   ├── Connects to: Cashu Mint (wss://mint.example.com/v1/ws)
+│   ├── Subscription kinds: bolt11_mint_quote, bolt11_melt_quote, proof_state
+│   ├── Auto-reconnection with exponential backoff
+│   ├── Callbacks: onMintQuoteUpdate, onMeltQuoteUpdate, onProofStateUpdate
+│   └── Used by: CashuBackend
 │
 ├── Nip60WalletSync (NIP-60 wallet backup - FULLY COMPLIANT)
 │   ├── Depends on: NostrService (event publishing)
