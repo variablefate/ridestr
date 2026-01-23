@@ -301,6 +301,9 @@ fun RidestrApp() {
     // Lightning address for tip screen
     var tipLightningAddress by remember { mutableStateOf<String?>(null) }
 
+    // Pending deposit amount for wallet detail screen (from insufficient funds dialog)
+    var pendingDepositAmount by remember { mutableStateOf<Long?>(null) }
+
     // Connect to Nostr if starting at MAIN screen
     LaunchedEffect(Unit) {
         if (currentScreen == Screen.MAIN) {
@@ -574,6 +577,10 @@ fun RidestrApp() {
                     onOpenWalletDetail = {
                         currentScreen = Screen.WALLET_DETAIL
                     },
+                    onOpenWalletWithDeposit = { amount ->
+                        pendingDepositAmount = amount
+                        currentScreen = Screen.WALLET_DETAIL
+                    },
                     onOpenWalletSettings = {
                         currentScreen = Screen.WALLET_SETTINGS
                     },
@@ -593,7 +600,11 @@ fun RidestrApp() {
                         walletService = walletService,
                         settingsManager = settingsManager,
                         priceService = bitcoinPriceService,
-                        onBack = { currentScreen = Screen.MAIN },
+                        onBack = {
+                            pendingDepositAmount = null  // Clear deposit amount when leaving
+                            currentScreen = Screen.MAIN
+                        },
+                        initialDepositAmount = pendingDepositAmount,
                         modifier = Modifier.padding(innerPadding)
                     )
                 } else {
@@ -761,6 +772,7 @@ fun MainScreen(
     onOpenRideDetail: (RideHistoryEntry) -> Unit,
     onSetupWallet: () -> Unit,
     onOpenWalletDetail: () -> Unit,
+    onOpenWalletWithDeposit: (Long) -> Unit,  // Opens wallet detail with deposit dialog pre-filled
     onOpenWalletSettings: () -> Unit,
     onSyncProfile: (suspend () -> Unit)? = null,
     onRefreshSavedLocations: (suspend () -> Unit)? = null,
@@ -878,6 +890,7 @@ fun MainScreen(
                     settingsManager = settingsManager,
                     onOpenTiles = onOpenTiles,
                     onOpenWallet = { currentTab = Tab.WALLET },
+                    onOpenWalletWithDeposit = onOpenWalletWithDeposit,
                     onRefreshSavedLocations = onRefreshSavedLocations,
                     modifier = Modifier.padding(innerPadding)
                 )

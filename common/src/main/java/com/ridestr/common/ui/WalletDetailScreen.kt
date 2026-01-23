@@ -61,6 +61,7 @@ fun WalletDetailScreen(
     settingsManager: SettingsManager,
     priceService: BitcoinPriceService,
     onBack: () -> Unit,
+    initialDepositAmount: Long? = null,  // If set, auto-open deposit dialog with this amount
     modifier: Modifier = Modifier
 ) {
     val balance by walletService.balance.collectAsState()
@@ -70,10 +71,13 @@ fun WalletDetailScreen(
     val displayCurrency by settingsManager.displayCurrency.collectAsState()
     val btcPriceUsd by priceService.btcPriceUsd.collectAsState()
 
-    // Dialog state
-    var showDepositDialog by remember { mutableStateOf(false) }
+    // Dialog state - auto-open deposit dialog if initialDepositAmount is provided
+    var showDepositDialog by remember { mutableStateOf(initialDepositAmount != null) }
     var showWithdrawDialog by remember { mutableStateOf(false) }
     var showChangeMintDialog by remember { mutableStateOf(false) }
+
+    // Track the initial deposit amount for pre-filling
+    val prefilledDepositAmount = remember { initialDepositAmount }
 
     // Pull-to-refresh state
     var isRefreshing by remember { mutableStateOf(false) }
@@ -197,6 +201,7 @@ fun WalletDetailScreen(
     if (showDepositDialog) {
         DepositDialog(
             walletService = walletService,
+            initialAmount = prefilledDepositAmount,
             onDismiss = {
                 showDepositDialog = false
                 // Trigger a background refresh after a short delay to clean up pending deposits
@@ -472,9 +477,10 @@ private fun TransactionItem(
 @Composable
 private fun DepositDialog(
     walletService: WalletService,
+    initialAmount: Long? = null,
     onDismiss: () -> Unit
 ) {
-    var amount by remember { mutableStateOf("") }
+    var amount by remember { mutableStateOf(initialAmount?.toString() ?: "") }
     var isLoading by remember { mutableStateOf(false) }
     var invoice by remember { mutableStateOf<String?>(null) }
     var quoteId by remember { mutableStateOf<String?>(null) }

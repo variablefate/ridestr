@@ -1083,14 +1083,18 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         val rideRoute = state.routeResult  // Already calculated pickup→destination route
 
         // Check balance before sending offer
+        // Include 2% buffer for potential mint fees during escrow operations
         val fareAmount = fareEstimate.toLong()
+        val fareWithBuffer = (fareAmount * 1.02).toLong()
         val currentBalance = walletService?.getBalance() ?: 0L
 
-        if (currentBalance < fareAmount) {
-            Log.w(TAG, "Insufficient funds: need $fareAmount sats, have $currentBalance sats")
+        if (currentBalance < fareWithBuffer) {
+            val shortfall = fareWithBuffer - currentBalance
+            Log.w(TAG, "Insufficient funds: need $fareWithBuffer sats (fare $fareAmount + 2% buffer), have $currentBalance sats")
             _uiState.value = state.copy(
                 showInsufficientFundsDialog = true,
-                insufficientFundsAmount = fareAmount - currentBalance
+                insufficientFundsAmount = shortfall,
+                depositAmountNeeded = shortfall  // Pre-fill deposit with exact amount needed
             )
             return  // Block ride request until funded
         }
@@ -3478,7 +3482,8 @@ data class RiderUiState(
 
     // Insufficient funds dialog
     val showInsufficientFundsDialog: Boolean = false,
-    val insufficientFundsAmount: Long = 0,          // How many more sats needed
+    val insufficientFundsAmount: Long = 0,          // How many more sats needed (display only)
+    val depositAmountNeeded: Long = 0,              // Amount to deposit (includes 2% fee buffer)
 
     // Cancel warning dialog (shown when cancelling after PIN verification)
     val showCancelWarningDialog: Boolean = false,

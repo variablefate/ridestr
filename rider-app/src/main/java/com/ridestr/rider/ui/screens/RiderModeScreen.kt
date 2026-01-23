@@ -87,6 +87,7 @@ fun RiderModeScreen(
     settingsManager: SettingsManager,
     onOpenTiles: () -> Unit,
     onOpenWallet: () -> Unit = {},
+    onOpenWalletWithDeposit: (Long) -> Unit = {},  // Opens wallet with pre-filled deposit amount
     onRefreshSavedLocations: (suspend () -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
@@ -176,11 +177,11 @@ fun RiderModeScreen(
             text = {
                 Column {
                     Text(
-                        "You need ${uiState.insufficientFundsAmount} more sats to request this ride."
+                        "You need ${"%,d".format(uiState.insufficientFundsAmount)} more sats to request this ride."
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        "Add funds to your wallet to continue.",
+                        "This includes a small buffer for potential mint fees.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -189,11 +190,12 @@ fun RiderModeScreen(
             confirmButton = {
                 Button(
                     onClick = {
+                        val depositAmount = uiState.depositAmountNeeded
                         viewModel.dismissInsufficientFundsDialog()
-                        onOpenWallet()
+                        onOpenWalletWithDeposit(depositAmount)
                     }
                 ) {
-                    Text("Add Funds")
+                    Text("Deposit ${"%,d".format(uiState.depositAmountNeeded)} sats")
                 }
             },
             dismissButton = {
