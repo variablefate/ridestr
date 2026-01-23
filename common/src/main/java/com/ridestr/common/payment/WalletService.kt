@@ -1232,13 +1232,30 @@ class WalletService(
             Log.d(TAG, "Cleared pending HTLC claim operation (no proofs): ${claimResult.pendingOpId}")
         }
 
-        // Update balance
-        val newBalance = _balance.value.availableSats + claimResult.amountSats
-        _balance.value = _balance.value.copy(
-            availableSats = newBalance,
-            lastUpdated = System.currentTimeMillis()
-        )
-        walletStorage.cacheBalance(_balance.value)
+        // Refresh balance from NIP-60 (ensures consistency)
+        val sync = nip60Sync
+        val newBalance = if (sync != null) {
+            sync.clearCache()
+            val freshProofs = sync.fetchProofs(forceRefresh = true)
+            val totalBalance = freshProofs.sumOf { it.amount }
+            _balance.value = WalletBalance(
+                availableSats = totalBalance,
+                pendingSats = _balance.value.pendingSats,
+                lastUpdated = System.currentTimeMillis()
+            )
+            walletStorage.cacheBalance(_balance.value)
+            updateDiagnostics()
+            totalBalance
+        } else {
+            // Fallback: local update only
+            val localBalance = _balance.value.availableSats + claimResult.amountSats
+            _balance.value = _balance.value.copy(
+                availableSats = localBalance,
+                lastUpdated = System.currentTimeMillis()
+            )
+            walletStorage.cacheBalance(_balance.value)
+            localBalance
+        }
 
         // Record transaction
         addTransaction(PaymentTransaction(
@@ -1252,7 +1269,7 @@ class WalletService(
         ))
 
         Log.d(TAG, "=== HTLC CLAIMED ===")
-        Log.d(TAG, "Received ${claimResult.amountSats} sats, new balance: $newBalance")
+        Log.d(TAG, "Received ${claimResult.amountSats} sats, refreshed balance: $newBalance")
 
         return result
     }
