@@ -2831,10 +2831,12 @@ class CashuBackend(
                             walletStorage.updateBlindedOpStatus(operationId, PendingOperationStatus.PENDING)
                         }
 
-                        // Poll for melt completion (up to 60 seconds)
-                        for (attempt in 1..12) {
-                            delay(5000) // Wait 5 seconds between polls
-                            Log.d(TAG, "Polling melt quote status (attempt $attempt/12)...")
+                        // Poll for melt completion with progressive backoff
+                        // Gradual ramp: 0.5s → 1s → 2s → 3s → 4s → 5s...
+                        val pollDelays = listOf(500L, 1000L, 2000L, 3000L, 4000L) + List(9) { 5000L } // Total ~55.5s
+                        for ((attempt, pollDelay) in pollDelays.withIndex()) {
+                            delay(pollDelay)
+                            Log.d(TAG, "Polling melt quote status (attempt ${attempt + 1}/${pollDelays.size}, waited ${pollDelay}ms)...")
 
                             val quoteStatus = checkMeltQuote(quoteId)
                             if (quoteStatus != null) {
@@ -2872,7 +2874,7 @@ class CashuBackend(
                             }
                         }
                         // Timed out waiting for melt - keep operation as PENDING for later recovery
-                        Log.w(TAG, "Melt still pending after 60s - payment may complete later")
+                        Log.w(TAG, "Melt still pending after ~55s - payment may complete later")
                         // Keep pending operation status as PENDING
                         return@withContext MeltResult(paid = false, paymentPreimage = null, change = emptyList(), isPending = true)
                     }

@@ -365,9 +365,25 @@ fun DriverModeScreen(
 
         // Payment warning dialog (shown when trying to complete ride without payment)
         if (uiState.showPaymentWarningDialog) {
+            val isWaiting = uiState.paymentWarningStatus == PaymentStatus.WAITING_FOR_PREIMAGE
             AlertDialog(
                 onDismissRequest = { viewModel.dismissPaymentWarningDialog() },
-                title = { Text("Payment Issue") },
+                icon = {
+                    if (isWaiting) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(32.dp),
+                            strokeWidth = 3.dp
+                        )
+                    } else {
+                        Icon(
+                            Icons.Default.Warning,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(32.dp)
+                        )
+                    }
+                },
+                title = { Text(if (isWaiting) "Waiting for Payment" else "Payment Issue") },
                 text = {
                     Text(when (uiState.paymentWarningStatus) {
                         PaymentStatus.MISSING_PREIMAGE ->
@@ -375,19 +391,28 @@ fun DriverModeScreen(
                         PaymentStatus.MISSING_ESCROW_TOKEN ->
                             "The rider app failed to lock payment escrow. You won't be able to claim payment for this ride."
                         PaymentStatus.WAITING_FOR_PREIMAGE ->
-                            "Still waiting for payment authorization. This may take a moment."
+                            "Waiting for payment authorization from rider. This may take a moment for cross-mint payments."
                         else ->
                             "Payment setup incomplete. You may not receive payment for this ride."
                     })
                 },
                 confirmButton = {
-                    TextButton(onClick = { viewModel.confirmCompleteWithoutPayment() }) {
-                        Text("Complete Anyway")
+                    if (!isWaiting) {
+                        TextButton(onClick = { viewModel.confirmCompleteWithoutPayment() }) {
+                            Text("Complete Anyway")
+                        }
                     }
                 },
                 dismissButton = {
-                    TextButton(onClick = { viewModel.cancelRideDueToPaymentIssue() }) {
-                        Text("Cancel Ride", color = MaterialTheme.colorScheme.error)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(onClick = { viewModel.dismissPaymentWarningDialog() }) {
+                            Text("Go Back")
+                        }
+                        if (!isWaiting) {
+                            TextButton(onClick = { viewModel.cancelRideDueToPaymentIssue() }) {
+                                Text("Cancel Ride", color = MaterialTheme.colorScheme.error)
+                            }
+                        }
                     }
                 }
             )

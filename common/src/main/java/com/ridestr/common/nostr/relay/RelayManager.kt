@@ -30,6 +30,7 @@ data class Subscription(
     val id: String,
     val filters: List<Map<String, Any>>,
     val onEvent: (Event, String) -> Unit, // event, relayUrl
+    val onEose: ((String) -> Unit)? = null, // relayUrl - called when EOSE received
     val createdAt: Long = System.currentTimeMillis()
 )
 
@@ -134,6 +135,8 @@ class RelayManager(
 
     /**
      * Subscribe to events matching the given filter criteria.
+     * @param onEose Optional callback when EOSE (End of Stored Events) is received from a relay
+     * @param onEvent Required callback for each event received (last param for trailing lambda syntax)
      * @return Subscription ID for closing later
      */
     fun subscribe(
@@ -143,6 +146,7 @@ class RelayManager(
         since: Long? = null,
         until: Long? = null,
         limit: Int? = null,
+        onEose: ((String) -> Unit)? = null,
         onEvent: (Event, String) -> Unit
     ): String {
         val subId = generateSubscriptionId()
@@ -161,7 +165,8 @@ class RelayManager(
         val subscription = Subscription(
             id = subId,
             filters = listOf(filter),
-            onEvent = onEvent
+            onEvent = onEvent,
+            onEose = onEose
         )
 
         subscriptions[subId] = subscription
@@ -339,6 +344,8 @@ class RelayManager(
 
     private fun handleEose(subscriptionId: String, relayUrl: String) {
         Log.d(TAG, "EOSE for subscription $subscriptionId from $relayUrl")
+        // Notify subscription callback if registered
+        subscriptions[subscriptionId]?.onEose?.invoke(relayUrl)
     }
 
     private fun handleOk(eventId: String, success: Boolean, message: String, relayUrl: String) {

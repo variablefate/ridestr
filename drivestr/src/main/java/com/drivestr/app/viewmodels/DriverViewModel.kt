@@ -1846,7 +1846,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 _uiState.value = state.copy(
                     activePreimage = preimage,
                     activeEscrowToken = escrowToken,
-                    canSettleEscrow = canSettle
+                    canSettleEscrow = canSettle,
+                    // Auto-dismiss payment warning dialog if payment is now ready
+                    showPaymentWarningDialog = if (canSettle) false else state.showPaymentWarningDialog,
+                    paymentWarningStatus = if (canSettle) null else state.paymentWarningStatus
                 )
 
                 if (canSettle) {
@@ -1947,7 +1950,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                         crossMintPaymentComplete = true,
                         // Clear the pending deposit fields
                         pendingDepositQuoteId = null,
-                        pendingDepositAmount = null
+                        pendingDepositAmount = null,
+                        // Auto-dismiss payment warning dialog since payment succeeded
+                        showPaymentWarningDialog = false,
+                        paymentWarningStatus = null
                     )
 
                     Log.d(TAG, "Cross-mint payment complete: received ${claimResult.totalSats} sats")

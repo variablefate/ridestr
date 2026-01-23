@@ -2462,6 +2462,9 @@ private fun DriverAcceptedContent(
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             // Status header with spinner
+            // AtoB Pattern: Show "Ride Confirmed!" when confirmationEventId is set,
+            // even though rideStage is still DRIVER_ACCEPTED (waiting for driver to start)
+            val isRideConfirmed = uiState.confirmationEventId != null
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.Center
@@ -2486,11 +2489,54 @@ private fun DriverAcceptedContent(
                     )
                     Spacer(modifier = Modifier.width(12.dp))
                     Text(
-                        text = "Driver Accepted!",
+                        text = if (isRideConfirmed) "Ride Confirmed!" else "Driver Accepted!",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
                 }
+            }
+
+            // Show PIN prominently when ride is confirmed
+            if (isRideConfirmed && uiState.pickupPin != null) {
+                Spacer(modifier = Modifier.height(16.dp))
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = "Your PIN",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = uiState.pickupPin,
+                            style = MaterialTheme.typography.headlineLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Tell this to your driver when they arrive",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                        )
+                    }
+                }
+                // Status message for waiting state
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Waiting for driver to start...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
 
             Spacer(modifier = Modifier.height(20.dp))

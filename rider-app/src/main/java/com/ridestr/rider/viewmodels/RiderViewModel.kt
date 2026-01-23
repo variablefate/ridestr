@@ -46,6 +46,7 @@ import com.ridestr.common.state.RideEvent
 import com.ridestr.common.state.RideState
 import com.ridestr.common.state.RideStateMachine
 import com.ridestr.common.state.TransitionResult
+import com.ridestr.common.state.riderStageFromDriverStatus
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -179,7 +180,11 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     private val processedDriverStateEventIds = mutableSetOf<String>()
     private val processedCancellationEventIds = mutableSetOf<String>()
 
-    // Current phase for rider ride state
+    // Current phase for rider ride state - INFORMATIONAL ONLY (AtoB pattern)
+    // This is published in Kind 30181 for logging/debugging, but:
+    // - Driver ignores it (processes history array actions, not phase)
+    // - Rider UI uses rideStage (derived from driver's status), not this phase
+    // The driver is the single source of truth for post-confirmation state.
     private var currentRiderPhase = RiderRideStateEvent.Phase.AWAITING_DRIVER
 
     // === STATE MACHINE (Phase 1: Validation Only) ===
@@ -1635,11 +1640,15 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 // Subscribe to cancellation events from driver
                 subscribeToCancellation(eventId)
 
+                // AtoB Pattern: Don't transition to RIDE_CONFIRMED yet - wait for driver's
+                // EN_ROUTE_PICKUP status. The driver is the single source of truth.
+                // We store confirmationEventId to track the ride, but keep DRIVER_ACCEPTED
+                // until driver acknowledges with Kind 30180.
                 _uiState.value = _uiState.value.copy(
                     isConfirmingRide = false,
                     confirmationEventId = eventId,
-                    rideStage = RideStage.RIDE_CONFIRMED,
-                    statusMessage = "Ride confirmed! Driver is on the way."
+                    // rideStage stays at DRIVER_ACCEPTED - will update when driver sends EN_ROUTE_PICKUP
+                    statusMessage = "Ride confirmed! Waiting for driver to start..."
                 )
             } else {
                 _uiState.value = _uiState.value.copy(
@@ -2109,18 +2118,22 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
                 acceptanceSubscriptionId = null
 
-                // Update service status - plays confirmation sound and updates notification
+                // Update service status - keep DriverAccepted until driver sends EN_ROUTE_PICKUP
+                // AtoB Pattern: Don't transition notification until driver confirms state
                 val driverName = _uiState.value.driverProfiles[acceptance.driverPubKey]?.bestName()?.split(" ")?.firstOrNull()
-                RiderActiveService.updateStatus(getApplication(), RiderStatus.DriverEnRoute(driverName))
+                RiderActiveService.updateStatus(getApplication(), RiderStatus.DriverAccepted(driverName))
 
+                // AtoB Pattern: Don't transition to RIDE_CONFIRMED yet - wait for driver's
+                // EN_ROUTE_PICKUP status. The driver is the single source of truth.
+                // We store confirmationEventId and PIN, but keep DRIVER_ACCEPTED stage.
                 _uiState.value = _uiState.value.copy(
                     isConfirmingRide = false,  // Reset flag on success
                     confirmationEventId = eventId,
                     pickupPin = pickupPin,
                     pinAttempts = 0,
                     precisePickupShared = driverAlreadyClose,  // Mark as shared if sent precise in confirmation
-                    rideStage = RideStage.RIDE_CONFIRMED,
-                    statusMessage = "Ride confirmed! Tell driver PIN: $pickupPin",
+                    // rideStage stays at DRIVER_ACCEPTED - will update when driver sends EN_ROUTE_PICKUP
+                    statusMessage = "Ride confirmed! Your PIN is: $pickupPin",
                     escrowToken = escrowToken,  // HTLC token locked with driver's wallet pubkey
                     paymentPath = paymentPath,
                     driverMintUrl = driverMintUrl
@@ -2259,6 +2272,10 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * Handle a status action from the driver.
+     *
+     * AtoB Pattern: Driver is the single source of truth for post-confirmation ride state.
+     * The rider's UI stage is DERIVED from the driver's status, not set independently.
+     * This eliminates state divergence between the two apps.
      */
     private fun handleDriverStatusAction(action: DriverRideAction.Status, driverState: DriverRideStateData, confirmationEventId: String) {
         val state = _uiState.value
@@ -2274,39 +2291,52 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         val driverPubKey = state.acceptance?.driverPubKey
         val driverName = driverPubKey?.let { _uiState.value.driverProfiles[it]?.bestName()?.split(" ")?.firstOrNull() }
 
+        // Store the authoritative driver status (AtoB: driver is custodian)
+        Log.d(TAG, "Driver status update: ${action.status}")
+
+        // Derive rider's UI stage from driver's status
+        val derivedStageName = riderStageFromDriverStatus(action.status)
+        val derivedStage = derivedStageName?.let {
+            try { RideStage.valueOf(it) } catch (e: Exception) { null }
+        }
+
         when (action.status) {
             DriverStatusType.EN_ROUTE_PICKUP -> {
-                Log.d(TAG, "Driver is en route to pickup")
+                Log.d(TAG, "Driver is en route to pickup (derived stage: $derivedStage)")
                 RiderActiveService.updateStatus(context, RiderStatus.DriverEnRoute(driverName))
                 _uiState.value = state.copy(
-                    rideStage = RideStage.RIDE_CONFIRMED,
+                    lastDriverStatus = action.status,
+                    rideStage = derivedStage ?: RideStage.RIDE_CONFIRMED,
                     statusMessage = "Driver is on the way!"
                 )
                 saveRideState()
             }
             DriverStatusType.ARRIVED -> {
-                Log.d(TAG, "Driver has arrived!")
+                Log.d(TAG, "Driver has arrived! (derived stage: $derivedStage)")
                 RiderActiveService.updateStatus(context, RiderStatus.DriverArrived(driverName))
                 currentRiderPhase = RiderRideStateEvent.Phase.AWAITING_PIN
                 _uiState.value = state.copy(
-                    rideStage = RideStage.DRIVER_ARRIVED,
+                    lastDriverStatus = action.status,
+                    rideStage = derivedStage ?: RideStage.DRIVER_ARRIVED,
                     statusMessage = "Driver has arrived! Tell them your PIN: ${state.pickupPin}"
                 )
                 saveRideState()
             }
             DriverStatusType.IN_PROGRESS -> {
-                Log.d(TAG, "Ride is in progress")
+                Log.d(TAG, "Ride is in progress (derived stage: $derivedStage)")
                 RiderActiveService.updateStatus(context, RiderStatus.RideInProgress(driverName))
                 currentRiderPhase = RiderRideStateEvent.Phase.IN_RIDE
                 _uiState.value = state.copy(
-                    rideStage = RideStage.IN_PROGRESS,
+                    lastDriverStatus = action.status,
+                    rideStage = derivedStage ?: RideStage.IN_PROGRESS,
                     statusMessage = "Ride in progress"
                 )
                 saveRideState()
             }
             DriverStatusType.COMPLETED -> {
                 Log.d(TAG, "Ride completed!")
-                // Use the dedicated completion handler
+                // Store status first, then use dedicated completion handler
+                _uiState.value = state.copy(lastDriverStatus = action.status)
                 handleRideCompletion(driverState)
             }
             DriverStatusType.CANCELLED -> {
@@ -2314,6 +2344,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 Log.w(TAG, "  Closure confirmationEventId: $confirmationEventId")
                 Log.w(TAG, "  Current state confirmationEventId: ${state.confirmationEventId}")
                 Log.w(TAG, "  Current rideStage: ${state.rideStage}")
+                _uiState.value = state.copy(lastDriverStatus = action.status)
                 handleDriverCancellation()
             }
         }
@@ -2411,18 +2442,18 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
 
-                // Update service status to in progress
-                val context = getApplication<Application>()
-                val driverName = _uiState.value.driverProfiles[driverPubKey]?.bestName()?.split(" ")?.firstOrNull()
-                RiderActiveService.updateStatus(context, RiderStatus.RideInProgress(driverName))
+                // AtoB Pattern: Don't transition to IN_PROGRESS yet - wait for driver's
+                // IN_PROGRESS status. The driver is the single source of truth.
+                // We update pinVerified locally, but keep service status at DriverArrived
+                // until driver acknowledges with Kind 30180 IN_PROGRESS.
 
                 // Use fresh state to preserve any changes made during async operations
                 _uiState.value = _uiState.value.copy(
                     pinAttempts = newAttempts,
                     pinVerified = true,
                     pickupPin = null,  // Clear PIN after verification - no longer needed
-                    rideStage = RideStage.IN_PROGRESS,
-                    statusMessage = "PIN verified! Ride in progress."
+                    // rideStage stays at DRIVER_ARRIVED - will update when driver sends IN_PROGRESS
+                    statusMessage = "PIN verified! Starting ride..."
                 )
 
                 // Save ride state for persistence
@@ -3421,6 +3452,9 @@ data class RiderUiState(
     val precisePickupShared: Boolean = false,      // True when precise pickup sent to driver
     val preciseDestinationShared: Boolean = false, // True when precise destination sent to driver
     val driverLocation: Location? = null,          // Driver's current location from status updates
+
+    // Driver state (AtoB pattern - driver is single source of truth for post-confirmation state)
+    val lastDriverStatus: String? = null,          // Driver's currentStatus from Kind 30180
 
     // User identity
     val myPubKey: String = "",

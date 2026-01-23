@@ -9,10 +9,12 @@ import com.ridestr.common.payment.WalletKeyManager
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.cancellation.CancellationException as KotlinCancellationException
 import org.json.JSONArray
 import org.json.JSONObject
@@ -53,8 +55,9 @@ class Nip60WalletSync(
         // d-tag for replaceable wallet event
         private const val WALLET_D_TAG = "cashu-wallet"
 
-        // Query timeout - increased from 5s to 8s for more reliable relay responses
-        private const val QUERY_TIMEOUT_MS = 8000L
+        // Query timeout - reduced from 8s to 2s (EOSE usually arrives within 500ms)
+        // This is a quick fix; proper solution would exit on EOSE receipt
+        private const val QUERY_TIMEOUT_MS = 2000L
 
         // Relay connection timeout (wait for at least one relay)
         private const val RELAY_CONNECT_TIMEOUT_MS = 15000L
@@ -242,61 +245,76 @@ class Nip60WalletSync(
         val seenEventIds = mutableSetOf<String>()  // Track seen events to avoid duplicate parsing
         val deletedEventIds = mutableSetOf<String>()  // NIP-60: Track events marked as deleted via `del` arrays
 
+        // EOSE-aware waiting: complete when first relay sends EOSE
+        val eoseReceived = CompletableDeferred<String>()
+
         try {
             val subscriptionId = relayManager.subscribe(
                 kinds = listOf(KIND_TOKEN),
                 authors = listOf(myPubKey),
-                limit = 100
-            ) { event, relayUrl ->
-                // Skip if we've already parsed this event (received from another relay)
-                synchronized(seenEventIds) {
-                    if (event.id in seenEventIds) {
-                        return@subscribe
+                limit = 100,
+                onEvent = { event, relayUrl ->
+                    // Skip if we've already parsed this event (received from another relay)
+                    synchronized(seenEventIds) {
+                        if (event.id in seenEventIds) {
+                            return@subscribe
+                        }
+                        seenEventIds.add(event.id)
                     }
-                    seenEventIds.add(event.id)
-                }
 
-                // Decrypt and parse each token event
-                try {
-                    val decrypted = runBlocking { signer.nip44Decrypt(event.content, myPubKey) }
-                    val json = JSONObject(decrypted)
-                    val mintUrl = json.getString("mint")
-                    val proofsArray = json.getJSONArray("proofs")
+                    // Decrypt and parse each token event
+                    try {
+                        val decrypted = runBlocking { signer.nip44Decrypt(event.content, myPubKey) }
+                        val json = JSONObject(decrypted)
+                        val mintUrl = json.getString("mint")
+                        val proofsArray = json.getJSONArray("proofs")
 
-                    // NIP-60: Parse `del` array if present - these events are consumed
-                    if (json.has("del")) {
-                        val delArray = json.getJSONArray("del")
-                        synchronized(deletedEventIds) {
-                            for (i in 0 until delArray.length()) {
-                                val deletedId = delArray.getString(i)
-                                deletedEventIds.add(deletedId)
+                        // NIP-60: Parse `del` array if present - these events are consumed
+                        if (json.has("del")) {
+                            val delArray = json.getJSONArray("del")
+                            synchronized(deletedEventIds) {
+                                for (i in 0 until delArray.length()) {
+                                    val deletedId = delArray.getString(i)
+                                    deletedEventIds.add(deletedId)
+                                }
+                            }
+                            if (delArray.length() > 0) {
+                                Log.d(TAG, "Event ${event.id.take(8)} deletes ${delArray.length()} previous events")
                             }
                         }
-                        if (delArray.length() > 0) {
-                            Log.d(TAG, "Event ${event.id.take(8)} deletes ${delArray.length()} previous events")
+
+                        for (i in 0 until proofsArray.length()) {
+                            val p = proofsArray.getJSONObject(i)
+                            proofs.add(Nip60Proof(
+                                eventId = event.id,
+                                mintUrl = mintUrl,
+                                id = p.getString("id"),
+                                amount = p.getLong("amount"),
+                                secret = p.getString("secret"),
+                                C = p.getString("C"),
+                                createdAt = event.createdAt
+                            ))
                         }
+                        Log.d(TAG, "Parsed ${proofsArray.length()} proofs from event ${event.id.take(8)}")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to parse token event ${event.id}: ${e.message}")
                     }
-
-                    for (i in 0 until proofsArray.length()) {
-                        val p = proofsArray.getJSONObject(i)
-                        proofs.add(Nip60Proof(
-                            eventId = event.id,
-                            mintUrl = mintUrl,
-                            id = p.getString("id"),
-                            amount = p.getLong("amount"),
-                            secret = p.getString("secret"),
-                            C = p.getString("C"),
-                            createdAt = event.createdAt
-                        ))
-                    }
-                    Log.d(TAG, "Parsed ${proofsArray.length()} proofs from event ${event.id.take(8)}")
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to parse token event ${event.id}: ${e.message}")
+                },
+                onEose = { relayUrl ->
+                    // Complete on first EOSE - don't wait for all relays
+                    eoseReceived.complete(relayUrl)
                 }
-            }
+            )
 
-            // Wait for responses
-            delay(QUERY_TIMEOUT_MS)
+            // Wait for EOSE or timeout (whichever comes first)
+            val eoseRelay = withTimeoutOrNull(QUERY_TIMEOUT_MS) {
+                eoseReceived.await()
+            }
+            if (eoseRelay != null) {
+                Log.d(TAG, "EOSE received from $eoseRelay - closing subscription early")
+            } else {
+                Log.d(TAG, "Timeout waiting for EOSE - closing subscription")
+            }
             relayManager.closeSubscription(subscriptionId)
 
             // NIP-60: Filter out proofs from events that are in `del` arrays
@@ -628,29 +646,45 @@ class Nip60WalletSync(
         var foundMetadata = false
         var foundProofs = false
 
+        // EOSE-aware waiting: complete when first relay sends EOSE for either subscription
+        val eoseReceived = CompletableDeferred<String>()
+
         // Check for wallet metadata (Kind 17375)
         val metaSubId = relayManager.subscribe(
             kinds = listOf(KIND_WALLET),
             authors = listOf(myPubKey),
             tags = mapOf("d" to listOf(WALLET_D_TAG)),
-            limit = 1
-        ) { event, relayUrl ->
-            Log.d(TAG, "Found wallet metadata event ${event.id} from $relayUrl")
-            foundMetadata = true
-        }
+            limit = 1,
+            onEvent = { event, relayUrl ->
+                Log.d(TAG, "Found wallet metadata event ${event.id} from $relayUrl")
+                foundMetadata = true
+            },
+            onEose = { relayUrl ->
+                eoseReceived.complete(relayUrl)
+            }
+        )
 
         // Also check for proof events (Kind 7375)
         val proofSubId = relayManager.subscribe(
             kinds = listOf(KIND_TOKEN),
             authors = listOf(myPubKey),
-            limit = 1
-        ) { event, relayUrl ->
-            Log.d(TAG, "Found proof event ${event.id} from $relayUrl")
-            foundProofs = true
-        }
+            limit = 1,
+            onEvent = { event, relayUrl ->
+                Log.d(TAG, "Found proof event ${event.id} from $relayUrl")
+                foundProofs = true
+            },
+            onEose = { relayUrl ->
+                eoseReceived.complete(relayUrl)
+            }
+        )
 
-        // Wait for responses
-        delay(QUERY_TIMEOUT_MS)
+        // Wait for EOSE or timeout (whichever comes first)
+        val eoseRelay = withTimeoutOrNull(QUERY_TIMEOUT_MS) {
+            eoseReceived.await()
+        }
+        if (eoseRelay != null) {
+            Log.d(TAG, "EOSE received from $eoseRelay - closing subscriptions early")
+        }
         relayManager.closeSubscription(metaSubId)
         relayManager.closeSubscription(proofSubId)
 
@@ -695,30 +729,43 @@ class Nip60WalletSync(
         var mnemonic: String? = null
         var counters: Map<String, Long> = emptyMap()
 
+        // EOSE-aware waiting
+        val eoseReceived = CompletableDeferred<String>()
+
         val metaSubId = relayManager.subscribe(
             kinds = listOf(KIND_WALLET),
             authors = listOf(myPubKey),
             tags = mapOf("d" to listOf(WALLET_D_TAG)),
-            limit = 1
-        ) { event, relayUrl ->
-            try {
-                Log.d(TAG, "Received metadata event ${event.id} from $relayUrl")
-                val decrypted = runBlocking { signer.nip44Decrypt(event.content, myPubKey) }
+            limit = 1,
+            onEvent = { event, relayUrl ->
+                try {
+                    Log.d(TAG, "Received metadata event ${event.id} from $relayUrl")
+                    val decrypted = runBlocking { signer.nip44Decrypt(event.content, myPubKey) }
 
-                // Try NIP-60 standard format first (array of tag-like pairs)
-                val parsed = parseWalletMetadata(decrypted)
-                mintUrl = parsed.mintUrl
-                walletPrivKey = parsed.privkey
-                mnemonic = parsed.mnemonic
-                counters = parsed.counters
+                    // Try NIP-60 standard format first (array of tag-like pairs)
+                    val parsed = parseWalletMetadata(decrypted)
+                    mintUrl = parsed.mintUrl
+                    walletPrivKey = parsed.privkey
+                    mnemonic = parsed.mnemonic
+                    counters = parsed.counters
 
-                Log.d(TAG, "Decrypted wallet metadata: mint=$mintUrl, hasWalletKey=${walletPrivKey != null}, hasMnemonic=${mnemonic != null}, counters=${counters.size}")
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to parse wallet metadata: ${e.message}")
+                    Log.d(TAG, "Decrypted wallet metadata: mint=$mintUrl, hasWalletKey=${walletPrivKey != null}, hasMnemonic=${mnemonic != null}, counters=${counters.size}")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to parse wallet metadata: ${e.message}")
+                }
+            },
+            onEose = { relayUrl ->
+                eoseReceived.complete(relayUrl)
             }
-        }
+        )
 
-        delay(QUERY_TIMEOUT_MS)
+        // Wait for EOSE or timeout (whichever comes first)
+        val eoseRelay = withTimeoutOrNull(QUERY_TIMEOUT_MS) {
+            eoseReceived.await()
+        }
+        if (eoseRelay != null) {
+            Log.d(TAG, "EOSE received from $eoseRelay - closing metadata subscription early")
+        }
         relayManager.closeSubscription(metaSubId)
 
         // 2. Restore wallet key if found (CRITICAL for HTLC claims on new device)
@@ -880,12 +927,13 @@ class Nip60WalletSync(
         val subscriptionId = relayManager.subscribe(
             kinds = listOf(KIND_TOKEN),
             authors = listOf(myPubKey),
-            limit = 1000
-        ) { event, _ ->
-            synchronized(eventIds) {
-                eventIds.add(event.id)
+            limit = 1000,
+            onEvent = { event, _ ->
+                synchronized(eventIds) {
+                    eventIds.add(event.id)
+                }
             }
-        }
+        )
 
         delay(3000)
         relayManager.closeSubscription(subscriptionId)
@@ -924,27 +972,28 @@ class Nip60WalletSync(
             val metaSubId = relayManager.subscribe(
                 kinds = listOf(KIND_WALLET),
                 authors = listOf(myPubKey),
-                limit = 10
-            ) { event, _ ->
-                try {
-                    val deletionEvent = runBlocking {
-                        signer.sign<Event>(
-                            createdAt = System.currentTimeMillis() / 1000,
-                            kind = 5,
-                            tags = arrayOf(
-                                arrayOf("e", event.id),
-                                arrayOf("k", KIND_WALLET.toString())
-                            ),
-                            content = "User requested wallet data deletion"
-                        )
+                limit = 10,
+                onEvent = { event, _ ->
+                    try {
+                        val deletionEvent = runBlocking {
+                            signer.sign<Event>(
+                                createdAt = System.currentTimeMillis() / 1000,
+                                kind = 5,
+                                tags = arrayOf(
+                                    arrayOf("e", event.id),
+                                    arrayOf("k", KIND_WALLET.toString())
+                                ),
+                                content = "User requested wallet data deletion"
+                            )
+                        }
+                        relayManager.publish(deletionEvent)
+                        deletedCount++
+                        Log.d(TAG, "Deleted wallet metadata event: ${event.id}")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error deleting metadata: ${e.message}")
                     }
-                    relayManager.publish(deletionEvent)
-                    deletedCount++
-                    Log.d(TAG, "Deleted wallet metadata event: ${event.id}")
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error deleting metadata: ${e.message}")
                 }
-            }
+            )
             delay(2000)
             relayManager.closeSubscription(metaSubId)
         } catch (e: Exception) {

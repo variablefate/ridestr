@@ -183,3 +183,24 @@ fun RideState.toDriverStageName(): String = when (this) {
     RideState.COMPLETED -> "RIDE_COMPLETED"
     RideState.CANCELLED -> "OFFLINE"
 }
+
+/**
+ * Maps driver's currentStatus (from Kind 30180) to the rider's UI stage.
+ *
+ * This is used to derive the rider's display state from the driver's authoritative state.
+ * The driver is the single source of truth for post-confirmation ride state (AtoB pattern).
+ *
+ * Pre-confirmation states (IDLE, BROADCASTING_REQUEST, WAITING_FOR_ACCEPTANCE, DRIVER_ACCEPTED)
+ * are tracked independently by the rider since no driver state events exist yet.
+ *
+ * @param driverStatus The driver's currentStatus string from Kind 30180
+ * @return The rider's RideStage name, or null if no mapping exists
+ */
+fun riderStageFromDriverStatus(driverStatus: String): String? = when (driverStatus) {
+    "en_route_pickup" -> "RIDE_CONFIRMED"
+    "arrived" -> "DRIVER_ARRIVED"
+    "in_progress" -> "IN_PROGRESS"
+    "completed" -> "COMPLETED"
+    "cancelled" -> "IDLE"
+    else -> null
+}
