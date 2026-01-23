@@ -112,6 +112,12 @@ class WalletKeyManager(private val context: Context) {
     /**
      * Get or create BIP-39 mnemonic for cdk-kotlin wallet seed.
      * This mnemonic is used to deterministically derive keys for Cashu proofs.
+     *
+     * Uses cdk-kotlin's generateMnemonic() which wraps the Rust CDK library's
+     * BIP-39 implementation (bip39 crate v2.0) - the same standard used by
+     * Bitcoin wallets like BlueWallet.
+     *
+     * @throws IllegalStateException if mnemonic generation fails
      */
     fun getOrCreateMnemonic(): String {
         val existing = prefs.getString(KEY_WALLET_MNEMONIC, null)
@@ -120,16 +126,16 @@ class WalletKeyManager(private val context: Context) {
             return existing
         }
 
-        // Generate new mnemonic using cdk-kotlin
+        // Generate new BIP-39 mnemonic using cdk-kotlin (Rust bip39 crate)
         val mnemonic = try {
             generateMnemonic()
         } catch (e: Exception) {
-            Log.e(TAG, "cdk-kotlin mnemonic generation failed, using fallback", e)
-            generateFallbackMnemonic()
+            Log.e(TAG, "BIP-39 mnemonic generation failed", e)
+            throw IllegalStateException("Failed to generate BIP-39 mnemonic: ${e.message}", e)
         }
 
         prefs.edit().putString(KEY_WALLET_MNEMONIC, mnemonic).apply()
-        Log.d(TAG, "Generated new wallet mnemonic")
+        Log.d(TAG, "Generated new BIP-39 wallet mnemonic")
         return mnemonic
     }
 
@@ -137,17 +143,6 @@ class WalletKeyManager(private val context: Context) {
      * Check if a wallet mnemonic exists.
      */
     fun hasMnemonic(): Boolean = prefs.getString(KEY_WALLET_MNEMONIC, null) != null
-
-    /**
-     * Generate a fallback mnemonic-like seed if cdk-kotlin fails.
-     * This creates a hex string from secure random bytes as a fallback.
-     */
-    private fun generateFallbackMnemonic(): String {
-        val entropy = ByteArray(32)
-        java.security.SecureRandom().nextBytes(entropy)
-        // Return as space-separated hex words (not BIP-39 but usable)
-        return entropy.toHexKey()
-    }
 
     /**
      * Export wallet private key for NIP-60 backup.
