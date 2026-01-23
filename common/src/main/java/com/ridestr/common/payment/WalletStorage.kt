@@ -933,6 +933,7 @@ class WalletStorage(private val context: Context) {
             put("id", tx.id)
             put("type", tx.type.name)
             put("amount_sats", tx.amountSats)
+            put("fee_sats", tx.feeSats)
             put("timestamp", tx.timestamp)
             tx.rideId?.let { put("ride_id", it) }
             tx.counterpartyPubKey?.let { put("counterparty", it) }
@@ -946,6 +947,7 @@ class WalletStorage(private val context: Context) {
                 id = json.getString("id"),
                 type = TransactionType.valueOf(json.getString("type")),
                 amountSats = json.getLong("amount_sats"),
+                feeSats = json.optLong("fee_sats", 0),
                 timestamp = json.getLong("timestamp"),
                 rideId = json.optString("ride_id").takeIf { it.isNotBlank() },
                 counterpartyPubKey = json.optString("counterparty").takeIf { it.isNotBlank() },

@@ -491,7 +491,8 @@ data class ProofStateCheck(
  *
  * @property id Unique transaction identifier
  * @property type Type of transaction
- * @property amountSats Amount in satoshis
+ * @property amountSats Amount in satoshis (not including fees)
+ * @property feeSats Mint/network fees paid for this transaction
  * @property timestamp When transaction occurred
  * @property rideId Associated ride ID (if applicable)
  * @property counterpartyPubKey Other party's Nostr pubkey
@@ -501,11 +502,15 @@ data class PaymentTransaction(
     val id: String,
     val type: TransactionType,
     val amountSats: Long,
+    val feeSats: Long = 0,
     val timestamp: Long,
     val rideId: String? = null,
     val counterpartyPubKey: String? = null,
     val status: String
-)
+) {
+    /** Total amount deducted from wallet (amount + fees for outgoing transactions) */
+    val totalSats: Long get() = amountSats + feeSats
+}
 
 /**
  * Type of wallet transaction.

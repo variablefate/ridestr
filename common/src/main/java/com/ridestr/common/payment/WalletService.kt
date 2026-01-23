@@ -2125,11 +2125,12 @@ class WalletService(
             walletStorage.cacheBalance(_balance.value)
             updateDiagnostics()
 
-            // Record transaction
+            // Record transaction (fees from feeReserve)
             addTransaction(PaymentTransaction(
                 id = quote.quote,
                 type = TransactionType.WITHDRAWAL,
                 amountSats = quote.amount,
+                feeSats = quote.feeReserve,
                 timestamp = System.currentTimeMillis(),
                 rideId = null,
                 counterpartyPubKey = null,
@@ -2360,11 +2361,12 @@ class WalletService(
             )
             Log.d(TAG, "[BRIDGE $bridgePaymentId] COMPLETE: ${quote.amount} sats + ${quote.feeReserve} sats fees")
 
-            // Record transaction
+            // Record transaction (fees from feeReserve)
             addTransaction(PaymentTransaction(
                 id = bridgePaymentId,
                 type = TransactionType.BRIDGE_PAYMENT,
-                amountSats = quote.amount + quote.feeReserve,
+                amountSats = quote.amount,
+                feeSats = quote.feeReserve,
                 timestamp = System.currentTimeMillis(),
                 rideId = rideId,
                 counterpartyPubKey = null,

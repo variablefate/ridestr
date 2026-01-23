@@ -445,12 +445,22 @@ private fun TransactionItem(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            Text(
-                text = "$prefix${formatSats(transaction.amountSats, displayCurrency, btcPriceUsd)}",
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.Medium,
-                color = tint
-            )
+            Column(horizontalAlignment = Alignment.End) {
+                Text(
+                    text = "$prefix${formatSats(transaction.amountSats, displayCurrency, btcPriceUsd)}",
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium,
+                    color = tint
+                )
+                // Show fee if present (for withdrawals, bridge payments, etc.)
+                if (transaction.feeSats > 0) {
+                    Text(
+                        text = "+ ${formatSats(transaction.feeSats, displayCurrency, btcPriceUsd)} fee",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
         }
     }
 }
