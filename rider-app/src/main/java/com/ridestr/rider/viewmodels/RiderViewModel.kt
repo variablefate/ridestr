@@ -2915,6 +2915,14 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         viewModelScope.launch {
+            // Refresh wallet balance from NIP-60 (ensures consistency after ride)
+            try {
+                walletService?.refreshBalance()
+                Log.d(TAG, "Refreshed wallet balance after ride completion")
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to refresh wallet balance after ride: ${e.message}")
+            }
+
             // Save to ride history (rider gets exact coords + addresses for their own history)
             try {
                 val historyEntry = RideHistoryEntry(
@@ -3018,6 +3026,15 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         Log.w(TAG, "  >>> State reset: confirmationEventId=null, rideStage=IDLE, selectedDriver=null, acceptance=null <<<")
 
         viewModelScope.launch {
+            // Refresh wallet balance from NIP-60 (ensures consistency after cancellation)
+            // This also checks for expired HTLCs that can be refunded
+            try {
+                walletService?.refreshBalance()
+                Log.d(TAG, "Refreshed wallet balance after ride cancellation")
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to refresh wallet balance after cancellation: ${e.message}")
+            }
+
             // Save cancelled ride to history (only if ride was confirmed/in progress)
             if (state.confirmationEventId != null || state.acceptance != null) {
                 try {
