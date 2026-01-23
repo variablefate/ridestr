@@ -8,8 +8,6 @@ import android.net.Uri
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.selection.selectable
@@ -747,7 +745,6 @@ private fun kotlinx.coroutines.CoroutineScope.pollForDeposit(
 // Withdraw Dialog
 // ================================
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun WithdrawDialog(
     walletService: WalletService,
@@ -805,10 +802,7 @@ private fun WithdrawDialog(
                                 color = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.padding(top = 8.dp)
                             )
-                            FlowRow(
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 favoriteAddresses.sortedByDescending { it.lastUsed }.forEach { fav ->
                                     AssistChip(
                                         onClick = { invoice = fav.address },

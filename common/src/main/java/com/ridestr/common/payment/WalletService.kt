@@ -2542,7 +2542,9 @@ class WalletService(
 
                 var counter = 0L
                 var emptyBatches = 0
-                val BATCH_SIZE = 100
+                // BATCH_SIZE * 21 denominations must be <= 1000 (mint limit)
+                // 45 * 21 = 945 items per request
+                val BATCH_SIZE = 45
                 val MAX_EMPTY_BATCHES = 3  // Stop after 3 consecutive empty batches
 
                 while (emptyBatches < MAX_EMPTY_BATCHES) {
