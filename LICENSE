@@ -1,0 +1,40 @@
+MIT License with No-Shitcoin Addendum
+
+Copyright (c) 2025–2026 variablefate
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice (including this addendum)
+shall be included in all copies or substantial portions of the Software.
+
+ADDITIONAL RESTRICTION: The Software and any modifications or derivative works
+may not incorporate, integrate, promote, facilitate, support, or otherwise include
+any functionality, features, integrations, promotions, or marketing related to
+"shitcoins" or similar speculative, memetic, low-utility, or high-risk
+cryptocurrencies/tokens. This includes (without limitation):
+
+- Memecoins, pump-and-dump tokens, rug-pull prone assets, joke coins, or any
+  tokens primarily designed or marketed for speculation, hype, or gambling-like
+  behavior rather than genuine real-world utility.
+
+Prohibited examples include wallets, trading pairs, swaps, staking, airdrops,
+rewards, or promotional materials tied to such assets.
+
+EXCEPTION: This restriction does NOT apply to fiat-based payment processing,
+fiat on-ramps/off-ramps, traditional financial integrations (e.g., credit/debit
+cards, bank transfers, stable fiat currencies), or non-speculative cryptocurrency
+features that serve genuine utility purposes (such as a basic wallet for value
+transfer in the context of the rideshare protocol itself).
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.

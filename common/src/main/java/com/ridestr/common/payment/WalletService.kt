@@ -485,15 +485,30 @@ class WalletService(
                 }
             }
 
-            // Step 1: Fetch ALL NIP-60 proofs (regardless of stored mint URL)
+            // Step 1: Fetch proofs from ALL sources
+            // Source A: NIP-60 (Nostr relays)
             val nip60Proofs = sync.fetchProofs(forceRefresh = true)
+            val nip60Balance = nip60Proofs.sumOf { it.amount }
+            val nip60Secrets = nip60Proofs.map { it.secret }.toSet()
+            Log.d(TAG, "NIP-60: ${nip60Proofs.size} proofs ($nip60Balance sats)")
+
+            // Source B: Local cdk-kotlin storage (may have proofs not yet synced to NIP-60)
+            val localProofs = cashuBackend.getLocalProofs() ?: emptyList()
+            val localBalance = localProofs.sumOf { it.amount }
+            Log.d(TAG, "Local: ${localProofs.size} proofs ($localBalance sats)")
+
+            // Source C: Unverified cache (proofs saved when mint was offline)
             val unverifiedCache = walletStorage.getUnverifiedProofs()
-            val allNip60Balance = nip60Proofs.sumOf { it.amount }
+            Log.d(TAG, "Unverified cache: ${unverifiedCache.size} proofs")
 
-            Log.d(TAG, "Fetched ${nip60Proofs.size} NIP-60 proofs ($allNip60Balance sats), ${unverifiedCache.size} cached")
+            // Find local proofs NOT in NIP-60 (these need to be published)
+            val localOnlyProofs = localProofs.filter { it.secret !in nip60Secrets }
+            if (localOnlyProofs.isNotEmpty()) {
+                Log.d(TAG, "Found ${localOnlyProofs.size} local proofs NOT in NIP-60 (${localOnlyProofs.sumOf { it.amount }} sats)")
+            }
 
-            if (nip60Proofs.isEmpty() && unverifiedCache.isEmpty()) {
-                Log.d(TAG, "No proofs found - balance is 0")
+            if (nip60Proofs.isEmpty() && localProofs.isEmpty() && unverifiedCache.isEmpty()) {
+                Log.d(TAG, "No proofs found from any source - balance is 0")
                 _balance.value = WalletBalance(
                     availableSats = 0,
                     pendingSats = _balance.value.pendingSats,
@@ -512,19 +527,38 @@ class WalletService(
                 )
             }
 
-            // Step 2: Try ALL proofs at CURRENT mint first (mint URL may have changed)
-            val allCashuProofs = nip60Proofs.map { it.toCashuProof() }
-            Log.d(TAG, "Trying ${allCashuProofs.size} proofs at current mint: $mintUrl")
+            // Step 2: Merge all proofs and verify with mint
+            // Combine NIP-60 proofs + local-only proofs (dedupe by secret)
+            val nip60CashuProofs = nip60Proofs.map { it.toCashuProof() }
+            val allProofsToVerify = (nip60CashuProofs + localOnlyProofs).distinctBy { it.secret }
+            Log.d(TAG, "Verifying ${allProofsToVerify.size} total proofs at current mint: $mintUrl")
 
-            val currentMintResult = cashuBackend.verifyProofsBalance(allCashuProofs)
+            val currentMintResult = cashuBackend.verifyProofsBalance(allProofsToVerify)
 
             if (currentMintResult != null) {
                 val (_, spentSecrets) = currentMintResult
-                val validProofs = nip60Proofs.filter { it.secret !in spentSecrets }
+
+                // Separate valid from spent (for ALL proofs)
+                val validProofs = allProofsToVerify.filter { it.secret !in spentSecrets }
                 val validBalance = validProofs.sumOf { it.amount }
                 val spentProofs = nip60Proofs.filter { it.secret in spentSecrets }
+                val spentLocalProofs = localOnlyProofs.filter { it.secret in spentSecrets }
 
-                Log.d(TAG, "Current mint verified: $validBalance sats valid, ${spentProofs.size} spent")
+                Log.d(TAG, "Current mint verified: $validBalance sats valid, ${spentProofs.size} NIP-60 spent, ${spentLocalProofs.size} local spent")
+
+                // Step 2b: Publish verified local-only proofs to NIP-60
+                val validLocalOnlyProofs = localOnlyProofs.filter { it.secret !in spentSecrets }
+                if (validLocalOnlyProofs.isNotEmpty()) {
+                    val localOnlyBalance = validLocalOnlyProofs.sumOf { it.amount }
+                    Log.d(TAG, "Publishing ${validLocalOnlyProofs.size} local proofs to NIP-60 ($localOnlyBalance sats)")
+                    val newEventId = sync.publishProofs(validLocalOnlyProofs, mintUrl)
+                    if (newEventId != null) {
+                        Log.d(TAG, "Published local proofs to NIP-60: $newEventId")
+                    } else {
+                        Log.e(TAG, "Failed to publish local proofs to NIP-60 - saving recovery token")
+                        saveRecoveryTokenFallback(validLocalOnlyProofs, mintUrl, "local_sync_nip60_failed")
+                    }
+                }
 
                 // SAFETY: Only delete proofs that are EXPLICITLY marked SPENT by the mint
                 // Do NOT delete proofs the mint doesn't recognize (they might have different Y computation)
@@ -558,8 +592,9 @@ class WalletService(
                     Log.d(TAG, "Deleted ${spentEventIds.size} spent proof events")
                 }
 
-                // Check if any have outdated mint URL and need re-publishing
-                val proofsWithOldUrl = validProofs.filter {
+                // Check if any NIP-60 proofs have outdated mint URL and need re-publishing
+                val validNip60Proofs = nip60Proofs.filter { it.secret !in spentSecrets }
+                val proofsWithOldUrl = validNip60Proofs.filter {
                     normalizeUrl(it.mintUrl) != normalizeUrl(mintUrl)
                 }
 
@@ -569,13 +604,16 @@ class WalletService(
                     sync.republishProofsWithNewMint(proofsWithOldUrl, mintUrl)
                 }
 
-                // Use NIP-60 total as balance (trust what's stored, don't rely on verification)
-                // This prevents losing funds due to hashToCurve mismatches in verification
-                val nip60Balance = nip60Proofs.sumOf { it.amount } - spentProofs.sumOf { it.amount }
+                // Calculate final balance: verified NIP-60 proofs + verified local-only proofs
+                // validBalance already includes both sources (calculated above)
+                val localOnlyBalance = validLocalOnlyProofs.sumOf { it.amount }
+                val syncedBalance = validBalance  // This is the total from all verified sources
+
+                Log.d(TAG, "Final balance: $syncedBalance sats (NIP-60: ${validBalance - localOnlyBalance}, local-only: $localOnlyBalance)")
 
                 // Update balance
                 _balance.value = WalletBalance(
-                    availableSats = nip60Balance,
+                    availableSats = syncedBalance,
                     pendingSats = _balance.value.pendingSats,
                     lastUpdated = System.currentTimeMillis()
                 )
@@ -583,12 +621,13 @@ class WalletService(
                 walletStorage.clearUnverifiedProofs()
                 updateDiagnostics()
 
-                val updatedMsg = if (proofsWithOldUrl.isNotEmpty()) " (updated ${proofsWithOldUrl.size} proof URLs)" else ""
+                val publishedMsg = if (validLocalOnlyProofs.isNotEmpty()) " (published ${validLocalOnlyProofs.size} local)" else ""
+                val updatedMsg = if (proofsWithOldUrl.isNotEmpty()) " (updated ${proofsWithOldUrl.size} URLs)" else ""
                 val spentMsg = if (spentProofs.isNotEmpty()) ", removed ${spentProofs.size} spent" else ""
                 return@withLock SyncResult(
                     success = true,
-                    message = "Synced: $nip60Balance sats$updatedMsg$spentMsg",
-                    verifiedBalance = nip60Balance,
+                    message = "Synced: $syncedBalance sats$publishedMsg$updatedMsg$spentMsg",
+                    verifiedBalance = syncedBalance,
                     unverifiedBalance = 0,
                     spentCount = spentProofs.size,
                     mintReachable = true
@@ -691,10 +730,12 @@ class WalletService(
                 }
             }
 
-            // No mints worked - trust NIP-60 balance anyway (better than losing funds)
-            Log.w(TAG, "Could not verify proofs at any mint - trusting NIP-60 balance")
+            // No mints worked - trust combined balance anyway (better than losing funds)
+            // Include both NIP-60 and local proofs
+            val totalUnverifiedBalance = nip60Balance + localBalance
+            Log.w(TAG, "Could not verify proofs at any mint - trusting combined balance ($totalUnverifiedBalance sats)")
             _balance.value = WalletBalance(
-                availableSats = allNip60Balance,  // Trust NIP-60 instead of setting to 0
+                availableSats = totalUnverifiedBalance,  // Trust stored proofs instead of setting to 0
                 pendingSats = _balance.value.pendingSats,
                 lastUpdated = System.currentTimeMillis()
             )
@@ -703,9 +744,9 @@ class WalletService(
 
             return@withLock SyncResult(
                 success = true,  // Changed to true - we have a balance, just unverified
-                message = "Synced: $allNip60Balance sats (unverified - mint unreachable)",
+                message = "Synced: $totalUnverifiedBalance sats (unverified - mint unreachable)",
                 verifiedBalance = 0,
-                unverifiedBalance = allNip60Balance,
+                unverifiedBalance = totalUnverifiedBalance,
                 spentCount = 0,
                 mintReachable = false
             )
@@ -1737,10 +1778,11 @@ class WalletService(
                     }
                 }
 
-                // Refresh balance from NIP-60 (source of truth)
-                sync.clearCache()
-                val newProofs = sync.fetchProofs(forceRefresh = true)
-                val newBalance = newProofs.sumOf { it.amount }
+                // Update balance IMMEDIATELY with the minted amount
+                // Don't wait for NIP-60 round-trip - we know exactly what we just minted
+                val mintedAmount = mintResult.proofs.sumOf { it.amount }
+                val currentBalance = _balance.value.availableSats
+                val newBalance = currentBalance + mintedAmount
 
                 _balance.value = WalletBalance(
                     availableSats = newBalance,
@@ -1748,9 +1790,12 @@ class WalletService(
                     lastUpdated = System.currentTimeMillis()
                 )
                 walletStorage.cacheBalance(_balance.value)
-                updateDiagnostics()
 
-                Log.d(TAG, "Deposit complete: ${quote.amount} sats minted, NIP-60 balance: $newBalance sats")
+                Log.d(TAG, "Deposit complete: $mintedAmount sats minted, balance updated: $currentBalance → $newBalance sats")
+
+                // Clear NIP-60 cache so next sync fetches fresh data
+                sync.clearCache()
+                updateDiagnostics()
 
                 // Mark pending deposit as minted and remove it
                 walletStorage.markDepositMinted(quoteId)
@@ -1832,10 +1877,11 @@ class WalletService(
                 publishProofsToNip60(mintResult.proofs, mintUrl, sync)
             }
 
-            // Refresh balance from NIP-60
-            sync.clearCache()
-            val newProofs = sync.fetchProofs(forceRefresh = true)
-            val newBalance = newProofs.sumOf { it.amount }
+            // Update balance IMMEDIATELY with the minted amount
+            // Don't wait for NIP-60 round-trip - we know exactly what we just minted
+            val mintedAmount = mintResult.proofs.sumOf { it.amount }
+            val currentBalance = _balance.value.availableSats
+            val newBalance = currentBalance + mintedAmount
 
             _balance.value = WalletBalance(
                 availableSats = newBalance,
@@ -1843,9 +1889,12 @@ class WalletService(
                 lastUpdated = System.currentTimeMillis()
             )
             walletStorage.cacheBalance(_balance.value)
+
+            // Clear NIP-60 cache so next sync fetches fresh data
+            sync.clearCache()
             updateDiagnostics()
 
-            Log.d(TAG, "Cross-mint deposit complete: ${mintResult.totalSats} sats minted, NIP-60 balance: $newBalance")
+            Log.d(TAG, "Cross-mint deposit complete: $mintedAmount sats minted, balance: $currentBalance → $newBalance")
 
             // Record transaction
             addTransaction(PaymentTransaction(
@@ -3314,11 +3363,23 @@ class WalletService(
                         status = "Manually claimed"
                     ))
 
-                    // Refresh balance
-                    sync.clearCache()
-                    refreshBalance()
+                    // Update balance IMMEDIATELY with the minted amount
+                    val mintedAmount = proofsToPublish.sumOf { it.amount }
+                    val currentBalance = _balance.value.availableSats
+                    val newBalance = currentBalance + mintedAmount
 
-                    Log.d(TAG, "Successfully claimed ${quote.amount} sats from quote $quoteId")
+                    _balance.value = WalletBalance(
+                        availableSats = newBalance,
+                        pendingSats = _balance.value.pendingSats,
+                        lastUpdated = System.currentTimeMillis()
+                    )
+                    walletStorage.cacheBalance(_balance.value)
+
+                    // Clear NIP-60 cache so next sync fetches fresh data
+                    sync.clearCache()
+                    updateDiagnostics()
+
+                    Log.d(TAG, "Successfully claimed $mintedAmount sats from quote $quoteId, balance: $currentBalance → $newBalance")
 
                     return ClaimResult(
                         success = true,

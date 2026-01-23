@@ -68,6 +68,10 @@ class SettingsManager(context: Context) {
         private const val KEY_DEFAULT_PAYMENT_METHOD = "default_payment_method"
         private const val KEY_MINT_URL = "mint_url"
 
+        // Favorite Lightning addresses (Issue #14)
+        private const val KEY_FAVORITE_LN_ADDRESSES = "favorite_ln_addresses"
+        const val MAX_FAVORITE_ADDRESSES = 10
+
         // Default manual location: Las Vegas (Fremont St)
         private const val DEFAULT_MANUAL_LAT = 36.1699
         private const val DEFAULT_MANUAL_LON = -115.1398
@@ -672,5 +676,131 @@ class SettingsManager(context: Context) {
         _paymentMethods.value = listOf("cashu")
         _defaultPaymentMethod.value = "cashu"
         _mintUrl.value = null
+        // Favorite LN addresses (Issue #14)
+        _favoriteLnAddresses.value = emptyList()
+    }
+
+    // ========================================
+    // Favorite Lightning Addresses (Issue #14)
+    // ========================================
+
+    /**
+     * A favorite lightning address with optional label.
+     */
+    data class FavoriteLnAddress(
+        val address: String,
+        val label: String? = null,
+        val lastUsed: Long = System.currentTimeMillis()
+    )
+
+    private val _favoriteLnAddresses = MutableStateFlow(loadFavoriteAddresses())
+    val favoriteLnAddresses: StateFlow<List<FavoriteLnAddress>> = _favoriteLnAddresses.asStateFlow()
+
+    private fun loadFavoriteAddresses(): List<FavoriteLnAddress> {
+        val json = prefs.getString(KEY_FAVORITE_LN_ADDRESSES, null) ?: return emptyList()
+        return try {
+            val jsonArray = org.json.JSONArray(json)
+            (0 until jsonArray.length()).map { i ->
+                val obj = jsonArray.getJSONObject(i)
+                FavoriteLnAddress(
+                    address = obj.getString("address"),
+                    label = obj.optString("label", "").takeIf { it.isNotEmpty() },
+                    lastUsed = obj.optLong("lastUsed", System.currentTimeMillis())
+                )
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun saveFavoriteAddresses(addresses: List<FavoriteLnAddress>) {
+        val jsonArray = org.json.JSONArray()
+        addresses.forEach { fav ->
+            val obj = org.json.JSONObject()
+            obj.put("address", fav.address)
+            fav.label?.let { obj.put("label", it) }
+            obj.put("lastUsed", fav.lastUsed)
+            jsonArray.put(obj)
+        }
+        prefs.edit().putString(KEY_FAVORITE_LN_ADDRESSES, jsonArray.toString()).apply()
+        _favoriteLnAddresses.value = addresses
+    }
+
+    /**
+     * Add a lightning address to favorites.
+     * @param address The lightning address (user@domain.com)
+     * @param label Optional display label
+     * @return true if added, false if already exists or limit reached
+     */
+    fun addFavoriteLnAddress(address: String, label: String? = null): Boolean {
+        val normalized = address.lowercase().trim()
+        val current = _favoriteLnAddresses.value
+
+        // Check if already exists
+        if (current.any { it.address.lowercase() == normalized }) {
+            // Update last used time instead
+            updateFavoriteLastUsed(normalized)
+            return false
+        }
+
+        // Check limit
+        if (current.size >= MAX_FAVORITE_ADDRESSES) {
+            return false
+        }
+
+        val newFavorite = FavoriteLnAddress(
+            address = normalized,
+            label = label?.trim()?.takeIf { it.isNotEmpty() },
+            lastUsed = System.currentTimeMillis()
+        )
+        saveFavoriteAddresses(current + newFavorite)
+        return true
+    }
+
+    /**
+     * Remove a lightning address from favorites.
+     */
+    fun removeFavoriteLnAddress(address: String) {
+        val normalized = address.lowercase().trim()
+        val updated = _favoriteLnAddresses.value.filter { it.address.lowercase() != normalized }
+        saveFavoriteAddresses(updated)
+    }
+
+    /**
+     * Update the label for a favorite address.
+     */
+    fun updateFavoriteLnAddressLabel(address: String, newLabel: String?) {
+        val normalized = address.lowercase().trim()
+        val updated = _favoriteLnAddresses.value.map { fav ->
+            if (fav.address.lowercase() == normalized) {
+                fav.copy(label = newLabel?.trim()?.takeIf { it.isNotEmpty() })
+            } else {
+                fav
+            }
+        }
+        saveFavoriteAddresses(updated)
+    }
+
+    /**
+     * Update the last used time for a favorite (called when used for withdrawal).
+     */
+    fun updateFavoriteLastUsed(address: String) {
+        val normalized = address.lowercase().trim()
+        val updated = _favoriteLnAddresses.value.map { fav ->
+            if (fav.address.lowercase() == normalized) {
+                fav.copy(lastUsed = System.currentTimeMillis())
+            } else {
+                fav
+            }
+        }
+        saveFavoriteAddresses(updated)
+    }
+
+    /**
+     * Check if an address is in favorites.
+     */
+    fun isFavoriteLnAddress(address: String): Boolean {
+        val normalized = address.lowercase().trim()
+        return _favoriteLnAddresses.value.any { it.address.lowercase() == normalized }
     }
 }

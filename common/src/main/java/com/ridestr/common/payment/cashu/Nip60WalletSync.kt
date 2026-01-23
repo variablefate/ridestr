@@ -311,7 +311,11 @@ class Nip60WalletSync(
                 eoseReceived.await()
             }
             if (eoseRelay != null) {
-                Log.d(TAG, "EOSE received from $eoseRelay - closing subscription early")
+                Log.d(TAG, "EOSE received from $eoseRelay - waiting 200ms for other relays")
+                // Brief delay to allow other relays to send recently published events
+                // This fixes race condition where fast relay sends EOSE before slow relay
+                // sends a newly published event (e.g., deposit proof published just now)
+                kotlinx.coroutines.delay(200)
             } else {
                 Log.d(TAG, "Timeout waiting for EOSE - closing subscription")
             }

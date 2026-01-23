@@ -8,6 +8,8 @@ import android.net.Uri
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.selection.selectable
@@ -217,6 +219,7 @@ fun WalletDetailScreen(
     if (showWithdrawDialog) {
         WithdrawDialog(
             walletService = walletService,
+            settingsManager = settingsManager,
             maxAmount = balance.availableSats,
             onDismiss = { showWithdrawDialog = false }
         )
@@ -379,6 +382,7 @@ private fun TransactionItem(
     displayCurrency: DisplayCurrency,
     btcPriceUsd: Int?
 ) {
+    val context = LocalContext.current
     val (icon, tint, prefix) = when (transaction.type) {
         TransactionType.ESCROW_LOCK -> Triple(
             Icons.Default.Lock,
@@ -424,7 +428,23 @@ private fun TransactionItem(
 
     val dateFormat = remember { SimpleDateFormat("MMM d, h:mm a", Locale.getDefault()) }
 
-    Card(modifier = Modifier.fillMaxWidth()) {
+    // Deposits and withdrawals have quote IDs that can be copied
+    val hasQuoteId = transaction.type == TransactionType.DEPOSIT ||
+            transaction.type == TransactionType.WITHDRAWAL
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                if (hasQuoteId) {
+                    Modifier.clickable {
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("Quote ID", transaction.id))
+                        android.widget.Toast.makeText(context, "Quote ID copied", android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                } else Modifier
+            )
+    ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -449,6 +469,14 @@ private fun TransactionItem(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                // Show quote ID hint for deposits/withdrawals
+                if (hasQuoteId) {
+                    Text(
+                        text = "Tap to copy quote ID",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
+                    )
+                }
             }
             Column(horizontalAlignment = Alignment.End) {
                 Text(
@@ -719,9 +747,11 @@ private fun kotlinx.coroutines.CoroutineScope.pollForDeposit(
 // Withdraw Dialog
 // ================================
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun WithdrawDialog(
     walletService: WalletService,
+    settingsManager: SettingsManager,
     maxAmount: Long,
     onDismiss: () -> Unit
 ) {
@@ -734,6 +764,11 @@ private fun WithdrawDialog(
     // LN address flow: need amount input before resolving
     var lnAddress by remember { mutableStateOf<String?>(null) }
     var amountInput by remember { mutableStateOf("") }
+
+    // Favorite addresses (Issue #14)
+    val favoriteAddresses by settingsManager.favoriteLnAddresses.collectAsState()
+    var showSaveToFavorites by remember { mutableStateOf(false) }
+    var savedToFavorites by remember { mutableStateOf(false) }
 
     val scope = rememberCoroutineScope()
 
@@ -761,6 +796,40 @@ private fun WithdrawDialog(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+
+                        // Favorite addresses (Issue #14)
+                        if (favoriteAddresses.isNotEmpty()) {
+                            Text(
+                                text = "Favorites",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(top = 8.dp)
+                            )
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                favoriteAddresses.sortedByDescending { it.lastUsed }.forEach { fav ->
+                                    AssistChip(
+                                        onClick = { invoice = fav.address },
+                                        label = {
+                                            Text(
+                                                text = fav.label ?: fav.address,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        },
+                                        leadingIcon = {
+                                            Icon(
+                                                Icons.Default.Star,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    )
+                                }
+                            }
+                        }
                     }
 
                     // Step 1.5: LN address detected - enter amount
@@ -860,6 +929,47 @@ private fun WithdrawDialog(
                                 style = MaterialTheme.typography.titleLarge,
                                 fontWeight = FontWeight.Bold
                             )
+
+                            // Show save to favorites option for LN addresses (Issue #14)
+                            if (lnAddress != null && !settingsManager.isFavoriteLnAddress(lnAddress!!)) {
+                                Spacer(modifier = Modifier.height(16.dp))
+                                if (!savedToFavorites) {
+                                    OutlinedButton(
+                                        onClick = {
+                                            settingsManager.addFavoriteLnAddress(lnAddress!!)
+                                            savedToFavorites = true
+                                        }
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Star,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text("Add to Favorites")
+                                    }
+                                } else {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            Icons.Default.Check,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            "Saved to favorites",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                }
+                            } else if (lnAddress != null) {
+                                // Already in favorites - update last used
+                                LaunchedEffect(Unit) {
+                                    settingsManager.updateFavoriteLastUsed(lnAddress!!)
+                                }
+                            }
                         }
                     }
                 }
