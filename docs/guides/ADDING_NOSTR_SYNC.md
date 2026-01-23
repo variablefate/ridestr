@@ -1,6 +1,6 @@
 # Adding Nostr-Synced Features
 
-**Last Updated**: 2026-01-17
+**Last Updated**: 2026-01-22
 
 This guide explains how to add new data types that sync via Nostr relays using the ProfileSyncManager architecture.
 
@@ -13,9 +13,10 @@ Ridestr uses ProfileSyncManager to sync profile data across devices via Nostr re
 | Data Type | Event Kind | d-tag | Sync Order | App |
 |-----------|------------|-------|------------|-----|
 | Wallet (NIP-60) | 7375, 17375 | - | 0 | Both |
-| Ride History | 30174 | `rideshare-history` | 1 | Both |
-| Vehicles | 30175 | `rideshare-vehicles` | 2 | Driver |
-| Saved Locations | 30176 | `rideshare-locations` | 3 | Rider |
+| **Unified Profile** | **30177** | `rideshare-profile` | **1** | Both |
+| Ride History | 30174 | `rideshare-history` | 2 | Both |
+
+**Note**: Kind 30177 (Unified Profile) consolidates vehicles, saved locations, and settings into a single event. This replaces the deprecated Kind 30175 (vehicles) and Kind 30176 (locations).
 
 ---
 
@@ -31,12 +32,11 @@ Before starting, understand:
 ## Step 1: Choose Event Kind
 
 Check existing event kinds to avoid conflicts:
-- 7375, 7376, 17375: Wallet (NIP-60)
+- 7375, 17375: Wallet (NIP-60)
 - 30174: Ride History
-- 30175: Vehicles (driver)
-- 30176: Saved Locations (rider)
+- 30177: Unified Profile (vehicles, locations, settings)
 
-For new features, use **30177+**.
+For new features, use **30178+**.
 
 ---
 
@@ -251,10 +251,9 @@ profileSyncManager.registerSyncable(XxxSyncAdapter(xxxRepository, nostrService))
 | Order | Data Type | Rationale |
 |-------|-----------|-----------|
 | 0 | Wallet | Needed for payments, highest priority |
-| 1 | Ride History | May reference payments |
-| 2 | Vehicles | Driver profile data |
-| 3 | Saved Locations | Rider convenience data |
-| 4+ | New features | Lower priority |
+| 1 | Unified Profile | Vehicles, locations, settings (Kind 30177) |
+| 2 | Ride History | May reference payments |
+| 3+ | New features | Lower priority |
 
 Lower sync order = synced first during key import.
 

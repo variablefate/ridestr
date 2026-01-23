@@ -1,6 +1,6 @@
 # Ridestr Documentation
 
-**Last Updated**: 2026-01-20
+**Last Updated**: 2026-01-22
 
 Ridestr is a decentralized rideshare platform built on Nostr. This documentation provides comprehensive coverage of the protocol, architecture, and implementation.
 
@@ -16,14 +16,17 @@ Ridestr is a decentralized rideshare platform built on Nostr. This documentation
 | Cashu Wallet (deposit/withdraw) | ✅ COMPLETE | [PAYMENT_ARCHITECTURE.md](architecture/PAYMENT_ARCHITECTURE.md) |
 | NIP-60 Backup/Restore | ✅ COMPLETE | [PAYMENT_ARCHITECTURE.md](architecture/PAYMENT_ARCHITECTURE.md) |
 | NUT-14 HTLC | ✅ COMPLETE | P2PK signing, wallet pubkey handshake, deferred locking |
+| NUT-13 Deterministic Secrets | ✅ COMPLETE | Seed-based recovery |
+| NUT-09 Restore | ✅ COMPLETE | Mint scanning for recovery |
 | Payment Integration | ✅ COMPLETE | Fully wired, HTLC escrow, NIP-60 sync |
+| Driver Monitoring (Issue #22) | ✅ COMPLETE | Notify rider when driver goes offline |
 
 ---
 
 ## Documentation Index
 
 ### Protocol
-- [NOSTR_EVENTS.md](protocol/NOSTR_EVENTS.md) - All 14 Nostr event kind definitions
+- [NOSTR_EVENTS.md](protocol/NOSTR_EVENTS.md) - All 10 active Nostr event kind definitions
 - [DEPRECATION.md](protocol/DEPRECATION.md) - Deprecated event history and migration notes
 
 ### Architecture

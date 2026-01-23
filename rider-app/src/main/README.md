@@ -48,39 +48,60 @@ The rider Android app allows users to request rides, track driver location in re
 ```
 IDLE
   │
-  ▼ requestRide() / broadcastRideRequest()
-BROADCASTING_REQUEST
-  │
-  ▼ driver responds with acceptance
-WAITING_FOR_ACCEPTANCE
-  │
-  ▼ rider confirms acceptance
-DRIVER_ACCEPTED
-  │
-  ▼ rider sends confirmation with PIN
-RIDE_CONFIRMED
-  │
-  ▼ driver arrives at pickup
-DRIVER_ARRIVED
-  │
-  ▼ driver verifies PIN, ride starts
-IN_PROGRESS
-  │
-  ▼ arrive at dropoff
-COMPLETED
+  ├──▶ sendRideOffer() ─────────────▶ WAITING_FOR_ACCEPTANCE
+  │                                        │
+  │                                        ├──▶ timeout/cancel/driver unavailable → IDLE
+  │                                        │
+  │                                        ▼ driver accepts (Kind 3174)
+  │                                   DRIVER_ACCEPTED
+  │                                        │
+  ├──▶ broadcastRideRequest() ──────▶ BROADCASTING_REQUEST
+  │                                        │
+  │                                        ├──▶ timeout/cancel → IDLE
+  │                                        │
+  │                                        ▼ driver accepts (Kind 3174)
+  │                                   DRIVER_ACCEPTED
+  │                                        │
+  ▼                                        ▼ autoConfirmRide() (automatic)
+                                      RIDE_CONFIRMED
+                                           │
+                                           ▼ driver state: ARRIVED
+                                      DRIVER_ARRIVED
+                                           │
+                                           ▼ PIN verified, preimage shared
+                                       IN_PROGRESS
+                                           │
+                                           ▼ driver state: COMPLETED
+                                       COMPLETED
+                                           │
+                                           ▼ clearRide()
+                                          IDLE
 
-Any state → cancelRide() or driverCancelled() → CANCELLED → IDLE
+Any active state → cancelRide() or driverCancelled() → IDLE
 ```
 
 ### Key State Transitions
 
 | Method | From State | To State | Nostr Event |
 |--------|------------|----------|-------------|
-| `broadcastRideRequest()` | IDLE | BROADCASTING_REQUEST | Kind 3173 |
-| `confirmRide()` | WAITING_FOR_ACCEPTANCE | RIDE_CONFIRMED | Kind 3175 |
+| `sendRideOffer()` | IDLE | WAITING_FOR_ACCEPTANCE | Kind 3173 (direct) |
+| `broadcastRideRequest()` | IDLE | BROADCASTING_REQUEST | Kind 3173 (broadcast) |
+| `autoConfirmRide()` | DRIVER_ACCEPTED | RIDE_CONFIRMED | Kind 3175 |
 | `handleDriverRideState()` | Various | Various | Receives Kind 30180 |
-| `cancelRide()` | Any | CANCELLED | Kind 3179 |
+| `cancelOffer()` | WAITING_FOR_ACCEPTANCE | IDLE | Cancels pending offer |
+| `cancelRide()` | Any active | IDLE | Kind 3179 |
 | `clearRiderStateHistory()` | - | - | **CRITICAL**: Must call when starting new ride |
+
+### Pre-Confirmation Driver Monitoring (Issue #22)
+
+When rider sends a direct offer to a specific driver, the rider app monitors that driver's availability:
+
+- `subscribeToSelectedDriverAvailability()` - Starts monitoring Kind 30173 for selected driver
+- If driver goes offline (availability status changes), shows "Driver Unavailable" dialog
+- Auto-cancels offer and returns to IDLE state
+- Only applies during WAITING_FOR_ACCEPTANCE stage (pre-confirmation)
+
+This prevents riders from waiting indefinitely when their selected driver takes another ride or goes offline.
 
 ---
 
@@ -122,8 +143,8 @@ val profileSyncManager = ProfileSyncManager.getInstance(context, relays)
 
 // Line 182-186: Sync adapter registration
 profileSyncManager.registerSyncable(Nip60WalletSyncAdapter(nip60Sync))
+profileSyncManager.registerSyncable(ProfileSyncAdapter(null, savedLocationRepo, settingsManager, nostrService))  // Unified profile (locations + settings)
 profileSyncManager.registerSyncable(RideHistorySyncAdapter(rideHistoryRepo, nostrService))
-profileSyncManager.registerSyncable(SavedLocationSyncAdapter(savedLocationRepo, nostrService))
 
 // Line 268-272: On login, trigger sync
 profileSyncManager.onKeyImported()
@@ -159,7 +180,9 @@ Screen.RIDE_DETAIL → (from history) → Full ride details
 ### Subscriptions
 - `subscribeToDriverRideState()` - Watch driver's Kind 30180 events
 - `subscribeToAcceptances()` - Watch for Kind 3174 responses
+- `subscribeToSelectedDriverAvailability()` - Watch selected driver's Kind 30173 (Issue #22)
 - `closeAllRideSubscriptions()` - Clean up on ride end
+- `closeDriverAvailabilitySubscription()` - Clean up driver monitoring on acceptance/cancel
 
 ### Confirmation Flow Protection (January 2026)
 Race condition fix prevents duplicate confirmation events:

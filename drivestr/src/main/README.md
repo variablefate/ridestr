@@ -123,8 +123,8 @@ val profileSyncManager = ProfileSyncManager.getInstance(context, relays)
 
 // Line 176-180: Sync adapter registration (driver-specific)
 profileSyncManager.registerSyncable(Nip60WalletSyncAdapter(nip60Sync))
+profileSyncManager.registerSyncable(ProfileSyncAdapter(vehicleRepository, null, settingsManager, nostrService))  // Unified profile (vehicles + settings)
 profileSyncManager.registerSyncable(RideHistorySyncAdapter(rideHistoryRepository, nostrService))
-profileSyncManager.registerSyncable(VehicleSyncAdapter(vehicleRepository, nostrService))
 
 // Line 255-256: On login, trigger sync
 profileSyncManager.onKeyImported()

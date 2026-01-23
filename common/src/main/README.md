@@ -25,7 +25,7 @@ The `common` module contains all shared code used by both rider and driver apps:
 
 | File | Purpose | Key Methods |
 |------|---------|-------------|
-| `NostrService.kt` | Event publishing/subscription | `broadcastAvailability()`, `publishDriverRideState()`, `publishRiderRideState()`, `subscribeToOffers()`, `publishRideHistoryBackup()` |
+| `NostrService.kt` | Event publishing/subscription | `broadcastAvailability()`, `publishDriverRideState()`, `publishRiderRideState()`, `subscribeToOffers()`, `subscribeToDriverAvailability()`, `publishRideHistoryBackup()` |
 | `relay/RelayManager.kt` | WebSocket connection pool, EOSE-aware subscriptions | `connectAll()`, `publish()`, `subscribe(onEose=...)`, `closeSubscription()` |
 | `relay/RelayConnection.kt` | Single relay connection | WebSocket lifecycle management |
 | `relay/RelayConfig.kt` | Configuration constants | Default relays, timeouts |
@@ -45,9 +45,7 @@ The `common` module contains all shared code used by both rider and driver apps:
 | `RideshareChatEvent.kt` | 3178 | In-ride encrypted chat |
 | `RideCancellationEvent.kt` | 3179 | Ride cancellation |
 | `RideHistoryEvent.kt` | 30174 | Ride history backup (encrypted to self) |
-| `VehicleBackupEvent.kt` | 30175 | Vehicle list backup (driver) |
-| `SavedLocationBackupEvent.kt` | 30176 | Saved locations backup (rider) |
-| `ProfileBackupEvent.kt` | 30177 | Unified profile backup (vehicles, locations, settings) |
+| `ProfileBackupEvent.kt` | 30177 | **Unified profile backup** (vehicles, locations, settings) |
 | `RideshareEventKinds.kt` | - | Kind constants, expiration times, `PaymentMethod` enum |
 
 ### Sync System (`java/com/ridestr/common/sync/`)
@@ -60,8 +58,6 @@ The `common` module contains all shared code used by both rider and driver apps:
 | `Nip60WalletSyncAdapter.kt` | Wallet sync | **0** (highest priority) |
 | `ProfileSyncAdapter.kt` | **Unified profile sync** (vehicles, locations, settings) | **1** |
 | `RideHistorySyncAdapter.kt` | History sync | **2** |
-| ~~`VehicleSyncAdapter.kt`~~ | ~~DEPRECATED~~ | Use ProfileSyncAdapter |
-| ~~`SavedLocationSyncAdapter.kt`~~ | ~~DEPRECATED~~ | Use ProfileSyncAdapter |
 
 ### State Machine (`java/com/ridestr/common/state/`)
 

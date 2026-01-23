@@ -1,6 +1,6 @@
 # Deprecated Event Kinds - NIP-014173
 
-**Last Updated**: 2026-01-17
+**Last Updated**: 2026-01-22
 **Original Location**: `common/src/main/java/com/ridestr/common/nostr/events/deprecation.md`
 
 This document describes event kinds that have been deprecated in the rideshare protocol.
@@ -89,10 +89,11 @@ The handshake events (Kinds 3173, 3174, 3175) remain separate regular events bec
 | 3178 | Rideshare Chat | Regular | Ride |
 | 3179 | Ride Cancellation | Regular | Any |
 | 30174 | Ride History Backup | Param Replaceable | Post |
-| 30175 | Vehicle Backup | Param Replaceable | Profile |
-| 30176 | Saved Locations Backup | Param Replaceable | Profile |
+| **30177** | **Unified Profile** | **Param Replaceable** | **Profile** |
 
-**Total: 11 active event kinds** (9 ride + 2 profile sync)
+**Total: 10 active event kinds** (8 ride + 2 profile sync)
+
+**Note**: Kind 30175 (vehicles) and Kind 30176 (saved locations) were consolidated into Kind 30177 (unified profile) in January 2026.
 
 ---
 

@@ -190,9 +190,8 @@ ProfileSyncManager coordinates all profile data sync with Nostr relays:
 
 ### Sync Order (on key import)
 1. **Wallet (order=0)** - NIP-60 proofs, highest priority
-2. **Ride History (order=1)** - Kind 30174 events
-3. **Vehicles (order=2, driver)** - Kind 30175 events
-4. **Saved Locations (order=3, rider)** - Kind 30176 events
+2. **Unified Profile (order=1)** - Kind 30177 events (vehicles, locations, settings)
+3. **Ride History (order=2)** - Kind 30174 events
 
 ### Key Files
 - `common/.../sync/ProfileSyncManager.kt` - Orchestrator
@@ -213,9 +212,9 @@ The Cashu wallet implementation uses:
 ### Current Status
 - Deposits/Withdrawals: ✅ COMPLETE
 - NIP-60 Sync: ✅ COMPLETE
-- HTLC Create: ⚠️ PARTIAL (structure exists)
-- HTLC Claim: ⚠️ PARTIAL (P2PK signing missing)
-- ViewModel Integration: ❌ NOT WIRED
+- HTLC Create: ✅ COMPLETE
+- HTLC Claim: ✅ COMPLETE (P2PK signing implemented)
+- ViewModel Integration: ✅ COMPLETE
 
 See: [PAYMENT_ARCHITECTURE.md](PAYMENT_ARCHITECTURE.md) for full details.
 

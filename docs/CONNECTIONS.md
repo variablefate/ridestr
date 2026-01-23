@@ -1,6 +1,6 @@
 # Ridestr Module Connections
 
-**Last Updated**: 2026-01-21
+**Last Updated**: 2026-01-22
 
 This document provides a comprehensive view of how all modules connect in the Ridestr codebase. Use this as a reference when making changes to understand what might be affected.
 
@@ -267,8 +267,8 @@ sequenceDiagram
     participant KM as KeyManager
     participant RM as RelayManager
     participant SA1 as WalletSyncAdapter
-    participant SA2 as HistorySyncAdapter
-    participant SA3 as VehicleSyncAdapter
+    participant SA2 as ProfileSyncAdapter
+    participant SA3 as HistorySyncAdapter
 
     U->>MA: Import nsec key
     MA->>KM: Store key
@@ -277,16 +277,16 @@ sequenceDiagram
     PSM->>RM: connectAll()
     RM-->>PSM: Connected
 
-    Note over PSM: Sync in order (0, 1, 2, 3)
+    Note over PSM: Sync in order (0, 1, 2)
 
     PSM->>SA1: fetchFromNostr() [order=0]
     SA1-->>PSM: Wallet restored (N proofs)
 
     PSM->>SA2: fetchFromNostr() [order=1]
-    SA2-->>PSM: History restored (N rides)
+    SA2-->>PSM: Profile restored (vehicles/locations + settings)
 
     PSM->>SA3: fetchFromNostr() [order=2]
-    SA3-->>PSM: Vehicles restored (N vehicles)
+    SA3-->>PSM: History restored (N rides)
 
     PSM-->>MA: Sync complete
 ```
@@ -355,7 +355,7 @@ Nostr Layer
 │
 └── Event Models (events/*.kt)
     ├── 8 ride protocol events (Kind 30173, 3173, 3174, 3175, 30180, 30181, 3178, 3179)
-    ├── 3 backup events (Kind 30174, 30175, 30176)
+    ├── 2 backup events (Kind 30174 history, 30177 profile)
     └── Used by: NostrService methods
 ```
 
@@ -381,14 +381,10 @@ Profile Sync
 │   ├── Depends on: NostrService
 │   └── Restores: Kind 30177 (vehicles + locations + settings)
 │
-├── RideHistorySyncAdapter (order=2)
-│   ├── Depends on: RideHistoryRepository
-│   ├── Depends on: NostrService
-│   └── Restores: Ride history (Kind 30174)
-│
-├── ~~VehicleSyncAdapter~~ (DEPRECATED - use ProfileSyncAdapter)
-│
-└── ~~SavedLocationSyncAdapter~~ (DEPRECATED - use ProfileSyncAdapter)
+└── RideHistorySyncAdapter (order=2)
+    ├── Depends on: RideHistoryRepository
+    ├── Depends on: NostrService
+    └── Restores: Ride history (Kind 30174)
 
 Auto-Backup Flow (MainActivity observers):
 ├── Driver: vehicleRepository.vehicles → backupProfileData()
@@ -436,8 +432,6 @@ State Machines
 | 3179 | Cancellation | Both | Both | Ride cancellation |
 | 30174 | Ride History | Self | Self | Backup (encrypted to self) |
 | 30177 | Unified Profile | Self | Self | Vehicles, locations, settings + payment prefs |
-| 30175 | Vehicles | Driver | Driver | DEPRECATED - use 30177 |
-| 30176 | Saved Locations | Rider | Rider | DEPRECATED - use 30177 |
 | 7375 | Wallet Proofs | Self | Self | NIP-60 wallet proofs (encrypted) |
 | 17375 | Wallet Metadata | Self | Self | NIP-60 wallet metadata (encrypted) |
 

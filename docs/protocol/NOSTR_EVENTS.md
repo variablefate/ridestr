@@ -1,7 +1,7 @@
 # Ridestr Nostr Event Protocol
 
-**Version**: 1.2
-**Last Updated**: 2026-01-21
+**Version**: 1.3
+**Last Updated**: 2026-01-22
 
 This document defines all Nostr event kinds used in the Ridestr rideshare application.
 
@@ -770,72 +770,11 @@ See [GitHub Issue #13](https://github.com/variablefate/ridestr/issues/13) for th
 
 ## Deprecated Events
 
-These events are deprecated and replaced by Kind 30177 (Unified Profile). They remain documented for migration purposes only. New implementations should use Kind 30177.
+The following event kinds were deprecated and replaced by Kind 30177 (Unified Profile):
 
-### Kind 30175: Vehicle Backup (DEPRECATED)
+| Kind | Name | Replaced By |
+|------|------|-------------|
+| 30175 | Vehicle Backup | Kind 30177 |
+| 30176 | Saved Locations Backup | Kind 30177 |
 
-**Replaced by**: Kind 30177 (Unified Profile)
-
-**Purpose**: Encrypted backup of driver's vehicle list.
-
-**Type**: Parameterized Replaceable Event (NIP-33)
-
-**d-tag**: `rideshare-vehicles`
-
-**Content** (JSON, self-encrypted with NIP-44):
-```json
-{
-  "vehicles": [
-    {
-      "id": "<uuid>",
-      "make": "Toyota",
-      "model": "Camry",
-      "year": 2022,
-      "color": "Silver",
-      "licensePlate": "ABC123",
-      "isPrimary": true
-    }
-  ],
-  "primaryVehicleId": "<uuid>"
-}
-```
-
-**Source**: `VehicleBackupEvent.kt` (deprecated)
-
----
-
-### Kind 30176: Saved Locations Backup (DEPRECATED)
-
-**Replaced by**: Kind 30177 (Unified Profile)
-
-**Purpose**: Encrypted backup of rider's saved/favorite locations.
-
-**Type**: Parameterized Replaceable Event (NIP-33)
-
-**d-tag**: `rideshare-locations`
-
-**Content** (JSON, self-encrypted with NIP-44):
-```json
-{
-  "favorites": [
-    {
-      "id": "<uuid>",
-      "name": "Home",
-      "address": "123 Main St, City, State",
-      "lat": <latitude>,
-      "lon": <longitude>
-    }
-  ],
-  "recent": [
-    {
-      "id": "<uuid>",
-      "address": "456 Oak Ave, City, State",
-      "lat": <latitude>,
-      "lon": <longitude>,
-      "lastUsed": <unix_timestamp>
-    }
-  ]
-}
-```
-
-**Source**: `SavedLocationBackupEvent.kt` (deprecated)
+New implementations should use Kind 30177 for all profile data.
