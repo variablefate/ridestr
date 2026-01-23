@@ -223,6 +223,23 @@ Before HTLC swap, proofs are verified with mint to catch stale NIP-60 events:
 - `findHtlcByPaymentHash()` and `markHtlcClaimedByPaymentHash()` track HTLC lifecycle
 - `RiderViewModel.handleRideCompletion()` marks HTLC as claimed to prevent false refund attempts
 - `markHtlcClaimedByPaymentHash()` also clears `pendingSats` from balance (January 2026)
+- `PendingHtlc` stores `htlcToken` for refund even after ride ends - only cleaned up after 7 days
+
+### Automatic Wallet Refresh (January 2026)
+All major payment operations now trigger automatic wallet refresh to ensure balance consistency:
+
+| Operation | Location | Refresh Method |
+|-----------|----------|----------------|
+| HTLC Claim (driver) | `WalletService.claimHtlcPayment()` | NIP-60 fetch + `updateDiagnostics()` |
+| Ride Completion (rider) | `RiderViewModel.handleRideCompletion()` | `refreshBalance()` |
+| Ride Cancellation (rider) | `RiderViewModel.handleDriverCancellation()` | `refreshBalance()` |
+| Withdrawal | `WalletService.executeWithdraw()` | NIP-60 fetch via `meltWithProofs()` |
+| Cross-Mint Bridge | `WalletService.bridgePayment()` | NIP-60 fetch |
+
+This ensures:
+- Displayed balance matches NIP-60 (green diagnostics icon)
+- `pendingSats` is cleared when HTLC is claimed
+- Expired HTLCs are checked for refund on cancellation
 
 ### Ride History Clear Grace Period (January 2026)
 When user clears ride history, a 30-second grace period prevents sync from restoring deleted data:

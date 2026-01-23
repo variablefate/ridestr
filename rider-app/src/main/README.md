@@ -185,3 +185,18 @@ If rider cancels after preimage was shared with driver:
 - Tap wallet card in `WalletScreen.kt` → navigates to `WalletDetailScreen` (common)
 - Deposit and withdraw are **fully functional**
 - Only LN address resolution is broken (must paste BOLT11 directly)
+
+### Wallet Refresh on Ride End (January 2026)
+Both ride completion and cancellation now trigger automatic wallet refresh:
+
+**`handleRideCompletion()`** (line ~2886):
+1. `markHtlcClaimedByPaymentHash()` - Clears `pendingSats` immediately (synchronous)
+2. `refreshBalance()` - Full NIP-60 sync + `updateDiagnostics()` (in coroutine)
+
+**`handleDriverCancellation()`** (line ~2982):
+1. `refreshBalance()` - Syncs wallet, checks for expired HTLCs to refund
+
+This ensures:
+- Rider's balance is accurate after ride ends
+- Diagnostics icon shows green (NIP-60 synced)
+- Expired HTLCs are auto-refunded on cancellation

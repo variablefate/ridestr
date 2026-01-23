@@ -165,6 +165,15 @@ The phantom cancellation bug was caused by not clearing history between rides.
 - Driver receives preimage from rider's Kind 30181 event
 - **Note**: P2PK witness signatures not implemented - empty array passed
 
+### Wallet Refresh on HTLC Claim (January 2026)
+`WalletService.claimHtlcPayment()` now performs automatic NIP-60 refresh after successful claim:
+1. Publishes received proofs to NIP-60
+2. Clears NIP-60 cache and fetches fresh proofs
+3. Updates displayed balance from NIP-60 data
+4. Calls `updateDiagnostics()` to ensure green status
+
+This ensures driver's balance is accurate and diagnostics show synced after claiming payment.
+
 ### Vehicle Selection
 - Driver must have at least one vehicle to go online
 - `VehiclePickerDialog` shown if multiple vehicles exist
