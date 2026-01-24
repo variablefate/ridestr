@@ -37,6 +37,7 @@ import com.ridestr.common.routing.RouteResult
 import com.ridestr.common.routing.TileManager
 import com.ridestr.common.routing.TileSource
 import com.ridestr.common.settings.DisplayCurrency
+import com.ridestr.common.settings.RemoteConfigManager
 import com.ridestr.common.settings.SettingsManager
 import com.ridestr.common.routing.ValhallaRoutingService
 import com.ridestr.common.payment.PaymentCrypto
@@ -66,9 +67,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
         private const val TAG = "RiderViewModel"
-        // Fare pricing in USD
-        private const val FARE_USD_PER_MILE = 1.85  // $1.85 per mile (competitive with Uber/Lyft)
-        private const val MINIMUM_FARE_USD = 5.0    // $5.00 minimum fare to ensure driver profitability
+        // Fare pricing now comes from RemoteConfigManager (admin config)
+        // Defaults: $1.85/mile, $5.00 minimum - fetched from Kind 30182 on startup
         // Fare boost amounts
         private const val FARE_BOOST_USD = 1.0     // $1 boost in USD mode
         private const val FARE_BOOST_SATS = 1000.0 // 1000 sats boost in sats mode
@@ -106,6 +106,13 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
     private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val nostrService = NostrService(application)
+
+    // Remote config for fare rates and mints (fetched from admin pubkey Kind 30182)
+    private val remoteConfigManager = RemoteConfigManager(application, nostrService.relayManager)
+
+    /** Expose remote config for UI (recommended mints, etc.) */
+    val remoteConfig get() = remoteConfigManager.config
+
     private val routingService = ValhallaRoutingService(application)
     private val geocodingService = GeocodingService(application)
     private val tileManager = TileManager.getInstance(application)
@@ -442,6 +449,12 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         startStaleDriverCleanup()
         // Start Bitcoin price auto-refresh (every 5 minutes)
         bitcoinPriceService.startAutoRefresh()
+
+        // Fetch remote config (fare rates, recommended mints) from admin pubkey
+        viewModelScope.launch {
+            remoteConfigManager.fetchConfig()
+            Log.d(TAG, "Remote config loaded: fare=$${remoteConfigManager.config.value.fareRateUsdPerMile}/mi, min=$${remoteConfigManager.config.value.minimumFareUsd}")
+        }
 
         // Set user's public key
         nostrService.getPubKeyHex()?.let { pubKey ->
@@ -3334,18 +3347,24 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     private fun calculateFare(route: RouteResult): Double {
         // Convert km to miles
         val distanceMiles = route.distanceKm * KM_TO_MILES
-        // Calculate fare in USD
-        val distanceBasedFare = distanceMiles * FARE_USD_PER_MILE
 
-        // Enforce minimum fare of $5.00 to ensure driver profitability on short rides
-        val fareUsd = maxOf(distanceBasedFare, MINIMUM_FARE_USD)
+        // Get fare rates from remote config (admin settings)
+        val config = remoteConfigManager.config.value
+        val farePerMile = config.fareRateUsdPerMile
+        val minimumFare = config.minimumFareUsd
+
+        // Calculate fare in USD
+        val distanceBasedFare = distanceMiles * farePerMile
+
+        // Enforce minimum fare to ensure driver profitability on short rides
+        val fareUsd = maxOf(distanceBasedFare, minimumFare)
 
         // Convert USD to sats using current BTC price
         val sats = bitcoinPriceService.usdToSats(fareUsd)
 
         // Return sats, or fallback if price unavailable
-        // For fallback, also enforce minimum (assuming ~$100k BTC, $5 = ~5000 sats)
-        val minimumFallbackSats = 5000.0
+        // For fallback, calculate minimum based on config minimum fare (assuming ~$100k BTC)
+        val minimumFallbackSats = minimumFare * 1000.0  // $1 = ~1000 sats at $100k BTC
         return sats?.toDouble() ?: maxOf(distanceMiles * FALLBACK_SATS_PER_MILE, minimumFallbackSats)
     }
 

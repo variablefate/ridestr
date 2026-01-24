@@ -1,7 +1,7 @@
 # Ridestr Nostr Event Protocol
 
-**Version**: 1.3
-**Last Updated**: 2026-01-22
+**Version**: 1.4
+**Last Updated**: 2026-01-24
 
 This document defines all Nostr event kinds used in the Ridestr rideshare application.
 
@@ -32,6 +32,11 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 |------|------|------|---------|
 | [7375](#kind-7375-wallet-proofs) | Wallet Proofs | Regular | Cashu proofs backup |
 | [17375](#kind-17375-wallet-metadata) | Wallet Metadata | Replaceable | Wallet settings/mint URL |
+
+### Admin Configuration Events
+| Kind | Name | Type | Purpose |
+|------|------|------|---------|
+| [30182](#kind-30182-admin-config) | Admin Config | Parameterized Replaceable | Platform settings (fare rates, mints, versions) |
 
 ### Discovery Events
 | Kind | Name | Type | Purpose |
@@ -518,6 +523,63 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 
 ---
 
+### Kind 30182: Admin Config
+
+**Purpose**: Platform-wide configuration settings published by the official Ridestr admin pubkey. Apps fetch this once on startup to get current fare rates, recommended mints, and version information.
+
+**Type**: Parameterized Replaceable Event (NIP-33)
+
+**Author**: Official admin pubkey (`da790ba18e63ae79b16e172907301906957a45f38ef0c9f219d0f016eaf16128`)
+
+**d-tag**: `ridestr-admin-config`
+
+**Tags**:
+```
+["d", "ridestr-admin-config"]
+["t", "ridestr-admin"]
+```
+
+**Content** (JSON, plaintext):
+```json
+{
+  "fare_rate_usd_per_mile": 1.85,
+  "minimum_fare_usd": 5.0,
+  "recommended_mints": [
+    {
+      "name": "Minibits",
+      "url": "https://mint.minibits.cash/Bitcoin",
+      "description": "Popular, widely used (~1% fees)",
+      "recommended": true
+    }
+  ],
+  "latest_version": {
+    "rider": { "code": 10, "name": "1.0.10", "sha256": "abc123..." },
+    "driver": { "code": 10, "name": "1.0.10", "sha256": "def456..." }
+  }
+}
+```
+
+**Fields**:
+- `fare_rate_usd_per_mile`: Default fare rate in USD per mile
+- `minimum_fare_usd`: Minimum fare in USD
+- `recommended_mints`: Array of Cashu mint recommendations with metadata
+- `latest_version`: Current app version info with SHA256 hashes for integrity verification
+
+**Lifecycle**:
+1. Published by admin when platform settings change
+2. Apps fetch once on startup after relay connection
+3. Cached locally for offline use
+4. Falls back to hardcoded defaults if no event found or fetch fails
+
+**Security**:
+- Only events from the official admin pubkey are trusted
+- Apps MUST verify the event's `pubkey` matches the hardcoded admin key
+- Version SHA256 hashes can be used to verify APK integrity
+
+**Note**: Kind 30182 is in the 30000-40000 parameterized replaceable range. This number was verified to not conflict with documented NIPs as of January 2026.
+
+---
+
 ### Kind 1063: Tile Availability (NIP-94)
 
 **Purpose**: Routing tile file metadata published by official Ridestr pubkey.
@@ -716,6 +778,7 @@ RIDER                           NOSTR RELAY                         DRIVER
 | 3175 | `RideConfirmationEvent.kt` | `create()`, `parse()` |
 | 3178 | `RideshareChatEvent.kt` | `create()`, `parse()` |
 | 3179 | `RideCancellationEvent.kt` | `create()`, `parse()` |
+| 30182 | `AdminConfigEvent.kt` | `create()`, `parse()` |
 | Constants | `RideshareEventKinds.kt` | Kind constants, tags, expiration helpers |
 
 ---

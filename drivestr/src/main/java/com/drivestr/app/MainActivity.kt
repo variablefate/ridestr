@@ -683,12 +683,15 @@ fun DrivestrApp() {
             }
 
             Screen.WALLET_SETTINGS -> {
+                val driverViewModel: DriverViewModel = viewModel()
+                val remoteConfig by driverViewModel.remoteConfig.collectAsState()
                 WalletSettingsScreen(
                     walletService = walletService,
                     settingsManager = settingsManager,
                     isDriverApp = true,
                     onBack = { currentScreen = Screen.MAIN },
-                    modifier = Modifier.padding(innerPadding)
+                    modifier = Modifier.padding(innerPadding),
+                    recommendedMints = remoteConfig.recommendedMints
                 )
             }
 

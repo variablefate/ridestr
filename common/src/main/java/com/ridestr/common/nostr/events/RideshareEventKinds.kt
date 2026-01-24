@@ -112,6 +112,15 @@ object RideshareEventKinds {
     const val PROFILE_BACKUP = 30177
 
     /**
+     * Kind 30182: Admin Config Event (Parameterized Replaceable)
+     * Platform-wide configuration published by official admin pubkey.
+     * Contains fare rates, recommended mints, and version info.
+     * Apps fetch once on startup and cache locally.
+     * Uses d-tag "ridestr-admin-config" for identification.
+     */
+    const val ADMIN_CONFIG = 30182
+
+    /**
      * Kind 30175: Vehicle Backup Event (Parameterized Replaceable)
      * @deprecated Use PROFILE_BACKUP (30177) instead. Vehicles are now part of unified profile backup.
      */

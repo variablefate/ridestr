@@ -120,6 +120,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
     private val nostrService = NostrService(application)
 
+    // Remote config for platform settings (fetched from admin pubkey Kind 30182)
+    private val remoteConfigManager = com.ridestr.common.settings.RemoteConfigManager(application, nostrService.relayManager)
+
+    /** Expose remote config for UI (recommended mints, etc.) */
+    val remoteConfig get() = remoteConfigManager.config
+
     // Wallet service for HTLC escrow settlement (injected from MainActivity)
     private var walletService: WalletService? = null
 
@@ -366,6 +372,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         nostrService.connect()
         // Start Bitcoin price auto-refresh (every 5 minutes)
         bitcoinPriceService.startAutoRefresh()
+
+        // Fetch remote config (platform settings) from admin pubkey
+        viewModelScope.launch {
+            remoteConfigManager.fetchConfig()
+            Log.d(TAG, "Remote config loaded: fare=$${remoteConfigManager.config.value.fareRateUsdPerMile}/mi")
+        }
 
         // Clean up any stale availability events from previous sessions
         // This handles the case where app was killed while driver was online

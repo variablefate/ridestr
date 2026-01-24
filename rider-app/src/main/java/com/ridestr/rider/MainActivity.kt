@@ -672,12 +672,15 @@ fun RidestrApp() {
             }
 
             Screen.WALLET_SETTINGS -> {
+                val riderViewModel: RiderViewModel = viewModel()
+                val remoteConfig by riderViewModel.remoteConfig.collectAsState()
                 WalletSettingsScreen(
                     walletService = walletService,
                     settingsManager = settingsManager,
                     isDriverApp = false,
                     onBack = { currentScreen = Screen.MAIN },
-                    modifier = Modifier.padding(innerPadding)
+                    modifier = Modifier.padding(innerPadding),
+                    recommendedMints = remoteConfig.recommendedMints
                 )
             }
 

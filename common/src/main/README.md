@@ -48,6 +48,7 @@ The `common` module contains all shared code used by both rider and driver apps:
 | `RideCancellationEvent.kt` | 3179 | Ride cancellation |
 | `RideHistoryEvent.kt` | 30174 | Ride history backup (encrypted to self) |
 | `ProfileBackupEvent.kt` | 30177 | **Unified profile backup** (vehicles, locations, settings) |
+| `AdminConfigEvent.kt` | 30182 | Platform config (fare rates, mints, versions) - from admin pubkey |
 | `RideshareEventKinds.kt` | - | Kind constants, expiration times, `PaymentMethod` enum |
 
 ### Sync System (`java/com/ridestr/common/sync/`)
@@ -139,6 +140,7 @@ CREATED → ACCEPTED → CONFIRMED → EN_ROUTE → ARRIVED → IN_PROGRESS → 
 | `notification/NotificationHelper.kt` | Push notification management |
 | `notification/SoundManager.kt` | Sound effects for ride events |
 | `settings/SettingsManager.kt` | App settings persistence + `syncableSettingsHash` for auto-backup |
+| `settings/RemoteConfigManager.kt` | Platform config from admin pubkey (fare rates, mints) - one-time fetch on startup |
 
 ---
 
@@ -169,6 +171,8 @@ CREATED → ACCEPTED → CONFIRMED → EN_ROUTE → ARRIVED → IN_PROGRESS → 
 | `RideStateMachine` | `RiderViewModel` | Transition validation | `stateMachine.canTransition(state, "CONFIRM", context)` |
 | `RideGuards` | `RideContext` | Authorization evaluation | `Guards.isRider(context)` |
 | `RideActions` | `ActionHandler` | Side effect execution | `handler.assignDriver(context, event)` |
+| `RemoteConfigManager` | `RelayManager` | Fetch admin config | `relayManager.subscribe(kind=30182, ...)` |
+| `RemoteConfigManager` | `AdminConfigEvent` | Parse config event | `AdminConfigEvent.parse(event)` |
 
 ---
 

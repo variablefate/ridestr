@@ -18,6 +18,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.ridestr.common.payment.*
+import com.ridestr.common.nostr.events.MintOption as AdminMintOption
 import com.ridestr.common.settings.SettingsManager
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -40,7 +41,8 @@ fun WalletSettingsScreen(
     settingsManager: SettingsManager,
     isDriverApp: Boolean,
     onBack: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    recommendedMints: List<AdminMintOption> = emptyList()
 ) {
     val isConnected by walletService.isConnected.collectAsState()
     val balance by walletService.balance.collectAsState()
@@ -1136,7 +1138,8 @@ fun WalletSettingsScreen(
         ChangeMintSettingsDialog(
             walletService = walletService,
             currentBalance = balance.availableSats,
-            onDismiss = { showChangeMintDialog = false }
+            onDismiss = { showChangeMintDialog = false },
+            recommendedMints = recommendedMints
         )
     }
 
@@ -1289,8 +1292,15 @@ fun WalletSettingsScreen(
 private fun ChangeMintSettingsDialog(
     walletService: WalletService,
     currentBalance: Long,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    recommendedMints: List<AdminMintOption> = emptyList()
 ) {
+    // Use admin config mints if available, otherwise fall back to defaults
+    val mintsToShow = if (recommendedMints.isNotEmpty()) {
+        recommendedMints.map { MintOption(it.name, it.description, it.url, it.recommended) }
+    } else {
+        WalletService.DEFAULT_MINTS
+    }
     var selectedMint by remember { mutableStateOf<MintOption?>(null) }
     var customUrl by remember { mutableStateOf("") }
     var showCustom by remember { mutableStateOf(false) }
@@ -1338,7 +1348,7 @@ private fun ChangeMintSettingsDialog(
                 }
 
                 // Mint selection
-                WalletService.DEFAULT_MINTS.forEach { option ->
+                mintsToShow.forEach { option ->
                     MintSelectionSettingsRow(
                         mint = option,
                         isSelected = selectedMint == option && !showCustom,
