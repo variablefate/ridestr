@@ -76,3 +76,4 @@ vcs.xml
 
 # Claude Code
 .claude/
+keystore.properties
