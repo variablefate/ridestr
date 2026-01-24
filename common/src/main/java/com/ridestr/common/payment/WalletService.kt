@@ -42,12 +42,6 @@ class WalletService(
                 description = "Popular, widely used (~1% fees)",
                 url = "https://mint.minibits.cash/Bitcoin",
                 recommended = true
-            ),
-            MintOption(
-                name = "The Milk Road",
-                description = "~1% fees, supports Ridestr development",
-                url = "https://mint.themilkroad.org",
-                recommended = false
             )
         )
     }
