@@ -76,7 +76,12 @@ fun TileSetupScreen(
             allRegions.forEach { region ->
                 val bbox = region.boundingBox
                 val contains = bbox.contains(lat, lon)
-                android.util.Log.d("TileSetupScreen", "Region ${region.id}: bbox=(${bbox.west},${bbox.south},${bbox.east},${bbox.north}) contains=$contains")
+                val bboxInfo = when {
+                    bbox.hasSwappedCoordinates -> " [SWAPPED]"
+                    bbox.crossesDateLine -> " [DATE LINE]"
+                    else -> ""
+                }
+                android.util.Log.d("TileSetupScreen", "Region ${region.id}: bbox=(${bbox.west},${bbox.south},${bbox.east},${bbox.north})$bboxInfo contains=$contains")
             }
             allRegions.partition { it.boundingBox.contains(lat, lon) }
         } else {

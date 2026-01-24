@@ -153,9 +153,13 @@ data class TileAvailabilityData(
 /**
  * Geographic bounding box for tile region.
  *
- * @param west Western longitude (minimum)
+ * Handles International Date Line crossing properly. When a region spans the date line
+ * (e.g., Alaska's Aleutian Islands), west will be > east in terms of longitude values.
+ * For example: west=172 (eastern hemisphere), east=-130 (western hemisphere).
+ *
+ * @param west Western longitude boundary
  * @param south Southern latitude (minimum)
- * @param east Eastern longitude (maximum)
+ * @param east Eastern longitude boundary
  * @param north Northern latitude (maximum)
  */
 data class BoundingBox(
@@ -165,15 +169,59 @@ data class BoundingBox(
     val north: Double
 ) {
     /**
+     * Whether this bounding box crosses the International Date Line.
+     * True date-line crossing occurs when:
+     * - west is positive (eastern hemisphere, e.g., 172°)
+     * - east is negative (western hemisphere, e.g., -130°)
+     *
+     * Note: If both are the same sign but west > east, that's likely a data error
+     * (swapped coordinates), not a date-line crossing.
+     */
+    val crossesDateLine: Boolean = west > 0 && east < 0
+
+    /**
+     * Whether this bounding box appears to have swapped west/east coordinates.
+     * This is likely a data error that should be corrected in the source.
+     */
+    val hasSwappedCoordinates: Boolean = west > east && !crossesDateLine
+
+    /**
      * Convert to tag value format: "west,south,east,north"
      */
     fun toTagValue(): String = "$west,$south,$east,$north"
 
     /**
      * Check if a point is within this bounding box.
+     *
+     * Handles three cases:
+     * 1. Normal boxes (west <= east): Standard range check
+     * 2. Date-line-crossing boxes (west > 0, east < 0): Check if in eastern OR western part
+     * 3. Swapped coordinates (west > east, same sign): Auto-correct by swapping
      */
     fun contains(lat: Double, lon: Double): Boolean {
-        return lat in south..north && lon in west..east
+        // Latitude check is always the same
+        val latInRange = lat in south..north
+        if (!latInRange) return false
+
+        // Longitude check depends on the bbox type
+        val lonInRange = when {
+            crossesDateLine -> {
+                // Date line crossing: region wraps from west (positive) through ±180 to east (negative)
+                // A point is inside if it's >= west (in eastern part) OR <= east (in western part)
+                lon >= west || lon <= east
+            }
+            hasSwappedCoordinates -> {
+                // Swapped coordinates - auto-correct by treating east as west and vice versa
+                // This handles misconfigured data gracefully
+                lon in east..west
+            }
+            else -> {
+                // Normal case: simple range check
+                lon in west..east
+            }
+        }
+
+        return lonInRange
     }
 
     companion object {

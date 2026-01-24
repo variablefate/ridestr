@@ -268,7 +268,29 @@ class NostrTileDiscoveryService(
             }
 
             // Log parsed bbox for debugging
-            Log.d(TAG, "Region $regionId bbox: west=${boundingBox.west}, south=${boundingBox.south}, east=${boundingBox.east}, north=${boundingBox.north}")
+            val bboxInfo = when {
+                boundingBox.hasSwappedCoordinates -> " [SWAPPED COORDS - will auto-correct]"
+                boundingBox.crossesDateLine -> " [CROSSES DATE LINE]"
+                else -> ""
+            }
+            Log.d(TAG, "Region $regionId bbox: west=${boundingBox.west}, south=${boundingBox.south}, east=${boundingBox.east}, north=${boundingBox.north}$bboxInfo")
+
+            // Warn about swapped coordinates - this is a data error that should be fixed at source
+            if (boundingBox.hasSwappedCoordinates) {
+                Log.w(TAG, "Region $regionId has west/east coordinates SWAPPED! west=${boundingBox.west} > east=${boundingBox.east}. Please fix the Nostr event.")
+            }
+
+            // Warn about suspiciously large bboxes that might indicate configuration errors
+            val lonSpan = if (boundingBox.crossesDateLine) {
+                // For date line crossing: (180 - west) + (east - (-180)) = 360 + east - west
+                (180.0 - boundingBox.west) + (boundingBox.east + 180.0)
+            } else {
+                boundingBox.east - boundingBox.west
+            }
+            val latSpan = boundingBox.north - boundingBox.south
+            if (lonSpan > 180.0 || latSpan > 90.0) {
+                Log.w(TAG, "Region $regionId has unusually large bbox (lon span: ${"%.1f".format(lonSpan)}°, lat span: ${"%.1f".format(latSpan)}°) - may be misconfigured")
+            }
 
             return TileRegion(
                 id = regionId,
