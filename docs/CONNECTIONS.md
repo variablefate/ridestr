@@ -1,6 +1,6 @@
 # Ridestr Module Connections
 
-**Last Updated**: 2026-01-23
+**Last Updated**: 2026-01-24
 
 This document provides a comprehensive view of how all modules connect in the Ridestr codebase. Use this as a reference when making changes to understand what might be affected.
 
@@ -26,6 +26,7 @@ graph TB
         NS[NostrService]
         WS[WalletService]
         PSM[ProfileSyncManager]
+        RCM[RemoteConfigManager]
 
         subgraph "Payment"
             CB[CashuBackend]
@@ -67,6 +68,10 @@ graph TB
     PSM --> RHR
     PSM --> VR
     PSM --> SLR
+
+    RCM --> RM
+    RVM --> RCM
+    DVM --> RCM
 ```
 
 ---
@@ -455,6 +460,7 @@ State Machines
 | 3179 | Cancellation | Both | Both | Ride cancellation |
 | 30174 | Ride History | Self | Self | Backup (encrypted to self) |
 | 30177 | Unified Profile | Self | Self | Vehicles, locations, settings + payment prefs |
+| 30182 | Admin Config | Admin | All Apps | Platform config (fare rates, recommended mints) |
 | 7375 | Wallet Proofs | Self | Self | NIP-60 wallet proofs (encrypted) |
 | 17375 | Wallet Metadata | Self | Self | NIP-60 wallet metadata (encrypted) |
 
