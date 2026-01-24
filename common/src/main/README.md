@@ -17,7 +17,7 @@ The `common` module contains all shared code used by both rider and driver apps:
 | `cashu/CashuWebSocket.kt` | NUT-17 WebSocket connection for real-time mint state updates | `connect()`, `disconnect()`, `subscribe()`, `unsubscribe()`, `isConnected()` |
 | `cashu/CashuWebSocketModels.kt` | NUT-17 JSON-RPC 2.0 data classes | `WsRequest`, `WsResponse`, `WsNotification`, `MintQuotePayload`, `MeltQuotePayload`, `SubscriptionKind` |
 | `cashu/CashuCrypto.kt` | Cryptographic operations (NUT-00/13) | `hashToCurve()`, `blindMessage()`, `unblindSignature()`, `mnemonicToSeed()`, `deriveSecrets()`, `derivePreMintSecret()` |
-| `cashu/Nip60WalletSync.kt` | Cross-device wallet sync (NIP-60, EOSE-aware queries) | `publishProofs()`, `fetchProofs()`, `publishWalletMetadata()`, `restoreFromNostr()`, `hasExistingWallet()` (counter backup, EOSE early-exit) |
+| `cashu/Nip60WalletSync.kt` | Cross-device wallet sync (NIP-60, EOSE-aware queries, cross-app safety) | `publishProofs()`, `fetchProofs()`, `publishWalletMetadata(forceOverwrite)`, `getExistingWalletMetadata()`, `restoreFromNostr()`, `hasExistingWallet()` (counter backup, EOSE early-exit, cross-mint proof preservation) |
 | `WalletKeyManager.kt` | Wallet keypair + signing | `getPrivateKeyBytes()`, `signSchnorr()`, `getWalletPubKeyHex()`, `importPrivateKey()`, `importMnemonic()` |
 | `WalletStorage.kt` | Local persistence + NUT-13 counters | `savePendingDeposit()`, `getPendingDeposits()`, `removePendingDeposit()`, `getCachedBalance()`, `saveMintUrl()`, `savePendingBlindedOp()`, `getRecoverableBlindedOps()`, `savePendingHtlc()`, `getRefundableHtlcs()`, `getCounter()`, `incrementCounter()`, `getAllCounters()` |
 | `PaymentCrypto.kt` | Preimage/hash generation | `generatePreimage()`, `hashPreimage()` |

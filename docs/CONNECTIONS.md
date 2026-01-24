@@ -346,13 +346,15 @@ Payment System
 │   ├── Callbacks: onMintQuoteUpdate, onMeltQuoteUpdate, onProofStateUpdate
 │   └── Used by: CashuBackend
 │
-├── Nip60WalletSync (NIP-60 wallet backup - FULLY COMPLIANT)
+├── Nip60WalletSync (NIP-60 wallet backup - FULLY COMPLIANT + Cross-App Safe)
 │   ├── Depends on: NostrService (event publishing)
 │   ├── Depends on: KeyManager (signing)
 │   ├── Depends on: WalletKeyManager (wallet key backup)
 │   ├── Kind 7375: {"mint":"...","proofs":[...]} - NIP-60 standard
 │   ├── Kind 17375: [["privkey","..."],["mint","..."]] - NIP-60 standard
 │   ├── IMPORTANT: One Kind 7375 event can contain MANY proofs (same eventId)
+│   ├── SAFETY: getExistingWalletMetadata() - check before overwriting other app's data
+│   ├── SAFETY: publishWalletMetadata(forceOverwrite) - explicit param for overwrites
 │   └── Used by: WalletService, Nip60WalletSyncAdapter
 │
 └── PaymentCrypto (preimage/hash utilities)

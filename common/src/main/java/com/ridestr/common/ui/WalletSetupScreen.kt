@@ -54,6 +54,8 @@ fun WalletSetupScreen(
     var hasExistingWallet by remember { mutableStateOf(false) }
     var isRestoring by remember { mutableStateOf(false) }
     var restoredBalance by remember { mutableStateOf<Long?>(null) }
+    var showStartFreshConfirmation by remember { mutableStateOf(false) }
+    var showRestoreFailedDialog by remember { mutableStateOf(false) }
 
     // Check for existing NIP-60 wallet on launch
     LaunchedEffect(Unit) {
@@ -123,16 +125,56 @@ fun WalletSetupScreen(
                             if (success) {
                                 restoredBalance = walletService.getBalance()
                             } else {
-                                // Fall back to new setup
-                                hasExistingWallet = false
+                                // Show error dialog instead of silently falling through
+                                showRestoreFailedDialog = true
                             }
                             isRestoring = false
                         }
                     },
                     onStartFresh = {
-                        hasExistingWallet = false
+                        showStartFreshConfirmation = true
                     }
                 )
+
+                // Restore failed dialog
+                if (showRestoreFailedDialog) {
+                    AlertDialog(
+                        onDismissRequest = { showRestoreFailedDialog = false },
+                        icon = {
+                            Icon(
+                                Icons.Default.Error,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                        },
+                        title = { Text("Restore Failed") },
+                        text = {
+                            Text(
+                                "Could not restore your wallet from NIP-60 backup. This may happen if:\n\n" +
+                                "\u2022 The backup is corrupted\n" +
+                                "\u2022 The mint is unreachable\n" +
+                                "\u2022 Network issues\n\n" +
+                                "Your wallet data still exists on Nostr. You can try again or start fresh (which will overwrite your existing backup)."
+                            )
+                        },
+                        confirmButton = {
+                            Button(onClick = { showRestoreFailedDialog = false }) {
+                                Text("Try Again")
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(
+                                onClick = {
+                                    showRestoreFailedDialog = false
+                                    showStartFreshConfirmation = true
+                                }
+                            ) {
+                                Text("Start Fresh")
+                            }
+                        }
+                    )
+                }
+
                 Spacer(modifier = Modifier.weight(1f))
             }
 
@@ -146,6 +188,49 @@ fun WalletSetupScreen(
             }
 
             else -> {
+                // Confirmation dialog for "Start Fresh" when existing wallet found
+                if (showStartFreshConfirmation) {
+                    AlertDialog(
+                        onDismissRequest = { showStartFreshConfirmation = false },
+                        icon = {
+                            Icon(
+                                Icons.Default.Warning,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                        },
+                        title = { Text("Replace Existing Wallet?") },
+                        text = {
+                            Text(
+                                "An existing NIP-60 wallet backup was found on Nostr. Starting fresh will:\n\n" +
+                                "\u2022 Create a new wallet key\n" +
+                                "\u2022 Overwrite your NIP-60 backup\n" +
+                                "\u2022 Make the old wallet unrecoverable\n\n" +
+                                "If you have ecash in another app (Minibits, nutstash, etc.) using this Nostr key, those funds may become inaccessible.\n\n" +
+                                "Only proceed if the existing wallet is empty or you have another backup."
+                            )
+                        },
+                        confirmButton = {
+                            TextButton(
+                                onClick = {
+                                    showStartFreshConfirmation = false
+                                    hasExistingWallet = false
+                                },
+                                colors = ButtonDefaults.textButtonColors(
+                                    contentColor = MaterialTheme.colorScheme.error
+                                )
+                            ) {
+                                Text("Start Fresh Anyway")
+                            }
+                        },
+                        dismissButton = {
+                            Button(onClick = { showStartFreshConfirmation = false }) {
+                                Text("Cancel")
+                            }
+                        }
+                    )
+                }
+
                 // New wallet setup - provider selection
                 LazyColumn(
                     modifier = Modifier.weight(1f),

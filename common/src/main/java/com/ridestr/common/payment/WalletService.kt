@@ -365,8 +365,9 @@ class WalletService(
 
         // Step 4: Update wallet metadata with new mint URL (for cross-device restore)
         // This ensures another device gets the correct mint URL when importing the key
+        // forceOverwrite=true because user explicitly requested mint change
         if (syncResult.success) {
-            nip60Sync?.publishWalletMetadata(newMintUrl)
+            nip60Sync?.publishWalletMetadata(newMintUrl, forceOverwrite = true)
             Log.d(TAG, "Published updated wallet metadata with new mint URL")
         }
 
@@ -2611,7 +2612,8 @@ class WalletService(
             _walletStorage.cacheBalance(newBalance)
 
             // Sync counters to NIP-60 metadata
-            sync.publishWalletMetadata(mintUrl)
+            // forceOverwrite=true because user explicitly requested seed recovery
+            sync.publishWalletMetadata(mintUrl, forceOverwrite = true)
 
             Log.d(TAG, "=== RECOVERY COMPLETE: $totalRecovered sats in $totalProofsFound proofs ===")
             return SeedRecoveryResult(
@@ -2628,11 +2630,12 @@ class WalletService(
 
     /**
      * Sync wallet metadata to NIP-60 Nostr events.
+     * This is a manual action, so forceOverwrite=true to update metadata.
      */
     suspend fun syncToNip60() {
         val mintUrl = cashuBackend.getCurrentMintUrl()
         if (mintUrl != null) {
-            nip60Sync?.publishWalletMetadata(mintUrl)
+            nip60Sync?.publishWalletMetadata(mintUrl, forceOverwrite = true)
         }
     }
 
@@ -2663,21 +2666,46 @@ class WalletService(
 
             Log.d(TAG, "Sync check: verified=$verifiedBalance, nip60=$nip60Balance")
 
-            // If NIP-60 is higher than verified, it has stale (spent) proofs
+            // If NIP-60 is higher than verified, it may have stale (spent) proofs
+            // SAFETY: Only delete proofs from the CURRENT mint that are verified spent
+            // This preserves proofs from OTHER mints (cross-app NIP-60 portability)
             if (nip60Balance > verifiedBalance) {
-                Log.w(TAG, "NIP-60 has stale proofs! Clearing and re-syncing...")
+                Log.w(TAG, "NIP-60 balance ($nip60Balance) > verified ($verifiedBalance) - checking for stale proofs...")
 
-                // Delete all existing NIP-60 proof events
                 val existingProofs = sync.fetchProofs(forceRefresh = true)
-                val eventIds = existingProofs.map { it.eventId }.distinct()
-                if (eventIds.isNotEmpty()) {
-                    sync.deleteProofEvents(eventIds)
-                    Log.d(TAG, "Deleted ${eventIds.size} stale NIP-60 proof events")
+
+                // Separate proofs by mint - ONLY touch proofs from current mint
+                val currentMintProofs = existingProofs.filter { it.mintUrl == mintUrl }
+                val otherMintProofs = existingProofs.filter { it.mintUrl != mintUrl }
+
+                if (otherMintProofs.isNotEmpty()) {
+                    val otherMintBalance = otherMintProofs.sumOf { it.amount }
+                    Log.w(TAG, "NIP-60 SAFETY: Preserving ${otherMintProofs.size} proofs ($otherMintBalance sats) from other mints")
                 }
 
-                // Note: We don't republish here because the proofs have been spent.
-                // The remaining balance (change proofs) will be in cdk-kotlin.
-                // They'll get published to NIP-60 on next deposit or manual sync.
+                // Only verify and delete spent proofs from CURRENT mint
+                if (currentMintProofs.isNotEmpty()) {
+                    val secrets = currentMintProofs.map { it.secret }
+                    val stateMap = cashuBackend.verifyProofStatesBySecret(secrets)
+
+                    if (stateMap != null) {
+                        // Find proofs that are actually spent at the current mint
+                        val spentProofs = currentMintProofs.filter { proof ->
+                            stateMap[proof.secret] == CashuBackend.ProofStateResult.SPENT
+                        }
+
+                        if (spentProofs.isNotEmpty()) {
+                            val spentBalance = spentProofs.sumOf { it.amount }
+                            val eventIdsToDelete = spentProofs.map { it.eventId }.distinct()
+                            sync.deleteProofEvents(eventIdsToDelete)
+                            Log.d(TAG, "Deleted ${eventIdsToDelete.size} events with ${spentProofs.size} spent proofs ($spentBalance sats) from current mint")
+                        } else {
+                            Log.d(TAG, "No spent proofs found at current mint - balance mismatch may be from other mints")
+                        }
+                    } else {
+                        Log.w(TAG, "Could not verify proof states - skipping deletion to be safe")
+                    }
+                }
             }
 
             // Update cached balance to verified amount

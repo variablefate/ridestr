@@ -520,6 +520,61 @@ class Nip60WalletSync(
     }
 
     /**
+     * Get information about existing NIP-60 wallet metadata without full restore.
+     * Used to check if overwriting would destroy data from another app.
+     *
+     * @return ExistingWalletInfo if metadata exists, null otherwise
+     */
+    suspend fun getExistingWalletMetadata(): ExistingWalletInfo? = withContext(Dispatchers.IO) {
+        val signer = keyManager.getSigner()
+        val myPubKey = keyManager.getPubKeyHex()
+
+        if (signer == null || myPubKey == null) {
+            Log.d(TAG, "getExistingWalletMetadata: Not logged in")
+            return@withContext null
+        }
+
+        if (!waitForRelayConnection()) {
+            Log.d(TAG, "getExistingWalletMetadata: No relays connected")
+            return@withContext null
+        }
+
+        var existingMint: String? = null
+        var hasPrivkey = false
+        var hasMnemonic = false
+        val eoseReceived = CompletableDeferred<String>()
+
+        val subId = relayManager.subscribe(
+            kinds = listOf(KIND_WALLET),
+            authors = listOf(myPubKey),
+            tags = mapOf("d" to listOf(WALLET_D_TAG)),
+            limit = 1,
+            onEvent = { event, relayUrl ->
+                try {
+                    val decrypted = runBlocking { signer.nip44Decrypt(event.content, myPubKey) }
+                    val parsed = parseWalletMetadata(decrypted)
+                    existingMint = parsed.mintUrl
+                    hasPrivkey = parsed.privkey != null
+                    hasMnemonic = parsed.mnemonic != null
+                    Log.d(TAG, "Found existing NIP-60 metadata: mint=$existingMint, hasPrivkey=$hasPrivkey, hasMnemonic=$hasMnemonic")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to parse existing metadata: ${e.message}")
+                }
+            },
+            onEose = { eoseReceived.complete(it) }
+        )
+
+        withTimeoutOrNull(QUERY_TIMEOUT_MS) { eoseReceived.await() }
+        relayManager.closeSubscription(subId)
+
+        if (existingMint != null) {
+            ExistingWalletInfo(existingMint!!, hasPrivkey, hasMnemonic)
+        } else {
+            null
+        }
+    }
+
+    /**
      * Publish wallet metadata (Kind 17375) in NIP-60 standard format.
      * Stores mint URL, wallet private key, and mnemonic for full backup.
      *
@@ -532,10 +587,16 @@ class Nip60WalletSync(
      *   ["mint", "https://mint.example.com"],
      *   ["mnemonic", "word1 word2 ..."]     // Custom extension for cdk-kotlin seed
      * ]
+     *
+     * @param mintUrl The mint URL to store in metadata
+     * @param walletName Display name for the wallet
+     * @param forceOverwrite If false, will not overwrite existing metadata from a different mint
+     *                       (protects cross-app NIP-60 portability)
      */
     suspend fun publishWalletMetadata(
         mintUrl: String,
-        walletName: String = "Ridestr Wallet"
+        walletName: String = "Ridestr Wallet",
+        forceOverwrite: Boolean = false
     ): Boolean = withContext(Dispatchers.IO) {
         val signer = keyManager.getSigner()
         val myPubKey = keyManager.getPubKeyHex()
@@ -549,6 +610,18 @@ class Nip60WalletSync(
         if (!waitForRelayConnection()) {
             Log.e(TAG, "publishWalletMetadata: No relays connected - metadata NOT backed up!")
             return@withContext false
+        }
+
+        // NIP-60 SAFETY: Check if existing metadata is from a different mint
+        // This protects users who import keys with wallet data from other apps (Minibits, nutstash, etc.)
+        if (!forceOverwrite) {
+            val existing = getExistingWalletMetadata()
+            if (existing != null && existing.mintUrl != mintUrl) {
+                Log.w(TAG, "NIP-60 SAFETY: Existing wallet metadata found for different mint (${existing.mintUrl})")
+                Log.w(TAG, "Not overwriting to preserve cross-app NIP-60 data. Use forceOverwrite=true to replace.")
+                Log.w(TAG, "Existing metadata has: privkey=${existing.hasPrivkey}, mnemonic=${existing.hasMnemonic}")
+                return@withContext false
+            }
         }
 
         try {
@@ -1070,4 +1143,14 @@ data class WalletState(
     val mintUrl: String?,
     val balance: WalletBalance,
     val proofCount: Int
+)
+
+/**
+ * Information about existing NIP-60 wallet metadata.
+ * Used to check before overwriting cross-app wallet data.
+ */
+data class ExistingWalletInfo(
+    val mintUrl: String,
+    val hasPrivkey: Boolean,
+    val hasMnemonic: Boolean
 )
