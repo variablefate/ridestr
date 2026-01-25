@@ -1270,6 +1270,13 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun boostDirectOffer() {
         val state = _uiState.value
+
+        // Guard against double-tap race condition
+        if (state.isSendingOffer) {
+            Log.d(TAG, "boostDirectOffer: already sending, ignoring")
+            return
+        }
+
         val driver = state.selectedDriver ?: return
         val currentFare = state.fareEstimate ?: return
         val pickup = state.pickupLocation ?: return
@@ -1277,6 +1284,24 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         val rideRoute = state.routeResult  // Already calculated pickup→destination route
         val boostAmount = getBoostAmount()
         val newFare = currentFare + boostAmount
+
+        // Check wallet balance before boosting (includes 2% fee buffer for cross-mint)
+        val newFareWithFees = (newFare * (1 + FEE_BUFFER_PERCENT)).toLong()
+        val currentBalance = walletService?.getBalance() ?: 0L
+
+        if (currentBalance < newFareWithFees) {
+            val shortfall = newFareWithFees - currentBalance
+            Log.w(TAG, "Insufficient funds for boost: need $newFareWithFees sats, have $currentBalance sats")
+            _uiState.value = state.copy(
+                showInsufficientFundsDialog = true,
+                insufficientFundsAmount = shortfall,
+                depositAmountNeeded = shortfall
+            )
+            return
+        }
+
+        // Set flag BEFORE coroutine to close race window
+        _uiState.value = state.copy(isSendingOffer = true)
 
         viewModelScope.launch {
             // Cancel current timeout
@@ -1463,9 +1488,34 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun boostFare() {
         val state = _uiState.value
+
+        // Guard against double-tap race condition
+        if (state.isSendingOffer) {
+            Log.d(TAG, "boostFare: already sending, ignoring")
+            return
+        }
+
         val currentFare = state.fareEstimate ?: return
         val boostAmount = getBoostAmount()
         val newFare = currentFare + boostAmount
+
+        // Check wallet balance before boosting (includes 2% fee buffer for cross-mint)
+        val newFareWithFees = (newFare * (1 + FEE_BUFFER_PERCENT)).toLong()
+        val currentBalance = walletService?.getBalance() ?: 0L
+
+        if (currentBalance < newFareWithFees) {
+            val shortfall = newFareWithFees - currentBalance
+            Log.w(TAG, "Insufficient funds for boost: need $newFareWithFees sats, have $currentBalance sats")
+            _uiState.value = state.copy(
+                showInsufficientFundsDialog = true,
+                insufficientFundsAmount = shortfall,
+                depositAmountNeeded = shortfall
+            )
+            return
+        }
+
+        // Set flag BEFORE coroutine to close race window
+        _uiState.value = state.copy(isSendingOffer = true)
 
         viewModelScope.launch {
             // Cancel current timeout
