@@ -1,5 +1,6 @@
 package com.ridestr.common.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -39,6 +40,8 @@ fun RelayManagementScreen(
     onReconnect: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
+    BackHandler(onBack = onBack)
+
     var isReconnecting by remember { mutableStateOf(false) }
     // Relay management state - derive effectiveRelays reactively from customRelays
     val customRelays by settingsManager.customRelays.collectAsState()

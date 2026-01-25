@@ -1,5 +1,6 @@
 package com.ridestr.rider.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -31,6 +32,8 @@ fun SettingsScreen(
     onOpenWalletSettings: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    BackHandler(onBack = onBack)
+
     Scaffold(
         topBar = {
             TopAppBar(

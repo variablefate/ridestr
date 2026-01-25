@@ -1,5 +1,6 @@
 package com.ridestr.common.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
@@ -36,6 +37,8 @@ fun RideDetailScreen(
     onTip: ((lightningAddress: String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
+    BackHandler(onBack = onBack)
+
     val dateFormat = remember { SimpleDateFormat("EEEE, MMMM d, yyyy", Locale.getDefault()) }
     val timeFormat = remember { SimpleDateFormat("h:mm a", Locale.getDefault()) }
     val formattedDate = remember(ride.timestamp) {

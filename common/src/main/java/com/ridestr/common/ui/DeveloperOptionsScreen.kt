@@ -1,5 +1,6 @@
 package com.ridestr.common.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -28,6 +29,8 @@ fun DeveloperOptionsScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    BackHandler(onBack = onBack)
+
     val useGeocodingSearch by settingsManager.useGeocodingSearch.collectAsState()
 
     // Driver-specific settings

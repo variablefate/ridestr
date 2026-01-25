@@ -1,5 +1,6 @@
 package com.ridestr.rider.ui.screens
 
+import androidx.activity.compose.BackHandler
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -42,6 +43,8 @@ fun TipScreen(
     onTipSent: (tipAmountSats: Long) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    BackHandler(onBack = onBack)
+
     val context = LocalContext.current
 
     // Preset tip amounts in sats

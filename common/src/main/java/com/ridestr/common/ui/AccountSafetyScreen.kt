@@ -1,5 +1,6 @@
 package com.ridestr.common.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -34,6 +35,8 @@ fun AccountSafetyScreen(
     walletService: WalletService? = null,
     modifier: Modifier = Modifier
 ) {
+    BackHandler(onBack = onBack)
+
     var showDeleteDialog by remember { mutableStateOf(false) }
     var isDeleting by remember { mutableStateOf(false) }
     var deleteResult by remember { mutableStateOf<DeleteResult?>(null) }

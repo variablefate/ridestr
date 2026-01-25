@@ -1,5 +1,6 @@
 package com.ridestr.common.ui
 
+import androidx.activity.compose.BackHandler
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -64,6 +65,8 @@ fun WalletDetailScreen(
     initialDepositAmount: Long? = null,  // If set, auto-open deposit dialog with this amount
     modifier: Modifier = Modifier
 ) {
+    BackHandler(onBack = onBack)
+
     val balance by walletService.balance.collectAsState()
     val isConnected by walletService.isConnected.collectAsState()
     val mintName by walletService.currentMintName.collectAsState()

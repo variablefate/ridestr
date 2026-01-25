@@ -1,5 +1,6 @@
 package com.ridestr.common.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -36,6 +37,8 @@ fun TileManagementScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    BackHandler(onBack = onBack)
+
     val scope = rememberCoroutineScope()
     val downloadedRegions by tileManager.downloadedRegions.collectAsState()
     val downloadStatus by tileManager.downloadStatus.collectAsState()

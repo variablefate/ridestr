@@ -1,5 +1,6 @@
 package com.ridestr.common.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
@@ -44,6 +45,8 @@ fun WalletSettingsScreen(
     modifier: Modifier = Modifier,
     recommendedMints: List<AdminMintOption> = emptyList()
 ) {
+    BackHandler(onBack = onBack)
+
     val isConnected by walletService.isConnected.collectAsState()
     val balance by walletService.balance.collectAsState()
     val mintName by walletService.currentMintName.collectAsState()

@@ -1,5 +1,6 @@
 package com.drivestr.app.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -42,6 +43,8 @@ fun EarningsScreen(
     onRideClick: (RideHistoryEntry) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    BackHandler(onBack = onBack)
+
     val rides by rideHistoryRepository.rides.collectAsState()
     val stats by rideHistoryRepository.stats.collectAsState()
     val isLoading by rideHistoryRepository.isLoading.collectAsState()
