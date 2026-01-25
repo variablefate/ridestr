@@ -293,10 +293,13 @@ private fun TileSetupCard(
     val isDownloading = downloadStatus?.state == DownloadState.DOWNLOADING ||
             downloadStatus?.state == DownloadState.VERIFYING
 
+    // Use highlighted style for recommended tiles that aren't downloaded yet
+    val isHighlighted = isRecommended && !isDownloaded && !region.isBundled
+
     Card(
         modifier = modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
-            containerColor = if (isRecommended && !isDownloaded && !region.isBundled)
+            containerColor = if (isHighlighted)
                 MaterialTheme.colorScheme.primaryContainer
             else
                 MaterialTheme.colorScheme.surface
@@ -313,7 +316,11 @@ private fun TileSetupCard(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = region.name,
-                        style = MaterialTheme.typography.titleSmall
+                        style = MaterialTheme.typography.titleSmall,
+                        color = if (isHighlighted)
+                            MaterialTheme.colorScheme.onPrimaryContainer
+                        else
+                            MaterialTheme.colorScheme.onSurface
                     )
                     if (region.isBundled) {
                         Spacer(modifier = Modifier.width(8.dp))
@@ -327,7 +334,10 @@ private fun TileSetupCard(
                 Text(
                     text = region.getFormattedSize(),
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = if (isHighlighted)
+                        MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                    else
+                        MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 
