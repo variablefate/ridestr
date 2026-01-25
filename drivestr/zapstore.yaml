@@ -15,7 +15,8 @@ description: |
   - Encrypted chat with riders
   - NIP-60 wallet backup
 tags: bitcoin nostr rideshare cashu ecash transportation driver
-license: MIT
+license: MIT-No-Shitcoins
+icon: icon.png
 
 assets:
   - build/outputs/apk/release/.*\.apk
