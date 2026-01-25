@@ -19,7 +19,6 @@ Ridestr is a decentralized rideshare platform built on Nostr. This documentation
 | NUT-13 Deterministic Secrets | ✅ COMPLETE | Seed-based recovery |
 | NUT-09 Restore | ✅ COMPLETE | Mint scanning for recovery |
 | Payment Integration | ✅ COMPLETE | Fully wired, HTLC escrow, NIP-60 sync |
-| Driver Monitoring (Issue #22) | ✅ COMPLETE | Notify rider when driver goes offline |
 
 ---
 
