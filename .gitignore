@@ -67,6 +67,10 @@ obj/
 # Windows
 Thumbs.db
 ehthumbs.db
+nul
+
+# Local build scripts
+build_release.bat
 
 # Kotlin
 .kotlin/
