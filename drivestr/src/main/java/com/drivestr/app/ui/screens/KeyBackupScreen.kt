@@ -1,5 +1,6 @@
 package com.drivestr.app.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -26,6 +27,8 @@ fun KeyBackupScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    BackHandler(onBack = onBack)
+
     val clipboardManager = LocalClipboardManager.current
     var showNsec by remember { mutableStateOf(false) }
     var copiedNpub by remember { mutableStateOf(false) }

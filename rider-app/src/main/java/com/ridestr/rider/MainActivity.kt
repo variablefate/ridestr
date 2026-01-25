@@ -93,6 +93,7 @@ enum class Screen {
     ONBOARDING,
     PROFILE_SYNC,       // Sync profile data on key import (before profile setup)
     PROFILE_SETUP,
+    PROFILE_EDIT,       // Edit existing profile (from account menu)
     WALLET_SETUP,       // Wallet onboarding (after profile, before location)
     LOCATION_PERMISSION,
     TILE_SETUP,
@@ -436,6 +437,19 @@ fun RidestrApp() {
                 )
             }
 
+            Screen.PROFILE_EDIT -> {
+                val profileViewModel: ProfileViewModel = viewModel()
+                ProfileSetupScreen(
+                    viewModel = profileViewModel,
+                    onComplete = {
+                        currentScreen = Screen.MAIN
+                    },
+                    isEditMode = true,
+                    onBack = { currentScreen = Screen.MAIN },
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
+
             Screen.WALLET_SETUP -> {
                 WalletSetupScreen(
                     walletService = walletService,
@@ -550,7 +564,7 @@ fun RidestrApp() {
                         currentScreen = Screen.ONBOARDING
                     },
                     onOpenProfile = {
-                        currentScreen = Screen.PROFILE_SETUP
+                        currentScreen = Screen.PROFILE_EDIT
                     },
                     onOpenBackup = {
                         currentScreen = Screen.BACKUP_KEYS

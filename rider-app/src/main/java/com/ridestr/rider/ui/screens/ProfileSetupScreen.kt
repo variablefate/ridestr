@@ -1,8 +1,11 @@
 package com.ridestr.rider.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -19,17 +22,38 @@ import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
 fun ProfileSetupScreen(
     viewModel: ProfileViewModel,
     onComplete: () -> Unit,
+    isEditMode: Boolean = false,
+    onBack: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val uiState by viewModel.uiState.collectAsState()
 
+    // Enable back handler for edit mode
+    if (isEditMode && onBack != null) {
+        BackHandler(onBack = onBack)
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Set Up Your Profile") },
+                title = { Text(if (isEditMode) "Edit Profile" else "Set Up Your Profile") },
+                navigationIcon = if (isEditMode && onBack != null) {
+                    {
+                        IconButton(onClick = onBack) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Back"
+                            )
+                        }
+                    }
+                } else {
+                    {}
+                },
                 actions = {
-                    TextButton(onClick = { viewModel.skip(onComplete) }) {
-                        Text("Skip")
+                    if (!isEditMode) {
+                        TextButton(onClick = { viewModel.skip(onComplete) }) {
+                            Text("Skip")
+                        }
                     }
                 }
             )

@@ -92,6 +92,7 @@ enum class Screen {
     ONBOARDING,
     PROFILE_SYNC,       // Sync profile data on key import (before profile setup)
     PROFILE_SETUP,
+    PROFILE_EDIT,       // Edit existing profile (from account menu)
     VEHICLE_SETUP,      // Vehicle onboarding for drivers without vehicles
     WALLET_SETUP,       // Wallet onboarding (after vehicle, before location)
     LOCATION_PERMISSION,
@@ -429,6 +430,19 @@ fun DrivestrApp() {
                 )
             }
 
+            Screen.PROFILE_EDIT -> {
+                val profileViewModel: ProfileViewModel = viewModel()
+                ProfileSetupScreen(
+                    viewModel = profileViewModel,
+                    onComplete = {
+                        currentScreen = Screen.MAIN
+                    },
+                    isEditMode = true,
+                    onBack = { currentScreen = Screen.MAIN },
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
+
             Screen.VEHICLE_SETUP -> {
                 VehicleSetupScreen(
                     vehicleRepository = vehicleRepository,
@@ -570,7 +584,7 @@ fun DrivestrApp() {
                         currentScreen = Screen.ONBOARDING
                     },
                     onOpenProfile = {
-                        currentScreen = Screen.PROFILE_SETUP
+                        currentScreen = Screen.PROFILE_EDIT
                     },
                     onOpenBackup = {
                         currentScreen = Screen.BACKUP_KEYS
