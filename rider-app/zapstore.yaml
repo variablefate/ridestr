@@ -1,0 +1,24 @@
+# Zapstore publishing config for Ridestr Rider App
+# Publish with: cd rider-app && zapstore publish
+
+repository: https://github.com/variablefate/ridestr
+name: Ridestr Rider
+summary: Nostr-based rideshare app for riders
+description: |
+  Request rides and pay with Bitcoin using Cashu ecash.
+  Built on Nostr for censorship-resistant, peer-to-peer ridesharing.
+
+  Features:
+  - Request rides from nearby drivers
+  - Pay with Cashu ecash (NUT-14 HTLC escrow)
+  - Real-time ride tracking
+  - Encrypted chat with drivers
+  - NIP-60 wallet backup
+tags: bitcoin nostr rideshare cashu ecash transportation
+license: MIT
+
+assets:
+  - build/outputs/apk/release/.*\.apk
+
+remote_metadata:
+  - github
