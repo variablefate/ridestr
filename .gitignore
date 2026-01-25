@@ -70,7 +70,7 @@ ehthumbs.db
 nul
 
 # Local build scripts
-build_release.bat
+build*.bat
 
 # Kotlin
 .kotlin/
