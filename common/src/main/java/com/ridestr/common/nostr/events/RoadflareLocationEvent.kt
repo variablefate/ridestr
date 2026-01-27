@@ -30,7 +30,6 @@ import org.json.JSONObject
  * Status values:
  * - "online": Available for RoadFlare requests
  * - "on_ride": Currently giving a ride
- * - "do_not_disturb": Explicitly unavailable (persists until manually ended)
  */
 object RoadflareLocationEvent {
 
@@ -41,7 +40,7 @@ object RoadflareLocationEvent {
     object Status {
         const val ONLINE = "online"
         const val ON_RIDE = "on_ride"
-        const val DO_NOT_DISTURB = "do_not_disturb"
+        const val OFFLINE = "offline"
     }
 
     /**

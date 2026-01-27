@@ -108,7 +108,7 @@ object RideOfferEvent {
      */
     suspend fun create(
         signer: NostrSigner,
-        driverAvailabilityEventId: String,
+        driverAvailabilityEventId: String? = null,
         driverPubKey: String,
         pickup: Location,
         destination: Location,
@@ -150,11 +150,13 @@ object RideOfferEvent {
         val expiration = RideshareExpiration.minutesFromNow(RideshareExpiration.RIDE_OFFER_MINUTES)
 
         val tagsList = mutableListOf(
-            arrayOf(RideshareTags.EVENT_REF, driverAvailabilityEventId),
             arrayOf(RideshareTags.PUBKEY_REF, driverPubKey),
             arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG),
             arrayOf(RideshareTags.EXPIRATION, expiration.toString())
         )
+        if (driverAvailabilityEventId != null) {
+            tagsList.add(0, arrayOf(RideshareTags.EVENT_REF, driverAvailabilityEventId))
+        }
 
         // Add RoadFlare tag if this is from rider's favorite driver network
         if (isRoadflare) {
@@ -165,71 +167,6 @@ object RideOfferEvent {
             createdAt = System.currentTimeMillis() / 1000,
             kind = RideshareEventKinds.RIDE_OFFER,
             tags = tagsList.toTypedArray(),
-            content = encryptedContent
-        )
-    }
-
-    /**
-     * Create and sign a RoadFlare ride offer to a favorite driver.
-     * Unlike regular offers, this doesn't require a driver availability event.
-     * Content is NIP-44 encrypted to protect pickup/destination.
-     *
-     * @param driverPubKey The driver's Nostr public key
-     * @param pickup The pickup location
-     * @param destination The destination location
-     * @param fareEstimate The estimated fare in sats
-     * @param pickupRouteKm Optional driver→pickup distance (if driver location known)
-     * @param rideRouteKm Optional pickup→destination distance
-     * @param rideRouteMin Optional pickup→destination duration
-     * @param paymentHash HTLC payment hash for escrow
-     * @param mintUrl Rider's Cashu mint URL
-     * @param paymentMethod Payment method (default "cashu")
-     */
-    suspend fun createRoadflare(
-        signer: NostrSigner,
-        driverPubKey: String,
-        pickup: Location,
-        destination: Location,
-        fareEstimate: Double,
-        pickupRouteKm: Double? = null,
-        pickupRouteMin: Double? = null,
-        rideRouteKm: Double? = null,
-        rideRouteMin: Double? = null,
-        paymentHash: String? = null,
-        mintUrl: String? = null,
-        paymentMethod: String = "cashu"
-    ): Event {
-        // Build plaintext content
-        val plaintext = JSONObject().apply {
-            put("fare_estimate", fareEstimate)
-            put("destination", destination.toJson())
-            put("approx_pickup", pickup.approximate().toJson())
-            pickupRouteKm?.let { put("pickup_route_km", it) }
-            pickupRouteMin?.let { put("pickup_route_min", it) }
-            rideRouteKm?.let { put("ride_route_km", it) }
-            rideRouteMin?.let { put("ride_route_min", it) }
-            paymentHash?.let { put("payment_hash", it) }
-            mintUrl?.let { put("mint_url", it) }
-            put("payment_method", paymentMethod)
-        }.toString()
-
-        // Encrypt using NIP-44 so only the target driver can read it
-        val encryptedContent = signer.nip44Encrypt(plaintext, driverPubKey)
-
-        // Add NIP-40 expiration (15 minutes)
-        val expiration = RideshareExpiration.minutesFromNow(RideshareExpiration.RIDE_OFFER_MINUTES)
-
-        val tags = arrayOf(
-            arrayOf(RideshareTags.PUBKEY_REF, driverPubKey),
-            arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG),
-            arrayOf(RideshareTags.HASHTAG, ROADFLARE_TAG),  // Always include RoadFlare tag
-            arrayOf(RideshareTags.EXPIRATION, expiration.toString())
-        )
-
-        return signer.sign<Event>(
-            createdAt = System.currentTimeMillis() / 1000,
-            kind = RideshareEventKinds.RIDE_OFFER,
-            tags = tags,
             content = encryptedContent
         )
     }
@@ -315,15 +252,16 @@ object RideOfferEvent {
                 }
             }
 
-            if (driverEventId == null || driverPubKey == null) return null
+            if (driverPubKey == null) return null
 
             RideOfferDataEncrypted(
                 eventId = event.id,
                 riderPubKey = event.pubKey,
-                driverEventId = driverEventId,
+                driverEventId = driverEventId ?: "",
                 driverPubKey = driverPubKey,
                 encryptedContent = event.content,
-                createdAt = event.createdAt
+                createdAt = event.createdAt,
+                isRoadflare = isRoadflare(event)
             )
         } catch (e: Exception) {
             Log.e(TAG, "Failed to parse encrypted direct offer", e)
@@ -383,7 +321,8 @@ object RideOfferEvent {
                 paymentHash = paymentHash,
                 destinationGeohash = destinationGeohash,
                 mintUrl = mintUrl,
-                paymentMethod = paymentMethod
+                paymentMethod = paymentMethod,
+                isRoadflare = encryptedData.isRoadflare
             )
         } catch (e: Exception) {
             Log.e(TAG, "Failed to decrypt direct offer", e)
@@ -436,7 +375,8 @@ object RideOfferEvent {
                 approxPickup = approxPickup,
                 destination = destination,
                 fareEstimate = fareEstimate,
-                createdAt = event.createdAt
+                createdAt = event.createdAt,
+                isRoadflare = isRoadflare(event)
             )
         } catch (e: Exception) {
             null
@@ -475,7 +415,8 @@ data class RideOfferDataEncrypted(
     val driverEventId: String,
     val driverPubKey: String,
     val encryptedContent: String,
-    val createdAt: Long
+    val createdAt: Long,
+    val isRoadflare: Boolean = false
 )
 
 /**
@@ -500,7 +441,9 @@ data class RideOfferData(
     val destinationGeohash: String? = null,
     // Multi-mint support (Issue #13)
     val mintUrl: String? = null,
-    val paymentMethod: String = "cashu"
+    val paymentMethod: String = "cashu",
+    // RoadFlare flag - true if from rider's favorite driver network
+    val isRoadflare: Boolean = false
 )
 
 /**

@@ -20,6 +20,9 @@ import com.drivestr.app.viewmodels.DriverStage
 import com.ridestr.common.settings.DisplayCurrency
 import com.ridestr.common.settings.DistanceUnit
 import com.ridestr.common.settings.SettingsManager
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlinx.coroutines.launch
 
 /**
@@ -74,6 +77,8 @@ fun SettingsContent(
     onOpenTiles: () -> Unit,
     onOpenDevOptions: () -> Unit,
     onOpenWalletSettings: () -> Unit = {},
+    removedFollowers: List<com.ridestr.common.nostr.events.MutedRider> = emptyList(),
+    onUnremoveFollower: (String) -> Unit = {},
     onSyncProfile: (suspend () -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
@@ -192,7 +197,6 @@ fun SettingsContent(
                 onCheckedChange = { enabled ->
                     settingsManager.setRoadflareAlertsEnabled(enabled)
                     // Note: Service start/stop is handled by MainActivity's LaunchedEffect
-                    // which respects both this setting AND DND status
                     if (enabled) {
                         RoadflareListenerService.start(context)
                     } else {
@@ -254,6 +258,52 @@ fun SettingsContent(
                 icon = Icons.Default.Code,
                 onClick = onOpenDevOptions
             )
+
+            // Removed Followers Section
+            if (removedFollowers.isNotEmpty()) {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+                Text(
+                    text = "Removed Followers",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(vertical = 8.dp)
+                )
+
+                Text(
+                    text = "These riders can no longer see your location. Restoring a follower will make them appear as pending (needing a fresh key exchange).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+
+                val dateFormat = remember { SimpleDateFormat("MMM d, yyyy", Locale.getDefault()) }
+                removedFollowers.forEach { removed ->
+                    val displayName = "${removed.pubkey.take(8)}...${removed.pubkey.takeLast(4)}"
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = displayName,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Text(
+                                text = "Removed ${dateFormat.format(Date(removed.mutedAt * 1000))}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        TextButton(onClick = { onUnremoveFollower(removed.pubkey) }) {
+                            Text("Restore")
+                        }
+                    }
+                }
+            }
 
             // Profile Sync Section (last item)
             if (onSyncProfile != null) {

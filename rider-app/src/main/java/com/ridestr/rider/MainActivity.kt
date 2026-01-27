@@ -281,6 +281,13 @@ fun RidestrApp() {
             }
         }
         android.util.Log.d("MainActivity", "Subscribed to RoadFlare key shares: $subId")
+
+        try {
+            kotlinx.coroutines.awaitCancellation()
+        } finally {
+            subId?.let { nostrService.closeSubscription(it) }
+            android.util.Log.d("MainActivity", "Closed RoadFlare key share subscription: $subId")
+        }
     }
 
     // Observable sync state for potential UI feedback
@@ -1039,12 +1046,10 @@ fun MainScreen(
                 RoadflareTab(
                     followedDriversRepository = followedDriversRepository,
                     nostrService = nostrService,
+                    settingsManager = settingsManager,
                     riderLocation = riderLocation,
                     onAddDriver = onAddDriver,
                     onDriverClick = { /* TODO: Show driver details */ },
-                    onSendRoadflare = { drivers ->
-                        /* TODO: Send RoadFlare broadcast to drivers */
-                    },
                     onDriverRemoved = {
                         // Publish updated Kind 30011 (even if empty) to update p-tags on relays
                         coroutineScope.launch {

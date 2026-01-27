@@ -1015,7 +1015,7 @@ class NostrService(
         }
 
         return try {
-            val event = RideOfferEvent.createRoadflare(
+            val event = RideOfferEvent.create(
                 signer = signer,
                 driverPubKey = driverPubKey,
                 pickup = pickup,
@@ -1027,7 +1027,8 @@ class NostrService(
                 rideRouteMin = rideRouteMin,
                 paymentHash = paymentHash,
                 mintUrl = mintUrl,
-                paymentMethod = paymentMethod
+                paymentMethod = paymentMethod,
+                isRoadflare = true
             )
             relayManager.publish(event)
             Log.d(TAG, "Sent RoadFlare offer to ${driverPubKey.take(16)}: ${event.id}")
@@ -2205,7 +2206,7 @@ class NostrService(
 
     /**
      * Publish driver RoadFlare state to Nostr (Kind 30012).
-     * Encrypted to self - contains keypair, followers, muted list, DND status.
+     * Encrypted to self - contains keypair, followers, muted list.
      *
      * @param signer The driver's signer (can be different from keyManager.getSigner in some cases)
      * @param state The complete RoadFlare state
@@ -2283,7 +2284,7 @@ class NostrService(
                     kotlinx.coroutines.runBlocking {
                         DriverRoadflareStateEvent.parseAndDecrypt(signer, event)?.let { data ->
                             result = data
-                            Log.d(TAG, "Decrypted driver RoadFlare state: key v${data.roadflareKey?.version}, ${data.followers.size} followers, DND=${data.dndActive}")
+                            Log.d(TAG, "Decrypted driver RoadFlare state: key v${data.roadflareKey?.version}, ${data.followers.size} followers")
                         }
                     }
                 }

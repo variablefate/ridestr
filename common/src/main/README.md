@@ -39,7 +39,7 @@ The `common` module contains all shared code used by both rider and driver apps:
 | File | Kind | Purpose |
 |------|------|---------|
 | `DriverAvailabilityEvent.kt` | 30173 | Driver broadcasts availability with geohash |
-| `RideOfferEvent.kt` | 3173 | Rider sends offer to driver (NIP-44 encrypted) |
+| `RideOfferEvent.kt` | 3173 | Rider sends offer to driver (NIP-44 encrypted). `isRoadflare` flag detected from `["t","roadflare"]` tag. |
 | `RideAcceptanceEvent.kt` | 3174 | Driver accepts ride offer (includes `wallet_pubkey`) |
 | `RideConfirmationEvent.kt` | 3175 | Rider confirms with PIN |
 | `DriverRideStateEvent.kt` | 30180 | Driver status updates (history-based) |
@@ -54,7 +54,8 @@ The `common` module contains all shared code used by both rider and driver apps:
 | `RoadflareLocationEvent.kt` | 30014 | Driver location broadcast (encrypted to RoadFlare pubkey) |
 | `RoadflareKeyShareEvent.kt` | 3186 | RoadFlare private key distribution (driver → follower, 5-min expiry) |
 | `RoadflareKeyAckEvent.kt` | 3188 | RoadFlare key acknowledgement (follower → driver, 5-min expiry) |
-| `RideshareEventKinds.kt` | - | Kind constants, expiration times, `PaymentMethod` enum |
+| `RoadflareFollowNotifyEvent.kt` | 3187 | RoadFlare follow notification (rider → driver, real-time UX) |
+| `RideshareEventKinds.kt` | - | Kind constants, expiration times, `PaymentMethod` enum (incl. RoadFlare alternate methods) |
 
 ### Sync System (`java/com/ridestr/common/sync/`)
 
@@ -155,7 +156,7 @@ CREATED → ACCEPTED → CONFIRMED → EN_ROUTE → ARRIVED → IN_PROGRESS → 
 | `location/GeocodingService.kt` | Address search/reverse geocoding |
 | `notification/NotificationHelper.kt` | Push notification management |
 | `notification/SoundManager.kt` | Sound effects for ride events |
-| `settings/SettingsManager.kt` | App settings persistence + `syncableSettingsHash` for auto-backup |
+| `settings/SettingsManager.kt` | App settings persistence + `syncableSettingsHash` for auto-backup + `roadflarePaymentMethods` |
 | `settings/RemoteConfigManager.kt` | Platform config from admin pubkey (fare rates, mints) - one-time fetch on startup |
 
 ---
@@ -191,7 +192,7 @@ CREATED → ACCEPTED → CONFIRMED → EN_ROUTE → ARRIVED → IN_PROGRESS → 
 | `RemoteConfigManager` | `AdminConfigEvent` | Parse config event | `AdminConfigEvent.parse(event)` |
 | `RoadflareKeyManager` | `DriverRoadflareRepository` | Key + follower state | `repository.getRoadflareKey()` |
 | `RoadflareKeyManager` | `NostrService` | Key share publishing | `nostrService.publishRoadflareKeyShare()` |
-| `RoadflareLocationBroadcaster` | `DriverRoadflareRepository` | State checks | `repository.state.value?.dndActive` |
+| `RoadflareLocationBroadcaster` | `DriverRoadflareRepository` | State checks | `repository.state.value` |
 | `RoadflareLocationBroadcaster` | `NostrService` | Location broadcast | `nostrService.publishRoadflareLocation()` |
 | `FollowedDriversSyncAdapter` | `FollowedDriversRepository` | Driver list sync | `repo.restoreFromBackup()` |
 | `DriverRoadflareSyncAdapter` | `DriverRoadflareRepository` | RoadFlare state sync | `repo.restoreFromBackup()` |
@@ -357,7 +358,7 @@ When ANY setting changes, the hash changes, triggering auto-backup to Nostr.
 
 ### Multi-Mint Support (Issue #13 - Phase 1)
 Protocol events now include payment method fields for multi-mint compatibility:
-- `PaymentMethod` enum: `CASHU`, `LIGHTNING`, `FIAT_CASH` in `RideshareEventKinds.kt`
+- `PaymentMethod` enum: `CASHU`, `LIGHTNING`, `FIAT_CASH` + RoadFlare alternate methods (`ZELLE`, `PAYPAL`, `CASH_APP`, `VENMO`, `CASH`, `STRIKE`) in `RideshareEventKinds.kt`
 - `mint_url` and `payment_methods` in Driver Availability (Kind 30173)
 - `mint_url` and `payment_method` in Ride Offer (Kind 3173) and Acceptance (Kind 3174)
-- `paymentMethods`, `defaultPaymentMethod`, `mintUrl` in SettingsBackup (Kind 30177)
+- `paymentMethods`, `defaultPaymentMethod`, `mintUrl`, `roadflarePaymentMethods` in SettingsBackup (Kind 30177)

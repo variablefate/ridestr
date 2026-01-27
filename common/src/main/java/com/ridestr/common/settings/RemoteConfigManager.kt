@@ -156,6 +156,7 @@ class RemoteConfigManager(
                 val config = AdminConfig(
                     fareRateUsdPerMile = json.optDouble("fare_rate", AdminConfig.DEFAULT_FARE_RATE),
                     minimumFareUsd = json.optDouble("minimum_fare", AdminConfig.DEFAULT_MINIMUM_FARE),
+                    roadflareFareRateUsdPerMile = json.optDouble("roadflare_fare_rate", AdminConfig.DEFAULT_ROADFLARE_FARE_RATE),
                     recommendedMints = mints.ifEmpty { AdminConfig.DEFAULT_MINTS },
                     createdAt = json.optLong("created_at", 0)
                 )
@@ -187,6 +188,7 @@ class RemoteConfigManager(
             val json = JSONObject().apply {
                 put("fare_rate", config.fareRateUsdPerMile)
                 put("minimum_fare", config.minimumFareUsd)
+                put("roadflare_fare_rate", config.roadflareFareRateUsdPerMile)
                 put("mints", mintsArray)
                 put("created_at", config.createdAt)
             }

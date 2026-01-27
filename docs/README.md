@@ -1,6 +1,6 @@
 # Ridestr Documentation
 
-**Last Updated**: 2026-01-22
+**Last Updated**: 2026-01-27
 
 Ridestr is a decentralized rideshare platform built on Nostr. This documentation provides comprehensive coverage of the protocol, architecture, and implementation.
 
@@ -19,13 +19,14 @@ Ridestr is a decentralized rideshare platform built on Nostr. This documentation
 | NUT-13 Deterministic Secrets | ✅ COMPLETE | Seed-based recovery |
 | NUT-09 Restore | ✅ COMPLETE | Mint scanning for recovery |
 | Payment Integration | ✅ COMPLETE | Fully wired, HTLC escrow, NIP-60 sync |
+| RoadFlare Network | ✅ COMPLETE | Personal driver network, three-state mode, location sharing |
 
 ---
 
 ## Documentation Index
 
 ### Protocol
-- [NOSTR_EVENTS.md](protocol/NOSTR_EVENTS.md) - All 10 active Nostr event kind definitions
+- [NOSTR_EVENTS.md](protocol/NOSTR_EVENTS.md) - All 18 active Nostr event kind definitions
 - [DEPRECATION.md](protocol/DEPRECATION.md) - Deprecated event history and migration notes
 
 ### Architecture

@@ -1,6 +1,6 @@
 # Ridestr Module Connections
 
-**Last Updated**: 2026-01-24
+**Last Updated**: 2026-01-27
 
 This document provides a comprehensive view of how all modules connect in the Ridestr codebase. Use this as a reference when making changes to understand what might be affected.
 
@@ -422,7 +422,8 @@ Auto-Backup Flow (MainActivity observers):
 └── Both: settingsManager.syncableSettingsHash → backupProfileData()
     └── syncableSettingsHash combines: displayCurrency, distanceUnit,
         notificationSettings, autoOpenNavigation, alwaysAskVehicle,
-        paymentMethods, defaultPaymentMethod, mintUrl, customRelays
+        paymentMethods, defaultPaymentMethod, mintUrl, customRelays,
+        roadflarePaymentMethods
 ```
 
 ### State Machines
@@ -469,7 +470,8 @@ State Machines
 | **30012** | Driver RoadFlare State | Driver | Driver | RoadFlare: keypair, followers, muted (to self) |
 | **30014** | RoadFlare Location | Driver | Rider | RoadFlare: encrypted location broadcast |
 | **3186** | RoadFlare Key Share | Driver | Rider | RoadFlare: private key DM to follower |
-| **3187** | Follow Notification | Rider | Driver | RoadFlare: follow/unfollow notification |
+| **3187** | Follow Notification | Rider | Driver | RoadFlare: follow notification (real-time UX) |
+| **3188** | Key Acknowledgement | Rider | Driver | RoadFlare: key receipt confirmation (5-min expiry) |
 
 ### NIP-60 Wallet Event Formats (January 2026 - Fully Compliant)
 
@@ -493,7 +495,14 @@ Protocol events now include payment method fields for multi-mint compatibility:
 PaymentMethod enum (RideshareEventKinds.kt)
 ├── CASHU - Cashu ecash (NUT-14 HTLC)
 ├── LIGHTNING - Lightning Network direct
-└── FIAT_CASH - Cash on delivery
+├── FIAT_CASH - Cash on delivery
+└── RoadFlare Alternate Methods:
+    ├── ZELLE - Zelle
+    ├── PAYPAL - PayPal
+    ├── CASH_APP - Cash App
+    ├── VENMO - Venmo
+    ├── CASH - Cash
+    └── STRIKE - Strike
 
 Fields added to events:
 ├── Kind 30173 (Availability): mint_url, payment_methods[]
@@ -555,13 +564,15 @@ Fields added to events:
 ```
 RoadFlare System
 ├── Rider App
-│   ├── RoadflareTab.kt - Favorite drivers UI, location subscription
+│   ├── RoadflareTab.kt - Favorite drivers UI, location subscription, payment methods dialog
 │   ├── AddDriverScreen.kt - Add driver via QR/manual entry
 │   └── FollowedDriversRepository.kt - Local cache of followed drivers + keys
 │
 ├── Driver App
-│   ├── RoadflareTab.kt - QR code, followers, DND toggle
-│   ├── RoadflareLocationBroadcaster.kt - Timer-based location broadcast
+│   ├── RoadflareTab.kt - QR code, followers, accepted payment methods
+│   ├── SettingsScreen.kt - Removed Followers list with "Restore" option
+│   ├── RoadflareListenerService.kt - Foreground service for background RoadFlare ride alerts
+│   ├── RoadflareLocationBroadcaster.kt - Timer-based location broadcast (~2 min)
 │   └── RoadflareKeyManager.kt - Keypair lifecycle, key distribution
 │
 └── Common Module
@@ -596,27 +607,29 @@ sequenceDiagram
     R->>R: Store roadflareKey in Kind 30011
 
     Note over R,D: Continuous location broadcast
-    loop Every 30 seconds
+    loop Every ~2 minutes
         D->>N: Kind 30014 (encrypted location)
         N->>R: Kind 30014 delivered
         R->>R: Decrypt with roadflareKey
     end
 
-    Note over R,D: Rider unfollows driver
-    R->>N: Kind 30011 (remove driver)
-    R->>N: Kind 3187 (unfollow notification)
-    N->>D: Kind 3187 delivered
-    D->>D: Remove follower (no key rotation)
+    Note over R,D: Rider receives key
+    R->>N: Kind 3188 (key acknowledgement)
+    N->>D: Kind 3188 delivered
 ```
 
-### Follower Approval State Machine
+### Follower State Machine
 
 ```
 [New Follow Request] ─→ PENDING ─approve─→ APPROVED ─→ [Key Sent]
-                          │                    │
-                          │ decline            │ mute (triggers key rotation)
-                          ▼                    ▼
-                       REMOVED              MUTED (excluded from broadcasts)
+                                               │
+                                               │ "Remove" (mutes under the hood + key rotation)
+                                               ▼
+                                            MUTED (filtered from UI, excluded from broadcasts)
+                                               │
+                                               │ "Restore" (from Settings → Removed Followers)
+                                               ▼
+                                            PENDING (needs fresh key exchange)
 ```
 
 ### Key Files and Methods
@@ -625,11 +638,10 @@ sequenceDiagram
 |-----------|------|--------|
 | Add follower | `RoadflareKeyManager.kt` | `handleNewFollower()` |
 | Approve follower | `RoadflareKeyManager.kt` | `approveFollower()` |
-| Decline follower | `RoadflareKeyManager.kt` | `declineFollower()` |
-| Handle unfollow | `RoadflareKeyManager.kt` | `handleUnfollow()` |
-| Mute follower | `RoadflareKeyManager.kt` | `handleMuteFollower()` |
+| Remove follower (mutes + rotates key) | `RoadflareKeyManager.kt` | `handleMuteFollower()` |
 | Send key | `RoadflareKeyManager.kt` | `sendKeyToFollower()` |
 | Rotate key | `RoadflareKeyManager.kt` | `rotateKey()` |
+| Unmute/restore follower | `DriverRoadflareRepository.kt` | `unmuteRider()` |
 | Broadcast location | `NostrService.kt` | `publishRoadflareLocation()` |
 | Subscribe to locations | `NostrService.kt` | `subscribeToRoadflareLocations()` |
 | Query followers | `NostrService.kt` | `queryRoadflareFollowers()` |
@@ -638,4 +650,5 @@ sequenceDiagram
 | Publish key ack | `NostrService.kt` | `publishRoadflareKeyAck()` |
 | Subscribe to key acks | `NostrService.kt` | `subscribeToRoadflareKeyAcks()` |
 | Fetch driver key timestamp | `NostrService.kt` | `fetchDriverKeyUpdatedAt()` |
-| ~~Send follow/unfollow~~ | `NostrService.kt` | ~~`publishRoadflareFollowNotify()`~~ (deprecated) |
+| Send follow notification | `NostrService.kt` | `publishRoadflareFollowNotify()` |
+| Subscribe to key acks | `NostrService.kt` | `subscribeToRoadflareKeyAcks()` |

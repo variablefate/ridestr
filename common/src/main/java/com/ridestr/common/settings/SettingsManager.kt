@@ -74,6 +74,9 @@ class SettingsManager(context: Context) {
         private const val KEY_DEFAULT_PAYMENT_METHOD = "default_payment_method"
         private const val KEY_MINT_URL = "mint_url"
 
+        // RoadFlare alternate payment methods (rider: what they offer, driver: what they accept)
+        private const val KEY_ROADFLARE_PAYMENT_METHODS = "roadflare_payment_methods"
+
         // Favorite Lightning addresses (Issue #14)
         private const val KEY_FAVORITE_LN_ADDRESSES = "favorite_ln_addresses"
         const val MAX_FAVORITE_ADDRESSES = 10
@@ -499,6 +502,25 @@ class SettingsManager(context: Context) {
         _defaultPaymentMethod.value = method
     }
 
+    // RoadFlare alternate payment methods (e.g., "zelle", "venmo", "cash")
+    private val _roadflarePaymentMethods = MutableStateFlow(loadRoadflarePaymentMethods())
+    val roadflarePaymentMethods: StateFlow<Set<String>> = _roadflarePaymentMethods.asStateFlow()
+
+    private fun loadRoadflarePaymentMethods(): Set<String> {
+        val stored = prefs.getString(KEY_ROADFLARE_PAYMENT_METHODS, null)
+        return if (stored.isNullOrBlank()) emptySet()
+        else stored.split(",").filter { it.isNotBlank() }.toSet()
+    }
+
+    fun setRoadflarePaymentMethods(methods: Set<String>) {
+        if (methods.isEmpty()) {
+            prefs.edit().remove(KEY_ROADFLARE_PAYMENT_METHODS).apply()
+        } else {
+            prefs.edit().putString(KEY_ROADFLARE_PAYMENT_METHODS, methods.joinToString(",")).apply()
+        }
+        _roadflarePaymentMethods.value = methods
+    }
+
     // Current Cashu mint URL (for backup/restore purposes)
     private val _mintUrl = MutableStateFlow<String?>(prefs.getString(KEY_MINT_URL, null))
     val mintUrl: StateFlow<String?> = _mintUrl.asStateFlow()
@@ -661,7 +683,9 @@ class SettingsManager(context: Context) {
             // Payment settings (Issue #13)
             paymentMethods = _paymentMethods.value,
             defaultPaymentMethod = _defaultPaymentMethod.value,
-            mintUrl = _mintUrl.value
+            mintUrl = _mintUrl.value,
+            // RoadFlare alternate payment methods
+            roadflarePaymentMethods = _roadflarePaymentMethods.value.toList()
         )
     }
 
@@ -689,6 +713,8 @@ class SettingsManager(context: Context) {
         setPaymentMethods(backup.paymentMethods)
         setDefaultPaymentMethod(backup.defaultPaymentMethod)
         setMintUrl(backup.mintUrl)
+        // Restore RoadFlare alternate payment methods
+        setRoadflarePaymentMethods(backup.roadflarePaymentMethods.toSet())
     }
 
     /**
@@ -719,6 +745,7 @@ class SettingsManager(context: Context) {
         _paymentMethods.value = listOf("cashu")
         _defaultPaymentMethod.value = "cashu"
         _mintUrl.value = null
+        _roadflarePaymentMethods.value = emptySet()
         // Favorite LN addresses (Issue #14)
         _favoriteLnAddresses.value = emptyList()
     }

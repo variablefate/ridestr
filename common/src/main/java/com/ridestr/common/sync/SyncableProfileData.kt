@@ -162,7 +162,6 @@ sealed class SyncMetadata {
     /** RoadFlare driver state sync result (driver app) */
     data class DriverRoadflare(
         val hasKey: Boolean,
-        val followerCount: Int,
-        val dndActive: Boolean
+        val followerCount: Int
     ) : SyncMetadata()
 }

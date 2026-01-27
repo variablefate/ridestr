@@ -901,7 +901,7 @@ RoadFlare enables riders to build a personal rideshare network from drivers they
 
 ### Kind 30012: Driver RoadFlare State
 
-**Purpose**: Driver's complete RoadFlare state - keypair, followers, muted list, DND status.
+**Purpose**: Driver's complete RoadFlare state - keypair, followers, muted list.
 
 **Type**: Parameterized Replaceable Event (NIP-33)
 
@@ -937,7 +937,6 @@ RoadFlare enables riders to build a personal rideshare network from drivers they
   "muted": [
     { "pubkey": "rider_pubkey", "mutedAt": 1234567890, "reason": "spam" }
   ],
-  "dndActive": false,
   "lastBroadcastAt": 1234567890,
   "updated_at": 1234567890
 }
@@ -964,7 +963,7 @@ RoadFlare enables riders to build a personal rideshare network from drivers they
 ```
 ["d", "roadflare-location"]
 ["t", "roadflare-location"]
-["status", "online"]  // online | on_ride | do_not_disturb
+["status", "online"]  // online | on_ride | offline
 ["key_version", "3"]
 ["expiration", "1234567890"]  // 5-minute TTL
 ```
@@ -990,7 +989,7 @@ RoadFlare enables riders to build a personal rideshare network from drivers they
 |--------|---------|
 | `online` | Available for RoadFlare requests |
 | `on_ride` | Currently giving a ride |
-| `do_not_disturb` | Unavailable (persists until explicit toggle) |
+| `offline` | Driver has gone offline |
 
 ---
 

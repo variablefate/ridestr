@@ -179,7 +179,8 @@ data class SettingsBackup(
     // Payment settings for multi-mint support (Issue #13)
     val paymentMethods: List<String> = listOf("cashu"),  // Supported payment methods
     val defaultPaymentMethod: String = "cashu",          // Preferred method for new rides
-    val mintUrl: String? = null                          // Current Cashu mint URL
+    val mintUrl: String? = null,                         // Current Cashu mint URL
+    val roadflarePaymentMethods: List<String> = emptyList() // RoadFlare alternate payment methods
 ) {
     /**
      * Serialize to JSON.
@@ -203,6 +204,12 @@ data class SettingsBackup(
             put("paymentMethods", paymentMethodsArray)
             put("defaultPaymentMethod", defaultPaymentMethod)
             mintUrl?.let { put("mintUrl", it) }
+            // RoadFlare alternate payment methods
+            if (roadflarePaymentMethods.isNotEmpty()) {
+                val rfArray = JSONArray()
+                roadflarePaymentMethods.forEach { rfArray.put(it) }
+                put("roadflarePaymentMethods", rfArray)
+            }
         }
     }
 
@@ -252,7 +259,14 @@ data class SettingsBackup(
                 // Payment settings (Issue #13)
                 paymentMethods = paymentMethods,
                 defaultPaymentMethod = json.optString("defaultPaymentMethod", "cashu"),
-                mintUrl = json.optString("mintUrl", null).takeIf { !it.isNullOrBlank() }
+                mintUrl = json.optString("mintUrl", null).takeIf { !it.isNullOrBlank() },
+                // RoadFlare alternate payment methods
+                roadflarePaymentMethods = mutableListOf<String>().also { list ->
+                    val rfArray = json.optJSONArray("roadflarePaymentMethods")
+                    if (rfArray != null) {
+                        for (i in 0 until rfArray.length()) list.add(rfArray.getString(i))
+                    }
+                }
             )
         }
     }

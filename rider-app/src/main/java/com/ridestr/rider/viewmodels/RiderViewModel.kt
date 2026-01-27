@@ -1264,7 +1264,10 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.value = state.copy(
                 showInsufficientFundsDialog = true,
                 insufficientFundsAmount = shortfall,
-                depositAmountNeeded = shortfall
+                depositAmountNeeded = shortfall,
+                insufficientFundsIsRoadflare = true,
+                pendingRoadflareDriverPubKey = driverPubKey,
+                pendingRoadflareDriverLocation = driverLocation
             )
             return
         }
@@ -1312,6 +1315,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 Log.d(TAG, "Sent RoadFlare offer to ${driverPubKey.take(16)}: $eventId")
                 myRideEventIds.add(eventId)
                 subscribeToAcceptance(eventId)
+                subscribeToSelectedDriverAvailability(driverPubKey)
                 startAcceptanceTimeout()
                 _uiState.value = _uiState.value.copy(
                     isSendingOffer = false,
@@ -1348,6 +1352,108 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     activePreimage = null,
                     activePaymentHash = null,
                     escrowToken = null
+                )
+            }
+        }
+    }
+
+    /**
+     * Send a RoadFlare offer with an alternate (non-bitcoin) payment method.
+     * Called when rider chooses "Continue with Alternate Payment" from insufficient funds dialog.
+     * Skips the bitcoin balance check since payment will be handled outside the app.
+     */
+    fun sendRoadflareOfferWithAlternatePayment(paymentMethod: String) {
+        val state = _uiState.value
+        val driverPubKey = state.pendingRoadflareDriverPubKey ?: return
+        val driverLocation = state.pendingRoadflareDriverLocation
+        val pickup = state.pickupLocation ?: return
+        val destination = state.destination ?: return
+        val rideRoute = state.routeResult
+
+        val fareEstimate = if (driverLocation != null) {
+            calculateRoadflareFare(pickup, driverLocation, rideRoute)
+        } else {
+            state.fareEstimate ?: return
+        }
+
+        // Clear the pending state
+        _uiState.value = _uiState.value.copy(
+            showInsufficientFundsDialog = false,
+            insufficientFundsIsRoadflare = false,
+            pendingRoadflareDriverPubKey = null,
+            pendingRoadflareDriverLocation = null
+        )
+
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isSendingOffer = true)
+            rideState = RideState.CANCELLED
+            clearRiderStateHistory()
+
+            // No HTLC for alternate payment — payment happens outside the app
+            val riderMintUrl = walletService?.getSavedMintUrl()
+
+            val pickupRoute = if (driverLocation != null && routingService.isReady()) {
+                routingService.calculateRoute(
+                    originLat = driverLocation.lat,
+                    originLon = driverLocation.lon,
+                    destLat = pickup.lat,
+                    destLon = pickup.lon
+                )
+            } else null
+
+            val eventId = nostrService.sendRoadflareOffer(
+                driverPubKey = driverPubKey,
+                pickup = pickup,
+                destination = destination,
+                fareEstimate = fareEstimate,
+                pickupRouteKm = pickupRoute?.distanceKm,
+                pickupRouteMin = pickupRoute?.let { it.durationSeconds / 60.0 },
+                rideRouteKm = rideRoute?.distanceKm,
+                rideRouteMin = rideRoute?.let { it.durationSeconds / 60.0 },
+                paymentHash = null, // No HTLC for alternate payment
+                mintUrl = riderMintUrl,
+                paymentMethod = paymentMethod
+            )
+
+            if (eventId != null) {
+                Log.d(TAG, "Sent RoadFlare offer with $paymentMethod to ${driverPubKey.take(16)}: $eventId")
+                myRideEventIds.add(eventId)
+                subscribeToAcceptance(eventId)
+                subscribeToSelectedDriverAvailability(driverPubKey)
+                startAcceptanceTimeout()
+                _uiState.value = _uiState.value.copy(
+                    isSendingOffer = false,
+                    pendingOfferEventId = eventId,
+                    rideStage = RideStage.WAITING_FOR_ACCEPTANCE,
+                    acceptanceTimeoutStartMs = System.currentTimeMillis(),
+                    statusMessage = "Waiting for driver to accept...",
+                    confirmationEventId = null,
+                    acceptance = null,
+                    pinVerified = false,
+                    pickupPin = null,
+                    pinAttempts = 0,
+                    escrowToken = null,
+                    activePreimage = null,
+                    activePaymentHash = null
+                )
+
+                val fareAmount = fareEstimate.toLong()
+                val myPubkey = nostrService.getPubKeyHex() ?: ""
+                val newContext = RideContext.forOffer(
+                    riderPubkey = myPubkey,
+                    approxPickup = pickup,
+                    destination = destination,
+                    fareEstimateSats = fareAmount,
+                    offerEventId = eventId,
+                    paymentHash = null,
+                    riderMintUrl = riderMintUrl,
+                    paymentMethod = paymentMethod
+                )
+                updateStateMachineState(RideState.CREATED, newContext)
+            } else {
+                _uiState.value = _uiState.value.copy(
+                    isSendingOffer = false,
+                    error = "Failed to send RoadFlare offer"
                 )
             }
         }
@@ -1688,7 +1794,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         rideRoute: RouteResult?,
         pickupRoute: RouteResult?
     ): Double {
-        val ROADFLARE_RATE_PER_MILE = 1.20
+        val ROADFLARE_RATE_PER_MILE = remoteConfigManager.config.value.roadflareFareRateUsdPerMile
         val METERS_PER_MILE = 1609.34
 
         // Driver distance to pickup - use route if available, else haversine
@@ -1705,14 +1811,16 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         // Ride distance (from route if available)
         val rideMiles = rideRoute?.let { it.distanceKm * 0.621371 } ?: 0.0
 
-        // Total fare = base + driver pickup distance + ride distance
+        // Total fare = base + driver pickup distance + ride distance, with minimum
         val baseFare = 2.50 // $2.50 base
-        val totalFare = baseFare + (driverToPickupMiles * ROADFLARE_RATE_PER_MILE) + (rideMiles * ROADFLARE_RATE_PER_MILE)
+        val minimumFareUsd = 5.0
+        val calculatedFare = baseFare + (driverToPickupMiles * ROADFLARE_RATE_PER_MILE) + (rideMiles * ROADFLARE_RATE_PER_MILE)
+        val totalFare = maxOf(calculatedFare, minimumFareUsd)
 
-        // Convert to sats (using approximate rate)
-        // TODO: Use actual BTC price
-        val satsPerDollar = 1000.0 // Approximate
-        return totalFare * satsPerDollar
+        // Convert USD to sats using live BTC price (same as normal ride fare)
+        val sats = bitcoinPriceService.usdToSats(totalFare)
+        // Fallback: assume ~$100k BTC if price unavailable
+        return sats?.toDouble() ?: (totalFare * 1000.0)
     }
 
     /**
@@ -2412,7 +2520,12 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      * Dismiss insufficient funds dialog.
      */
     fun dismissInsufficientFundsDialog() {
-        _uiState.value = _uiState.value.copy(showInsufficientFundsDialog = false)
+        _uiState.value = _uiState.value.copy(
+            showInsufficientFundsDialog = false,
+            insufficientFundsIsRoadflare = false,
+            pendingRoadflareDriverPubKey = null,
+            pendingRoadflareDriverLocation = null
+        )
     }
 
     /**
@@ -4114,6 +4227,9 @@ data class RiderUiState(
     val showInsufficientFundsDialog: Boolean = false,
     val insufficientFundsAmount: Long = 0,          // How many more sats needed (display only)
     val depositAmountNeeded: Long = 0,              // Amount to deposit (includes 2% fee buffer)
+    val insufficientFundsIsRoadflare: Boolean = false, // True when from RoadFlare offer path
+    val pendingRoadflareDriverPubKey: String? = null,   // Driver pubkey for deferred RoadFlare offer
+    val pendingRoadflareDriverLocation: Location? = null, // Driver location for deferred RoadFlare offer
 
     // Cancel warning dialog (shown when cancelling after PIN verification)
     val showCancelWarningDialog: Boolean = false,

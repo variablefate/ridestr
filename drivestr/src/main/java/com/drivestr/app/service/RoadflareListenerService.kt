@@ -98,7 +98,7 @@ class RoadflareListenerService : Service() {
     private var subscriptionId: String? = null
 
     // Track received requests to avoid duplicate notifications
-    private val seenRequests = mutableSetOf<String>()
+    private val seenRequests = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     // Cache rider names to avoid repeated lookups
     private val riderNameCache = mutableMapOf<String, String>()
@@ -187,9 +187,8 @@ class RoadflareListenerService : Service() {
                 "t" to listOf(RideOfferEvent.ROADFLARE_TAG)
             )
         ) { event, relayUrl ->
-            // Skip if already seen
-            if (event.id in seenRequests) return@subscribe
-            seenRequests.add(event.id)
+            // Skip if already seen (atomic check-and-add)
+            if (!seenRequests.add(event.id)) return@subscribe
 
             // Skip if from muted rider
             if (event.pubKey in mutedPubkeys) {

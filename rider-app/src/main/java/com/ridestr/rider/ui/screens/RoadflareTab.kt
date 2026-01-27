@@ -1,5 +1,6 @@
 package com.ridestr.rider.ui.screens
 
+import android.content.Intent
 import android.util.Log
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -7,11 +8,13 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
+import com.ridestr.common.nostr.events.PaymentMethod
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
@@ -25,6 +28,7 @@ import com.ridestr.common.nostr.events.RoadflareLocationEvent
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
+import com.vitorpamplona.quartz.nip19Bech32.toNpub
 import kotlinx.coroutines.runBlocking
 import java.text.SimpleDateFormat
 import java.util.*
@@ -38,7 +42,7 @@ data class DriverLocationState(
     val pubkey: String,
     val lat: Double,
     val lon: Double,
-    val status: String, // "online", "on_ride", "do_not_disturb"
+    val status: String, // "online", "on_ride", "offline"
     val timestamp: Long,
     val keyVersion: Int
 )
@@ -58,11 +62,13 @@ data class RoadflareFareEstimate(
     val isAccurate: Boolean
 )
 
-/** Default RoadFlare rate: $1.20 per mile = 120 sats/mile at ~$100k/BTC */
-private const val ROADFLARE_SATS_PER_MILE = 120L
+/** RoadFlare fare defaults (used when admin RemoteConfig has no RoadFlare rate) */
+private const val ROADFLARE_BASE_FARE_USD = 2.50
+private const val ROADFLARE_MINIMUM_FARE_USD = 5.0
 
 /**
  * Calculate fare estimate for a RoadFlare ride.
+ * Uses USD-based calculation with live BTC price conversion (same as normal rides).
  *
  * @param riderLocation Rider's current location (pickup point)
  * @param destination Ride destination
@@ -72,7 +78,8 @@ private const val ROADFLARE_SATS_PER_MILE = 120L
 fun calculateRoadflareFare(
     riderLocation: Location,
     destination: Location,
-    driverLocation: DriverLocationState?
+    driverLocation: DriverLocationState?,
+    ratePerMile: Double = com.ridestr.common.nostr.events.AdminConfig.DEFAULT_ROADFLARE_FARE_RATE
 ): RoadflareFareEstimate {
     // Calculate ride distance (pickup to destination)
     val rideDistanceKm = riderLocation.distanceToKm(destination)
@@ -86,11 +93,19 @@ fun calculateRoadflareFare(
         pickupKm * 0.621371
     } else null
 
-    // Calculate fare based on ride distance
-    val fareSats = (rideDistanceMiles * ROADFLARE_SATS_PER_MILE).toLong()
+    // Calculate fare in USD first
+    val totalMiles = rideDistanceMiles + (pickupDistanceMiles ?: 0.0)
+    val fareUsd = maxOf(
+        ROADFLARE_BASE_FARE_USD + (totalMiles * ratePerMile),
+        ROADFLARE_MINIMUM_FARE_USD
+    )
+
+    // Convert USD to sats using live BTC price
+    val priceService = com.ridestr.common.bitcoin.BitcoinPriceService.getInstance()
+    val fareSats = priceService.usdToSats(fareUsd) ?: (fareUsd * 1000.0).toLong() // Fallback: ~$100k
 
     return RoadflareFareEstimate(
-        satoshis = fareSats.coerceAtLeast(100), // Minimum 100 sats
+        satoshis = fareSats,
         distanceMiles = rideDistanceMiles,
         pickupDistanceMiles = pickupDistanceMiles,
         isAccurate = pickupDistanceMiles != null
@@ -111,16 +126,20 @@ fun calculateRoadflareFare(
 fun RoadflareTab(
     followedDriversRepository: FollowedDriversRepository,
     nostrService: NostrService?,
+    settingsManager: com.ridestr.common.settings.SettingsManager? = null,
     riderLocation: Location? = null,
     onAddDriver: () -> Unit = {},
     onDriverClick: (FollowedDriver) -> Unit = {},
-    onSendRoadflare: (List<FollowedDriver>) -> Unit = {},
     onDriverRemoved: () -> Unit = {},  // Called after driver removed - triggers Nostr backup
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val drivers by followedDriversRepository.drivers.collectAsState()
     val driverNames by followedDriversRepository.driverNames.collectAsState()
+
+    // Payment methods dialog state
+    var showPaymentMethodsDialog by remember { mutableStateOf(false) }
 
     // Track driver locations by pubkey
     val driverLocations = remember { mutableStateMapOf<String, DriverLocationState>() }
@@ -289,14 +308,33 @@ fun RoadflareTab(
         )
     }
 
+    // Payment methods dialog
+    if (showPaymentMethodsDialog && settingsManager != null) {
+        RoadflarePaymentMethodsDialog(
+            settingsManager = settingsManager,
+            onDismiss = { showPaymentMethodsDialog = false }
+        )
+    }
+
     Scaffold(
         floatingActionButton = {
             if (drivers.isNotEmpty()) {
-                // Add driver FAB only - Send RoadFlare is in driver selection screen
-                FloatingActionButton(
-                    onClick = onAddDriver
+                Column(
+                    horizontalAlignment = Alignment.End,
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Icon(Icons.Default.PersonAdd, contentDescription = "Add Driver")
+                    // Payment methods FAB
+                    SmallFloatingActionButton(
+                        onClick = { showPaymentMethodsDialog = true }
+                    ) {
+                        Icon(Icons.Default.Payment, contentDescription = "Payment Methods")
+                    }
+                    // Add driver FAB
+                    FloatingActionButton(
+                        onClick = onAddDriver
+                    ) {
+                        Icon(Icons.Default.PersonAdd, contentDescription = "Add Driver")
+                    }
                 }
             }
         },
@@ -328,11 +366,35 @@ fun RoadflareTab(
                     modifier = Modifier.fillMaxSize()
                 ) {
                     item {
-                        Text(
-                            text = "Favorite Drivers",
-                            style = MaterialTheme.typography.headlineSmall,
-                            modifier = Modifier.padding(bottom = 8.dp)
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+                        ) {
+                            Text(
+                                text = "Favorite Drivers",
+                                style = MaterialTheme.typography.headlineSmall,
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (drivers.size > 1) {
+                                IconButton(onClick = {
+                                    val shareText = drivers.joinToString("\n") { d ->
+                                        val name = driverNames[d.pubkey]
+                                        val npub = d.pubkey.hexToByteArray().toNpub()
+                                        if (name != null) "$name: nostr:$npub" else "nostr:$npub"
+                                    }
+                                    val intent = Intent(Intent.ACTION_SEND).apply {
+                                        type = "text/plain"
+                                        putExtra(Intent.EXTRA_TEXT, shareText)
+                                    }
+                                    context.startActivity(Intent.createChooser(intent, "Share driver list"))
+                                }) {
+                                    Icon(
+                                        Icons.Default.Share,
+                                        contentDescription = "Share all drivers"
+                                    )
+                                }
+                            }
+                        }
                     }
 
                     items(drivers, key = { it.pubkey }) { driver ->
@@ -343,7 +405,15 @@ fun RoadflareTab(
                             riderLocation = riderLocation,
                             hasStaleKey = staleKeyDrivers[driver.pubkey] == true,
                             onClick = { onDriverClick(driver) },
-                            onRemove = { showRemoveDialog = driver }
+                            onRemove = { showRemoveDialog = driver },
+                            onShare = {
+                                val npub = driver.pubkey.hexToByteArray().toNpub()
+                                val intent = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_TEXT, "nostr:$npub")
+                                }
+                                context.startActivity(Intent.createChooser(intent, "Share driver"))
+                            }
                         )
                     }
                 }
@@ -424,6 +494,7 @@ private fun DriverCard(
     hasStaleKey: Boolean = false,
     onClick: () -> Unit,
     onRemove: () -> Unit,
+    onShare: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val dateFormat = remember { SimpleDateFormat("MMM d, yyyy", Locale.getDefault()) }
@@ -520,6 +591,15 @@ private fun DriverCard(
                 )
             }
 
+            // Share button
+            IconButton(onClick = onShare) {
+                Icon(
+                    Icons.Default.Share,
+                    contentDescription = "Share",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
             // Remove button
             IconButton(onClick = onRemove) {
                 Icon(
@@ -550,7 +630,7 @@ private fun formatDistance(miles: Double): String {
  * Status mapping:
  * - online -> "Available" (Green)
  * - on_ride -> "On Ride" (Yellow/Orange)
- * - do_not_disturb -> "Unavailable" (Gray)
+ * - offline -> "Offline" (Gray)
  * - No location / stale -> "Offline" or "Pending" (Gray)
  */
 @Composable
@@ -574,8 +654,8 @@ private fun DriverStatusBadge(
             MaterialTheme.colorScheme.primary to "Available"
         locationState.status == RoadflareLocationEvent.Status.ON_RIDE ->
             MaterialTheme.colorScheme.tertiary to "On Ride"
-        locationState.status == RoadflareLocationEvent.Status.DO_NOT_DISTURB ->
-            MaterialTheme.colorScheme.outline to "Unavailable"
+        locationState.status == RoadflareLocationEvent.Status.OFFLINE ->
+            MaterialTheme.colorScheme.outline to "Offline"
         else -> MaterialTheme.colorScheme.outline to "Offline"
     }
 
@@ -616,7 +696,7 @@ private fun formatLastSeen(timestamp: Long): String {
  * - We decrypt with: ECDH(roadflare_priv, driver_identity_pub)
  * - These produce the same shared secret (ECDH is commutative)
  */
-private fun decryptRoadflareLocation(
+internal fun decryptRoadflareLocation(
     roadflarePrivKey: String,
     driverPubKey: String,
     event: com.vitorpamplona.quartz.nip01Core.core.Event
@@ -649,4 +729,84 @@ private fun decryptRoadflareLocation(
         Log.e(TAG, "Failed to decrypt RoadFlare location", e)
         null
     }
+}
+
+/**
+ * Dialog for selecting RoadFlare alternate payment methods.
+ * These are non-bitcoin methods riders can offer to personal RoadFlare drivers.
+ */
+@Composable
+fun RoadflarePaymentMethodsDialog(
+    settingsManager: com.ridestr.common.settings.SettingsManager,
+    onDismiss: () -> Unit
+) {
+    val currentMethods by settingsManager.roadflarePaymentMethods.collectAsState()
+    val selectedMethods = remember { mutableStateMapOf<String, Boolean>() }
+
+    // Initialize from saved state
+    LaunchedEffect(currentMethods) {
+        PaymentMethod.ROADFLARE_ALTERNATE_METHODS.forEach { method ->
+            selectedMethods[method.value] = method.value in currentMethods
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                Icons.Default.Payment,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary
+            )
+        },
+        title = { Text("Payment Methods") },
+        text = {
+            Column {
+                Text(
+                    "Bitcoin is the preferred payment method and is required for rides " +
+                    "with random drivers. For personal RoadFlare drivers, you can offer " +
+                    "alternate payment methods.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    "Select your available payment methods:",
+                    style = MaterialTheme.typography.labelLarge
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                PaymentMethod.ROADFLARE_ALTERNATE_METHODS.forEach { method ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Checkbox(
+                            checked = selectedMethods[method.value] == true,
+                            onCheckedChange = { checked ->
+                                selectedMethods[method.value] = checked
+                            }
+                        )
+                        Text(
+                            text = method.displayName,
+                            style = MaterialTheme.typography.bodyLarge,
+                            modifier = Modifier.padding(start = 4.dp)
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = {
+                val methods = selectedMethods.filter { it.value }.keys
+                settingsManager.setRoadflarePaymentMethods(methods)
+                onDismiss()
+            }) {
+                Text("Save")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
 }

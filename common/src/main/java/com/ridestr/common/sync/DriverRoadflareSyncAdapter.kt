@@ -15,7 +15,6 @@ import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
  * - RoadFlare keypair (for encrypting location broadcasts)
  * - Followers list (who has received the decryption key)
  * - Muted riders list (excluded from broadcasts)
- * - DND (Do Not Disturb) status
  *
  * This is CRITICAL for cross-device sync:
  * - When driver imports key on new device, this restores the RoadFlare keypair
@@ -57,12 +56,11 @@ class DriverRoadflareSyncAdapter(
 
                 val hasKey = state.roadflareKey != null
                 val followerCount = state.followers.size
-                val dndActive = state.dndActive
 
-                Log.d(TAG, "Restored RoadFlare state: key=${hasKey}, followers=$followerCount, DND=$dndActive")
+                Log.d(TAG, "Restored RoadFlare state: key=${hasKey}, followers=$followerCount")
                 SyncResult.Success(
                     followerCount,
-                    SyncMetadata.DriverRoadflare(hasKey, followerCount, dndActive)
+                    SyncMetadata.DriverRoadflare(hasKey, followerCount)
                 )
             } else {
                 Log.d(TAG, "No RoadFlare state found on Nostr")

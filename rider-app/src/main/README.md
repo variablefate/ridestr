@@ -28,6 +28,8 @@ The rider Android app allows users to request rides, track driver location in re
 | `ProfileSetupScreen.kt` | Profile name and picture setup |
 | `KeyBackupScreen.kt` | nsec backup display |
 | `TipScreen.kt` | Post-ride tipping UI |
+| `RoadflareTab.kt` | RoadFlare tab - favorite drivers list, driver status badges, fare estimates, payment methods dialog |
+| `AddDriverScreen.kt` | Add driver via QR scan (Quickie) or manual npub/hex entry |
 
 ### Services (`java/com/ridestr/rider/service/`)
 
@@ -85,6 +87,8 @@ Any active state → cancelRide() or driverCancelled() → IDLE
 | Method | From State | To State | Nostr Event |
 |--------|------------|----------|-------------|
 | `sendRideOffer()` | IDLE | WAITING_FOR_ACCEPTANCE | Kind 3173 (direct) |
+| `sendRoadflareOffer()` | IDLE | WAITING_FOR_ACCEPTANCE | Kind 3173 (RoadFlare, isRoadflare=true) |
+| `sendRoadflareOfferWithAlternatePayment()` | IDLE | WAITING_FOR_ACCEPTANCE | Kind 3173 (RoadFlare, alternate payment, no HTLC) |
 | `broadcastRideRequest()` | IDLE | BROADCASTING_REQUEST | Kind 3173 (broadcast) |
 | `autoConfirmRide()` | DRIVER_ACCEPTED | RIDE_CONFIRMED | Kind 3175 |
 | `handleDriverRideState()` | Various | Various | Receives Kind 30180 |
@@ -122,6 +126,9 @@ This prevents riders from waiting indefinitely when their selected driver takes 
 | `WalletScreen` | `WalletService` | Display balance | `walletService.balance.value` |
 | `HistoryScreen` | `RideHistoryRepository` | Display past rides | `rideHistoryRepo.rides.value` |
 | `HistoryScreen` | `RideHistoryRepository` | Manual backup | `rideHistoryRepo.backupToNostr()` |
+| `RiderViewModel` | `NostrService` | Send RoadFlare to all drivers | `sendRoadflareToAll()` |
+| `MainActivity` | `FollowedDriversRepository` | Followed drivers for RoadFlare tab | `followedDriversRepo.drivers` |
+| `MainActivity` | `NostrService` | Subscribe to key shares (Kind 3186) | `nostrService.subscribeToRoadflareKeyShares()` |
 
 ---
 
@@ -208,6 +215,20 @@ If rider cancels after preimage was shared with driver:
 - Tap wallet card in `WalletScreen.kt` → navigates to `WalletDetailScreen` (common)
 - Deposit and withdraw are **fully functional**
 - Only LN address resolution is broken (must paste BOLT11 directly)
+
+### RoadFlare Alternate Payment Methods (January 2026)
+For personal RoadFlare drivers, riders can offer non-bitcoin payment methods:
+- Payment methods configured in RoadflareTab via `RoadflarePaymentMethodsDialog` (Zelle, PayPal, Cash App, Venmo, Cash, Strike)
+- Stored in `SettingsManager.roadflarePaymentMethods` and backed up to Kind 30177
+- When insufficient bitcoin funds during a RoadFlare offer, modified dialog offers "Continue with Alternate Payment"
+- `sendRoadflareOfferWithAlternatePayment()` skips balance check and sends offer with alternate `paymentMethod`
+- UI state tracks `insufficientFundsIsRoadflare`, `pendingRoadflareDriverPubKey`, `pendingRoadflareDriverLocation`
+
+### RoadFlare Offer Unification (January 2026)
+RoadFlare offers use the same `RideOfferEvent.create()` as normal offers with `isRoadflare=true`:
+- `driverAvailabilityEventId` is optional (RoadFlare offers have no `e` tag)
+- `subscribeToSelectedDriverAvailability()` called for RoadFlare offers (cancellation compatibility)
+- Minimum fare ($5.00 USD) enforced for RoadFlare rides
 
 ### Wallet Refresh on Ride End (January 2026)
 Both ride completion and cancellation now trigger automatic wallet refresh:

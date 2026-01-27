@@ -1,5 +1,6 @@
 package com.drivestr.app.ui.screens
 
+import android.content.Intent
 import android.graphics.Bitmap
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
@@ -8,6 +9,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
+import com.ridestr.common.nostr.events.PaymentMethod
+import com.ridestr.common.settings.SettingsManager
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -30,7 +33,6 @@ import java.util.*
  * - QR code for riders to scan
  * - Pending followers with Approve/Decline buttons
  * - Approved followers with Mute controls
- * - DND toggle to pause location broadcasts
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -39,26 +41,22 @@ fun RoadflareTab(
     driverPubkey: String,
     driverNpub: String = "",
     driverName: String = "",
+    settingsManager: SettingsManager? = null,
     backgroundAlertsEnabled: Boolean = false,
     onApproveFollower: (String) -> Unit = {},
     onDeclineFollower: (String) -> Unit = {},
-    onMuteFollower: (String) -> Unit = {},
-    onUnmuteFollower: (String) -> Unit = {},
     onRemoveFollower: (String) -> Unit = {},
-    onToggleDnd: (Boolean) -> Unit = {},
     onRefreshFollowers: (suspend () -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val state by driverRoadflareRepository.state.collectAsState()
-    val dndActive by driverRoadflareRepository.dndActive.collectAsState()
 
     val allFollowers = state?.followers ?: emptyList()
-    val pendingFollowers = allFollowers.filter { !it.approved }
-    val approvedFollowers = allFollowers.filter { it.approved }
     val mutedPubkeys = state?.muted?.map { it.pubkey }?.toSet() ?: emptySet()
+    val pendingFollowers = allFollowers.filter { !it.approved && it.pubkey !in mutedPubkeys }
+    val approvedFollowers = allFollowers.filter { it.approved && it.pubkey !in mutedPubkeys }
     val hasKey = state?.roadflareKey != null
 
-    var showMuteDialog by remember { mutableStateOf<RoadflareFollower?>(null) }
     var showRemoveDialog by remember { mutableStateOf<RoadflareFollower?>(null) }
 
     // Pull to refresh state
@@ -79,34 +77,7 @@ fun RoadflareTab(
         }
     }
 
-    // Mute confirmation dialog
-    showMuteDialog?.let { follower ->
-        AlertDialog(
-            onDismissRequest = { showMuteDialog = null },
-            icon = { Icon(Icons.Default.VolumeOff, contentDescription = null) },
-            title = { Text("Mute Follower?") },
-            text = {
-                Text("This rider will no longer see your location. Your RoadFlare key will be rotated and all other followers will receive the new key.")
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        onMuteFollower(follower.pubkey)
-                        showMuteDialog = null
-                    }
-                ) {
-                    Text("Mute", color = MaterialTheme.colorScheme.error)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showMuteDialog = null }) {
-                    Text("Cancel")
-                }
-            }
-        )
-    }
-
-    // Remove confirmation dialog (with key rotation for security)
+    // Remove confirmation dialog — "Remove" mutes under the hood (local ignore + key rotation)
     showRemoveDialog?.let { follower ->
         val displayName = follower.name.ifEmpty { "${follower.pubkey.take(8)}..." }
         AlertDialog(
@@ -114,7 +85,7 @@ fun RoadflareTab(
             icon = { Icon(Icons.Default.PersonRemove, contentDescription = null) },
             title = { Text("Remove Follower?") },
             text = {
-                Text("Remove $displayName from your followers? Your RoadFlare key will be rotated and all other followers will receive the new key.")
+                Text("Remove $displayName from your followers? They will no longer see your location. You can undo this in Settings.")
             },
             confirmButton = {
                 TextButton(
@@ -147,12 +118,10 @@ fun RoadflareTab(
             // Header with status (only count approved followers)
             item {
                 BroadcastStatusCard(
-                    dndActive = dndActive,
                     hasKey = hasKey,
                     followerCount = approvedFollowers.size,
                     pendingCount = pendingFollowers.size,
-                    backgroundAlertsEnabled = backgroundAlertsEnabled,
-                    onToggleDnd = onToggleDnd
+                    backgroundAlertsEnabled = backgroundAlertsEnabled
                 )
             }
 
@@ -162,6 +131,13 @@ fun RoadflareTab(
                     driverNpub = driverNpub,
                     driverName = driverName
                 )
+            }
+
+            // Accepted payment methods section
+            if (settingsManager != null) {
+                item {
+                    AcceptedPaymentMethodsCard(settingsManager = settingsManager)
+                }
             }
 
             // Pending followers section (need approval)
@@ -226,9 +202,6 @@ fun RoadflareTab(
                 items(approvedFollowers, key = { it.pubkey }) { follower ->
                     FollowerCard(
                         follower = follower,
-                        isMuted = follower.pubkey in mutedPubkeys,
-                        onMute = { showMuteDialog = follower },
-                        onUnmute = { onUnmuteFollower(follower.pubkey) },
                         onRemove = { showRemoveDialog = follower }
                     )
                 }
@@ -243,28 +216,24 @@ fun RoadflareTab(
 }
 
 /**
- * Card showing broadcast status and DND toggle.
+ * Card showing broadcast status.
  */
 @Composable
 private fun BroadcastStatusCard(
-    dndActive: Boolean,
     hasKey: Boolean,
     followerCount: Int,
     pendingCount: Int = 0,
     backgroundAlertsEnabled: Boolean = false,
-    onToggleDnd: (Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val statusColor = when {
         pendingCount > 0 -> MaterialTheme.colorScheme.tertiary
-        dndActive -> MaterialTheme.colorScheme.error
         hasKey && followerCount > 0 -> MaterialTheme.colorScheme.primary
         else -> MaterialTheme.colorScheme.outline
     }
 
     val statusText = when {
         pendingCount > 0 -> "$pendingCount Pending Request${if (pendingCount != 1) "s" else ""}"
-        dndActive -> "Unavailable"
         hasKey && followerCount > 0 -> "Available"
         hasKey -> "Ready (no followers yet)"
         else -> "Not Set Up"
@@ -272,15 +241,12 @@ private fun BroadcastStatusCard(
 
     val statusIcon = when {
         pendingCount > 0 -> Icons.Default.PersonAdd
-        dndActive -> Icons.Default.DoNotDisturb
         hasKey && followerCount > 0 -> Icons.Default.Sensors
         else -> Icons.Default.SensorsOff
     }
 
-    // Subtitle explains what's happening
     val statusSubtitle = when {
-        pendingCount > 0 -> null // No subtitle for pending state
-        dndActive -> "Location hidden, notifications paused"
+        pendingCount > 0 -> null
         hasKey && followerCount > 0 && backgroundAlertsEnabled ->
             "Location visible to $followerCount follower${if (followerCount != 1) "s" else ""} \u2022 Background alerts on"
         hasKey && followerCount > 0 ->
@@ -294,64 +260,35 @@ private fun BroadcastStatusCard(
             containerColor = statusColor.copy(alpha = 0.1f)
         )
     ) {
-        Column(
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(16.dp)
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Icon(
-                    imageVector = statusIcon,
-                    contentDescription = null,
-                    tint = statusColor,
-                    modifier = Modifier.size(32.dp)
-                )
-
-                Spacer(modifier = Modifier.width(16.dp))
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = statusText,
-                        style = MaterialTheme.typography.titleMedium,
-                        color = statusColor
-                    )
-                    if (statusSubtitle != null) {
-                        Text(
-                            text = statusSubtitle,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-
-                // DND Toggle
-                Switch(
-                    checked = dndActive,
-                    onCheckedChange = onToggleDnd,
-                    thumbContent = {
-                        Icon(
-                            imageVector = if (dndActive) Icons.Default.DoNotDisturb else Icons.Default.Check,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-                )
-            }
-
-            // Explanation text
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = if (dndActive) {
-                    "Turn off to share your location with followers and receive RoadFlare requests"
-                } else {
-                    "Turn on to hide your location and pause all RoadFlare notifications"
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+            Icon(
+                imageVector = statusIcon,
+                contentDescription = null,
+                tint = statusColor,
+                modifier = Modifier.size(32.dp)
             )
+
+            Spacer(modifier = Modifier.width(16.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = statusText,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = statusColor
+                )
+                if (statusSubtitle != null) {
+                    Text(
+                        text = statusSubtitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
         }
     }
 }
@@ -452,6 +389,28 @@ private fun QrCodeCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Share button
+            val context = LocalContext.current
+            OutlinedButton(
+                onClick = {
+                    val intent = Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_TEXT, "nostr:$driverNpub")
+                    }
+                    context.startActivity(Intent.createChooser(intent, "Share your RoadFlare profile"))
+                }
+            ) {
+                Icon(
+                    Icons.Default.Share,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Share")
+            }
         }
     }
 }
@@ -588,9 +547,6 @@ private fun PendingFollowerCard(
 @Composable
 private fun FollowerCard(
     follower: RoadflareFollower,
-    isMuted: Boolean,
-    onMute: () -> Unit,
-    onUnmute: () -> Unit,
     onRemove: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -599,14 +555,7 @@ private fun FollowerCard(
     val displayName = follower.name.ifEmpty { "${follower.pubkey.take(8)}...${follower.pubkey.takeLast(4)}" }
 
     Card(
-        modifier = modifier.fillMaxWidth(),
-        colors = if (isMuted) {
-            CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)
-            )
-        } else {
-            CardDefaults.cardColors()
-        }
+        modifier = modifier.fillMaxWidth()
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -617,22 +566,14 @@ private fun FollowerCard(
             // Avatar placeholder
             Surface(
                 shape = MaterialTheme.shapes.medium,
-                color = if (isMuted) {
-                    MaterialTheme.colorScheme.errorContainer
-                } else {
-                    MaterialTheme.colorScheme.secondaryContainer
-                },
+                color = MaterialTheme.colorScheme.secondaryContainer,
                 modifier = Modifier.size(40.dp)
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
-                        imageVector = if (isMuted) Icons.Default.VolumeOff else Icons.Default.Person,
+                        imageVector = Icons.Default.Person,
                         contentDescription = null,
-                        tint = if (isMuted) {
-                            MaterialTheme.colorScheme.onErrorContainer
-                        } else {
-                            MaterialTheme.colorScheme.onSecondaryContainer
-                        }
+                        tint = MaterialTheme.colorScheme.onSecondaryContainer
                     )
                 }
             }
@@ -647,23 +588,11 @@ private fun FollowerCard(
                     overflow = TextOverflow.Ellipsis
                 )
 
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text(
-                        text = "Added ${dateFormat.format(Date(follower.addedAt * 1000))}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-
-                    if (isMuted) {
-                        Text(
-                            text = "Muted",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.error
-                        )
-                    }
-                }
+                Text(
+                    text = "Added ${dateFormat.format(Date(follower.addedAt * 1000))}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
 
             // Options menu
@@ -679,29 +608,6 @@ private fun FollowerCard(
                     expanded = showMenu,
                     onDismissRequest = { showMenu = false }
                 ) {
-                    if (isMuted) {
-                        DropdownMenuItem(
-                            text = { Text("Unmute") },
-                            onClick = {
-                                showMenu = false
-                                onUnmute()
-                            },
-                            leadingIcon = {
-                                Icon(Icons.Default.VolumeUp, contentDescription = null)
-                            }
-                        )
-                    } else {
-                        DropdownMenuItem(
-                            text = { Text("Mute") },
-                            onClick = {
-                                showMenu = false
-                                onMute()
-                            },
-                            leadingIcon = {
-                                Icon(Icons.Default.VolumeOff, contentDescription = null)
-                            }
-                        )
-                    }
                     DropdownMenuItem(
                         text = { Text("Remove", color = MaterialTheme.colorScheme.error) },
                         onClick = {
@@ -740,5 +646,66 @@ private fun generateQrCode(content: String, size: Int): Bitmap? {
         bitmap
     } catch (e: Exception) {
         null
+    }
+}
+
+/**
+ * Card for driver to select which alternate payment methods they accept from RoadFlare riders.
+ */
+@Composable
+private fun AcceptedPaymentMethodsCard(settingsManager: SettingsManager) {
+    val currentMethods by settingsManager.roadflarePaymentMethods.collectAsState()
+
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.Payment,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Accepted Payment Methods",
+                    style = MaterialTheme.typography.titleMedium
+                )
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Select non-bitcoin methods you accept from RoadFlare riders.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            PaymentMethod.ROADFLARE_ALTERNATE_METHODS.forEach { method ->
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Checkbox(
+                        checked = method.value in currentMethods,
+                        onCheckedChange = { checked ->
+                            val updated = if (checked) {
+                                currentMethods + method.value
+                            } else {
+                                currentMethods - method.value
+                            }
+                            settingsManager.setRoadflarePaymentMethods(updated)
+                        }
+                    )
+                    Text(
+                        text = method.displayName,
+                        style = MaterialTheme.typography.bodyLarge,
+                        modifier = Modifier.padding(start = 4.dp)
+                    )
+                }
+            }
+        }
     }
 }

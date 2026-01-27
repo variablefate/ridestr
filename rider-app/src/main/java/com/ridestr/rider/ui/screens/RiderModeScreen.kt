@@ -45,6 +45,8 @@ import com.google.android.gms.tasks.CancellationTokenSource
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
+import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
+import com.ridestr.common.nostr.events.AdminConfig
 import com.ridestr.common.nostr.events.DriverAvailabilityData
 import com.ridestr.common.nostr.events.Location
 import com.ridestr.common.nostr.events.RideshareChatData
@@ -96,6 +98,7 @@ fun RiderModeScreen(
 ) {
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsState()
+    val remoteConfig by viewModel.remoteConfig.collectAsState()
     var showChatSheet by remember { mutableStateOf(false) }
 
     // Driver selection sheet state - lifted to RiderModeScreen level
@@ -167,6 +170,10 @@ fun RiderModeScreen(
 
     // Insufficient funds dialog
     if (uiState.showInsufficientFundsDialog) {
+        val roadflarePaymentMethods = settingsManager.roadflarePaymentMethods.collectAsState()
+        val hasAlternateMethods = uiState.insufficientFundsIsRoadflare &&
+            roadflarePaymentMethods.value.isNotEmpty()
+
         AlertDialog(
             onDismissRequest = { viewModel.dismissInsufficientFundsDialog() },
             icon = {
@@ -176,7 +183,7 @@ fun RiderModeScreen(
                     tint = MaterialTheme.colorScheme.primary
                 )
             },
-            title = { Text("Insufficient Funds") },
+            title = { Text(if (uiState.insufficientFundsIsRoadflare) "Insufficient Bitcoin Funds" else "Insufficient Funds") },
             text = {
                 Column {
                     Text(
@@ -188,17 +195,42 @@ fun RiderModeScreen(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    if (hasAlternateMethods) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            "Since this is a RoadFlare ride, you can continue with an alternate payment method.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
                 }
             },
             confirmButton = {
-                Button(
-                    onClick = {
-                        val depositAmount = uiState.depositAmountNeeded
-                        viewModel.dismissInsufficientFundsDialog()
-                        onOpenWalletWithDeposit(depositAmount)
+                Column(horizontalAlignment = Alignment.End) {
+                    Button(
+                        onClick = {
+                            val depositAmount = uiState.depositAmountNeeded
+                            viewModel.dismissInsufficientFundsDialog()
+                            onOpenWalletWithDeposit(depositAmount)
+                        }
+                    ) {
+                        Text("Deposit ${"%,d".format(uiState.depositAmountNeeded)} sats")
                     }
-                ) {
-                    Text("Deposit ${"%,d".format(uiState.depositAmountNeeded)} sats")
+                    if (hasAlternateMethods) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        OutlinedButton(
+                            onClick = {
+                                // Use the first configured alternate payment method
+                                val method = roadflarePaymentMethods.value.first()
+                                viewModel.sendRoadflareOfferWithAlternatePayment(method)
+                            }
+                        ) {
+                            val methodName = roadflarePaymentMethods.value.firstOrNull()?.let { value ->
+                                com.ridestr.common.nostr.events.PaymentMethod.fromString(value)?.displayName ?: value
+                            } ?: "Alternate"
+                            Text("Continue with $methodName")
+                        }
+                    }
                 }
             },
             dismissButton = {
@@ -390,6 +422,7 @@ fun RiderModeScreen(
                     // RoadFlare parameters
                     followedDriversRepository = followedDriversRepository,
                     nostrService = viewModel.getNostrService(),
+                    roadflareRatePerMile = remoteConfig.roadflareFareRateUsdPerMile,
                     onSendRoadflareOffer = viewModel::sendRoadflareOffer,
                     onSendRoadflareToAll = viewModel::sendRoadflareToAll
                 )
@@ -529,6 +562,7 @@ private fun IdleContent(
     // RoadFlare parameters
     followedDriversRepository: FollowedDriversRepository? = null,
     nostrService: com.ridestr.common.nostr.NostrService? = null,
+    roadflareRatePerMile: Double = AdminConfig.DEFAULT_ROADFLARE_FARE_RATE,
     onSendRoadflareOffer: (String, Location?) -> Unit = { _, _ -> },
     onSendRoadflareToAll: (List<FollowedDriver>, Map<String, Location>) -> Unit = { _, _ -> }
 ) {
@@ -583,6 +617,7 @@ private fun IdleContent(
                 nostrService = nostrService,
                 settingsManager = settingsManager,
                 priceService = priceService,
+                roadflareRatePerMile = roadflareRatePerMile,
                 onSelectDriver = { driverPubKey, driverLocation ->
                     onSendRoadflareOffer(driverPubKey, driverLocation)
                     showRoadflareSheet = false
@@ -3370,6 +3405,7 @@ private fun RoadflareDriverSelectionSheet(
     nostrService: com.ridestr.common.nostr.NostrService?,
     settingsManager: SettingsManager,
     priceService: BitcoinPriceService,
+    roadflareRatePerMile: Double = AdminConfig.DEFAULT_ROADFLARE_FARE_RATE,
     onSelectDriver: (String, Location?) -> Unit,
     onSendToAll: (List<FollowedDriver>, Map<String, Location>) -> Unit,
     onDismiss: () -> Unit
@@ -3381,8 +3417,10 @@ private fun RoadflareDriverSelectionSheet(
     val driverNames = remember { mutableStateMapOf<String, String>() }
 
     // Subscribe to driver locations
-    LaunchedEffect(drivers, nostrService) {
-        if (nostrService == null) return@LaunchedEffect
+    var locationSubId by remember { mutableStateOf<String?>(null) }
+
+    DisposableEffect(drivers, nostrService) {
+        if (nostrService == null) return@DisposableEffect onDispose {}
 
         // Fetch driver profile names
         drivers.forEach { driver ->
@@ -3396,21 +3434,17 @@ private fun RoadflareDriverSelectionSheet(
         // Subscribe to driver locations - need drivers with keys
         val driversWithKeys = drivers.filter { it.roadflareKey != null }
         if (driversWithKeys.isNotEmpty()) {
-            nostrService.subscribeToRoadflareLocations(
+            locationSubId = nostrService.subscribeToRoadflareLocations(
                 driverPubkeys = driversWithKeys.map { it.pubkey }
             ) { event, relayUrl ->
                 // Find the driver and decrypt their location
                 val driver = driversWithKeys.find { it.pubkey == event.pubKey }
                 if (driver?.roadflareKey != null) {
-                    val locationData = com.ridestr.common.nostr.events.RoadflareLocationEvent.parseAndDecrypt(
+                    val locationData = decryptRoadflareLocation(
                         roadflarePrivKey = driver.roadflareKey!!.privateKey,
                         driverPubKey = event.pubKey,
                         event = event
-                    ) { ciphertext, counterpartyPubKey ->
-                        // Use a simple NIP-44 decrypt - but we need the signer
-                        // For now, skip decryption and just note that the driver is online
-                        null
-                    }
+                    )
                     if (locationData != null) {
                         driverLocations[event.pubKey] = Location(
                             lat = locationData.location.lat,
@@ -3419,6 +3453,10 @@ private fun RoadflareDriverSelectionSheet(
                     }
                 }
             }
+        }
+
+        onDispose {
+            locationSubId?.let { nostrService.closeSubscription(it) }
         }
     }
 
@@ -3534,7 +3572,7 @@ private fun RoadflareDriverSelectionSheet(
 
                     // Calculate fare if we have location
                     val fareSats = if (driverLocation != null && pickupLocation != null) {
-                        calculateRoadflareFareSats(pickupLocation, driverLocation, routeResult)
+                        calculateRoadflareFareSats(pickupLocation, driverLocation, routeResult, roadflareRatePerMile)
                     } else null
 
                     val fare = if (fareSats != null) {
@@ -3727,9 +3765,10 @@ private fun RoadflareDriverCard(
 private fun calculateRoadflareFareSats(
     pickup: Location,
     driverLocation: Location,
-    routeResult: RouteResult?
+    routeResult: RouteResult?,
+    ratePerMile: Double = AdminConfig.DEFAULT_ROADFLARE_FARE_RATE
 ): Double {
-    val ROADFLARE_RATE_PER_MILE = 1.20
+    val ROADFLARE_RATE_PER_MILE = ratePerMile
     val METERS_PER_MILE = 1609.34
 
     // Driver distance to pickup (haversine)
@@ -3746,8 +3785,12 @@ private fun calculateRoadflareFareSats(
     // Ride distance
     val rideMiles = routeResult?.let { it.distanceKm * 0.621371 } ?: 0.0
 
-    // Total fare
+    // Total fare with minimum fare enforcement
     val baseFare = 2.50
-    val totalFareUsd = baseFare + (driverToPickupMiles * ROADFLARE_RATE_PER_MILE) + (rideMiles * ROADFLARE_RATE_PER_MILE)
-    return totalFareUsd * 1000.0 // Approximate conversion to sats
+    val minimumFareUsd = 5.0
+    val calculatedFare = baseFare + (driverToPickupMiles * ROADFLARE_RATE_PER_MILE) + (rideMiles * ROADFLARE_RATE_PER_MILE)
+    val totalFareUsd = maxOf(calculatedFare, minimumFareUsd)
+    // Convert USD to sats using live BTC price
+    val sats = BitcoinPriceService.getInstance().usdToSats(totalFareUsd)
+    return sats?.toDouble() ?: (totalFareUsd * 1000.0) // Fallback: ~$100k BTC
 }

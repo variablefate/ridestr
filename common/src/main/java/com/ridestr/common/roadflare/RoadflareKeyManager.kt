@@ -212,12 +212,10 @@ class RoadflareKeyManager(
             repository.updateKeyUpdatedAt(keyUpdatedAt)
         }
 
-        // Mark as approved
-        repository.approveFollower(followerPubkey)
-
-        // Send key to follower
+        // Send key to follower before marking approved (avoid stuck state if send fails)
         val success = sendKeyToFollower(signer, followerPubkey, key, keyUpdatedAt)
         if (success) {
+            repository.approveFollower(followerPubkey)
             repository.markFollowerKeySent(followerPubkey, key.version)
 
             // Publish updated state to Nostr

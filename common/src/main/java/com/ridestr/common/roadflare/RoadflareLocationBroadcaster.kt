@@ -21,9 +21,8 @@ import kotlinx.coroutines.flow.asStateFlow
  * the shared private key they received via Kind 3186.
  *
  * Broadcasting stops when:
- * - DND (Do Not Disturb) is enabled
  * - The driver has no RoadFlare key (no followers yet)
- * - stopBroadcasting() is called (app backgrounded/closed)
+ * - stopBroadcasting() is called (driver goes offline/app closed)
  *
  * Usage:
  * ```kotlin
@@ -132,12 +131,6 @@ class RoadflareLocationBroadcaster(
     private suspend fun broadcastIfReady(locationProvider: suspend () -> Location?) {
         val state = repository.state.value
 
-        // Check if DND is active
-        if (state?.dndActive == true) {
-            Log.d(TAG, "DND active, skipping broadcast")
-            return
-        }
-
         // Check if we have a RoadFlare key
         val roadflareKey = state?.roadflareKey
         if (roadflareKey == null) {
@@ -173,7 +166,6 @@ class RoadflareLocationBroadcaster(
 
         // Determine status
         val status = when {
-            state.dndActive -> RoadflareLocationEvent.Status.DO_NOT_DISTURB
             isOnRide -> RoadflareLocationEvent.Status.ON_RIDE
             else -> RoadflareLocationEvent.Status.ONLINE
         }

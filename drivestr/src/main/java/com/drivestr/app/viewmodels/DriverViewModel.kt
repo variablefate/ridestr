@@ -58,6 +58,7 @@ import org.json.JSONObject
  */
 enum class DriverStage {
     OFFLINE,            // Not available for rides
+    ROADFLARE_ONLY,     // Broadcasting RoadFlare location, receiving RoadFlare offers only
     AVAILABLE,          // Broadcasting availability, waiting for ride requests
     RIDE_ACCEPTED,      // Accepted a ride, waiting for rider confirmation
     EN_ROUTE_TO_PICKUP, // Driving to pick up the rider
@@ -171,6 +172,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     private var pinVerificationTimeoutJob: Job? = null
     private var confirmationTimeoutJob: Job? = null  // Timeout for rider confirmation after acceptance
     private var offerSubscriptionId: String? = null                    // Direct offers (legacy/advanced)
+    private var roadflareOfferSubscriptionId: String? = null           // RoadFlare-only offers (ROADFLARE_ONLY stage)
     private var broadcastRequestSubscriptionId: String? = null         // Broadcast ride requests (new flow)
     private var confirmationSubscriptionId: String? = null
     private var chatSubscriptionId: String? = null
@@ -249,6 +251,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      */
     private fun currentRideState(): RideState = when (_uiState.value.stage) {
         DriverStage.OFFLINE -> RideState.CANCELLED
+        DriverStage.ROADFLARE_ONLY -> RideState.CREATED  // Waiting for RoadFlare offers
         DriverStage.AVAILABLE -> RideState.CREATED  // Waiting for acceptance = pre-created
         DriverStage.RIDE_ACCEPTED -> RideState.ACCEPTED
         DriverStage.EN_ROUTE_TO_PICKUP -> RideState.EN_ROUTE
@@ -443,10 +446,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
         val state = _uiState.value
 
-        // If driver is AVAILABLE, request location refresh
+        // If driver is AVAILABLE or ROADFLARE_ONLY, request location refresh
         // The UI will fetch GPS and call updateLocation()
-        if (state.stage == DriverStage.AVAILABLE) {
-            Log.d(TAG, "Driver is AVAILABLE, requesting location refresh")
+        if (state.stage == DriverStage.AVAILABLE || state.stage == DriverStage.ROADFLARE_ONLY) {
+            Log.d(TAG, "Driver is ${state.stage}, requesting location refresh")
             _locationRefreshRequested.value = true
         }
 
@@ -690,6 +693,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     private fun getStatusMessageForStage(stage: DriverStage): String {
         return when (stage) {
             DriverStage.OFFLINE -> "Tap to go online"
+            DriverStage.ROADFLARE_ONLY -> "Available for RoadFlare requests only"
             DriverStage.AVAILABLE -> "Waiting for ride requests..."
             DriverStage.RIDE_ACCEPTED -> "Waiting for rider confirmation..."
             DriverStage.EN_ROUTE_TO_PICKUP -> "Ride accepted, Heading to Pickup"
@@ -706,7 +710,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     fun goOnline(location: Location, vehicle: Vehicle?) {
         val currentState = _uiState.value
 
-        if (currentState.stage != DriverStage.OFFLINE) return
+        if (currentState.stage != DriverStage.OFFLINE && currentState.stage != DriverStage.ROADFLARE_ONLY) return
 
         // Check if wallet is set up (has mint URL configured)
         // Without a wallet, riders using Cashu payments won't be able to complete rides
@@ -734,6 +738,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     private fun proceedGoOnline(location: Location, vehicle: Vehicle?) {
         val currentState = _uiState.value
         val context = getApplication<Application>()
+        val wasRoadflareOnly = currentState.stage == DriverStage.ROADFLARE_ONLY
 
         // Set location and vehicle FIRST so route calculations work
         _uiState.value = currentState.copy(
@@ -749,17 +754,20 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Initialize cache location tracker
         lastCacheDriverLocation = location
 
-        // Start the foreground service to keep app alive
-        DriverOnlineService.start(context)
-
-        // Now start subscriptions (location is already set for route calculations)
+        // Start availability broadcasting and full offer subscriptions
         startBroadcasting(location)
         subscribeToBroadcastRequests(location)
-        // Also subscribe to direct offers (legacy/advanced mode)
         subscribeToOffers()
 
-        // Start RoadFlare location broadcasting to followers
-        startRoadflareBroadcasting()
+        if (wasRoadflareOnly) {
+            // Close roadflare-only subscription (full subscribeToOffers replaces it)
+            closeRoadflareOfferSubscription()
+            // RoadFlare broadcasting already running — don't restart
+        } else {
+            // Fresh start: launch foreground service and RoadFlare broadcasting
+            DriverOnlineService.start(context)
+            startRoadflareBroadcasting()
+        }
     }
 
     /**
@@ -790,17 +798,46 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /**
+     * Go to RoadFlare-only mode: broadcast location to followers and receive
+     * RoadFlare-tagged offers, but don't broadcast Kind 30173 availability.
+     */
+    fun goRoadflareOnly(location: Location, vehicle: Vehicle?) {
+        val context = getApplication<Application>()
+
+        _uiState.value = _uiState.value.copy(
+            stage = DriverStage.ROADFLARE_ONLY,
+            currentLocation = location,
+            activeVehicle = vehicle,
+            statusMessage = "Available for RoadFlare requests only"
+        )
+
+        // Start foreground service (needed for background location)
+        DriverOnlineService.start(context)
+
+        // Start RoadFlare broadcasting + offer subscription (RoadFlare-tagged only)
+        startRoadflareBroadcasting()
+        subscribeToRoadflareOffers()
+    }
+
+    /**
      * Go offline.
      */
     fun goOffline() {
         val currentState = _uiState.value
         val context = getApplication<Application>()
 
-        if (currentState.stage != DriverStage.AVAILABLE) return
+        if (currentState.stage != DriverStage.AVAILABLE && currentState.stage != DriverStage.ROADFLARE_ONLY) return
 
-        // Stop broadcasting and subscriptions first
-        stopBroadcasting()
-        closeOfferSubscription()
+        // Stop broadcasting and subscriptions based on current stage
+        if (currentState.stage == DriverStage.AVAILABLE) {
+            stopBroadcasting()
+            closeOfferSubscription()
+        }
+        if (currentState.stage == DriverStage.ROADFLARE_ONLY) {
+            closeRoadflareOfferSubscription()
+        }
+        // Broadcast final OFFLINE status to followers before stopping
+        broadcastRoadflareOfflineStatus()
         stopRoadflareBroadcasting()
 
         // Capture location before launching coroutine
@@ -853,7 +890,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     fun toggleAvailability(location: Location, vehicle: Vehicle? = null) {
         val currentState = _uiState.value
 
-        if (currentState.stage == DriverStage.AVAILABLE) {
+        if (currentState.stage == DriverStage.AVAILABLE || currentState.stage == DriverStage.ROADFLARE_ONLY) {
             goOffline()
         } else if (currentState.stage == DriverStage.OFFLINE) {
             goOnline(location, vehicle)
@@ -937,7 +974,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         // Guard: Not in an active ride
-        if (state.stage == DriverStage.OFFLINE || state.stage == DriverStage.AVAILABLE) return
+        if (state.stage == DriverStage.OFFLINE || state.stage == DriverStage.ROADFLARE_ONLY || state.stage == DriverStage.AVAILABLE) return
 
         // STATE_MACHINE: Validate CANCEL transition
         val myPubkey = nostrService.getPubKeyHex() ?: ""
@@ -1235,6 +1272,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 trackEventForCleanup(eventId, "ACCEPTANCE")
                 // Stop broadcasting availability but stay in "ride" mode, not offline
                 stopBroadcasting()
+                closeRoadflareOfferSubscription()  // Close RoadFlare offer subscription if active
                 deleteAllAvailabilityEvents()
 
                 // Extract payment hash for HTLC escrow (if present in offer)
@@ -2461,7 +2499,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 return@subscribeToCancellation
             }
 
-            if (currentState.stage == DriverStage.OFFLINE || currentState.stage == DriverStage.AVAILABLE) {
+            if (currentState.stage == DriverStage.OFFLINE || currentState.stage == DriverStage.ROADFLARE_ONLY || currentState.stage == DriverStage.AVAILABLE) {
                 Log.d(TAG, "Ignoring cancellation - not in active ride (stage=${currentState.stage})")
                 return@subscribeToCancellation
             }
@@ -2908,67 +2946,120 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun subscribeToOffers() {
         offerSubscriptionId?.let { nostrService.closeSubscription(it) }
-
         offerSubscriptionId = nostrService.subscribeToOffers(viewModelScope) { offer ->
-            Log.d(TAG, "Received ride offer from ${offer.riderPubKey.take(8)}...")
+            processIncomingOffer(offer, roadflareOnly = false)
+        }
+    }
 
-            // Filter out offers we've already accepted (prevents duplicates after ride completion)
-            if (offer.eventId in acceptedOfferEventIds) {
-                Log.d(TAG, "Ignoring already-accepted offer: ${offer.eventId.take(8)}")
-                return@subscribeToOffers
+    /**
+     * Subscribe to RoadFlare-tagged offers only (for ROADFLARE_ONLY stage).
+     * Uses the same offer processing logic as subscribeToOffers but filters
+     * to only RoadFlare-tagged events on the client side.
+     */
+    private fun subscribeToRoadflareOffers() {
+        roadflareOfferSubscriptionId?.let { nostrService.closeSubscription(it) }
+        roadflareOfferSubscriptionId = nostrService.subscribeToOffers(viewModelScope) { offer ->
+            processIncomingOffer(offer, roadflareOnly = true)
+        }
+    }
+
+    /**
+     * Shared offer processing logic for both full and RoadFlare-only subscriptions.
+     * Handles deduplication, staleness filtering, fare boosts, notification, and route calculation.
+     */
+    private fun processIncomingOffer(offer: RideOfferData, roadflareOnly: Boolean) {
+        // In ROADFLARE_ONLY mode, only process RoadFlare-tagged offers
+        if (roadflareOnly && !offer.isRoadflare) {
+            Log.d(TAG, "Ignoring non-RoadFlare offer in ROADFLARE_ONLY mode")
+            return
+        }
+
+        val offerType = if (offer.isRoadflare) "RoadFlare" else "Direct"
+        Log.d(TAG, "Received $offerType offer from ${offer.riderPubKey.take(8)}...")
+
+        // Filter out offers we've already accepted (prevents duplicates after ride completion)
+        if (offer.eventId in acceptedOfferEventIds) {
+            Log.d(TAG, "Ignoring already-accepted offer: ${offer.eventId.take(8)}")
+            return
+        }
+
+        // Filter out offers older than 2 minutes (stale offers)
+        val currentTimeSeconds = System.currentTimeMillis() / 1000
+        val offerAgeSeconds = currentTimeSeconds - offer.createdAt
+        val maxOfferAgeSeconds = 2 * 60
+
+        if (offerAgeSeconds > maxOfferAgeSeconds) {
+            Log.d(TAG, "Ignoring stale offer (${offerAgeSeconds}s old)")
+            return
+        }
+
+        val currentOffers = _uiState.value.pendingOffers
+        val isNewOffer = currentOffers.none { it.eventId == offer.eventId }
+        // Check if this is a fare boost (same rider, different event)
+        val isFareBoost = currentOffers.any { it.riderPubKey == offer.riderPubKey }
+
+        if (isNewOffer) {
+            // Filter out stale offers AND any existing offer from same rider (fare boost case)
+            val freshOffers = currentOffers.filter { existing ->
+                (currentTimeSeconds - existing.createdAt) <= maxOfferAgeSeconds &&
+                existing.riderPubKey != offer.riderPubKey  // Remove old offer from same rider
             }
+            // Sort: RoadFlare first, then by createdAt descending (newest first)
+            val sortedOffers = (freshOffers + offer).sortedWith(
+                compareByDescending<RideOfferData> { it.isRoadflare }
+                    .thenByDescending { it.createdAt }
+            )
+            _uiState.value = _uiState.value.copy(
+                pendingOffers = sortedOffers
+            )
 
-            // Filter out offers older than 2 minutes (stale offers) - same as broadcast requests
-            val currentTimeSeconds = System.currentTimeMillis() / 1000
-            val offerAgeSeconds = currentTimeSeconds - offer.createdAt
-            val maxOfferAgeSeconds = 2 * 60 // 2 minutes (was 10 minutes)
+            // Update deletion subscription to watch for this offer being cancelled
+            updateDeletionSubscription()
 
-            if (offerAgeSeconds > maxOfferAgeSeconds) {
-                Log.d(TAG, "Ignoring stale offer (${offerAgeSeconds}s old)")
-                return@subscribeToOffers
-            }
-
-            val currentOffers = _uiState.value.pendingOffers
-            val isNewOffer = currentOffers.none { it.eventId == offer.eventId }
-            // Check if this is a fare boost (same rider, different event)
-            val isFareBoost = currentOffers.any { it.riderPubKey == offer.riderPubKey }
-
-            if (isNewOffer) {
-                // Filter out stale offers AND any existing offer from same rider (fare boost case)
-                val freshOffers = currentOffers.filter { existing ->
-                    (currentTimeSeconds - existing.createdAt) <= maxOfferAgeSeconds &&
-                    existing.riderPubKey != offer.riderPubKey  // Remove old offer from same rider
-                }
-                // Sort by createdAt descending (newest first)
-                val sortedOffers = (freshOffers + offer).sortedByDescending { it.createdAt }
-                _uiState.value = _uiState.value.copy(
-                    pendingOffers = sortedOffers
-                )
-
-                // Update deletion subscription to watch for this offer being cancelled
-                updateDeletionSubscription()
-
-                // Notify service of new offer (plays sound, updates notification temporarily)
-                // Only for NEW offers, not fare boosts (same as broadcast requests)
-                if (!isFareBoost) {
-                    val context = getApplication<Application>()
-                    val fareDisplay = "${offer.fareEstimate.toInt()} sats"
-                    val distanceDisplay = offer.rideRouteKm?.let { "${String.format("%.1f", it)} km ride" } ?: "Direct offer"
-                    DriverOnlineService.updateStatus(
-                        context,
-                        DriverStatus.NewRequest(
-                            count = sortedOffers.size,
-                            fare = fareDisplay,
-                            distance = distanceDisplay
-                        )
+            // Notify service of new offer (plays sound, updates notification temporarily)
+            // Only for NEW offers, not fare boosts
+            if (!isFareBoost) {
+                val context = getApplication<Application>()
+                val fareDisplay = "${offer.fareEstimate.toInt()} sats"
+                val fallbackLabel = if (offer.isRoadflare) "RoadFlare request" else "Direct offer"
+                val distanceDisplay = offer.rideRouteKm?.let { "${String.format("%.1f", it)} km ride" } ?: fallbackLabel
+                DriverOnlineService.updateStatus(
+                    context,
+                    DriverStatus.NewRequest(
+                        count = sortedOffers.size,
+                        fare = fareDisplay,
+                        distance = distanceDisplay
                     )
-                    Log.d(TAG, "Direct offer received - notified service")
-                } else {
-                    Log.d(TAG, "Fare boost received from same rider - updating offer quietly")
-                }
+                )
+                Log.d(TAG, "$offerType offer received - notified service")
+            } else {
+                Log.d(TAG, "Fare boost received from same rider - updating offer quietly")
+            }
 
-                // Calculate routes for the new offer
-                calculateDirectOfferRoutes(offer)
+            // Calculate routes for the new offer
+            calculateDirectOfferRoutes(offer)
+        }
+    }
+
+    private fun closeRoadflareOfferSubscription() {
+        roadflareOfferSubscriptionId?.let { nostrService.closeSubscription(it) }
+        roadflareOfferSubscriptionId = null
+    }
+
+    /**
+     * Broadcast a final OFFLINE status to RoadFlare followers so they see
+     * the driver go offline immediately rather than waiting for staleness timeout.
+     */
+    private fun broadcastRoadflareOfflineStatus() {
+        val broadcaster = roadflareLocationBroadcaster ?: return
+        viewModelScope.launch {
+            val location = _uiState.value.currentLocation
+            if (location != null) {
+                val androidLocation = android.location.Location("").apply {
+                    latitude = location.lat
+                    longitude = location.lon
+                }
+                broadcaster.broadcastNow(androidLocation)
             }
         }
     }
@@ -3333,9 +3424,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     it.eventId !in takenOfferEventIds &&
                     it.riderPubKey != request.riderPubKey  // Remove old request from same rider
                 }
-                // Sort by fare (highest first), then by time (newest first)
+                // Sort: RoadFlare first, then by fare (highest first), then by time (newest first)
                 val sortedRequests = (freshRequests + request)
-                    .sortedWith(compareByDescending<BroadcastRideOfferData> { it.fareEstimate }
+                    .sortedWith(compareByDescending<BroadcastRideOfferData> { it.isRoadflare }
+                        .thenByDescending { it.fareEstimate }
                         .thenByDescending { it.createdAt })
 
                 _uiState.value = _uiState.value.copy(
@@ -3489,6 +3581,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 trackEventForCleanup(eventId, "BROADCAST_ACCEPTANCE")
                 // Stop broadcasting availability
                 stopBroadcasting()
+                closeRoadflareOfferSubscription()  // Close RoadFlare offer subscription if active
                 deleteAllAvailabilityEvents()
 
                 // Create a RideOfferData from broadcast data for compatibility
@@ -3708,6 +3801,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         chatRefreshJob?.cancel()
         confirmationTimeoutJob?.cancel()
         offerSubscriptionId?.let { nostrService.closeSubscription(it) }
+        roadflareOfferSubscriptionId?.let { nostrService.closeSubscription(it) }
         broadcastRequestSubscriptionId?.let { nostrService.closeSubscription(it) }
         deletionSubscriptionId?.let { nostrService.closeSubscription(it) }
         requestAcceptanceSubscriptionIds.values.forEach { nostrService.closeSubscription(it) }

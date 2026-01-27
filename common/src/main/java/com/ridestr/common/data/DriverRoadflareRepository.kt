@@ -13,7 +13,7 @@ import org.json.JSONObject
 
 /**
  * Repository for managing driver's RoadFlare state.
- * Stores the RoadFlare keypair, followers list, muted riders, and DND status.
+ * Stores the RoadFlare keypair, followers list, and muted riders.
  *
  * This is the local cache of Kind 30012 data. The source of truth is Nostr,
  * but local storage allows offline access and faster app startup.
@@ -22,7 +22,6 @@ import org.json.JSONObject
  * - roadflareKey: The Nostr keypair used to encrypt location broadcasts
  * - followers: Riders who have been sent the decryption key
  * - muted: Riders excluded from future broadcasts (triggers key rotation)
- * - dndActive: Do Not Disturb mode (stops all broadcasts)
  */
 class DriverRoadflareRepository(context: Context) {
 
@@ -30,9 +29,6 @@ class DriverRoadflareRepository(context: Context) {
 
     private val _state = MutableStateFlow<DriverRoadflareState?>(null)
     val state: StateFlow<DriverRoadflareState?> = _state.asStateFlow()
-
-    private val _dndActive = MutableStateFlow(false)
-    val dndActive: StateFlow<Boolean> = _dndActive.asStateFlow()
 
     init {
         loadState()
@@ -69,7 +65,6 @@ class DriverRoadflareRepository(context: Context) {
                     }
                 }
 
-                val dndActive = json.optBoolean("dndActive", false)
                 val keyUpdatedAt = if (json.has("keyUpdatedAt")) json.getLong("keyUpdatedAt") else null
                 val lastBroadcastAt = if (json.has("lastBroadcastAt")) json.getLong("lastBroadcastAt") else null
                 val updatedAt = json.optLong("updatedAt", System.currentTimeMillis() / 1000)
@@ -78,12 +73,10 @@ class DriverRoadflareRepository(context: Context) {
                     roadflareKey = roadflareKey,
                     followers = followers,
                     muted = muted,
-                    dndActive = dndActive,
                     keyUpdatedAt = keyUpdatedAt,
                     lastBroadcastAt = lastBroadcastAt,
                     updatedAt = updatedAt
                 )
-                _dndActive.value = dndActive
             } catch (e: Exception) {
                 _state.value = null
             }
@@ -111,7 +104,6 @@ class DriverRoadflareRepository(context: Context) {
             state.muted.forEach { mutedArray.put(it.toJson()) }
             put("muted", mutedArray)
 
-            put("dndActive", state.dndActive)
             state.keyUpdatedAt?.let { put("keyUpdatedAt", it) }
             state.lastBroadcastAt?.let { put("lastBroadcastAt", it) }
             put("updatedAt", state.updatedAt)
@@ -129,7 +121,6 @@ class DriverRoadflareRepository(context: Context) {
             roadflareKey = null,
             followers = emptyList(),
             muted = emptyList(),
-            dndActive = false,
             lastBroadcastAt = null
         )
         _state.value = current.copy(
@@ -346,31 +337,6 @@ class DriverRoadflareRepository(context: Context) {
     }
 
     /**
-     * Set DND (Do Not Disturb) mode.
-     * When active, location broadcasts are stopped.
-     */
-    fun setDndActive(active: Boolean) {
-        val current = _state.value ?: DriverRoadflareState(
-            roadflareKey = null,
-            followers = emptyList(),
-            muted = emptyList(),
-            dndActive = active,
-            lastBroadcastAt = null
-        )
-        _state.value = current.copy(
-            dndActive = active,
-            updatedAt = System.currentTimeMillis() / 1000
-        )
-        _dndActive.value = active
-        saveState()
-    }
-
-    /**
-     * Check if DND is active.
-     */
-    fun isDndActive(): Boolean = _state.value?.dndActive ?: false
-
-    /**
      * Update last broadcast timestamp.
      */
     fun updateLastBroadcast() {
@@ -394,7 +360,6 @@ class DriverRoadflareRepository(context: Context) {
      */
     fun restoreFromBackup(state: DriverRoadflareState) {
         _state.value = state
-        _dndActive.value = state.dndActive
         saveState()
     }
 
@@ -404,7 +369,6 @@ class DriverRoadflareRepository(context: Context) {
     fun clearAll() {
         prefs.edit().remove(KEY_STATE).apply()
         _state.value = null
-        _dndActive.value = false
     }
 
     companion object {

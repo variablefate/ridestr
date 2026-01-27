@@ -1,7 +1,7 @@
 # Ridestr State Machines
 
 **Version**: 1.0
-**Last Updated**: 2026-01-15
+**Last Updated**: 2026-01-27
 
 This document defines the state machines for both Rider and Driver applications.
 
@@ -125,7 +125,8 @@ The driver's ride lifecycle is managed by `DriverStage` enum in `DriverViewModel
 | State | Description |
 |-------|-------------|
 | `OFFLINE` | Not accepting rides |
-| `AVAILABLE` | Online and accepting ride requests |
+| `ROADFLARE_ONLY` | Broadcasting RoadFlare location, receiving RoadFlare offers only |
+| `AVAILABLE` | Online and accepting all ride requests |
 | `RIDE_ACCEPTED` | Accepted a ride, awaiting confirmation |
 | `EN_ROUTE_TO_PICKUP` | Driving to pickup location |
 | `ARRIVED_AT_PICKUP` | At pickup, waiting for passenger |
@@ -135,9 +136,12 @@ The driver's ride lifecycle is managed by `DriverStage` enum in `DriverViewModel
 ### State Diagram
 
 ```
-+---------+     goOnline()     +-----------+
-| OFFLINE |<------------------>| AVAILABLE |
-+---------+     goOffline()    +-----------+
++---------+  goRoadflareOnly()  +----------------+  goOnline()  +-----------+
+| OFFLINE |-------------------->| ROADFLARE_ONLY |------------->| AVAILABLE |
++---------+<--------------------+----------------+<-------------+-----------+
+     ^       goOffline()              ^              goOffline()      |
+     |                                |                               |
+     +--------------------------------+-------------------------------+
                                     |
                                     | acceptBroadcastRequest() /
                                     | acceptOffer()
@@ -183,6 +187,10 @@ The driver's ride lifecycle is managed by `DriverStage` enum in `DriverViewModel
 | From | Trigger | To |
 |------|---------|-----|
 | OFFLINE | `goOnline()` | AVAILABLE |
+| OFFLINE | `goRoadflareOnly()` | ROADFLARE_ONLY |
+| ROADFLARE_ONLY | `goOnline()` | AVAILABLE |
+| ROADFLARE_ONLY | `goOffline()` | OFFLINE |
+| ROADFLARE_ONLY | `acceptOffer()` (RoadFlare) | RIDE_ACCEPTED |
 | AVAILABLE | `goOffline()` | OFFLINE |
 | AVAILABLE | `acceptBroadcastRequest()` | RIDE_ACCEPTED |
 | AVAILABLE | `acceptOffer()` | RIDE_ACCEPTED |
@@ -198,7 +206,8 @@ The driver's ride lifecycle is managed by `DriverStage` enum in `DriverViewModel
 
 | State | Available Actions |
 |-------|-------------------|
-| OFFLINE | Go Online |
+| OFFLINE | Go Online (All Rides), Go Online (RoadFlare Only) |
+| ROADFLARE_ONLY | Go Fully Online, Go Offline, Accept RoadFlare Offers |
 | AVAILABLE | Go Offline, Accept Offer, Accept Broadcast |
 | RIDE_ACCEPTED | Cancel Ride |
 | EN_ROUTE_TO_PICKUP | Arrived at Pickup, Cancel Ride |
@@ -289,6 +298,7 @@ Each state has associated Nostr subscriptions:
 | State | Active Subscriptions |
 |-------|---------------------|
 | OFFLINE | None |
+| ROADFLARE_ONLY | RoadFlare offers only (Kind 3173 with roadflare tag) |
 | AVAILABLE | Ride offers (Kind 3173), Broadcast requests (Kind 3173 with g-tag) |
 | RIDE_ACCEPTED | + Rider ride state (Kind 30181), Confirmation (Kind 3175), Chat (Kind 3178), Cancellation (Kind 3179) |
 | EN_ROUTE_TO_PICKUP | Same as RIDE_ACCEPTED |

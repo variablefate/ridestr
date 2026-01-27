@@ -284,11 +284,10 @@ fun DrivestrApp() {
         }
     }
 
-    // Start RoadFlare listener service if enabled AND not in DND mode
+    // Start RoadFlare listener service if enabled
     val roadflareAlertsEnabled by settingsManager.roadflareAlertsEnabled.collectAsState()
-    val dndActive by driverRoadflareRepo.dndActive.collectAsState()
-    LaunchedEffect(roadflareAlertsEnabled, dndActive) {
-        if (roadflareAlertsEnabled && !dndActive) {
+    LaunchedEffect(roadflareAlertsEnabled) {
+        if (roadflareAlertsEnabled) {
             RoadflareListenerService.start(context)
         } else {
             RoadflareListenerService.stop(context)
@@ -392,6 +391,14 @@ fun DrivestrApp() {
             }
         }
         android.util.Log.d("MainActivity", "Subscribed to RoadFlare key acks: $ackSubId")
+
+        try {
+            kotlinx.coroutines.awaitCancellation()
+        } finally {
+            subId?.let { nostrService.closeSubscription(it) }
+            ackSubId?.let { nostrService.closeSubscription(it) }
+            android.util.Log.d("MainActivity", "Closed RoadFlare subscriptions: follow=$subId, ack=$ackSubId")
+        }
     }
 
     // Track if we're doing a key import (vs new key generation) for sync flow
@@ -931,7 +938,7 @@ fun MainScreen(
     // Vehicle repository state
     val vehicles by vehicleRepository.vehicles.collectAsState()
 
-    // RoadFlare settings for DND/service control
+    // RoadFlare settings
     val roadflareAlertsEnabled by settingsManager.roadflareAlertsEnabled.collectAsState()
 
     // Driver ViewModel (persists across tab switches)
@@ -1064,6 +1071,7 @@ fun MainScreen(
                     driverPubkey = driverPubkey,
                     driverNpub = driverNpub,
                     driverName = driverDisplayName,
+                    settingsManager = settingsManager,
                     backgroundAlertsEnabled = roadflareAlertsEnabled,
                     onApproveFollower = { pubkey ->
                         scope.launch {
@@ -1080,47 +1088,19 @@ fun MainScreen(
                             profileSyncManager.backupProfileData()
                         }
                     },
-                    onMuteFollower = { pubkey ->
+                    onRemoveFollower = { pubkey ->
+                        // "Remove" mutes under the hood — local ignore + key rotation.
+                        // Recoverable via Settings > Removed Followers.
                         scope.launch {
                             val signer = nostrService.keyManager.getSigner()
                             if (signer != null) {
                                 roadflareKeyManager.handleMuteFollower(
                                     signer = signer,
                                     followerPubkey = pubkey,
-                                    reason = "muted by driver"
+                                    reason = "removed by driver"
                                 )
                                 profileSyncManager.backupProfileData()
                             }
-                        }
-                    },
-                    onUnmuteFollower = { pubkey ->
-                        scope.launch {
-                            driverRoadflareRepository.unmuteRider(pubkey)
-                            profileSyncManager.backupProfileData()
-                        }
-                    },
-                    onRemoveFollower = { pubkey ->
-                        // Remove follower with key rotation (same as muting)
-                        scope.launch {
-                            val signer = nostrService.keyManager.getSigner()
-                            if (signer != null) {
-                                roadflareKeyManager.handleRemoveFollower(signer, pubkey)
-                                profileSyncManager.backupProfileData()
-                            }
-                        }
-                    },
-                    onToggleDnd = { enabled ->
-                        scope.launch {
-                            driverRoadflareRepository.setDndActive(enabled)
-                            profileSyncManager.backupProfileData()
-                        }
-                        // Tie DND to background listener service
-                        if (enabled) {
-                            // DND ON: Stop background listener (don't receive requests when unavailable)
-                            RoadflareListenerService.stop(context)
-                        } else if (roadflareAlertsEnabled) {
-                            // DND OFF + alerts enabled: Start background listener
-                            RoadflareListenerService.start(context)
                         }
                     },
                     onRefreshFollowers = {
@@ -1226,6 +1206,8 @@ fun MainScreen(
                 )
             }
             Tab.SETTINGS -> {
+                val roadflareState by driverRoadflareRepository.state.collectAsState()
+                val settingsScope = rememberCoroutineScope()
                 SettingsContent(
                     settingsManager = settingsManager,
                     hasMultipleVehicles = vehicles.size > 1,
@@ -1233,6 +1215,13 @@ fun MainScreen(
                     onOpenTiles = onOpenTiles,
                     onOpenDevOptions = onOpenDevOptions,
                     onOpenWalletSettings = onOpenWalletSettings,
+                    removedFollowers = roadflareState?.muted ?: emptyList(),
+                    onUnremoveFollower = { pubkey ->
+                        settingsScope.launch {
+                            driverRoadflareRepository.unmuteRider(pubkey)
+                            profileSyncManager.backupProfileData()
+                        }
+                    },
                     onSyncProfile = onSyncProfile,
                     modifier = Modifier.padding(innerPadding)
                 )

@@ -26,7 +26,8 @@ The driver Android app allows users to go online, receive ride offers, navigate 
 | `VehiclesScreen.kt` | Vehicle list with add/edit/delete |
 | `VehicleSetupScreen.kt` | New vehicle form |
 | `VehiclePickerDialog.kt` | Vehicle selection for going online |
-| `SettingsScreen.kt` | App settings, relay config, developer options |
+| `SettingsScreen.kt` | App settings, relay config, developer options, removed followers list |
+| `RoadflareTab.kt` | RoadFlare tab - QR code, pending/approved followers, accepted payment methods |
 | `OnboardingScreen.kt` | Login/signup flow |
 | `ProfileSetupScreen.kt` | Profile name and picture setup |
 | `KeyBackupScreen.kt` | nsec backup display |
@@ -36,6 +37,7 @@ The driver Android app allows users to go online, receive ride offers, navigate 
 | File | Purpose |
 |------|---------|
 | `DriverOnlineService.kt` | Foreground service - keeps driver online, refreshes availability |
+| `RoadflareListenerService.kt` | Foreground service - background RoadFlare ride request alerts (Kind 3173 with roadflare tag) |
 
 ### Entry Point
 
@@ -49,6 +51,11 @@ The driver Android app allows users to go online, receive ride offers, navigate 
 
 ```
 OFFLINE
+  │
+  ├──▶ goRoadflareOnly()
+  │    ROADFLARE_ONLY (RoadFlare location + RoadFlare offers only)
+  │    ├──▶ goOnline() → AVAILABLE
+  │    └──▶ goOffline() → OFFLINE
   │
   ▼ goOnline() / broadcastAvailability()
 AVAILABLE
@@ -75,8 +82,10 @@ Any state → cancelCurrentRide() → CANCELLED → goOnline() → AVAILABLE
 
 | Method | From State | To State | Nostr Event |
 |--------|------------|----------|-------------|
-| `goOnline()` | OFFLINE | AVAILABLE | Kind 30173 |
-| `acceptOffer()` | AVAILABLE | RIDE_ACCEPTED | Kind 3174 |
+| `goOnline()` | OFFLINE/ROADFLARE_ONLY | AVAILABLE | Kind 30173 |
+| `goRoadflareOnly()` | OFFLINE | ROADFLARE_ONLY | Kind 30014 (location broadcast) |
+| `goOffline()` | AVAILABLE/ROADFLARE_ONLY | OFFLINE | Kind 30014 (offline status) |
+| `acceptOffer()` | AVAILABLE/ROADFLARE_ONLY | RIDE_ACCEPTED | Kind 3174 |
 | `acceptBroadcastRequest()` | AVAILABLE | RIDE_ACCEPTED | Kind 3174 |
 | `updateDriverStatus()` | Various | Various | Kind 30180 |
 | `cancelCurrentRide()` | Any | CANCELLED | Kind 3179 |
@@ -102,6 +111,10 @@ Any state → cancelCurrentRide() → CANCELLED → goOnline() → AVAILABLE
 | `WalletScreen` | `WalletService` | Display earnings | `walletService.balance.value` |
 | `EarningsScreen` | `RideHistoryRepository` | Display past rides | `rideHistoryRepo.rides.value` |
 | `VehiclesScreen` | `VehicleRepository` | CRUD operations | `vehicleRepo.addVehicle()` |
+| `MainActivity` | `RoadflareKeyManager` | Follower approval/removal | `roadflareKeyManager.handleMuteFollower()` |
+| `MainActivity` | `DriverRoadflareRepository` | RoadFlare state + removed followers | `driverRoadflareRepository.state` |
+| `MainActivity` | `RoadflareLocationBroadcaster` | Location broadcast lifecycle | `broadcaster.startBroadcasting()` |
+| `SettingsScreen` | `DriverRoadflareRepository` | Removed followers list | `roadflareState?.muted` |
 
 ---
 
@@ -213,3 +226,9 @@ Driver broadcasts availability every 5 minutes (`AVAILABILITY_BROADCAST_INTERVAL
 - Tap wallet card in `WalletScreen.kt` → navigates to `WalletDetailScreen` (common)
 - Deposit and withdraw are **fully functional**
 - Only LN address resolution is broken (must paste BOLT11 directly)
+
+### RoadFlare Accepted Payment Methods (January 2026)
+Drivers can configure which alternate payment methods they accept from RoadFlare riders:
+- `AcceptedPaymentMethodsCard` in `RoadflareTab.kt` with checkboxes (Zelle, PayPal, Cash App, Venmo, Cash, Strike)
+- Stored in `SettingsManager.roadflarePaymentMethods` and backed up to Kind 30177
+- RoadFlare offer cards in `DriverModeScreen.kt` display the rider's chosen payment method (e.g., "Payment: Zelle") for non-cashu methods

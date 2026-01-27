@@ -13,7 +13,6 @@ import org.json.JSONObject
  * - roadflareKey: The Nostr keypair used to encrypt location broadcasts
  * - followers: List of riders who have been sent the decryption key
  * - muted: List of riders excluded from broadcasts (on key rotation)
- * - dndActive: Do Not Disturb mode (stops location broadcasts)
  *
  * This is the single source of truth for cross-device sync and key import recovery.
  * When a driver imports their key on a new device, this event restores their
@@ -61,7 +60,6 @@ object DriverRoadflareStateEvent {
             state.roadflareKey?.let { put("roadflareKey", it.toJson()) }
             put("followers", followersArray)
             put("muted", mutedArray)
-            put("dndActive", state.dndActive)
             state.keyUpdatedAt?.let { put("keyUpdatedAt", it) }
             state.lastBroadcastAt?.let { put("lastBroadcastAt", it) }
             put("updated_at", System.currentTimeMillis() / 1000)
@@ -134,7 +132,6 @@ object DriverRoadflareStateEvent {
                 }
             }
 
-            val dndActive = json.optBoolean("dndActive", false)
             val keyUpdatedAt = if (json.has("keyUpdatedAt")) json.getLong("keyUpdatedAt") else null
             val lastBroadcastAt = if (json.has("lastBroadcastAt")) json.getLong("lastBroadcastAt") else null
             val updatedAt = json.optLong("updated_at", event.createdAt)
@@ -144,7 +141,6 @@ object DriverRoadflareStateEvent {
                 roadflareKey = roadflareKey,
                 followers = followers,
                 muted = muted,
-                dndActive = dndActive,
                 keyUpdatedAt = keyUpdatedAt,
                 lastBroadcastAt = lastBroadcastAt,
                 updatedAt = updatedAt,
@@ -184,7 +180,6 @@ object DriverRoadflareStateEvent {
  * @param roadflareKey The keypair used for location broadcast encryption
  * @param followers List of riders who have been sent the decryption key
  * @param muted List of riders excluded from broadcasts
- * @param dndActive Do Not Disturb mode (stops location broadcasts)
  * @param keyUpdatedAt Timestamp when key was last updated/rotated (for stale detection)
  * @param lastBroadcastAt Timestamp of last location broadcast
  * @param updatedAt Timestamp when state was last updated
@@ -195,7 +190,6 @@ data class DriverRoadflareState(
     val roadflareKey: DriverRoadflareKey?,
     val followers: List<RoadflareFollower>,
     val muted: List<MutedRider>,
-    val dndActive: Boolean,
     val keyUpdatedAt: Long? = null,
     val lastBroadcastAt: Long?,
     val updatedAt: Long = System.currentTimeMillis() / 1000,

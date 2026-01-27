@@ -135,7 +135,7 @@ object RideshareEventKinds {
     /**
      * Kind 30012: Driver RoadFlare State (Parameterized Replaceable)
      * Driver's complete RoadFlare state, encrypted to self.
-     * Contains: roadflareKey (Nostr keypair), followers list, muted riders, DND status.
+     * Contains: roadflareKey (Nostr keypair), followers list, muted riders.
      * Single source of truth for cross-device sync and key import recovery.
      * Content is NIP-44 encrypted to self.
      * Uses d-tag "roadflare-state" for identification.
@@ -159,7 +159,7 @@ object RideshareEventKinds {
      * Followers decrypt using the shared private key received via Kind 3186.
      * Content is NIP-44 encrypted to driver's roadflarePubKey.
      * Uses d-tag "roadflare-location" for identification.
-     * Includes "status" tag: online, on_ride, do_not_disturb.
+     * Includes "status" tag: online, on_ride, offline.
      * Includes "key_version" tag for rotation tracking.
      * Published every ~30 seconds when driver app is active.
      */
@@ -226,12 +226,22 @@ object RideshareEventKinds {
  * Payment methods supported by the rideshare protocol.
  * Used in profile backup (supported methods) and ride events (requested method).
  */
-enum class PaymentMethod(val value: String) {
-    CASHU("cashu"),           // Cashu ecash (NUT-14 HTLC)
-    LIGHTNING("lightning"),   // Lightning Network direct
-    FIAT_CASH("fiat_cash");   // Cash on delivery
+enum class PaymentMethod(val value: String, val displayName: String = value) {
+    CASHU("cashu", "Bitcoin (Cashu)"),
+    LIGHTNING("lightning", "Lightning"),
+    FIAT_CASH("fiat_cash", "Cash"),
+    // RoadFlare-only alternate payment methods
+    ZELLE("zelle", "Zelle"),
+    PAYPAL("paypal", "PayPal"),
+    CASH_APP("cash_app", "Cash App"),
+    VENMO("venmo", "Venmo"),
+    CASH("cash", "Cash"),
+    STRIKE("strike", "Strike");
 
     companion object {
+        /** Alternate payment methods available for RoadFlare rides only */
+        val ROADFLARE_ALTERNATE_METHODS = listOf(ZELLE, PAYPAL, CASH_APP, VENMO, CASH, STRIKE)
+
         fun fromString(s: String): PaymentMethod? =
             entries.find { it.value == s }
 
