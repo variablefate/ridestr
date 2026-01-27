@@ -107,6 +107,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val nostrService = NostrService(application)
 
+    /** Expose NostrService for RoadFlare location subscriptions */
+    fun getNostrService(): NostrService = nostrService
+
     // Remote config for fare rates and mints (fetched from admin pubkey Kind 30182)
     private val remoteConfigManager = RemoteConfigManager(application, nostrService.relayManager)
 
@@ -1229,6 +1232,501 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
         }
+    }
+
+    /**
+     * Send a RoadFlare ride offer to a favorite driver.
+     *
+     * @param driverPubKey The driver's Nostr public key
+     * @param driverLocation The driver's current location (from Kind 30014), or null if offline
+     */
+    fun sendRoadflareOffer(driverPubKey: String, driverLocation: Location?) {
+        val state = _uiState.value
+        val pickup = state.pickupLocation ?: return
+        val destination = state.destination ?: return
+        val rideRoute = state.routeResult
+
+        // Calculate fare - use exact location if available
+        val fareEstimate = if (driverLocation != null) {
+            calculateRoadflareFare(pickup, driverLocation, rideRoute)
+        } else {
+            state.fareEstimate ?: return
+        }
+
+        // Check balance (with 2% buffer)
+        val fareAmount = fareEstimate.toLong()
+        val fareWithBuffer = (fareAmount * 1.02).toLong()
+        val currentBalance = walletService?.getBalance() ?: 0L
+
+        if (currentBalance < fareWithBuffer) {
+            val shortfall = fareWithBuffer - currentBalance
+            Log.w(TAG, "Insufficient funds for RoadFlare: need $fareWithBuffer, have $currentBalance")
+            _uiState.value = state.copy(
+                showInsufficientFundsDialog = true,
+                insufficientFundsAmount = shortfall,
+                depositAmountNeeded = shortfall
+            )
+            return
+        }
+
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isSendingOffer = true)
+
+            // Reset state for new ride
+            rideState = RideState.CANCELLED
+            clearRiderStateHistory()
+
+            // Generate HTLC preimage and payment hash
+            val preimage = PaymentCrypto.generatePreimage()
+            val paymentHash = PaymentCrypto.computePaymentHash(preimage)
+            Log.d(TAG, "Generated RoadFlare HTLC payment hash: ${paymentHash.take(16)}...")
+
+            // Calculate route metrics if driver location is known
+            val pickupRoute = if (driverLocation != null && routingService.isReady()) {
+                routingService.calculateRoute(
+                    originLat = driverLocation.lat,
+                    originLon = driverLocation.lon,
+                    destLat = pickup.lat,
+                    destLon = pickup.lon
+                )
+            } else null
+
+            val riderMintUrl = walletService?.getSavedMintUrl()
+            val paymentMethod = settingsManager.defaultPaymentMethod.value
+
+            val eventId = nostrService.sendRoadflareOffer(
+                driverPubKey = driverPubKey,
+                pickup = pickup,
+                destination = destination,
+                fareEstimate = fareEstimate,
+                pickupRouteKm = pickupRoute?.distanceKm,
+                pickupRouteMin = pickupRoute?.let { it.durationSeconds / 60.0 },
+                rideRouteKm = rideRoute?.distanceKm,
+                rideRouteMin = rideRoute?.let { it.durationSeconds / 60.0 },
+                paymentHash = paymentHash,
+                mintUrl = riderMintUrl,
+                paymentMethod = paymentMethod ?: "cashu"
+            )
+
+            if (eventId != null) {
+                Log.d(TAG, "Sent RoadFlare offer to ${driverPubKey.take(16)}: $eventId")
+                myRideEventIds.add(eventId)
+                subscribeToAcceptance(eventId)
+                startAcceptanceTimeout()
+                _uiState.value = _uiState.value.copy(
+                    isSendingOffer = false,
+                    pendingOfferEventId = eventId,
+                    rideStage = RideStage.WAITING_FOR_ACCEPTANCE,
+                    acceptanceTimeoutStartMs = System.currentTimeMillis(),
+                    statusMessage = "Waiting for driver to accept...",
+                    confirmationEventId = null,
+                    acceptance = null,
+                    pinVerified = false,
+                    pickupPin = null,
+                    pinAttempts = 0,
+                    escrowToken = null,
+                    activePreimage = preimage,
+                    activePaymentHash = paymentHash
+                )
+
+                val myPubkey = nostrService.getPubKeyHex() ?: ""
+                val newContext = RideContext.forOffer(
+                    riderPubkey = myPubkey,
+                    approxPickup = pickup,
+                    destination = destination,
+                    fareEstimateSats = fareAmount,
+                    offerEventId = eventId,
+                    paymentHash = paymentHash,
+                    riderMintUrl = riderMintUrl,
+                    paymentMethod = paymentMethod ?: "cashu"
+                )
+                updateStateMachineState(RideState.CREATED, newContext)
+            } else {
+                _uiState.value = _uiState.value.copy(
+                    isSendingOffer = false,
+                    error = "Failed to send RoadFlare offer",
+                    activePreimage = null,
+                    activePaymentHash = null,
+                    escrowToken = null
+                )
+            }
+        }
+    }
+
+    /** Batch size for RoadFlare broadcasts */
+    private val ROADFLARE_BATCH_SIZE = 3
+    /** Delay between batches in milliseconds (15 seconds) */
+    private val ROADFLARE_BATCH_DELAY_MS = 15_000L
+
+    /** Track active RoadFlare batch job for cancellation */
+    private var roadflareBatchJob: kotlinx.coroutines.Job? = null
+    /** Track which drivers have been contacted in current RoadFlare broadcast */
+    private val contactedDrivers = mutableSetOf<String>()
+
+    /**
+     * Data class to hold driver info with pre-calculated route for sorting and sending.
+     */
+    private data class DriverWithRoute(
+        val driver: com.ridestr.common.nostr.events.FollowedDriver,
+        val location: Location?,
+        val pickupRoute: RouteResult?,
+        val distanceKm: Double // Route distance or haversine fallback
+    )
+
+    /**
+     * Send RoadFlare ride offers to favorite drivers in batches.
+     * Sends to 3 closest drivers at a time, waits 15 seconds for response,
+     * then sends to the next 3 until a driver accepts or all are contacted.
+     *
+     * @param drivers List of followed drivers to send offers to
+     * @param driverLocations Map of driver pubkey -> current location (from Kind 30014)
+     */
+    fun sendRoadflareToAll(
+        drivers: List<com.ridestr.common.nostr.events.FollowedDriver>,
+        driverLocations: Map<String, Location>
+    ) {
+        val state = _uiState.value
+        val pickup = state.pickupLocation ?: return
+        val destination = state.destination ?: return
+
+        // Filter to eligible drivers (have key = approved connection)
+        val eligibleDrivers = drivers.filter { driver ->
+            driver.roadflareKey != null
+        }
+
+        if (eligibleDrivers.isEmpty()) {
+            Log.w(TAG, "No eligible RoadFlare drivers to send to")
+            _uiState.value = state.copy(error = "No favorite drivers available")
+            return
+        }
+
+        Log.d(TAG, "Starting RoadFlare broadcast to ${eligibleDrivers.size} drivers - calculating routes...")
+
+        // Clear previous state
+        contactedDrivers.clear()
+        roadflareBatchJob?.cancel()
+
+        // Start batched sending (with route calculation)
+        roadflareBatchJob = viewModelScope.launch {
+            // Pre-calculate routes for all online drivers to get accurate sorting
+            val driversWithRoutes = eligibleDrivers.map { driver ->
+                val location = driverLocations[driver.pubkey]
+
+                if (location != null && routingService.isReady()) {
+                    // Calculate actual route from driver to pickup
+                    val pickupRoute = routingService.calculateRoute(
+                        originLat = location.lat,
+                        originLon = location.lon,
+                        destLat = pickup.lat,
+                        destLon = pickup.lon
+                    )
+
+                    if (pickupRoute != null) {
+                        DriverWithRoute(driver, location, pickupRoute, pickupRoute.distanceKm)
+                    } else {
+                        // Route calculation failed - use haversine as fallback
+                        val haversineDist = haversineDistance(pickup.lat, pickup.lon, location.lat, location.lon) / 1000.0
+                        DriverWithRoute(driver, location, null, haversineDist)
+                    }
+                } else if (location != null) {
+                    // Routing service not ready - use haversine
+                    val haversineDist = haversineDistance(pickup.lat, pickup.lon, location.lat, location.lon) / 1000.0
+                    DriverWithRoute(driver, location, null, haversineDist)
+                } else {
+                    // No location (offline) - put at end with large distance
+                    DriverWithRoute(driver, null, null, Double.MAX_VALUE)
+                }
+            }
+
+            // Sort by actual route distance (online first, then offline)
+            val sortedDrivers = driversWithRoutes.sortedBy { it.distanceKm }
+
+            Log.d(TAG, "Route calculation complete. Order:")
+            sortedDrivers.forEachIndexed { index, dwr ->
+                val distStr = if (dwr.distanceKm == Double.MAX_VALUE) "offline"
+                    else String.format("%.1f km (%.1f mi)", dwr.distanceKm, dwr.distanceKm * 0.621371)
+                val routeType = if (dwr.pickupRoute != null) "route" else "haversine"
+                Log.d(TAG, "  ${index + 1}. ${dwr.driver.pubkey.take(12)} - $distStr ($routeType)")
+            }
+
+            sendRoadflareBatches(sortedDrivers, pickup)
+        }
+    }
+
+    /**
+     * Send RoadFlare offers in batches, waiting between each batch for acceptance.
+     */
+    private suspend fun sendRoadflareBatches(
+        sortedDrivers: List<DriverWithRoute>,
+        pickup: Location
+    ) {
+        val batches = sortedDrivers.chunked(ROADFLARE_BATCH_SIZE)
+        var batchIndex = 0
+
+        for (batch in batches) {
+            // Check if we already got an acceptance
+            if (_uiState.value.rideStage == RideStage.DRIVER_ACCEPTED ||
+                _uiState.value.rideStage == RideStage.RIDE_CONFIRMED ||
+                _uiState.value.rideStage == RideStage.IN_PROGRESS) {
+                Log.d(TAG, "RoadFlare broadcast: Driver already accepted, stopping batch sending")
+                return
+            }
+
+            // Check if cancelled
+            if (_uiState.value.rideStage == RideStage.IDLE) {
+                Log.d(TAG, "RoadFlare broadcast: Cancelled, stopping batch sending")
+                return
+            }
+
+            batchIndex++
+            Log.d(TAG, "RoadFlare batch $batchIndex/${batches.size}: Sending to ${batch.size} drivers")
+
+            // Update status message
+            _uiState.value = _uiState.value.copy(
+                statusMessage = "Contacting drivers... (${contactedDrivers.size + batch.size}/${sortedDrivers.size})"
+            )
+
+            // Send to all drivers in this batch
+            for (dwr in batch) {
+                if (dwr.driver.pubkey in contactedDrivers) continue
+                contactedDrivers.add(dwr.driver.pubkey)
+
+                val distanceInfo = if (dwr.location != null) {
+                    val distMiles = dwr.distanceKm * 0.621371
+                    String.format("%.1f mi away", distMiles)
+                } else "offline"
+
+                Log.d(TAG, "  -> Sending to ${dwr.driver.pubkey.take(12)} ($distanceInfo)")
+                sendRoadflareOfferSilent(dwr.driver.pubkey, dwr.location, dwr.pickupRoute)
+            }
+
+            // Wait for acceptance (unless this is the last batch)
+            if (batchIndex < batches.size) {
+                Log.d(TAG, "RoadFlare batch $batchIndex: Waiting ${ROADFLARE_BATCH_DELAY_MS/1000}s for response...")
+
+                // Wait in 1-second increments so we can check for acceptance
+                repeat((ROADFLARE_BATCH_DELAY_MS / 1000).toInt()) {
+                    kotlinx.coroutines.delay(1000)
+
+                    // Check if driver accepted
+                    if (_uiState.value.rideStage == RideStage.DRIVER_ACCEPTED ||
+                        _uiState.value.rideStage == RideStage.RIDE_CONFIRMED) {
+                        Log.d(TAG, "RoadFlare broadcast: Got acceptance during wait, stopping")
+                        return
+                    }
+
+                    // Check if cancelled
+                    if (_uiState.value.rideStage == RideStage.IDLE) {
+                        Log.d(TAG, "RoadFlare broadcast: Cancelled during wait, stopping")
+                        return
+                    }
+                }
+            }
+        }
+
+        Log.d(TAG, "RoadFlare broadcast complete: Contacted ${contactedDrivers.size} drivers")
+
+        // If still waiting after all batches, update message
+        if (_uiState.value.rideStage == RideStage.WAITING_FOR_ACCEPTANCE) {
+            _uiState.value = _uiState.value.copy(
+                statusMessage = "Waiting for response from ${contactedDrivers.size} drivers..."
+            )
+        }
+    }
+
+    /**
+     * Send a RoadFlare offer without updating the main UI state.
+     * Used for batch sending where we don't want each send to reset the UI.
+     *
+     * @param driverPubKey The driver's public key
+     * @param driverLocation The driver's current location (if known)
+     * @param preCalculatedRoute Pre-calculated route from driver to pickup (for efficiency)
+     */
+    private suspend fun sendRoadflareOfferSilent(
+        driverPubKey: String,
+        driverLocation: Location?,
+        preCalculatedRoute: RouteResult? = null
+    ) {
+        val state = _uiState.value
+        val pickup = state.pickupLocation ?: return
+        val destination = state.destination ?: return
+        val rideRoute = state.routeResult
+
+        // Calculate fare using pre-calculated route distance if available
+        val fareEstimate = if (driverLocation != null) {
+            calculateRoadflareFareWithRoute(pickup, driverLocation, rideRoute, preCalculatedRoute)
+        } else {
+            state.fareEstimate ?: return
+        }
+
+        // Generate HTLC preimage and payment hash (reuse existing if this is part of a batch)
+        val preimage = state.activePreimage ?: PaymentCrypto.generatePreimage()
+        val paymentHash = state.activePaymentHash ?: PaymentCrypto.computePaymentHash(preimage)
+
+        // Use pre-calculated route or calculate if not provided
+        val pickupRoute = preCalculatedRoute ?: if (driverLocation != null && routingService.isReady()) {
+            routingService.calculateRoute(
+                originLat = driverLocation.lat,
+                originLon = driverLocation.lon,
+                destLat = pickup.lat,
+                destLon = pickup.lon
+            )
+        } else null
+
+        val riderMintUrl = walletService?.getSavedMintUrl()
+        val paymentMethod = settingsManager.defaultPaymentMethod.value
+
+        val eventId = nostrService.sendRoadflareOffer(
+            driverPubKey = driverPubKey,
+            pickup = pickup,
+            destination = destination,
+            fareEstimate = fareEstimate,
+            pickupRouteKm = pickupRoute?.distanceKm,
+            pickupRouteMin = pickupRoute?.let { it.durationSeconds / 60.0 },
+            rideRouteKm = rideRoute?.distanceKm,
+            rideRouteMin = rideRoute?.let { it.durationSeconds / 60.0 },
+            paymentHash = paymentHash,
+            mintUrl = riderMintUrl,
+            paymentMethod = paymentMethod ?: "cashu"
+        )
+
+        if (eventId != null) {
+            Log.d(TAG, "Sent RoadFlare offer to ${driverPubKey.take(12)}: ${eventId.take(12)}")
+            myRideEventIds.add(eventId)
+
+            // Subscribe to acceptance (first call sets up the state)
+            if (state.pendingOfferEventId == null) {
+                // First offer in batch - set up the main subscription
+                subscribeToAcceptance(eventId)
+                startAcceptanceTimeout()
+                clearRiderStateHistory()
+
+                val myPubkey = nostrService.getPubKeyHex() ?: ""
+                val fareAmount = fareEstimate.toLong()
+
+                _uiState.value = _uiState.value.copy(
+                    isSendingOffer = false,
+                    pendingOfferEventId = eventId,
+                    rideStage = RideStage.WAITING_FOR_ACCEPTANCE,
+                    acceptanceTimeoutStartMs = System.currentTimeMillis(),
+                    confirmationEventId = null,
+                    acceptance = null,
+                    pinVerified = false,
+                    pickupPin = null,
+                    pinAttempts = 0,
+                    escrowToken = null,
+                    activePreimage = preimage,
+                    activePaymentHash = paymentHash
+                )
+            } else {
+                // Additional offer in batch - just subscribe to this one too
+                nostrService.subscribeToAcceptance(eventId) { acceptance ->
+                    // Route to the main acceptance handler
+                    handleBatchAcceptance(acceptance)
+                }
+            }
+        }
+    }
+
+    /**
+     * Handle acceptance from a batch RoadFlare offer.
+     */
+    private fun handleBatchAcceptance(acceptance: com.ridestr.common.nostr.events.RideAcceptanceData) {
+        Log.d(TAG, "RoadFlare batch: Driver accepted! ${acceptance.driverPubKey.take(12)}")
+
+        // Cancel the batch job
+        roadflareBatchJob?.cancel()
+
+        // Cancel the acceptance timeout
+        cancelAcceptanceTimeout()
+        closeDriverAvailabilitySubscription()
+
+        // Only process if we're still waiting
+        if (_uiState.value.rideStage == RideStage.WAITING_FOR_ACCEPTANCE) {
+            _uiState.value = _uiState.value.copy(
+                acceptance = acceptance,
+                rideStage = RideStage.DRIVER_ACCEPTED,
+                statusMessage = "Driver accepted! Confirming ride..."
+            )
+
+            // Auto-confirm the ride
+            viewModelScope.launch {
+                autoConfirmRide(acceptance)
+            }
+        }
+    }
+
+    /**
+     * Cancel the RoadFlare batch broadcast.
+     */
+    fun cancelRoadflareBroadcast() {
+        roadflareBatchJob?.cancel()
+        roadflareBatchJob = null
+        contactedDrivers.clear()
+        cancelOffer()
+    }
+
+    /**
+     * Calculate fare for RoadFlare using exact driver location.
+     * Uses $1.20/mile rate (cheaper than geohash estimate due to accuracy).
+     */
+    private fun calculateRoadflareFare(
+        pickup: Location,
+        driverLocation: Location,
+        rideRoute: RouteResult?
+    ): Double {
+        return calculateRoadflareFareWithRoute(pickup, driverLocation, rideRoute, null)
+    }
+
+    /**
+     * Calculate RoadFlare fare using actual route distance when available.
+     * Falls back to haversine if route is not provided.
+     */
+    private fun calculateRoadflareFareWithRoute(
+        pickup: Location,
+        driverLocation: Location,
+        rideRoute: RouteResult?,
+        pickupRoute: RouteResult?
+    ): Double {
+        val ROADFLARE_RATE_PER_MILE = 1.20
+        val METERS_PER_MILE = 1609.34
+
+        // Driver distance to pickup - use route if available, else haversine
+        val driverToPickupMiles = if (pickupRoute != null) {
+            pickupRoute.distanceKm * 0.621371
+        } else {
+            val driverToPickupMeters = haversineDistance(
+                driverLocation.lat, driverLocation.lon,
+                pickup.lat, pickup.lon
+            )
+            driverToPickupMeters / METERS_PER_MILE
+        }
+
+        // Ride distance (from route if available)
+        val rideMiles = rideRoute?.let { it.distanceKm * 0.621371 } ?: 0.0
+
+        // Total fare = base + driver pickup distance + ride distance
+        val baseFare = 2.50 // $2.50 base
+        val totalFare = baseFare + (driverToPickupMiles * ROADFLARE_RATE_PER_MILE) + (rideMiles * ROADFLARE_RATE_PER_MILE)
+
+        // Convert to sats (using approximate rate)
+        // TODO: Use actual BTC price
+        val satsPerDollar = 1000.0 // Approximate
+        return totalFare * satsPerDollar
+    }
+
+    /**
+     * Haversine distance calculation in meters.
+     */
+    private fun haversineDistance(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        val R = 6371000.0 // Earth radius in meters
+        val dLat = Math.toRadians(lat2 - lat1)
+        val dLon = Math.toRadians(lon2 - lon1)
+        val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+                Math.sin(dLon / 2) * Math.sin(dLon / 2)
+        val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+        return R * c
     }
 
     /**

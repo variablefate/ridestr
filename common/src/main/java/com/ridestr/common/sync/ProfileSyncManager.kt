@@ -5,6 +5,7 @@ import android.util.Log
 import com.ridestr.common.nostr.keys.KeyManager
 import com.ridestr.common.nostr.relay.RelayConfig
 import com.ridestr.common.nostr.relay.RelayManager
+import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -245,6 +246,14 @@ class ProfileSyncManager private constructor(
                             savedLocationCount = meta.savedLocationCount
                             settingsRestored = meta.settingsRestored
                         }
+                        is SyncMetadata.FollowedDrivers -> {
+                            // RoadFlare: count of followed drivers restored
+                            Log.d(TAG, "Restored ${meta.count} followed drivers")
+                        }
+                        is SyncMetadata.DriverRoadflare -> {
+                            // RoadFlare: driver state restored (key, followers, muted)
+                            Log.d(TAG, "Restored driver RoadFlare state: ${meta.followerCount} followers")
+                        }
                         null -> {
                             // No metadata, try to infer from displayName (backward compat)
                         }
@@ -379,6 +388,12 @@ class ProfileSyncManager private constructor(
                             savedLocationCount = meta.savedLocationCount
                             settingsRestored = meta.settingsRestored
                         }
+                        is SyncMetadata.FollowedDrivers -> {
+                            Log.d(TAG, "Restored ${meta.count} followed drivers")
+                        }
+                        is SyncMetadata.DriverRoadflare -> {
+                            Log.d(TAG, "Restored driver RoadFlare state: ${meta.followerCount} followers")
+                        }
                         null -> {}
                     }
                 }
@@ -502,6 +517,62 @@ class ProfileSyncManager private constructor(
             Log.d(TAG, "backupProfileData: Success - event $eventId")
         } else {
             Log.e(TAG, "backupProfileData: Failed to backup")
+        }
+
+        // Also backup RoadFlare data if registered
+        backupRoadflareAdapters(signer)
+    }
+
+    /**
+     * Backup RoadFlare-specific data (followed drivers, driver state).
+     * Called from backupProfileData() and can be called independently.
+     */
+    private suspend fun backupRoadflareAdapters(signer: NostrSigner) {
+        // Backup Favorite Drivers (rider app) - only if non-empty
+        // For empty list publishing (after removal), use backupFollowedDrivers() instead
+        val followedDriversAdapter = syncables.find { it.displayName == "Favorite Drivers" }
+        if (followedDriversAdapter != null && followedDriversAdapter.hasLocalData()) {
+            Log.d(TAG, "backupRoadflareAdapters: Backing up followed drivers...")
+            val eventId = followedDriversAdapter.publishToNostr(signer, relayManager)
+            if (eventId != null) {
+                Log.d(TAG, "backupRoadflareAdapters: Followed drivers backed up - event $eventId")
+            } else {
+                Log.e(TAG, "backupRoadflareAdapters: Failed to backup followed drivers")
+            }
+        }
+
+        // Backup Driver RoadFlare State (driver app)
+        val driverRoadflareAdapter = syncables.find { it.displayName == "RoadFlare Settings" }
+        if (driverRoadflareAdapter != null && driverRoadflareAdapter.hasLocalData()) {
+            Log.d(TAG, "backupRoadflareAdapters: Backing up driver RoadFlare state...")
+            val eventId = driverRoadflareAdapter.publishToNostr(signer, relayManager)
+            if (eventId != null) {
+                Log.d(TAG, "backupRoadflareAdapters: Driver RoadFlare state backed up - event $eventId")
+            } else {
+                Log.e(TAG, "backupRoadflareAdapters: Failed to backup driver RoadFlare state")
+            }
+        }
+    }
+
+    /**
+     * Publish the current followed drivers list to Nostr, even if empty.
+     * Call this after explicitly adding or removing a driver to sync p-tags.
+     */
+    suspend fun backupFollowedDrivers() = withContext(Dispatchers.IO) {
+        val signer = keyManager.getSigner()
+        if (signer == null) {
+            Log.d(TAG, "backupFollowedDrivers: No signer available")
+            return@withContext
+        }
+
+        val adapter = syncables.find { it.displayName == "Favorite Drivers" }
+        if (adapter != null) {
+            val eventId = adapter.publishToNostr(signer, relayManager)
+            if (eventId != null) {
+                Log.d(TAG, "backupFollowedDrivers: Published - event $eventId")
+            } else {
+                Log.e(TAG, "backupFollowedDrivers: Failed to publish")
+            }
         }
     }
 

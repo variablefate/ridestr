@@ -120,6 +120,93 @@ object RideshareEventKinds {
      */
     const val ADMIN_CONFIG = 30182
 
+    // ==================== RoadFlare Events ====================
+    // Personal rideshare network - riders build favorite driver lists
+
+    /**
+     * Kind 30011: Followed Drivers List (Parameterized Replaceable)
+     * Rider's personal list of favorite drivers, encrypted to self.
+     * Contains driver pubkeys, names, notes, and their RoadFlare decryption keys.
+     * Content is NIP-44 encrypted to self.
+     * Uses d-tag "roadflare-drivers" for identification.
+     */
+    const val ROADFLARE_FOLLOWED_DRIVERS = 30011
+
+    /**
+     * Kind 30012: Driver RoadFlare State (Parameterized Replaceable)
+     * Driver's complete RoadFlare state, encrypted to self.
+     * Contains: roadflareKey (Nostr keypair), followers list, muted riders, DND status.
+     * Single source of truth for cross-device sync and key import recovery.
+     * Content is NIP-44 encrypted to self.
+     * Uses d-tag "roadflare-state" for identification.
+     * Includes "key_version" tag for quick staleness check.
+     */
+    const val ROADFLARE_DRIVER_STATE = 30012
+
+    /**
+     * Kind 30013: Shareable Driver List (Parameterized Replaceable)
+     * Public list of recommended drivers that can be shared with friends.
+     * Content is NOT encrypted (public for sharing via deep link).
+     * Includes p-tags for each driver pubkey.
+     * Uses d-tag "roadflare-share-{randomId}" for identification.
+     * Optional expiration tag for 30-day TTL.
+     */
+    const val ROADFLARE_SHAREABLE_LIST = 30013
+
+    /**
+     * Kind 30014: RoadFlare Location Broadcast (Parameterized Replaceable)
+     * Driver's real-time location, encrypted to their RoadFlare keypair.
+     * Followers decrypt using the shared private key received via Kind 3186.
+     * Content is NIP-44 encrypted to driver's roadflarePubKey.
+     * Uses d-tag "roadflare-location" for identification.
+     * Includes "status" tag: online, on_ride, do_not_disturb.
+     * Includes "key_version" tag for rotation tracking.
+     * Published every ~30 seconds when driver app is active.
+     */
+    const val ROADFLARE_LOCATION = 30014
+
+    /**
+     * Kind 3185: RoadFlare Request
+     * @deprecated Use RIDE_OFFER (3173) with ["t", "roadflare"] tag instead.
+     * RoadFlare requests use the same structure as regular offers.
+     */
+    @Deprecated("Use RIDE_OFFER (3173) with roadflare tag instead")
+    const val ROADFLARE_REQUEST = 3185
+
+    /**
+     * Kind 3186: RoadFlare Key Share (Regular)
+     * Ephemeral DM sharing the RoadFlare private key with a follower.
+     * Sent when driver clicks "Accept" on a pending follower.
+     * Content is NIP-44 encrypted to follower's identity pubkey.
+     * Contains: roadflareKey (privateKey, publicKey, version), keyUpdatedAt, driverPubKey.
+     * Uses "expiration" tag with short TTL (5 minutes).
+     * Follower stores key in Kind 30011, sends Kind 3188 confirmation.
+     */
+    const val ROADFLARE_KEY_SHARE = 3186
+
+    /**
+     * Kind 3187: RoadFlare Follow Notification Event (Regular)
+     * Short-expiring notification (5 min) sent by rider when following a driver.
+     * Primary discovery is via p-tag query on Kind 30011, but this provides
+     * immediate real-time feedback when driver is online.
+     *
+     * Content is NIP-44 encrypted to driver's identity pubkey.
+     * Contains: action ("follow" or "unfollow"), riderName, timestamp.
+     * Uses "expiration" tag with short TTL (5 minutes) to reduce relay storage.
+     */
+    const val ROADFLARE_FOLLOW_NOTIFY = 3187
+
+    /**
+     * Kind 3188: RoadFlare Key Acknowledgement (Regular)
+     * Ephemeral confirmation from rider to driver after receiving key.
+     * Sent after rider successfully stores the RoadFlare key.
+     * Content is NIP-44 encrypted to driver's identity pubkey.
+     * Contains: keyVersion, keyUpdatedAt, status ("received").
+     * Uses "expiration" tag with short TTL (5 minutes).
+     * Driver uses this to confirm follower has current key.
+     */
+    const val ROADFLARE_KEY_ACK = 3188
+
     /**
      * Kind 30175: Vehicle Backup Event (Parameterized Replaceable)
      * @deprecated Use PROFILE_BACKUP (30177) instead. Vehicles are now part of unified profile backup.
@@ -249,6 +336,15 @@ object RideshareExpiration {
 
     // Post-ride: 24 hours (for dispute resolution)
     const val RIDE_CANCELLATION_HOURS = 24
+
+    // RoadFlare events
+    const val ROADFLARE_LOCATION_MINUTES = 5     // Real-time location, short TTL
+    const val ROADFLARE_REQUEST_MINUTES = 15     // Same as ride offer
+    const val ROADFLARE_SHAREABLE_LIST_DAYS = 30 // Shareable driver lists
+
+    // Helper function for days
+    fun daysFromNow(days: Int): Long =
+        (System.currentTimeMillis() / 1000) + (days * 24L * 60L * 60L)
 
     // Helper functions to calculate expiration timestamp
     fun minutesFromNow(minutes: Int): Long =

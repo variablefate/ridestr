@@ -465,6 +465,11 @@ State Machines
 | 30182 | Admin Config | Admin | All Apps | Platform config (fare rates, recommended mints) |
 | 7375 | Wallet Proofs | Self | Self | NIP-60 wallet proofs (encrypted) |
 | 17375 | Wallet Metadata | Self | Self | NIP-60 wallet metadata (encrypted) |
+| **30011** | Followed Drivers | Rider | Rider | RoadFlare: favorite drivers + keys (to self) |
+| **30012** | Driver RoadFlare State | Driver | Driver | RoadFlare: keypair, followers, muted (to self) |
+| **30014** | RoadFlare Location | Driver | Rider | RoadFlare: encrypted location broadcast |
+| **3186** | RoadFlare Key Share | Driver | Rider | RoadFlare: private key DM to follower |
+| **3187** | Follow Notification | Rider | Driver | RoadFlare: follow/unfollow notification |
 
 ### NIP-60 Wallet Event Formats (January 2026 - Fully Compliant)
 
@@ -536,3 +541,101 @@ Fields added to events:
 | **WalletDetailScreen** | `common/src/main/java/com/ridestr/common/ui/WalletDetailScreen.kt` |
 | **WalletSettingsScreen** | `common/src/main/java/com/ridestr/common/ui/WalletSettingsScreen.kt` |
 | **RideHistoryRepository** | `common/src/main/java/com/ridestr/common/data/RideHistoryRepository.kt` |
+| **FollowedDriversRepository** | `common/src/main/java/com/ridestr/common/data/FollowedDriversRepository.kt` |
+| **DriverRoadflareRepository** | `common/src/main/java/com/ridestr/common/data/DriverRoadflareRepository.kt` |
+| **RoadflareKeyManager** | `common/src/main/java/com/ridestr/common/roadflare/RoadflareKeyManager.kt` |
+| **RoadflareLocationBroadcaster** | `common/src/main/java/com/ridestr/common/roadflare/RoadflareLocationBroadcaster.kt` |
+
+---
+
+## RoadFlare Module Connections
+
+### Architecture
+
+```
+RoadFlare System
+├── Rider App
+│   ├── RoadflareTab.kt - Favorite drivers UI, location subscription
+│   ├── AddDriverScreen.kt - Add driver via QR/manual entry
+│   └── FollowedDriversRepository.kt - Local cache of followed drivers + keys
+│
+├── Driver App
+│   ├── RoadflareTab.kt - QR code, followers, DND toggle
+│   ├── RoadflareLocationBroadcaster.kt - Timer-based location broadcast
+│   └── RoadflareKeyManager.kt - Keypair lifecycle, key distribution
+│
+└── Common Module
+    ├── FollowedDriversEvent.kt (Kind 30011)
+    ├── DriverRoadflareStateEvent.kt (Kind 30012)
+    ├── RoadflareLocationEvent.kt (Kind 30014)
+    ├── RoadflareKeyShareEvent.kt (Kind 3186)
+    ├── RoadflareFollowNotifyEvent.kt (Kind 3187)
+    ├── FollowedDriversSyncAdapter.kt
+    └── DriverRoadflareSyncAdapter.kt
+```
+
+### Two-Way Connection Flow
+
+```mermaid
+sequenceDiagram
+    participant R as Rider App
+    participant N as Nostr Relays
+    participant D as Driver App
+
+    Note over R,D: Rider adds driver
+    R->>N: Kind 30011 (update followed list)
+    R->>N: Kind 3187 (follow notification)
+    N->>D: Kind 3187 delivered
+
+    Note over D: Driver approves follower
+    D->>D: Generate/use RoadFlare keypair
+    D->>N: Kind 3186 (DM private key to rider)
+    D->>N: Kind 30012 (update followers list)
+
+    N->>R: Kind 3186 delivered
+    R->>R: Store roadflareKey in Kind 30011
+
+    Note over R,D: Continuous location broadcast
+    loop Every 30 seconds
+        D->>N: Kind 30014 (encrypted location)
+        N->>R: Kind 30014 delivered
+        R->>R: Decrypt with roadflareKey
+    end
+
+    Note over R,D: Rider unfollows driver
+    R->>N: Kind 30011 (remove driver)
+    R->>N: Kind 3187 (unfollow notification)
+    N->>D: Kind 3187 delivered
+    D->>D: Remove follower (no key rotation)
+```
+
+### Follower Approval State Machine
+
+```
+[New Follow Request] ─→ PENDING ─approve─→ APPROVED ─→ [Key Sent]
+                          │                    │
+                          │ decline            │ mute (triggers key rotation)
+                          ▼                    ▼
+                       REMOVED              MUTED (excluded from broadcasts)
+```
+
+### Key Files and Methods
+
+| Operation | File | Method |
+|-----------|------|--------|
+| Add follower | `RoadflareKeyManager.kt` | `handleNewFollower()` |
+| Approve follower | `RoadflareKeyManager.kt` | `approveFollower()` |
+| Decline follower | `RoadflareKeyManager.kt` | `declineFollower()` |
+| Handle unfollow | `RoadflareKeyManager.kt` | `handleUnfollow()` |
+| Mute follower | `RoadflareKeyManager.kt` | `handleMuteFollower()` |
+| Send key | `RoadflareKeyManager.kt` | `sendKeyToFollower()` |
+| Rotate key | `RoadflareKeyManager.kt` | `rotateKey()` |
+| Broadcast location | `NostrService.kt` | `publishRoadflareLocation()` |
+| Subscribe to locations | `NostrService.kt` | `subscribeToRoadflareLocations()` |
+| Query followers | `NostrService.kt` | `queryRoadflareFollowers()` |
+| Publish key share | `NostrService.kt` | `publishRoadflareKeyShare()` |
+| Subscribe to key shares | `NostrService.kt` | `subscribeToRoadflareKeyShares()` |
+| Publish key ack | `NostrService.kt` | `publishRoadflareKeyAck()` |
+| Subscribe to key acks | `NostrService.kt` | `subscribeToRoadflareKeyAcks()` |
+| Fetch driver key timestamp | `NostrService.kt` | `fetchDriverKeyUpdatedAt()` |
+| ~~Send follow/unfollow~~ | `NostrService.kt` | ~~`publishRoadflareFollowNotify()`~~ (deprecated) |

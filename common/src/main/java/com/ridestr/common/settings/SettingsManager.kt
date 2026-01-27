@@ -63,6 +63,12 @@ class SettingsManager(context: Context) {
         private const val KEY_WALLET_SETUP_SKIPPED = "wallet_setup_skipped"
         private const val KEY_ALWAYS_SHOW_WALLET_DIAGNOSTICS = "always_show_wallet_diagnostics"
 
+        // RoadFlare debug settings
+        private const val KEY_IGNORE_FOLLOW_NOTIFICATIONS = "ignore_follow_notifications"
+
+        // RoadFlare alerts (driver app only)
+        private const val KEY_ROADFLARE_ALERTS_ENABLED = "roadflare_alerts_enabled"
+
         // Payment settings (Issue #13 - multi-mint support)
         private const val KEY_PAYMENT_METHODS = "payment_methods"
         private const val KEY_DEFAULT_PAYMENT_METHOD = "default_payment_method"
@@ -410,6 +416,43 @@ class SettingsManager(context: Context) {
     fun setAlwaysShowWalletDiagnostics(enabled: Boolean) {
         prefs.edit().putBoolean(KEY_ALWAYS_SHOW_WALLET_DIAGNOSTICS, enabled).apply()
         _alwaysShowWalletDiagnostics.value = enabled
+    }
+
+    // ===================
+    // ROADFLARE DEBUG SETTINGS
+    // ===================
+
+    // Ignore Kind 3187 follow notifications (for testing p-tag queries)
+    private val _ignoreFollowNotifications = MutableStateFlow(prefs.getBoolean(KEY_IGNORE_FOLLOW_NOTIFICATIONS, false))
+    val ignoreFollowNotifications: StateFlow<Boolean> = _ignoreFollowNotifications.asStateFlow()
+
+    /**
+     * Set whether to ignore Kind 3187 follow notifications.
+     * When enabled, driver app won't process real-time follow notifications,
+     * forcing use of p-tag queries on Kind 30011 for follower discovery.
+     * Useful for testing that the p-tag query mechanism works correctly.
+     */
+    fun setIgnoreFollowNotifications(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_IGNORE_FOLLOW_NOTIFICATIONS, enabled).apply()
+        _ignoreFollowNotifications.value = enabled
+    }
+
+    // ===================
+    // ROADFLARE ALERTS (Driver app only)
+    // ===================
+
+    // RoadFlare alerts enabled - when true, driver receives notifications even when offline
+    private val _roadflareAlertsEnabled = MutableStateFlow(prefs.getBoolean(KEY_ROADFLARE_ALERTS_ENABLED, false))
+    val roadflareAlertsEnabled: StateFlow<Boolean> = _roadflareAlertsEnabled.asStateFlow()
+
+    /**
+     * Set whether RoadFlare alerts are enabled.
+     * When enabled, driver app runs a background service that listens for RoadFlare
+     * requests and shows notifications even when the main app is closed.
+     */
+    fun setRoadflareAlertsEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_ROADFLARE_ALERTS_ENABLED, enabled).apply()
+        _roadflareAlertsEnabled.value = enabled
     }
 
     // ===================

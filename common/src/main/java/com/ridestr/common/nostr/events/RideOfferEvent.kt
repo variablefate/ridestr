@@ -19,6 +19,9 @@ object RideOfferEvent {
     /** Tag value to identify broadcast ride requests */
     const val RIDE_REQUEST_TAG = "ride-request"
 
+    /** Tag value to identify RoadFlare requests (from rider's favorite driver network) */
+    const val ROADFLARE_TAG = "roadflare"
+
     /**
      * Create and sign a BROADCAST ride offer event.
      * This is visible to all drivers in the pickup area.
@@ -31,6 +34,7 @@ object RideOfferEvent {
      * @param routeDurationMin Route duration in minutes
      * @param mintUrl Rider's Cashu mint URL (for multi-mint support)
      * @param paymentMethod Payment method for this ride (e.g., "cashu", "fiat_cash")
+     * @param isRoadflare True if this is a RoadFlare request (from rider's favorite driver network)
      */
     suspend fun createBroadcast(
         signer: NostrSigner,
@@ -40,7 +44,8 @@ object RideOfferEvent {
         routeDistanceKm: Double,
         routeDurationMin: Double,
         mintUrl: String? = null,
-        paymentMethod: String = "cashu"
+        paymentMethod: String = "cashu",
+        isRoadflare: Boolean = false
     ): Event {
         val content = JSONObject().apply {
             put("fare_estimate", fareEstimate)
@@ -71,6 +76,11 @@ object RideOfferEvent {
         tagsList.add(arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG))
         tagsList.add(arrayOf(RideshareTags.HASHTAG, RIDE_REQUEST_TAG))
 
+        // Add RoadFlare tag if this is from rider's favorite driver network
+        if (isRoadflare) {
+            tagsList.add(arrayOf(RideshareTags.HASHTAG, ROADFLARE_TAG))
+        }
+
         // Add NIP-40 expiration (15 minutes)
         val expiration = RideshareExpiration.minutesFromNow(RideshareExpiration.RIDE_OFFER_MINUTES)
         tagsList.add(arrayOf(RideshareTags.EXPIRATION, expiration.toString()))
@@ -94,6 +104,7 @@ object RideOfferEvent {
      * @param rideRouteMin Optional pre-calculated pickup→destination duration in minutes
      * @param mintUrl Rider's Cashu mint URL (for multi-mint support)
      * @param paymentMethod Payment method for this ride (e.g., "cashu", "fiat_cash")
+     * @param isRoadflare True if this is a RoadFlare request (from rider's favorite driver network)
      */
     suspend fun create(
         signer: NostrSigner,
@@ -111,7 +122,8 @@ object RideOfferEvent {
         destinationGeohash: String? = null,
         // Multi-mint support (Issue #13)
         mintUrl: String? = null,
-        paymentMethod: String = "cashu"
+        paymentMethod: String = "cashu",
+        isRoadflare: Boolean = false
     ): Event {
         // Build plaintext content
         val plaintext = JSONObject().apply {
@@ -137,10 +149,80 @@ object RideOfferEvent {
         // Add NIP-40 expiration (15 minutes)
         val expiration = RideshareExpiration.minutesFromNow(RideshareExpiration.RIDE_OFFER_MINUTES)
 
-        val tags = arrayOf(
+        val tagsList = mutableListOf(
             arrayOf(RideshareTags.EVENT_REF, driverAvailabilityEventId),
             arrayOf(RideshareTags.PUBKEY_REF, driverPubKey),
             arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG),
+            arrayOf(RideshareTags.EXPIRATION, expiration.toString())
+        )
+
+        // Add RoadFlare tag if this is from rider's favorite driver network
+        if (isRoadflare) {
+            tagsList.add(arrayOf(RideshareTags.HASHTAG, ROADFLARE_TAG))
+        }
+
+        return signer.sign<Event>(
+            createdAt = System.currentTimeMillis() / 1000,
+            kind = RideshareEventKinds.RIDE_OFFER,
+            tags = tagsList.toTypedArray(),
+            content = encryptedContent
+        )
+    }
+
+    /**
+     * Create and sign a RoadFlare ride offer to a favorite driver.
+     * Unlike regular offers, this doesn't require a driver availability event.
+     * Content is NIP-44 encrypted to protect pickup/destination.
+     *
+     * @param driverPubKey The driver's Nostr public key
+     * @param pickup The pickup location
+     * @param destination The destination location
+     * @param fareEstimate The estimated fare in sats
+     * @param pickupRouteKm Optional driver→pickup distance (if driver location known)
+     * @param rideRouteKm Optional pickup→destination distance
+     * @param rideRouteMin Optional pickup→destination duration
+     * @param paymentHash HTLC payment hash for escrow
+     * @param mintUrl Rider's Cashu mint URL
+     * @param paymentMethod Payment method (default "cashu")
+     */
+    suspend fun createRoadflare(
+        signer: NostrSigner,
+        driverPubKey: String,
+        pickup: Location,
+        destination: Location,
+        fareEstimate: Double,
+        pickupRouteKm: Double? = null,
+        pickupRouteMin: Double? = null,
+        rideRouteKm: Double? = null,
+        rideRouteMin: Double? = null,
+        paymentHash: String? = null,
+        mintUrl: String? = null,
+        paymentMethod: String = "cashu"
+    ): Event {
+        // Build plaintext content
+        val plaintext = JSONObject().apply {
+            put("fare_estimate", fareEstimate)
+            put("destination", destination.toJson())
+            put("approx_pickup", pickup.approximate().toJson())
+            pickupRouteKm?.let { put("pickup_route_km", it) }
+            pickupRouteMin?.let { put("pickup_route_min", it) }
+            rideRouteKm?.let { put("ride_route_km", it) }
+            rideRouteMin?.let { put("ride_route_min", it) }
+            paymentHash?.let { put("payment_hash", it) }
+            mintUrl?.let { put("mint_url", it) }
+            put("payment_method", paymentMethod)
+        }.toString()
+
+        // Encrypt using NIP-44 so only the target driver can read it
+        val encryptedContent = signer.nip44Encrypt(plaintext, driverPubKey)
+
+        // Add NIP-40 expiration (15 minutes)
+        val expiration = RideshareExpiration.minutesFromNow(RideshareExpiration.RIDE_OFFER_MINUTES)
+
+        val tags = arrayOf(
+            arrayOf(RideshareTags.PUBKEY_REF, driverPubKey),
+            arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG),
+            arrayOf(RideshareTags.HASHTAG, ROADFLARE_TAG),  // Always include RoadFlare tag
             arrayOf(RideshareTags.EXPIRATION, expiration.toString())
         )
 
@@ -189,6 +271,9 @@ object RideOfferEvent {
             val mintUrl = json.optString("mint_url", null).takeIf { !it.isNullOrBlank() }
             val paymentMethod = json.optString("payment_method", "cashu")
 
+            // Check for RoadFlare tag
+            val isRoadflare = isRoadflare(event)
+
             BroadcastRideOfferData(
                 eventId = event.id,
                 riderPubKey = event.pubKey,
@@ -200,7 +285,8 @@ object RideOfferEvent {
                 createdAt = event.createdAt,
                 geohashes = geohashes,
                 mintUrl = mintUrl,
-                paymentMethod = paymentMethod
+                paymentMethod = paymentMethod,
+                isRoadflare = isRoadflare
             )
         } catch (e: Exception) {
             null
@@ -367,6 +453,17 @@ object RideOfferEvent {
             tag.getOrNull(0) == RideshareTags.HASHTAG && tag.getOrNull(1) == RIDE_REQUEST_TAG
         }
     }
+
+    /**
+     * Check if an event is a RoadFlare request (from rider's favorite driver network).
+     * RoadFlare requests receive higher priority and indicate a trusted rider.
+     */
+    fun isRoadflare(event: Event): Boolean {
+        if (event.kind != RideshareEventKinds.RIDE_OFFER) return false
+        return event.tags.any { tag ->
+            tag.getOrNull(0) == RideshareTags.HASHTAG && tag.getOrNull(1) == ROADFLARE_TAG
+        }
+    }
 }
 
 /**
@@ -421,5 +518,7 @@ data class BroadcastRideOfferData(
     val geohashes: List<String>,
     // Multi-mint support (Issue #13)
     val mintUrl: String? = null,
-    val paymentMethod: String = "cashu"
+    val paymentMethod: String = "cashu",
+    // RoadFlare flag - true if from rider's favorite driver network (higher priority)
+    val isRoadflare: Boolean = false
 )

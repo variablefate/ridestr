@@ -155,4 +155,14 @@ sealed class SyncMetadata {
         val savedLocationCount: Int = 0,
         val settingsRestored: Boolean = false
     ) : SyncMetadata()
+
+    /** RoadFlare followed drivers sync result (rider app) */
+    data class FollowedDrivers(val count: Int) : SyncMetadata()
+
+    /** RoadFlare driver state sync result (driver app) */
+    data class DriverRoadflare(
+        val hasKey: Boolean,
+        val followerCount: Int,
+        val dndActive: Boolean
+    ) : SyncMetadata()
 }

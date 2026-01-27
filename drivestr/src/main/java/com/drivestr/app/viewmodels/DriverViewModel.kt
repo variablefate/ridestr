@@ -9,8 +9,10 @@ import com.drivestr.app.service.DriverOnlineService
 import com.drivestr.app.service.DriverStackableAlert
 import com.drivestr.app.service.DriverStatus
 import com.ridestr.common.bitcoin.BitcoinPriceService
+import com.ridestr.common.data.DriverRoadflareRepository
 import com.ridestr.common.data.RideHistoryRepository
 import com.ridestr.common.data.Vehicle
+import com.ridestr.common.roadflare.RoadflareLocationBroadcaster
 import com.ridestr.common.nostr.NostrService
 import com.ridestr.common.nostr.events.RideHistoryEntry
 import com.ridestr.common.nostr.events.geohash
@@ -135,6 +137,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
     // Ride history repository
     private val rideHistoryRepository = RideHistoryRepository.getInstance(application)
+
+    // RoadFlare repository for driver's follower list and broadcast key
+    private val driverRoadflareRepository = DriverRoadflareRepository.getInstance(application)
+
+    // RoadFlare location broadcaster - initialized lazily when signer is available
+    private var roadflareLocationBroadcaster: RoadflareLocationBroadcaster? = null
 
     // Bitcoin price service for fare conversion
     val bitcoinPriceService = BitcoinPriceService.getInstance()
@@ -749,6 +757,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         subscribeToBroadcastRequests(location)
         // Also subscribe to direct offers (legacy/advanced mode)
         subscribeToOffers()
+
+        // Start RoadFlare location broadcasting to followers
+        startRoadflareBroadcasting()
     }
 
     /**
@@ -790,6 +801,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Stop broadcasting and subscriptions first
         stopBroadcasting()
         closeOfferSubscription()
+        stopRoadflareBroadcasting()
 
         // Capture location before launching coroutine
         val lastLocation = currentState.currentLocation
@@ -952,6 +964,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
         // Clear driver state history
         clearDriverStateHistory()
+
+        // Stop RoadFlare broadcasting (going offline)
+        stopRoadflareBroadcasting()
 
         // Stop the foreground service
         DriverOnlineService.stop(getApplication())
@@ -1265,6 +1280,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                         driverMintUrl = driverMintUrl
                     )
                 )
+
+                // Update RoadFlare broadcaster to indicate on-ride status
+                updateRoadflareOnRideStatus(true)
 
                 // Save ride state for persistence
                 saveRideState()
@@ -2021,6 +2039,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 statusMessage = "Ride in progress..."
             )
 
+            // Update RoadFlare broadcaster to indicate on-ride status
+            updateRoadflareOnRideStatus(true)
+
             // Save ride state for persistence
             saveRideState()
         }
@@ -2286,6 +2307,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
         // Clear driver state history
         clearDriverStateHistory()
+
+        // Reset RoadFlare on-ride status (returning to AVAILABLE)
+        updateRoadflareOnRideStatus(false)
 
         // Return to available state
         _uiState.value = _uiState.value.copy(
@@ -2594,9 +2618,13 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Return to available state (if they were online) or offline
         val newStage = if (state.currentLocation != null) DriverStage.AVAILABLE else DriverStage.OFFLINE
 
-        // Stop the foreground service if going offline
+        // Stop the foreground service and RoadFlare broadcasting if going offline
         if (newStage == DriverStage.OFFLINE) {
             DriverOnlineService.stop(context)
+            stopRoadflareBroadcasting()
+        } else {
+            // Returning to AVAILABLE - reset on-ride status
+            updateRoadflareOnRideStatus(false)
         }
 
         // Resume broadcasting and subscriptions if returning to AVAILABLE
@@ -3504,6 +3532,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     pendingDepositAmount = null
                 )
 
+                // Update RoadFlare broadcaster to indicate on-ride status
+                updateRoadflareOnRideStatus(true)
+
                 // Save ride state for persistence
                 saveRideState()
 
@@ -3612,6 +3643,64 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         Log.d(TAG, "Declined request ${request.eventId.take(8)}, total declined: ${declinedOfferEventIds.size}")
     }
 
+    // ========================================================================
+    // RoadFlare Location Broadcasting
+    // ========================================================================
+
+    /**
+     * Start RoadFlare location broadcasting to followers.
+     * Creates the broadcaster if needed and starts periodic location updates.
+     */
+    private fun startRoadflareBroadcasting() {
+        val signer = nostrService.getSigner()
+        if (signer == null) {
+            Log.w(TAG, "Cannot start RoadFlare broadcasting: no signer available")
+            return
+        }
+
+        // Create broadcaster if not exists
+        if (roadflareLocationBroadcaster == null) {
+            roadflareLocationBroadcaster = RoadflareLocationBroadcaster(
+                repository = driverRoadflareRepository,
+                nostrService = nostrService,
+                signer = signer
+            )
+        }
+
+        // Start broadcasting with a location provider that reads current location from UI state
+        roadflareLocationBroadcaster?.startBroadcasting {
+            val location = _uiState.value.currentLocation
+            if (location != null) {
+                // Convert our Location to Android Location for the broadcaster
+                android.location.Location("").apply {
+                    latitude = location.lat
+                    longitude = location.lon
+                }
+            } else {
+                null
+            }
+        }
+
+        Log.d(TAG, "RoadFlare location broadcasting started")
+    }
+
+    /**
+     * Stop RoadFlare location broadcasting.
+     */
+    private fun stopRoadflareBroadcasting() {
+        roadflareLocationBroadcaster?.stopBroadcasting()
+        Log.d(TAG, "RoadFlare location broadcasting stopped")
+    }
+
+    /**
+     * Update RoadFlare broadcaster's on-ride status.
+     * Call when entering or exiting a ride.
+     */
+    private fun updateRoadflareOnRideStatus(isOnRide: Boolean) {
+        roadflareLocationBroadcaster?.setOnRide(isOnRide)
+        Log.d(TAG, "RoadFlare on-ride status: $isOnRide")
+    }
+
     override fun onCleared() {
         super.onCleared()
         stopBroadcasting()
@@ -3629,6 +3718,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         nostrService.disconnect()
         // Clean up Bitcoin price service
         bitcoinPriceService.cleanup()
+        // Clean up RoadFlare broadcaster
+        roadflareLocationBroadcaster?.destroy()
     }
 }
 

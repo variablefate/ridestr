@@ -49,6 +49,11 @@ The `common` module contains all shared code used by both rider and driver apps:
 | `RideHistoryEvent.kt` | 30174 | Ride history backup (encrypted to self) |
 | `ProfileBackupEvent.kt` | 30177 | **Unified profile backup** (vehicles, locations, settings) |
 | `AdminConfigEvent.kt` | 30182 | Platform config (fare rates, mints, versions) - from admin pubkey |
+| `FollowedDriversEvent.kt` | 30011 | Rider's followed drivers list + RoadFlare keys (encrypted to self) |
+| `DriverRoadflareStateEvent.kt` | 30012 | Driver's RoadFlare state (keypair, followers, muted) - encrypted to self |
+| `RoadflareLocationEvent.kt` | 30014 | Driver location broadcast (encrypted to RoadFlare pubkey) |
+| `RoadflareKeyShareEvent.kt` | 3186 | RoadFlare private key distribution (driver → follower, 5-min expiry) |
+| `RoadflareKeyAckEvent.kt` | 3188 | RoadFlare key acknowledgement (follower → driver, 5-min expiry) |
 | `RideshareEventKinds.kt` | - | Kind constants, expiration times, `PaymentMethod` enum |
 
 ### Sync System (`java/com/ridestr/common/sync/`)
@@ -61,6 +66,8 @@ The `common` module contains all shared code used by both rider and driver apps:
 | `Nip60WalletSyncAdapter.kt` | Wallet sync | **0** (highest priority) |
 | `ProfileSyncAdapter.kt` | **Unified profile sync** (vehicles, locations, settings) | **1** |
 | `RideHistorySyncAdapter.kt` | History sync | **2** |
+| `FollowedDriversSyncAdapter.kt` | Rider's followed drivers (RoadFlare) | **3** |
+| `DriverRoadflareSyncAdapter.kt` | Driver's RoadFlare state | **3** |
 
 ### State Machine (`java/com/ridestr/common/state/`)
 
@@ -95,6 +102,15 @@ CREATED → ACCEPTED → CONFIRMED → EN_ROUTE → ARRIVED → IN_PROGRESS → 
 | `RideHistoryRepository.kt` | Ride history storage (with grace period protection) | `addRide()`, `syncFromNostr()`, `backupToNostr()`, `clearAllHistoryAndDeleteFromNostr()` |
 | `VehicleRepository.kt` | Driver vehicles | `addVehicle()`, `updateVehicle()`, `setPrimaryVehicle()` |
 | `SavedLocationRepository.kt` | Rider saved locations | `addRecent()`, `pinAsFavorite()`, `restoreFromBackup()` |
+| `FollowedDriversRepository.kt` | Rider's followed drivers (RoadFlare) | `addDriver()`, `removeDriver()`, `updateDriverKey()`, `getDrivers()` |
+| `DriverRoadflareRepository.kt` | Driver's RoadFlare state | `getRoadflareKey()`, `approveFollower()`, `muteRider()`, `updateKeyUpdatedAt()` |
+
+### RoadFlare (`java/com/ridestr/common/roadflare/`)
+
+| File | Purpose | Key Methods |
+|------|---------|-------------|
+| `RoadflareKeyManager.kt` | Nostr keypair lifecycle + key rotation | `approveFollower()`, `handleMuteFollower()`, `rotateKey()`, `ensureFollowersHaveCurrentKey()` |
+| `RoadflareLocationBroadcaster.kt` | Timer-based location broadcast (2 min interval) | `startBroadcasting()`, `stopBroadcasting()`, `setOnRide()`, `broadcastNow()` |
 
 ### Routing (`java/com/ridestr/common/routing/`)
 
@@ -173,6 +189,12 @@ CREATED → ACCEPTED → CONFIRMED → EN_ROUTE → ARRIVED → IN_PROGRESS → 
 | `RideActions` | `ActionHandler` | Side effect execution | `handler.assignDriver(context, event)` |
 | `RemoteConfigManager` | `RelayManager` | Fetch admin config | `relayManager.subscribe(kind=30182, ...)` |
 | `RemoteConfigManager` | `AdminConfigEvent` | Parse config event | `AdminConfigEvent.parse(event)` |
+| `RoadflareKeyManager` | `DriverRoadflareRepository` | Key + follower state | `repository.getRoadflareKey()` |
+| `RoadflareKeyManager` | `NostrService` | Key share publishing | `nostrService.publishRoadflareKeyShare()` |
+| `RoadflareLocationBroadcaster` | `DriverRoadflareRepository` | State checks | `repository.state.value?.dndActive` |
+| `RoadflareLocationBroadcaster` | `NostrService` | Location broadcast | `nostrService.publishRoadflareLocation()` |
+| `FollowedDriversSyncAdapter` | `FollowedDriversRepository` | Driver list sync | `repo.restoreFromBackup()` |
+| `DriverRoadflareSyncAdapter` | `DriverRoadflareRepository` | RoadFlare state sync | `repo.restoreFromBackup()` |
 
 ---
 

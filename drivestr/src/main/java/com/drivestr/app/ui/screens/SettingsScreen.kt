@@ -13,7 +13,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.drivestr.app.service.RoadflareListenerService
 import com.drivestr.app.viewmodels.DriverStage
 import com.ridestr.common.settings.DisplayCurrency
 import com.ridestr.common.settings.DistanceUnit
@@ -81,6 +83,9 @@ fun SettingsContent(
     val notificationSoundEnabled by settingsManager.notificationSoundEnabled.collectAsState()
     val notificationVibrationEnabled by settingsManager.notificationVibrationEnabled.collectAsState()
     val alwaysAskVehicle by settingsManager.alwaysAskVehicle.collectAsState()
+    val roadflareAlertsEnabled by settingsManager.roadflareAlertsEnabled.collectAsState()
+
+    val context = LocalContext.current
 
     // Sync state
     var isSyncing by remember { mutableStateOf(false) }
@@ -164,6 +169,36 @@ fun SettingsContent(
                 description = "Vibrate for ride requests and updates",
                 checked = notificationVibrationEnabled,
                 onCheckedChange = { settingsManager.setNotificationVibrationEnabled(it) }
+            )
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+            // RoadFlare Section
+            Text(
+                text = "RoadFlare",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(vertical = 8.dp)
+            )
+
+            // RoadFlare Background Alerts
+            SettingsSwitchRow(
+                title = "Background Alerts",
+                description = if (roadflareAlertsEnabled)
+                    "Receive RoadFlare notifications even when app is closed (paused when Unavailable)"
+                else
+                    "Only receive RoadFlare requests when app is open",
+                checked = roadflareAlertsEnabled,
+                onCheckedChange = { enabled ->
+                    settingsManager.setRoadflareAlertsEnabled(enabled)
+                    // Note: Service start/stop is handled by MainActivity's LaunchedEffect
+                    // which respects both this setting AND DND status
+                    if (enabled) {
+                        RoadflareListenerService.start(context)
+                    } else {
+                        RoadflareListenerService.stop(context)
+                    }
+                }
             )
 
             // Vehicle Section - Only show if user has multiple vehicles
