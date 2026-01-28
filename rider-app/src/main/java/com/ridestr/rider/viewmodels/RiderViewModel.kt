@@ -2210,7 +2210,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                             amountSats = fareAmount,
                             paymentHash = paymentHash,
                             driverPubKey = driverP2pkKey,
-                            expirySeconds = 7200L  // 2 hours
+                            expirySeconds = 900L  // 15 minutes
                         )?.htlcToken
                     } catch (e: Exception) {
                         Log.e(TAG, "Exception during lockForRide: ${e.message}", e)
