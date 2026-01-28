@@ -1114,25 +1114,27 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         val fareEstimate = state.fareEstimate ?: return
         val rideRoute = state.routeResult  // Already calculated pickup→destination route
 
-        // Check balance before sending offer
-        // Include 2% buffer for potential mint fees during escrow operations
         val fareAmount = fareEstimate.toLong()
         val fareWithBuffer = (fareAmount * 1.02).toLong()
-        val currentBalance = walletService?.getBalance() ?: 0L
-
-        if (currentBalance < fareWithBuffer) {
-            val shortfall = fareWithBuffer - currentBalance
-            Log.w(TAG, "Insufficient funds: need $fareWithBuffer sats (fare $fareAmount + 2% buffer), have $currentBalance sats")
-            _uiState.value = state.copy(
-                showInsufficientFundsDialog = true,
-                insufficientFundsAmount = shortfall,
-                depositAmountNeeded = shortfall  // Pre-fill deposit with exact amount needed
-            )
-            return  // Block ride request until funded
-        }
 
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isSendingOffer = true)
+
+            // Verify wallet state with mint before sending offer
+            // This cleans stale NIP-60 proofs and confirms sufficient verified balance
+            val walletReady = walletService?.ensureWalletReady(fareWithBuffer) ?: false
+            if (!walletReady) {
+                val currentBalance = walletService?.getBalance() ?: 0L
+                val shortfall = fareWithBuffer - currentBalance
+                Log.w(TAG, "Wallet not ready: need $fareWithBuffer sats, verified balance insufficient")
+                _uiState.value = _uiState.value.copy(
+                    isSendingOffer = false,
+                    showInsufficientFundsDialog = true,
+                    insufficientFundsAmount = shortfall.coerceAtLeast(0),
+                    depositAmountNeeded = shortfall.coerceAtLeast(0)
+                )
+                return@launch
+            }
 
             // STATE_MACHINE: Reset state for new ride
             rideState = RideState.CANCELLED  // Will be set to CREATED after offer sent
@@ -2019,6 +2021,22 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isSendingOffer = true)
 
+            // Verify wallet state with mint before broadcasting
+            val fareWithBuffer = (fareEstimate.toLong() * 1.02).toLong()
+            val walletReady = walletService?.ensureWalletReady(fareWithBuffer) ?: false
+            if (!walletReady) {
+                val currentBalance = walletService?.getBalance() ?: 0L
+                val shortfall = fareWithBuffer - currentBalance
+                Log.w(TAG, "Wallet not ready for broadcast: need $fareWithBuffer sats")
+                _uiState.value = _uiState.value.copy(
+                    isSendingOffer = false,
+                    showInsufficientFundsDialog = true,
+                    insufficientFundsAmount = shortfall.coerceAtLeast(0),
+                    depositAmountNeeded = shortfall.coerceAtLeast(0)
+                )
+                return@launch
+            }
+
             // Generate HTLC preimage and payment hash for escrow
             // The actual locking happens in autoConfirmRide after driver accepts with wallet pubkey
             val preimage = PaymentCrypto.generatePreimage()
@@ -2822,7 +2840,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                             amountSats = fareAmount,
                             paymentHash = paymentHash,
                             driverPubKey = driverP2pkKey,
-                            expirySeconds = 7200L  // 2 hours
+                            expirySeconds = 900L  // 15 minutes
                         )?.htlcToken
                     } catch (e: Exception) {
                         Log.e(TAG, "Exception during lockForRide: ${e.message}", e)

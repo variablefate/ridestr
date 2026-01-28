@@ -872,6 +872,111 @@ class WalletService(
         cashuBackend.storeRecoveredProofs(proofs, mintUrl)
     }
 
+    // === Pre-ride wallet verification ===
+
+    /**
+     * Verify wallet state before requesting a ride.
+     * Cleans up stale NIP-60 proofs (spent at mint but not yet deleted from relays),
+     * refunds any expired HTLCs, and confirms sufficient verified balance.
+     *
+     * Call this BEFORE sending a ride offer to move the verification cost out of
+     * the time-critical acceptance→confirmation window.
+     *
+     * Fund safety: Only deletes proofs confirmed SPENT by mint (NUT-07).
+     * Unspent proofs from affected events are always republished BEFORE deletion.
+     *
+     * @param requiredAmount Minimum balance needed (fare amount in sats)
+     * @return true if verified available balance >= requiredAmount
+     */
+    suspend fun ensureWalletReady(requiredAmount: Long): Boolean {
+        if (!_isConnected.value) {
+            Log.w(TAG, "ensureWalletReady: not connected")
+            return false
+        }
+
+        val sync = nip60Sync ?: run {
+            Log.w(TAG, "ensureWalletReady: NIP-60 sync not initialized")
+            return false
+        }
+
+        val mintUrl = cashuBackend.getCurrentMintUrl() ?: run {
+            Log.w(TAG, "ensureWalletReady: no mint URL")
+            return false
+        }
+
+        Log.d(TAG, "=== ENSURE WALLET READY (need $requiredAmount sats) ===")
+
+        // Step 1: Refund any expired HTLCs first — recovers funds from cancelled rides
+        try {
+            refundExpiredHtlcs()
+        } catch (e: Exception) {
+            Log.w(TAG, "ensureWalletReady: HTLC refund check failed: ${e.message}")
+        }
+
+        // Step 2: Fetch all NIP-60 proofs and verify with mint
+        val allProofs = sync.fetchProofs(forceRefresh = true)
+        if (allProofs.isEmpty()) {
+            Log.w(TAG, "ensureWalletReady: no NIP-60 proofs found")
+            return false
+        }
+
+        val cashuProofs = allProofs.map { it.toCashuProof() }
+        Log.d(TAG, "ensureWalletReady: verifying ${cashuProofs.size} proofs with mint")
+
+        val verifyResult = cashuBackend.verifyProofsBalance(cashuProofs)
+        if (verifyResult == null) {
+            Log.w(TAG, "ensureWalletReady: NUT-07 verification failed, using cached balance")
+            return getBalance() >= requiredAmount
+        }
+
+        val (verifiedAmount, spentSecrets) = verifyResult
+        Log.d(TAG, "ensureWalletReady: verified=$verifiedAmount sats, spent=${spentSecrets.size}")
+
+        // Step 3: Clean up spent proofs if any
+        if (spentSecrets.isNotEmpty()) {
+            Log.d(TAG, "ensureWalletReady: cleaning ${spentSecrets.size} spent proofs from NIP-60")
+
+            // Group spent proofs by event ID
+            val spentEventIds = allProofs
+                .filter { it.secret in spentSecrets }
+                .map { it.eventId }
+                .distinct()
+
+            // Republish unspent proofs from affected events BEFORE deleting
+            val remainingProofs = allProofs.filter { proof ->
+                proof.eventId in spentEventIds && proof.secret !in spentSecrets
+            }
+
+            if (remainingProofs.isNotEmpty()) {
+                Log.d(TAG, "ensureWalletReady: republishing ${remainingProofs.size} unspent proofs from affected events")
+                val cashuRemaining = remainingProofs.map { it.toCashuProof() }
+                val newEventId = sync.publishProofs(cashuRemaining, mintUrl, spentEventIds)
+                if (newEventId != null) {
+                    Log.d(TAG, "ensureWalletReady: republished to $newEventId (del: ${spentEventIds.size} events)")
+                } else {
+                    saveRecoveryTokenFallback(cashuRemaining, mintUrl, "ensureWalletReady_republish")
+                }
+            }
+
+            // Delete stale events
+            sync.deleteProofEvents(spentEventIds)
+            sync.clearCache()
+
+            // Update displayed balance (preserve pending from active HTLCs)
+            val currentPending = _balance.value.pendingSats
+            updateBalance(WalletBalance(availableSats = verifiedAmount, pendingSats = currentPending))
+            Log.d(TAG, "ensureWalletReady: cleaned up, verified balance = $verifiedAmount sats")
+        }
+
+        val ready = verifiedAmount >= requiredAmount
+        if (!ready) {
+            Log.w(TAG, "ensureWalletReady: insufficient verified balance ($verifiedAmount < $requiredAmount)")
+        } else {
+            Log.d(TAG, "ensureWalletReady: wallet ready ($verifiedAmount >= $requiredAmount)")
+        }
+        return ready
+    }
+
     // === Escrow operations (for ride payments) ===
 
     /**
@@ -886,14 +991,14 @@ class WalletService(
      * @param amountSats Amount to lock in satoshis
      * @param paymentHash SHA256 hash that locks the funds
      * @param driverPubKey Driver's wallet public key for P2PK condition
-     * @param expirySeconds Time until escrow expires (default 2 hours)
+     * @param expirySeconds Time until escrow expires (default 15 minutes)
      * @return EscrowLock if successful, null on failure
      */
     suspend fun lockForRide(
         amountSats: Long,
         paymentHash: String,
         driverPubKey: String,
-        expirySeconds: Long = 7200L
+        expirySeconds: Long = 900L
     ): EscrowLock? {
         if (!_isConnected.value) {
             Log.e(TAG, "Cannot lock funds - not connected to wallet provider")
@@ -977,76 +1082,77 @@ class WalletService(
             }
         }
 
-        // Step 1.6: Verify selected proofs with mint (NUT-07) to catch stale proofs
-        Log.d(TAG, "Verifying ${proofsToVerify.size} proofs with mint before HTLC swap...")
-        val verifyResult = cashuBackend.verifyProofsBalance(proofsToVerify)
+        // Step 1.6: Verify selected proofs with mint (NUT-07) and clean stale proofs
+        // Loop up to 3 times to handle relay propagation lag where deleted events reappear
+        val maxCleanupAttempts = 3
+        var cleanupAttempt = 0
 
-        if (verifyResult != null) {
+        while (true) {
+            val currentSelection = selection ?: run {
+                Log.e(TAG, "Selection unexpectedly null in cleanup loop")
+                return null
+            }
+            val currentProofs = currentSelection.proofs.map { it.toCashuProof() }
+            Log.d(TAG, "Verifying ${currentProofs.size} proofs with mint (attempt ${cleanupAttempt + 1})...")
+            val verifyResult = cashuBackend.verifyProofsBalance(currentProofs)
+
+            if (verifyResult == null) {
+                Log.e(TAG, "NUT-07 verification failed - cannot proceed without verification")
+                return null
+            }
+
             val (verifiedAmount, spentSecrets) = verifyResult
             Log.d(TAG, "Verification result: $verifiedAmount sats verified, ${spentSecrets.size} spent")
 
-            if (spentSecrets.isNotEmpty()) {
-                Log.w(TAG, "Found ${spentSecrets.size} SPENT proofs in NIP-60 selection - cleaning up stale events")
-
-                // Find event IDs for spent proofs and delete them
-                val spentEventIds = selection.proofs
-                    .filter { it.secret in spentSecrets }
-                    .map { it.eventId }
-                    .distinct()
-
-                // CRITICAL: One event can contain MANY proofs!
-                // Find remaining proofs in affected events that are NOT spent
-                val allProofs = sync.fetchProofs(forceRefresh = true)
-                val remainingProofsToRepublish = allProofs.filter { proof ->
-                    proof.eventId in spentEventIds && proof.secret !in spentSecrets
-                }
-
-                if (remainingProofsToRepublish.isNotEmpty()) {
-                    Log.d(TAG, "Republishing ${remainingProofsToRepublish.size} remaining proofs before delete")
-                    val cashuProofs = remainingProofsToRepublish.map { it.toCashuProof() }
-                    // Include del array to atomically mark old events as consumed
-                    val newEventId = sync.publishProofs(cashuProofs, mintUrl, spentEventIds)
-                    if (newEventId == null) {
-                        // Fallback: save recovery token for manual recovery
-                        saveRecoveryTokenFallback(cashuProofs, mintUrl, "nip60_republish_failed_lockforride")
-                    } else {
-                        Log.d(TAG, "Republished remaining proofs to new event: $newEventId (del: ${spentEventIds.size} events)")
-                    }
-                }
-
-                Log.d(TAG, "Deleting ${spentEventIds.size} stale NIP-60 events")
-                // NIP-09 deletion as backup (del arrays are primary)
-                sync.deleteProofEvents(spentEventIds)
-                sync.clearCache()
-
-                // Retry selection with cleaned cache
-                Log.d(TAG, "Retrying proof selection after cleanup...")
-                selection = sync.selectProofsForSpending(amountSats, mintUrl)
-
-                if (selection == null) {
-                    Log.e(TAG, "Insufficient proofs after removing stale ones (need $amountSats sats)")
-                    return null
-                }
-
-                Log.d(TAG, "Retry selected ${selection.proofs.size} proofs (${selection.totalAmount} sats)")
-
-                // Verify the new selection too
-                val retryProofs = selection.proofs.map { it.toCashuProof() }
-                val retryResult = cashuBackend.verifyProofsBalance(retryProofs)
-                if (retryResult == null) {
-                    Log.e(TAG, "Failed to verify retried proof selection")
-                    return null
-                }
-                val (retryVerified, retrySpent) = retryResult
-                if (retrySpent.isNotEmpty()) {
-                    Log.e(TAG, "Retried selection still has ${retrySpent.size} spent proofs - giving up")
-                    return null
-                }
-                Log.d(TAG, "Retried selection verified: $retryVerified sats")
+            // All proofs clean — proceed to HTLC swap
+            if (spentSecrets.isEmpty()) {
+                Log.d(TAG, "All proofs verified clean on attempt ${cleanupAttempt + 1}")
+                break
             }
-        } else {
-            Log.e(TAG, "NUT-07 verification failed - cannot proceed without verification")
-            return null
+
+            // Spent proofs found — clean up and retry
+            cleanupAttempt++
+            if (cleanupAttempt >= maxCleanupAttempts) {
+                Log.e(TAG, "Still ${spentSecrets.size} spent proofs after $maxCleanupAttempts cleanup attempts - giving up")
+                return null
+            }
+
+            Log.w(TAG, "Found ${spentSecrets.size} SPENT proofs (attempt $cleanupAttempt/$maxCleanupAttempts) - cleaning up")
+
+            // Find event IDs for spent proofs
+            val spentEventIds = currentSelection.proofs
+                .filter { it.secret in spentSecrets }
+                .map { it.eventId }
+                .distinct()
+
+            // CRITICAL: Republish unspent proofs from affected events BEFORE deleting
+            val allProofs = sync.fetchProofs(forceRefresh = true)
+            val remainingProofsToRepublish = allProofs.filter { proof ->
+                proof.eventId in spentEventIds && proof.secret !in spentSecrets
+            }
+
+            if (remainingProofsToRepublish.isNotEmpty()) {
+                Log.d(TAG, "Republishing ${remainingProofsToRepublish.size} remaining proofs before delete")
+                val cashuProofs = remainingProofsToRepublish.map { it.toCashuProof() }
+                val newEventId = sync.publishProofs(cashuProofs, mintUrl, spentEventIds)
+                if (newEventId == null) {
+                    saveRecoveryTokenFallback(cashuProofs, mintUrl, "nip60_republish_failed_lockforride")
+                } else {
+                    Log.d(TAG, "Republished remaining proofs to new event: $newEventId (del: ${spentEventIds.size} events)")
+                }
+            }
+
+            // Delete stale events (NIP-09 as backup, del arrays are primary)
+            sync.deleteProofEvents(spentEventIds)
+            sync.clearCache()
+
+            // Re-select proofs for next verification round
+            selection = sync.selectProofsForSpending(amountSats, mintUrl)
+            if (selection == null) {
+                Log.e(TAG, "Insufficient proofs after cleanup attempt $cleanupAttempt (need $amountSats sats)")
+                return null
+            }
+            Log.d(TAG, "Re-selected ${selection.proofs.size} proofs (${selection.totalAmount} sats) for next verification")
         }
 
         // Convert to CashuProof for mint operations
@@ -1404,8 +1510,10 @@ class WalletService(
 
                     Log.d(TAG, "Refunded ${refundResult.amountSats} sats from HTLC ${htlc.escrowId}")
                 } else {
-                    Log.e(TAG, "Failed to refund HTLC ${htlc.escrowId}")
-                    walletStorage.updateHtlcStatus(htlc.escrowId, PendingHtlcStatus.FAILED)
+                    // Keep status as LOCKED so it can be retried on next connect/refresh.
+                    // Do NOT mark as FAILED — that would make recalculatePendingSats() drop
+                    // the pending amount, effectively losing track of the locked funds.
+                    Log.e(TAG, "Failed to refund HTLC ${htlc.escrowId} - keeping LOCKED for retry")
                     results.add(HtlcRefundInfo(
                         escrowId = htlc.escrowId,
                         amountSats = htlc.amountSats,

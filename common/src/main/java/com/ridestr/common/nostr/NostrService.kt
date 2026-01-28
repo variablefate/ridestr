@@ -11,6 +11,7 @@ import com.ridestr.common.nostr.keys.KeyManager
 import com.ridestr.common.nostr.relay.RelayConfig
 import com.ridestr.common.nostr.relay.RelayConnectionState
 import com.ridestr.common.nostr.relay.RelayManager
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -19,6 +20,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 // GlobalScope removed - all decrypt coroutines now use caller-provided scope
 
 /**
@@ -270,10 +272,12 @@ class NostrService(
 
         // Collect event IDs from subscription
         val eventIds = mutableListOf<String>()
+        val eoseReceived = CompletableDeferred<String>()
         val subscriptionId = relayManager.subscribe(
             kinds = rideshareKinds,
             authors = listOf(pubkey),
-            limit = 1000
+            limit = 1000,
+            onEose = { relayUrl -> eoseReceived.complete(relayUrl) }
         ) { event, _ ->
             // Skip offline driver availability events - they're signals, not active data
             if (event.kind == RideshareEventKinds.DRIVER_AVAILABILITY) {
@@ -287,8 +291,8 @@ class NostrService(
             }
         }
 
-        // Wait for relays to respond (2 seconds should be enough for most events)
-        delay(2000)
+        // Wait for EOSE or timeout
+        if (withTimeoutOrNull(2000L) { eoseReceived.await() } != null) delay(200)
 
         // Close subscription
         relayManager.closeSubscription(subscriptionId)
@@ -329,18 +333,20 @@ class NostrService(
 
         // Collect event IDs from subscription
         val eventIds = mutableListOf<String>()
+        val eoseReceived2 = CompletableDeferred<String>()
         val subscriptionId = relayManager.subscribe(
             kinds = listOf(kind),
             authors = listOf(pubkey),
-            limit = 100
+            limit = 100,
+            onEose = { relayUrl -> eoseReceived2.complete(relayUrl) }
         ) { event, _ ->
             synchronized(eventIds) {
                 eventIds.add(event.id)
             }
         }
 
-        // Wait for relays to respond
-        delay(2000)
+        // Wait for EOSE or timeout
+        if (withTimeoutOrNull(2000L) { eoseReceived2.await() } != null) delay(200)
 
         // Close subscription
         relayManager.closeSubscription(subscriptionId)
@@ -396,10 +402,12 @@ class NostrService(
 
         // Collect event IDs from subscription
         val eventIds = mutableListOf<String>()
+        val eoseReceived3 = CompletableDeferred<String>()
         val subscriptionId = relayManager.subscribe(
             kinds = rideshareKinds,
             authors = listOf(pubkey),
-            limit = 1000
+            limit = 1000,
+            onEose = { relayUrl -> eoseReceived3.complete(relayUrl) }
         ) { event, _ ->
             // Skip offline driver availability events - they're signals, not active data
             if (event.kind == RideshareEventKinds.DRIVER_AVAILABILITY) {
@@ -416,8 +424,8 @@ class NostrService(
             }
         }
 
-        // Wait for relays to respond (2 seconds should be enough for most events)
-        delay(2000)
+        // Wait for EOSE or timeout
+        if (withTimeoutOrNull(2000L) { eoseReceived3.await() } != null) delay(200)
 
         // Close subscription
         relayManager.closeSubscription(subscriptionId)
@@ -467,10 +475,12 @@ class NostrService(
 
         // Collect events with their kinds
         val kindCounts = mutableMapOf<Int, Int>()
+        val eoseReceived4 = CompletableDeferred<String>()
         val subscriptionId = relayManager.subscribe(
             kinds = rideshareKinds,
             authors = listOf(pubkey),
-            limit = 1000
+            limit = 1000,
+            onEose = { relayUrl -> eoseReceived4.complete(relayUrl) }
         ) { event, _ ->
             // Skip offline driver availability events - they're signals, not active data
             if (event.kind == RideshareEventKinds.DRIVER_AVAILABILITY) {
@@ -484,8 +494,8 @@ class NostrService(
             }
         }
 
-        // Wait longer for relay responses (increased from 2s to 5s)
-        delay(5000)
+        // Wait for EOSE or timeout
+        if (withTimeoutOrNull(5000L) { eoseReceived4.await() } != null) delay(200)
         relayManager.closeSubscription(subscriptionId)
 
         val total = kindCounts.values.sum()
@@ -529,10 +539,12 @@ class NostrService(
 
         // Collect event IDs from subscription (same approach as Account Safety)
         val foundEventIds = mutableListOf<String>()
+        val eoseCleanup1 = CompletableDeferred<String>()
         val subscriptionId = relayManager.subscribe(
             kinds = kindsToClean,
             authors = listOf(pubkey),
-            limit = 500  // High limit to catch stragglers
+            limit = 500,  // High limit to catch stragglers
+            onEose = { relayUrl -> eoseCleanup1.complete(relayUrl) }
         ) { event, _ ->
             // Skip offline driver availability events - they're signals to riders
             if (event.kind == RideshareEventKinds.DRIVER_AVAILABILITY) {
@@ -547,8 +559,8 @@ class NostrService(
             }
         }
 
-        // Wait for relay responses - same as Account Safety (2 seconds)
-        delay(2000)
+        // Wait for EOSE or timeout
+        if (withTimeoutOrNull(2000L) { eoseCleanup1.await() } != null) delay(200)
 
         // Close subscription
         relayManager.closeSubscription(subscriptionId)
@@ -580,10 +592,12 @@ class NostrService(
 
         // Re-query to find any stubborn events that weren't deleted
         val persistingEventIds = mutableListOf<String>()
+        val eoseRetry = CompletableDeferred<String>()
         val retrySubId = relayManager.subscribe(
             kinds = kindsToClean,
             authors = listOf(pubkey),
-            limit = 500
+            limit = 500,
+            onEose = { relayUrl -> eoseRetry.complete(relayUrl) }
         ) { event, _ ->
             // Only track events from our ORIGINAL list (ignore new events if user went back online)
             if (event.id in originalEventIds) {
@@ -595,7 +609,7 @@ class NostrService(
             }
         }
 
-        delay(2000)
+        if (withTimeoutOrNull(2000L) { eoseRetry.await() } != null) delay(200)
         relayManager.closeSubscription(retrySubId)
 
         if (persistingEventIds.isNotEmpty()) {
@@ -1711,27 +1725,29 @@ class NostrService(
             Log.d(TAG, "Fetching ride history from ${relayManager.connectedCount()} relays for ${myPubKey.take(16)}...")
 
             try {
-                var result: RideHistoryData? = null
+                var rawEvent: com.vitorpamplona.quartz.nip01Core.core.Event? = null
+                val eoseHistory = CompletableDeferred<String>()
                 val subscriptionId = relayManager.subscribe(
                     kinds = listOf(RideshareEventKinds.RIDE_HISTORY_BACKUP),
                     authors = listOf(myPubKey),
                     tags = mapOf("d" to listOf(RideHistoryEvent.D_TAG)),
-                    limit = 1
+                    limit = 1,
+                    onEose = { relayUrl -> eoseHistory.complete(relayUrl) }
                 ) { event, relayUrl ->
-                    // This is our own history event - try to decrypt
                     Log.d(TAG, "Received ride history event ${event.id} from $relayUrl")
-                    kotlinx.coroutines.runBlocking {
-                        RideHistoryEvent.parseAndDecrypt(signer, event)?.let { data ->
-                            result = data
-                            Log.d(TAG, "Decrypted ride history: ${data.rides.size} rides")
-                        }
-                    }
+                    rawEvent = event
                 }
 
-                // Wait for response (increased from 3s to 8s)
-                delay(8000)
+                // Wait for EOSE or timeout
+                if (withTimeoutOrNull(8000L) { eoseHistory.await() } != null) delay(200)
                 relayManager.closeSubscription(subscriptionId)
 
+                // Decrypt outside callback
+                val result = rawEvent?.let { event ->
+                    RideHistoryEvent.parseAndDecrypt(signer, event)?.also { data ->
+                        Log.d(TAG, "Decrypted ride history: ${data.rides.size} rides")
+                    }
+                }
                 if (result == null) {
                     Log.d(TAG, "No ride history backup found on relays")
                 }
@@ -1847,27 +1863,29 @@ class NostrService(
             Log.d(TAG, "Fetching profile backup from ${relayManager.connectedCount()} relays for ${myPubKey.take(16)}...")
 
             try {
-                var result: ProfileBackupData? = null
+                var rawEvent: com.vitorpamplona.quartz.nip01Core.core.Event? = null
+                val eoseProfile = CompletableDeferred<String>()
                 val subscriptionId = relayManager.subscribe(
                     kinds = listOf(RideshareEventKinds.PROFILE_BACKUP),
                     authors = listOf(myPubKey),
                     tags = mapOf("d" to listOf(ProfileBackupEvent.D_TAG)),
-                    limit = 1
+                    limit = 1,
+                    onEose = { relayUrl -> eoseProfile.complete(relayUrl) }
                 ) { event, relayUrl ->
-                    // This is our own profile event - try to decrypt
                     Log.d(TAG, "Received profile backup event ${event.id} from $relayUrl")
-                    kotlinx.coroutines.runBlocking {
-                        ProfileBackupEvent.parseAndDecrypt(signer, event)?.let { data ->
-                            result = data
-                            Log.d(TAG, "Decrypted profile backup: ${data.vehicles.size} vehicles, ${data.savedLocations.size} locations")
-                        }
-                    }
+                    rawEvent = event
                 }
 
-                // Wait for response
-                delay(8000)
+                // Wait for EOSE or timeout
+                if (withTimeoutOrNull(8000L) { eoseProfile.await() } != null) delay(200)
                 relayManager.closeSubscription(subscriptionId)
 
+                // Decrypt outside callback
+                val result = rawEvent?.let { event ->
+                    ProfileBackupEvent.parseAndDecrypt(signer, event)?.also { data ->
+                        Log.d(TAG, "Decrypted profile backup: ${data.vehicles.size} vehicles, ${data.savedLocations.size} locations")
+                    }
+                }
                 if (result == null) {
                     Log.d(TAG, "No profile backup found on relays")
                 }
@@ -1958,27 +1976,29 @@ class NostrService(
             Log.d(TAG, "Fetching vehicle backup from ${relayManager.connectedCount()} relays for ${myPubKey.take(16)}...")
 
             try {
-                var result: VehicleBackupData? = null
+                var rawEvent: com.vitorpamplona.quartz.nip01Core.core.Event? = null
+                val eoseVehicle = CompletableDeferred<String>()
                 val subscriptionId = relayManager.subscribe(
                     kinds = listOf(RideshareEventKinds.VEHICLE_BACKUP),
                     authors = listOf(myPubKey),
                     tags = mapOf("d" to listOf(VehicleBackupEvent.D_TAG)),
-                    limit = 1
+                    limit = 1,
+                    onEose = { relayUrl -> eoseVehicle.complete(relayUrl) }
                 ) { event, relayUrl ->
-                    // This is our own vehicle event - try to decrypt
                     Log.d(TAG, "Received vehicle backup event ${event.id} from $relayUrl")
-                    kotlinx.coroutines.runBlocking {
-                        VehicleBackupEvent.parseAndDecrypt(signer, event)?.let { data ->
-                            result = data
-                            Log.d(TAG, "Decrypted vehicle backup: ${data.vehicles.size} vehicles")
-                        }
-                    }
+                    rawEvent = event
                 }
 
-                // Wait for response
-                delay(8000)
+                // Wait for EOSE or timeout
+                if (withTimeoutOrNull(8000L) { eoseVehicle.await() } != null) delay(200)
                 relayManager.closeSubscription(subscriptionId)
 
+                // Decrypt outside callback
+                val result = rawEvent?.let { event ->
+                    VehicleBackupEvent.parseAndDecrypt(signer, event)?.also { data ->
+                        Log.d(TAG, "Decrypted vehicle backup: ${data.vehicles.size} vehicles")
+                    }
+                }
                 if (result == null) {
                     Log.d(TAG, "No vehicle backup found on relays")
                 }
@@ -2069,27 +2089,29 @@ class NostrService(
             Log.d(TAG, "Fetching saved location backup from ${relayManager.connectedCount()} relays for ${myPubKey.take(16)}...")
 
             try {
-                var result: SavedLocationBackupData? = null
+                var rawEvent: com.vitorpamplona.quartz.nip01Core.core.Event? = null
+                val eoseLocations = CompletableDeferred<String>()
                 val subscriptionId = relayManager.subscribe(
                     kinds = listOf(RideshareEventKinds.SAVED_LOCATIONS_BACKUP),
                     authors = listOf(myPubKey),
                     tags = mapOf("d" to listOf(SavedLocationBackupEvent.D_TAG)),
-                    limit = 1
+                    limit = 1,
+                    onEose = { relayUrl -> eoseLocations.complete(relayUrl) }
                 ) { event, relayUrl ->
-                    // This is our own saved locations event - try to decrypt
                     Log.d(TAG, "Received saved location backup event ${event.id} from $relayUrl")
-                    kotlinx.coroutines.runBlocking {
-                        SavedLocationBackupEvent.parseAndDecrypt(signer, event)?.let { data ->
-                            result = data
-                            Log.d(TAG, "Decrypted saved location backup: ${data.locations.size} locations")
-                        }
-                    }
+                    rawEvent = event
                 }
 
-                // Wait for response
-                delay(8000)
+                // Wait for EOSE or timeout
+                if (withTimeoutOrNull(8000L) { eoseLocations.await() } != null) delay(200)
                 relayManager.closeSubscription(subscriptionId)
 
+                // Decrypt outside callback
+                val result = rawEvent?.let { event ->
+                    SavedLocationBackupEvent.parseAndDecrypt(signer, event)?.also { data ->
+                        Log.d(TAG, "Decrypted saved location backup: ${data.locations.size} locations")
+                    }
+                }
                 if (result == null) {
                     Log.d(TAG, "No saved location backup found on relays")
                 }
@@ -2174,25 +2196,29 @@ class NostrService(
             Log.d(TAG, "Fetching followed drivers for ${myPubKey.take(16)}...")
 
             try {
-                var result: FollowedDriversData? = null
+                var rawEvent: com.vitorpamplona.quartz.nip01Core.core.Event? = null
+                val eoseFollowed = CompletableDeferred<String>()
                 val subscriptionId = relayManager.subscribe(
                     kinds = listOf(RideshareEventKinds.ROADFLARE_FOLLOWED_DRIVERS),
                     authors = listOf(myPubKey),
                     tags = mapOf("d" to listOf(FollowedDriversEvent.D_TAG)),
-                    limit = 1
+                    limit = 1,
+                    onEose = { relayUrl -> eoseFollowed.complete(relayUrl) }
                 ) { event, relayUrl ->
                     Log.d(TAG, "Received followed drivers event ${event.id} from $relayUrl")
-                    kotlinx.coroutines.runBlocking {
-                        FollowedDriversEvent.parseAndDecrypt(signer, event)?.let { data ->
-                            result = data
-                            Log.d(TAG, "Decrypted followed drivers: ${data.drivers.size} drivers")
-                        }
-                    }
+                    rawEvent = event
                 }
 
-                delay(8000)
+                // Wait for EOSE or timeout
+                if (withTimeoutOrNull(8000L) { eoseFollowed.await() } != null) delay(200)
                 relayManager.closeSubscription(subscriptionId)
 
+                // Decrypt outside callback
+                val result = rawEvent?.let { event ->
+                    FollowedDriversEvent.parseAndDecrypt(signer, event)?.also { data ->
+                        Log.d(TAG, "Decrypted followed drivers: ${data.drivers.size} drivers")
+                    }
+                }
                 if (result == null) {
                     Log.d(TAG, "No followed drivers found on relays")
                 }
@@ -2273,25 +2299,29 @@ class NostrService(
             Log.d(TAG, "Fetching driver RoadFlare state for ${myPubKey.take(16)}...")
 
             try {
-                var result: DriverRoadflareState? = null
+                var rawEvent: com.vitorpamplona.quartz.nip01Core.core.Event? = null
+                val eoseRoadflare = CompletableDeferred<String>()
                 val subscriptionId = relayManager.subscribe(
                     kinds = listOf(RideshareEventKinds.ROADFLARE_DRIVER_STATE),
                     authors = listOf(myPubKey),
                     tags = mapOf("d" to listOf(DriverRoadflareStateEvent.D_TAG)),
-                    limit = 1
+                    limit = 1,
+                    onEose = { relayUrl -> eoseRoadflare.complete(relayUrl) }
                 ) { event, relayUrl ->
                     Log.d(TAG, "Received driver RoadFlare state event ${event.id} from $relayUrl")
-                    kotlinx.coroutines.runBlocking {
-                        DriverRoadflareStateEvent.parseAndDecrypt(signer, event)?.let { data ->
-                            result = data
-                            Log.d(TAG, "Decrypted driver RoadFlare state: key v${data.roadflareKey?.version}, ${data.followers.size} followers")
-                        }
-                    }
+                    rawEvent = event
                 }
 
-                delay(8000)
+                // Wait for EOSE or timeout
+                if (withTimeoutOrNull(8000L) { eoseRoadflare.await() } != null) delay(200)
                 relayManager.closeSubscription(subscriptionId)
 
+                // Decrypt outside callback
+                val result = rawEvent?.let { event ->
+                    DriverRoadflareStateEvent.parseAndDecrypt(signer, event)?.also { data ->
+                        Log.d(TAG, "Decrypted driver RoadFlare state: key v${data.roadflareKey?.version}, ${data.followers.size} followers")
+                    }
+                }
                 if (result == null) {
                     Log.d(TAG, "No driver RoadFlare state found on relays")
                 }
@@ -2322,11 +2352,13 @@ class NostrService(
 
             try {
                 var result: Long? = null
+                val eoseKeyUpdate = CompletableDeferred<String>()
                 val subscriptionId = relayManager.subscribe(
                     kinds = listOf(RideshareEventKinds.ROADFLARE_DRIVER_STATE),
                     authors = listOf(driverPubKey),
                     tags = mapOf("d" to listOf(DriverRoadflareStateEvent.D_TAG)),
-                    limit = 1
+                    limit = 1,
+                    onEose = { relayUrl -> eoseKeyUpdate.complete(relayUrl) }
                 ) { event, relayUrl ->
                     // Extract public key_updated_at tag without decryption
                     val keyUpdatedAt = DriverRoadflareStateEvent.getKeyUpdatedAt(event)
@@ -2336,7 +2368,8 @@ class NostrService(
                     }
                 }
 
-                delay(5000)
+                // Wait for EOSE or timeout
+                if (withTimeoutOrNull(5000L) { eoseKeyUpdate.await() } != null) delay(200)
                 relayManager.closeSubscription(subscriptionId)
 
                 if (result == null) {
@@ -2665,9 +2698,11 @@ class NostrService(
         val signer = keyManager.getSigner() ?: return@withContext null
 
         var foundEvent: com.vitorpamplona.quartz.nip01Core.core.Event? = null
+        val eoseVerify = CompletableDeferred<String>()
         val subscriptionId = relayManager.subscribe(
             kinds = listOf(RideshareEventKinds.ROADFLARE_FOLLOWED_DRIVERS),
-            authors = listOf(followerPubKey)
+            authors = listOf(followerPubKey),
+            onEose = { relayUrl -> eoseVerify.complete(relayUrl) }
         ) { event, _ ->
             // Replaceable event (d-tag) - relays should return only one, keep newest
             if (foundEvent == null || event.createdAt > foundEvent!!.createdAt) {
@@ -2675,7 +2710,7 @@ class NostrService(
             }
         }
 
-        delay(3000)
+        if (withTimeoutOrNull(3000L) { eoseVerify.await() } != null) delay(200)
         relayManager.closeSubscription(subscriptionId)
 
         val event = foundEvent ?: return@withContext FollowerVerification(
@@ -2731,17 +2766,19 @@ class NostrService(
         Log.d(TAG, "Fetching own Kind 3187 (follow notify) events...")
 
         val eventIds = mutableListOf<String>()
+        val eoseNotify = CompletableDeferred<String>()
         val subscriptionId = relayManager.subscribe(
             kinds = listOf(RideshareEventKinds.ROADFLARE_FOLLOW_NOTIFY),
-            authors = listOf(myPubKey)
+            authors = listOf(myPubKey),
+            onEose = { relayUrl -> eoseNotify.complete(relayUrl) }
         ) { event, _ ->
             synchronized(eventIds) {
                 eventIds.add(event.id)
             }
         }
 
-        // Wait for responses
-        delay(3000)
+        // Wait for EOSE or timeout
+        if (withTimeoutOrNull(3000L) { eoseNotify.await() } != null) delay(200)
         relayManager.closeSubscription(subscriptionId)
 
         Log.d(TAG, "Found ${eventIds.size} follow notify events to potentially delete")
@@ -2787,17 +2824,19 @@ class NostrService(
         Log.d(TAG, "Counting own events of Kind $kind...")
 
         val eventIds = mutableListOf<String>()
+        val eoseCount = CompletableDeferred<String>()
         val subscriptionId = relayManager.subscribe(
             kinds = listOf(kind),
-            authors = listOf(myPubKey)
+            authors = listOf(myPubKey),
+            onEose = { relayUrl -> eoseCount.complete(relayUrl) }
         ) { event, _ ->
             synchronized(eventIds) {
                 eventIds.add(event.id)
             }
         }
 
-        // Wait for responses
-        delay(3000)
+        // Wait for EOSE or timeout
+        if (withTimeoutOrNull(3000L) { eoseCount.await() } != null) delay(200)
         relayManager.closeSubscription(subscriptionId)
 
         Log.d(TAG, "Found ${eventIds.size} Kind $kind events")
@@ -2821,17 +2860,19 @@ class NostrService(
         Log.d(TAG, "Fetching own Kind $kind events for deletion...")
 
         val eventIds = mutableListOf<String>()
+        val eoseDelete = CompletableDeferred<String>()
         val subscriptionId = relayManager.subscribe(
             kinds = listOf(kind),
-            authors = listOf(myPubKey)
+            authors = listOf(myPubKey),
+            onEose = { relayUrl -> eoseDelete.complete(relayUrl) }
         ) { event, _ ->
             synchronized(eventIds) {
                 eventIds.add(event.id)
             }
         }
 
-        // Wait for responses
-        delay(3000)
+        // Wait for EOSE or timeout
+        if (withTimeoutOrNull(3000L) { eoseDelete.await() } != null) delay(200)
         relayManager.closeSubscription(subscriptionId)
 
         if (eventIds.isEmpty()) {
