@@ -62,11 +62,9 @@ fun ProfileSetupScreen(
         ProfileSetupContent(
             uiState = uiState,
             signer = viewModel.getSigner(),
-            onNameChange = viewModel::updateName,
             onDisplayNameChange = viewModel::updateDisplayName,
             onAboutChange = viewModel::updateAbout,
             onPictureChange = viewModel::updatePicture,
-            onLightningAddressChange = viewModel::updateLightningAddress,
             onSave = { viewModel.saveProfile(onComplete) },
             modifier = modifier.padding(padding)
         )
@@ -77,11 +75,9 @@ fun ProfileSetupScreen(
 private fun ProfileSetupContent(
     uiState: ProfileUiState,
     signer: NostrSigner?,
-    onNameChange: (String) -> Unit,
     onDisplayNameChange: (String) -> Unit,
     onAboutChange: (String) -> Unit,
     onPictureChange: (String) -> Unit,
-    onLightningAddressChange: (String) -> Unit,
     onSave: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -138,20 +134,9 @@ private fun ProfileSetupContent(
         }
 
         OutlinedTextField(
-            value = uiState.name,
-            onValueChange = onNameChange,
-            label = { Text("Username") },
-            placeholder = { Text("satoshi") },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true
-        )
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        OutlinedTextField(
             value = uiState.displayName,
             onValueChange = onDisplayNameChange,
-            label = { Text("Display Name") },
+            label = { Text("Name") },
             placeholder = { Text("Satoshi Nakamoto") },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true
@@ -167,26 +152,6 @@ private fun ProfileSetupContent(
             modifier = Modifier.fillMaxWidth(),
             minLines = 2,
             maxLines = 4
-        )
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        OutlinedTextField(
-            value = uiState.lightningAddress,
-            onValueChange = onLightningAddressChange,
-            label = { Text("Lightning Address") },
-            placeholder = { Text("you@walletofsatoshi.com") },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        Text(
-            text = "Your lightning address is used to pay for rides",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center
         )
 
         Spacer(modifier = Modifier.height(32.dp))
