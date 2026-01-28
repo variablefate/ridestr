@@ -133,6 +133,15 @@ This document provides a complete reference of all functions, state fields, and 
 | `restoreRideState()` | Restore ride state on app restart |
 | `clearSavedRideState()` | Clear persisted ride state |
 
+### RoadFlare Functions
+
+| Function | Purpose |
+|----------|---------|
+| `goRoadflareOnly()` | Enter RoadFlare-only mode (Kind 30014 location, no Kind 30173) |
+| `subscribeToRoadflareOffers()` | Listen for RoadFlare-tagged Kind 3173 offers |
+| `processIncomingOffer(offer)` | Filter and display incoming RoadFlare/direct offers |
+| `broadcastRoadflareOfflineStatus()` | Send final OFFLINE RoadFlare location (Kind 30014) |
+
 ### Utility Functions
 
 | Function | Purpose |

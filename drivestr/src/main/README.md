@@ -109,6 +109,10 @@ Any state → cancelCurrentRide() → CANCELLED → goOnline() → AVAILABLE
 | `MainActivity` | `Nip60WalletSync` | Wire to WalletService | `walletService.setNip60Sync()` |
 | `MainActivity` | `VehicleRepository` | Vehicle data for UI | `vehicleRepository.vehicles.value` |
 | `WalletScreen` | `WalletService` | Display earnings | `walletService.balance.value` |
+| `DriverViewModel` | `RoadflareLocationBroadcaster` | Location broadcast lifecycle | `broadcaster.startBroadcasting()`, `setOnRide()` |
+| `DriverViewModel` | `DriverRoadflareRepository` | RoadFlare follower/key state | `driverRoadflareRepository.state` |
+| `RoadflareListenerService` | `NostrService` | Subscribe to RoadFlare offers | `nostrService.subscribeToOffers()` |
+| `RoadflareListenerService` | `DriverRoadflareRepository` | Filter muted riders | `repo.getMutedPubkeys()` |
 | `EarningsScreen` | `RideHistoryRepository` | Display past rides | `rideHistoryRepo.rides.value` |
 | `VehiclesScreen` | `VehicleRepository` | CRUD operations | `vehicleRepo.addVehicle()` |
 | `MainActivity` | `RoadflareKeyManager` | Follower approval/removal | `roadflareKeyManager.handleMuteFollower()` |

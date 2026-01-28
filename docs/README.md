@@ -100,9 +100,9 @@ See [PAYMENT_ARCHITECTURE.md](architecture/PAYMENT_ARCHITECTURE.md) for detailed
 ## What IS Connected (Complete Integration)
 
 ### HTLC Payment Flow (Complete)
-- `RiderViewModel:1823` → `walletService.lockForRide()` in `autoConfirmRide()` - Creates HTLC escrow **AFTER** acceptance
-- `WalletService.kt:324` → NUT-07 verification BEFORE swap (catches stale proofs)
-- `DriverViewModel:1621` → `walletService.claimHtlcPayment()` - Settles ride with P2PK signature
+- `RiderViewModel:2839` → `walletService.lockForRide()` in `autoConfirmRide()` - Creates HTLC escrow **AFTER** acceptance
+- `WalletService.kt:1085` → NUT-07 verification BEFORE swap (catches stale proofs)
+- `DriverViewModel:2189` → `walletService.claimHtlcPayment()` - Settles ride with P2PK signature
 - `WalletKeyManager.signSchnorr()` - BIP-340 Schnorr signatures for P2PK
 - `CashuBackend.signP2pkProof()` - Per-proof witness signatures
 

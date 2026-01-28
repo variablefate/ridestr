@@ -90,6 +90,7 @@ Any active state → cancelRide() or driverCancelled() → IDLE
 | `sendRoadflareOffer()` | IDLE | WAITING_FOR_ACCEPTANCE | Kind 3173 (RoadFlare, isRoadflare=true) |
 | `sendRoadflareOfferWithAlternatePayment()` | IDLE | WAITING_FOR_ACCEPTANCE | Kind 3173 (RoadFlare, alternate payment, no HTLC) |
 | `broadcastRideRequest()` | IDLE | BROADCASTING_REQUEST | Kind 3173 (broadcast) |
+| `sendRoadflareToAll()` | IDLE | WAITING_FOR_ACCEPTANCE | Kind 3173 (batch to all followed drivers, sorted by proximity, batches of 3) |
 | `autoConfirmRide()` | DRIVER_ACCEPTED | RIDE_CONFIRMED | Kind 3175 |
 | `handleDriverRideState()` | Various | Various | Receives Kind 30180 |
 | `cancelOffer()` | WAITING_FOR_ACCEPTANCE | IDLE | Cancels pending offer |
@@ -116,6 +117,7 @@ This prevents riders from waiting indefinitely when their selected driver takes 
 | `RiderViewModel` | `NostrService` | Publish ride request | `nostrService.broadcastRideRequest()` |
 | `RiderViewModel` | `NostrService` | Subscribe to acceptances | `nostrService.subscribeToAcceptances()` |
 | `RiderViewModel` | `NostrService` | Publish rider state | `nostrService.publishRiderRideState()` |
+| `RiderViewModel` | `WalletService` | Verify wallet before offer | `walletService.ensureWalletReady(fareWithBuffer)` |
 | `RiderViewModel` | `WalletService` | Lock funds for ride (HTLC) | `walletService.lockForRide(fareSats)` |
 | `RiderViewModel` | `WalletService` | Check balance | `walletService.hasSufficientFunds()` |
 | `RiderViewModel` | `RideHistoryRepository` | Save completed ride | `rideHistoryRepo.addRide()` |

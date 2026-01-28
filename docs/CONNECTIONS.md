@@ -323,6 +323,7 @@ Payment System
 │   ├── Depends on: Nip60WalletSync (cross-device sync)
 │   ├── Depends on: WalletKeyManager (wallet identity)
 │   ├── Key method: syncWallet() - THE sync function (NIP-60 is source of truth)
+│   ├── Key method: ensureWalletReady(amount) - pre-ride NUT-07 verification + stale proof cleanup
 │   ├── Key method: recoverPendingOperations() - recover blinded ops on connect
 │   ├── CRITICAL: Safe deletion pattern - always republish remaining proofs before deleteProofEvents()
 │   ├── CRITICAL: pendingOpId must be cleared AFTER NIP-60 publish (or RecoveryToken fallback)
@@ -438,12 +439,23 @@ State Machines
 │   ├── Publishes: Kind 3173, 3175, 30181 events
 │   └── Subscribes: Kind 30173, 3174, 30180, 3179 events
 │
+├── RiderViewModel
+│   ├── Depends on: NostrService (event pub/sub)
+│   ├── Depends on: WalletService (payment locking, ensureWalletReady)
+│   ├── Depends on: RideHistoryRepository (ride storage)
+│   ├── Depends on: SavedLocationRepository (location storage)
+│   ├── Depends on: FollowedDriversRepository (RoadFlare drivers)
+│   ├── Publishes: Kind 3173, 3175, 30181 events
+│   └── Subscribes: Kind 30173, 3174, 30180, 3179 events
+│
 └── DriverViewModel
     ├── Depends on: NostrService (event pub/sub)
     ├── Depends on: WalletService (payment claiming)
     ├── Depends on: RideHistoryRepository (ride storage)
     ├── Depends on: VehicleRepository (vehicle data)
-    ├── Publishes: Kind 30173, 3174, 30180, 3179 events
+    ├── Depends on: RoadflareLocationBroadcaster (location broadcast lifecycle)
+    ├── Depends on: DriverRoadflareRepository (follower/key state)
+    ├── Publishes: Kind 30173, 3174, 30180, 3179, 30014 events
     └── Subscribes: Kind 3173, 3175, 30181 events
 ```
 

@@ -125,7 +125,7 @@ The driver's ride lifecycle is managed by `DriverStage` enum in `DriverViewModel
 | State | Description |
 |-------|-------------|
 | `OFFLINE` | Not accepting rides |
-| `ROADFLARE_ONLY` | Broadcasting RoadFlare location, receiving RoadFlare offers only |
+| `ROADFLARE_ONLY` | Broadcasting RoadFlare location (Kind 30014, not Kind 30173), receiving only RoadFlare-tagged offers |
 | `AVAILABLE` | Online and accepting all ride requests |
 | `RIDE_ACCEPTED` | Accepted a ride, awaiting confirmation |
 | `EN_ROUTE_TO_PICKUP` | Driving to pickup location |

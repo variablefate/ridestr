@@ -12,7 +12,7 @@ The `common` module contains all shared code used by both rider and driver apps:
 
 | File | Purpose | Key Methods |
 |------|---------|-------------|
-| `WalletService.kt` | Orchestration layer (⚠️ safe deletion pattern required - see cashu-wallet skill) | `syncWallet()`, `requestDeposit()`, `checkDepositStatus()`, `getMeltQuote()`, `executeWithdraw()`, `lockForRide()`, `claimHtlcPayment()`, `mintTokens()`, `claimUnclaimedDeposits()`, `changeMintUrl()`, `recoverPendingOperations()`, `bridgePayment()`, `recoverFromSeed()` |
+| `WalletService.kt` | Orchestration layer (⚠️ safe deletion pattern required - see cashu-wallet skill) | `syncWallet()`, `ensureWalletReady()`, `requestDeposit()`, `checkDepositStatus()`, `getMeltQuote()`, `executeWithdraw()`, `lockForRide()`, `claimHtlcPayment()`, `mintTokens()`, `claimUnclaimedDeposits()`, `changeMintUrl()`, `recoverPendingOperations()`, `bridgePayment()`, `recoverFromSeed()` |
 | `cashu/CashuBackend.kt` | Mint operations (NUT-04/05/14/17), NUT-13 deterministic secrets, WebSocket state updates | `getMintQuote()`, `mintTokens()`, `getMeltQuote()`, `meltWithProofs()`, `createHtlcTokenFromProofs()`, `claimHtlcTokenWithProofs()`, `refundExpiredHtlc()`, `restoreProofs()`, `getActiveKeysetIds()`, `waitForMeltQuoteState()`, `waitForMintQuoteState()` |
 | `cashu/CashuWebSocket.kt` | NUT-17 WebSocket connection for real-time mint state updates | `connect()`, `disconnect()`, `subscribe()`, `unsubscribe()`, `isConnected()` |
 | `cashu/CashuWebSocketModels.kt` | NUT-17 JSON-RPC 2.0 data classes | `WsRequest`, `WsResponse`, `WsNotification`, `MintQuotePayload`, `MeltQuotePayload`, `SubscriptionKind` |
@@ -27,7 +27,7 @@ The `common` module contains all shared code used by both rider and driver apps:
 
 | File | Purpose | Key Methods |
 |------|---------|-------------|
-| `NostrService.kt` | Event publishing/subscription | `broadcastAvailability()`, `publishDriverRideState()`, `publishRiderRideState()`, `subscribeToOffers()`, `subscribeToDriverAvailability()`, `publishRideHistoryBackup()` |
+| `NostrService.kt` | Event publishing/subscription (EOSE-aware timeouts, no runBlocking) | `broadcastAvailability()`, `publishDriverRideState()`, `publishRiderRideState()`, `subscribeToOffers()`, `subscribeToDriverAvailability()`, `publishRideHistoryBackup()` |
 | `relay/RelayManager.kt` | WebSocket connection pool, EOSE-aware subscriptions | `connectAll()`, `publish()`, `subscribe(onEose=...)`, `closeSubscription()` |
 | `relay/RelayConnection.kt` | Single relay connection | WebSocket lifecycle management |
 | `relay/RelayConfig.kt` | Configuration constants | Default relays, timeouts |
@@ -237,14 +237,26 @@ Driver's **wallet key** (for P2PK) is different from **Nostr key** (for identity
 - Rider uses `acceptance.walletPubKey` for HTLC P2PK condition
 - HTLC locked AFTER acceptance (in `autoConfirmRide()`), not before
 
+### Pre-Ride Wallet Verification
+`ensureWalletReady(requiredAmount)` verifies wallet state before sending ride offers:
+- Refunds any expired HTLCs first (recovers funds from cancelled rides)
+- Fetches all NIP-60 proofs and verifies with mint via NUT-07
+- Cleans spent proofs (republishes unspent remainders, then deletes stale events)
+- Returns true if verified balance >= required amount
+- Called from `RiderViewModel.sendRideOffer()` and `broadcastRideRequest()` before publishing
+
 ### NUT-07 Stale Proof Verification
 Before HTLC swap, proofs are verified with mint to catch stale NIP-60 events:
-- `WalletService.lockForRide()` calls `verifyProofStatesBySecret()` at line 324
-- If any proofs are SPENT → deletes their NIP-60 events → retries selection
+- `WalletService.lockForRide()` verifies proofs via `verifyProofStatesBySecret()` (NUT-07)
+- Loop up to 3 cleanup attempts to handle relay propagation lag
+- Each iteration: republishes unspent remainders from affected events, deletes stale events, re-selects
 - Prevents "Token already spent" (code 11001) errors from stale proofs
 
-### HTLC Refund Flow
-- `WalletService.checkAndRefundExpiredHtlcs()` runs on wallet `connect()` to auto-refund expired HTLCs
+### HTLC Locktime & Refund Flow
+- **Locktime**: 15 minutes (900 seconds) — short enough for fast fund recovery after cancellation
+- **Clock skew buffer**: 120-second safety margin in `isRefundable()` and `refundExpiredHtlc()` to prevent mint rejection when device clock is ahead of mint server
+- `WalletService.refundExpiredHtlcs()` runs on wallet `connect()` to auto-refund expired HTLCs
+- On refund failure: status kept as `LOCKED` (not `FAILED`) so `recalculatePendingSats()` preserves the pending amount and refund is retried on next connect
 - `findHtlcByPaymentHash()` and `markHtlcClaimedByPaymentHash()` track HTLC lifecycle
 - `RiderViewModel.handleRideCompletion()` marks HTLC as claimed to prevent false refund attempts
 - `markHtlcClaimedByPaymentHash()` also clears `pendingSats` from balance (January 2026)
