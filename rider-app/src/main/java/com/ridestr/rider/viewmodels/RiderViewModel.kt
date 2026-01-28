@@ -1811,16 +1811,17 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         // Ride distance (from route if available)
         val rideMiles = rideRoute?.let { it.distanceKm * 0.621371 } ?: 0.0
 
-        // Total fare = base + driver pickup distance + ride distance, with minimum
-        val baseFare = 2.50 // $2.50 base
-        val minimumFareUsd = 5.0
-        val calculatedFare = baseFare + (driverToPickupMiles * ROADFLARE_RATE_PER_MILE) + (rideMiles * ROADFLARE_RATE_PER_MILE)
-        val totalFare = maxOf(calculatedFare, minimumFareUsd)
+        // Total fare = driver pickup distance + ride distance, with minimum from remote config
+        val config = remoteConfigManager.config.value
+        val minimumFareUsd = config.roadflareMinimumFareUsd
+        val calculatedFare = (driverToPickupMiles + rideMiles) * ROADFLARE_RATE_PER_MILE
+        val fareUsd = maxOf(calculatedFare, minimumFareUsd)
 
-        // Convert USD to sats using live BTC price (same as normal ride fare)
-        val sats = bitcoinPriceService.usdToSats(totalFare)
-        // Fallback: assume ~$100k BTC if price unavailable
-        return sats?.toDouble() ?: (totalFare * 1000.0)
+        // Convert USD to sats using live BTC price
+        val sats = bitcoinPriceService.usdToSats(fareUsd)
+        // Fallback: 5000 sats when no BTC price available
+        val MINIMUM_FALLBACK_SATS = 5000.0
+        return sats?.toDouble() ?: MINIMUM_FALLBACK_SATS
     }
 
     /**

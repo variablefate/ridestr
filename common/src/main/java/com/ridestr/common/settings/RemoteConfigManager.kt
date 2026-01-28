@@ -157,6 +157,7 @@ class RemoteConfigManager(
                     fareRateUsdPerMile = json.optDouble("fare_rate", AdminConfig.DEFAULT_FARE_RATE),
                     minimumFareUsd = json.optDouble("minimum_fare", AdminConfig.DEFAULT_MINIMUM_FARE),
                     roadflareFareRateUsdPerMile = json.optDouble("roadflare_fare_rate", AdminConfig.DEFAULT_ROADFLARE_FARE_RATE),
+                    roadflareMinimumFareUsd = json.optDouble("roadflare_minimum_fare", AdminConfig.DEFAULT_ROADFLARE_MINIMUM_FARE),
                     recommendedMints = mints.ifEmpty { AdminConfig.DEFAULT_MINTS },
                     createdAt = json.optLong("created_at", 0)
                 )
@@ -189,6 +190,7 @@ class RemoteConfigManager(
                 put("fare_rate", config.fareRateUsdPerMile)
                 put("minimum_fare", config.minimumFareUsd)
                 put("roadflare_fare_rate", config.roadflareFareRateUsdPerMile)
+                put("roadflare_minimum_fare", config.roadflareMinimumFareUsd)
                 put("mints", mintsArray)
                 put("created_at", config.createdAt)
             }
