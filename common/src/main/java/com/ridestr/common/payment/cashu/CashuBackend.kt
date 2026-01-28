@@ -1172,11 +1172,12 @@ class CashuBackend(
             }
 
             val now = System.currentTimeMillis() / 1000
-            if (now <= locktime) {
-                Log.e(TAG, "refundExpiredHtlc: locktime not expired (now=$now, locktime=$locktime)")
+            val bufferSeconds = 120  // Account for clock skew between device and mint
+            if (now <= locktime + bufferSeconds) {
+                Log.e(TAG, "refundExpiredHtlc: locktime not safely expired (now=$now, locktime=$locktime, buffer=${bufferSeconds}s)")
                 return@withContext null
             }
-            Log.d(TAG, "Locktime expired: now=$now > locktime=$locktime")
+            Log.d(TAG, "Locktime safely expired: now=$now > locktime+buffer=${locktime + bufferSeconds}")
 
             // Step 3: Verify rider pubkey matches refund tag
             val refundKeys = extractRefundKeysFromSecret(htlcProofs.first().secret)

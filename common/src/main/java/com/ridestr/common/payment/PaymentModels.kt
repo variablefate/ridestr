@@ -231,8 +231,9 @@ data class PendingHtlc(
     val createdAt: Long = System.currentTimeMillis(),
     val status: PendingHtlcStatus = PendingHtlcStatus.LOCKED
 ) {
-    /** Check if the locktime has passed and refund is available */
-    fun isRefundable(): Boolean = System.currentTimeMillis() / 1000 > locktime
+    /** Check if the locktime has passed and refund is available.
+     *  Adds 120-second buffer to account for clock skew between device and mint. */
+    fun isRefundable(): Boolean = System.currentTimeMillis() / 1000 > locktime + 120
 
     /** Check if this HTLC is still active (not claimed or refunded) */
     fun isActive(): Boolean = status == PendingHtlcStatus.LOCKED

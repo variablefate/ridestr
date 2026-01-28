@@ -893,7 +893,7 @@ class WalletService(
         amountSats: Long,
         paymentHash: String,
         driverPubKey: String,
-        expirySeconds: Long = 7200L
+        expirySeconds: Long = 900L
     ): EscrowLock? {
         if (!_isConnected.value) {
             Log.e(TAG, "Cannot lock funds - not connected to wallet provider")
@@ -1404,8 +1404,10 @@ class WalletService(
 
                     Log.d(TAG, "Refunded ${refundResult.amountSats} sats from HTLC ${htlc.escrowId}")
                 } else {
-                    Log.e(TAG, "Failed to refund HTLC ${htlc.escrowId}")
-                    walletStorage.updateHtlcStatus(htlc.escrowId, PendingHtlcStatus.FAILED)
+                    // Keep status as LOCKED so it can be retried on next connect/refresh.
+                    // Do NOT mark as FAILED — that would make recalculatePendingSats() drop
+                    // the pending amount, effectively losing track of the locked funds.
+                    Log.e(TAG, "Failed to refund HTLC ${htlc.escrowId} - keeping LOCKED for retry")
                     results.add(HtlcRefundInfo(
                         escrowId = htlc.escrowId,
                         amountSats = htlc.amountSats,
