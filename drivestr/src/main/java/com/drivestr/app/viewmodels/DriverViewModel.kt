@@ -1061,6 +1061,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 statusEventId?.let { myRideEventIds.add(it) }
             }
 
+            // Broadcast offline status so riders/followers see driver is unavailable
+            nostrService.broadcastAvailability(
+                location = null,  // Locationless - preserves privacy
+                status = DriverAvailabilityEvent.STATUS_OFFLINE
+            )
+
             // Update state immediately (UI transition first)
             _uiState.value = _uiState.value.copy(
                 stage = DriverStage.OFFLINE,
