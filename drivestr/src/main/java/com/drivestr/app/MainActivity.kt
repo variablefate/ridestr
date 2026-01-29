@@ -39,7 +39,9 @@ import com.drivestr.app.ui.screens.RoadflareTab
 import com.ridestr.common.data.RideHistoryRepository
 import com.ridestr.common.nostr.events.RideHistoryEntry
 import com.ridestr.common.ui.RideDetailScreen
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.runtime.rememberCoroutineScope
 import com.ridestr.common.data.VehicleRepository
 import com.ridestr.common.routing.NostrTileDiscoveryService
@@ -1011,6 +1013,54 @@ fun MainScreen(
         DriverOnlineService.clearAlerts(context)
     }
 
+    // Observe sync-triggered refresh from DriverViewModel
+    // When DriverViewModel merges RoadFlare state, it triggers this to detect unfollowed riders
+    LaunchedEffect(driverViewModel) {
+        driverViewModel.syncTriggeredRefresh.collect {
+            android.util.Log.d("MainActivity", "Sync triggered background refresh")
+            withContext(Dispatchers.IO) {
+                val driverPubkey = keyManager.getPubKeyHex() ?: return@withContext
+
+                // Guard: skip if not connected
+                if (!nostrService.isConnected()) {
+                    android.util.Log.d("RoadflareRefresh", "Skipping refresh - not connected")
+                    return@withContext
+                }
+
+                val foundFollowers = mutableSetOf<String>()
+                val subscriptionId = nostrService.queryRoadflareFollowers(driverPubkey) { riderPubKey ->
+                    foundFollowers.add(riderPubKey)
+                }
+                kotlinx.coroutines.delay(3000)
+                nostrService.closeSubscription(subscriptionId)
+
+                val existingFollowers = driverRoadflareRepository.getFollowers()
+                val existingPubkeys = existingFollowers.map { it.pubkey }.toSet()
+                var stateChanged = false
+
+                // Verify existing followers not found in p-tag query
+                val followersToVerify = existingFollowers.filter { it.pubkey !in foundFollowers }
+                for (follower in followersToVerify) {
+                    val verification = nostrService.verifyFollowerStatus(
+                        followerPubKey = follower.pubkey,
+                        driverPubKey = driverPubkey,
+                        currentKeyUpdatedAt = driverRoadflareRepository.getKeyUpdatedAt()
+                    )
+                    if (verification != null && !verification.stillFollowing) {
+                        driverRoadflareRepository.removeFollower(follower.pubkey)
+                        driverRoadflareRepository.unmuteRider(follower.pubkey)  // Also clear from muted list
+                        stateChanged = true
+                    }
+                }
+
+                android.util.Log.d("RoadflareRefresh", "Background refresh complete: found=${foundFollowers.size}, stateChanged=$stateChanged")
+                if (stateChanged) {
+                    profileSyncManager.backupProfileData()
+                }
+            }
+        }
+    }
+
     Scaffold(
         modifier = modifier,
         topBar = {
@@ -1194,6 +1244,7 @@ fun MainScreen(
                             )
                             if (verification != null && !verification.stillFollowing) {
                                 driverRoadflareRepository.removeFollower(follower.pubkey)
+                                driverRoadflareRepository.unmuteRider(follower.pubkey)  // Also clear from muted list
                                 stateChanged = true
                             }
                         }

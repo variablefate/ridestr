@@ -14,6 +14,8 @@ import com.ridestr.common.data.RideHistoryRepository
 import com.ridestr.common.data.Vehicle
 import com.ridestr.common.roadflare.RoadflareLocationBroadcaster
 import com.ridestr.common.nostr.NostrService
+import com.ridestr.common.nostr.events.MutedRider
+import com.ridestr.common.nostr.events.RoadflareFollower
 import com.ridestr.common.nostr.events.RoadflareLocation
 import com.ridestr.common.nostr.events.RoadflareLocationEvent
 import com.ridestr.common.nostr.events.RideHistoryEntry
@@ -22,6 +24,7 @@ import com.ridestr.common.nostr.events.BroadcastRideOfferData
 import com.ridestr.common.nostr.events.DriverAvailabilityEvent
 import com.ridestr.common.nostr.events.DriverRideAction
 import com.ridestr.common.nostr.events.DriverRideStateEvent
+import com.ridestr.common.nostr.events.DriverRoadflareState
 import com.ridestr.common.nostr.events.DriverStatusType
 import com.ridestr.common.nostr.events.Location
 import com.ridestr.common.nostr.events.PaymentPath
@@ -48,8 +51,11 @@ import com.ridestr.common.state.toDriverStageName
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -169,6 +175,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
     private val _uiState = MutableStateFlow(DriverUiState())
     val uiState: StateFlow<DriverUiState> = _uiState.asStateFlow()
+
+    // Signal for background refresh after sync (observed by MainActivity)
+    private val _syncTriggeredRefresh = MutableSharedFlow<Unit>(replay = 0)
+    val syncTriggeredRefresh: SharedFlow<Unit> = _syncTriggeredRefresh.asSharedFlow()
 
     private var availabilityJob: Job? = null
     private var chatRefreshJob: Job? = null
@@ -3806,65 +3816,184 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     // ========================================================================
 
     /**
-     * Ensure RoadFlare state is synced from Nostr.
+     * Ensure RoadFlare state is synced from Nostr using union merge.
      * Called before starting RoadFlare broadcasting to handle cross-device sync.
      *
-     * ALWAYS fetches from Nostr and compares timestamps - if Nostr has newer data
-     * (higher keyUpdatedAt), it replaces the local state. This fixes the case where
-     * two devices have different RoadFlare keys and ensures we always use the latest.
+     * Uses union merge strategy:
+     * 1. Takes newer key based on keyUpdatedAt/keyVersion
+     * 2. Merges follower lists (union by pubkey, prefer approved + higher keyVersionSent)
+     * 3. Merges muted lists (union, never auto-unmute)
+     * 4. Retries fetch once on null before pushing
+     * 5. Signals background refresh after merge to catch unfollowed riders
      *
-     * @return true if state was restored/updated from Nostr, false otherwise
+     * @return true if state was merged/updated, false otherwise
      */
     private suspend fun ensureRoadflareStateSynced(): Boolean {
         val currentState = driverRoadflareRepository.state.value
         val localKeyUpdatedAt = currentState?.keyUpdatedAt ?: 0L
         val localKeyVersion = currentState?.roadflareKey?.version ?: 0
+        val localUpdatedAt = currentState?.updatedAt ?: 0L
 
-        Log.d(TAG, "Checking RoadFlare state: local key v$localKeyVersion, keyUpdatedAt=$localKeyUpdatedAt")
+        Log.d(TAG, "Checking RoadFlare state: local key v$localKeyVersion, " +
+                  "keyUpdatedAt=$localKeyUpdatedAt, updatedAt=$localUpdatedAt")
 
-        // Always fetch from Nostr to check for newer state
-        val remoteState = nostrService.fetchDriverRoadflareState()
+        // Fetch remote state with one retry on failure
+        var remoteState = nostrService.fetchDriverRoadflareState()
+        if (remoteState == null) {
+            Log.d(TAG, "First fetch returned null, retrying...")
+            delay(1000)
+            remoteState = nostrService.fetchDriverRoadflareState()
+        }
 
         if (remoteState != null) {
             val remoteKeyUpdatedAt = remoteState.keyUpdatedAt ?: 0L
             val remoteKeyVersion = remoteState.roadflareKey?.version ?: 0
+            val remoteUpdatedAt = remoteState.updatedAt
 
-            Log.d(TAG, "Remote RoadFlare state: key v$remoteKeyVersion, keyUpdatedAt=$remoteKeyUpdatedAt")
+            Log.d(TAG, "Remote RoadFlare state: key v$remoteKeyVersion, " +
+                      "keyUpdatedAt=$remoteKeyUpdatedAt, updatedAt=$remoteUpdatedAt")
 
-            // Determine if we should use remote state:
-            // 1. Local has no key but remote does
-            // 2. Remote has newer keyUpdatedAt timestamp
-            // 3. Remote has higher key version (fallback if timestamps equal)
-            val shouldRestore = when {
-                currentState?.roadflareKey == null && remoteState.roadflareKey != null -> {
-                    Log.d(TAG, "Local has no key, using remote")
-                    true
-                }
-                remoteKeyUpdatedAt > localKeyUpdatedAt -> {
-                    Log.d(TAG, "Remote has newer timestamp ($remoteKeyUpdatedAt > $localKeyUpdatedAt)")
-                    true
-                }
-                remoteKeyUpdatedAt == localKeyUpdatedAt && remoteKeyVersion > localKeyVersion -> {
-                    Log.d(TAG, "Same timestamp but remote has higher version ($remoteKeyVersion > $localKeyVersion)")
-                    true
-                }
-                else -> {
-                    Log.d(TAG, "Local state is current or newer, keeping local")
-                    false
-                }
+            // Determine which key to use (newer keyUpdatedAt wins, then version as tiebreaker)
+            val useRemoteKey = when {
+                currentState?.roadflareKey == null && remoteState.roadflareKey != null -> true
+                remoteKeyUpdatedAt > localKeyUpdatedAt -> true
+                remoteKeyUpdatedAt == localKeyUpdatedAt && remoteKeyVersion > localKeyVersion -> true
+                else -> false
             }
 
-            if (shouldRestore) {
-                driverRoadflareRepository.restoreFromBackup(remoteState)
-                Log.d(TAG, "Restored RoadFlare state from Nostr: key v$remoteKeyVersion, " +
-                          "followers=${remoteState.followers.size}")
+            // Determine selected key version for merge validation
+            val selectedKeyVersion = if (useRemoteKey) remoteKeyVersion else localKeyVersion
+
+            // Merge follower lists (union)
+            val mergedFollowers = mergeFollowerLists(
+                currentState?.followers ?: emptyList(),
+                remoteState.followers,
+                selectedKeyVersion
+            )
+
+            // Merge muted lists (union - never auto-unmute)
+            val mergedMuted = mergeMutedLists(
+                currentState?.muted ?: emptyList(),
+                remoteState.muted
+            )
+
+            // Build merged state
+            val mergedState = DriverRoadflareState(
+                eventId = if (useRemoteKey) remoteState.eventId else currentState?.eventId,
+                roadflareKey = if (useRemoteKey) remoteState.roadflareKey else currentState?.roadflareKey,
+                followers = mergedFollowers,
+                muted = mergedMuted,
+                keyUpdatedAt = if (useRemoteKey) remoteKeyUpdatedAt else localKeyUpdatedAt,
+                lastBroadcastAt = maxOf(currentState?.lastBroadcastAt ?: 0L, remoteState.lastBroadcastAt ?: 0L),
+                updatedAt = maxOf(localUpdatedAt, remoteUpdatedAt),
+                createdAt = minOf(currentState?.createdAt ?: Long.MAX_VALUE, remoteState.createdAt)
+            )
+
+            // Check if meaningful state changed (ignore eventId/createdAt/updatedAt metadata)
+            val stateChanged = mergedState.roadflareKey != currentState?.roadflareKey ||
+                mergedState.followers != currentState?.followers ||
+                mergedState.muted != currentState?.muted ||
+                mergedState.keyUpdatedAt != currentState?.keyUpdatedAt
+
+            if (stateChanged) {
+                driverRoadflareRepository.restoreFromBackup(mergedState)
+                Log.d(TAG, "Merged RoadFlare state: key v${mergedState.roadflareKey?.version}, " +
+                          "followers=${mergedState.followers.size}, muted=${mergedState.muted.size}")
+
+                // Push merged state to Nostr
+                nostrService.getSigner()?.let { signer ->
+                    nostrService.publishDriverRoadflareState(signer, mergedState)
+                    Log.d(TAG, "Pushed merged state to Nostr")
+                }
+
+                // Signal background refresh after sync completes (to detect unfollowed riders)
+                viewModelScope.launch {
+                    delay(2000)
+                    _syncTriggeredRefresh.emit(Unit)
+                }
+
                 return true
             }
         } else {
-            Log.d(TAG, "No RoadFlare state found on Nostr")
+            Log.d(TAG, "No RoadFlare state found on Nostr after retry")
+
+            // Push local state if we have one
+            if (currentState?.roadflareKey != null) {
+                Log.d(TAG, "Pushing local state to Nostr...")
+                nostrService.getSigner()?.let { signer ->
+                    nostrService.publishDriverRoadflareState(signer, currentState)
+                }
+            }
         }
 
         return false
+    }
+
+    /**
+     * Merge two follower lists (union by pubkey).
+     * For duplicates, prefer the one with approved=true or higher keyVersionSent.
+     * Clamps keyVersionSent to selected key version to prevent claiming sent keys that don't exist.
+     */
+    private fun mergeFollowerLists(
+        local: List<RoadflareFollower>,
+        remote: List<RoadflareFollower>,
+        selectedKeyVersion: Int
+    ): List<RoadflareFollower> {
+        val byPubkey = mutableMapOf<String, RoadflareFollower>()
+
+        // Add all local followers
+        for (follower in local) {
+            byPubkey[follower.pubkey] = follower
+        }
+
+        // Merge remote followers
+        for (follower in remote) {
+            val existing = byPubkey[follower.pubkey]
+            if (existing == null) {
+                byPubkey[follower.pubkey] = follower
+            } else {
+                // Merge: prefer approved, higher keyVersionSent (clamped), earlier addedAt
+                val mergedKeyVersionSent = maxOf(existing.keyVersionSent, follower.keyVersionSent)
+
+                // Clamp keyVersionSent to selected key version to prevent claiming sent keys that don't exist
+                val clampedKeyVersionSent = minOf(mergedKeyVersionSent, selectedKeyVersion)
+                if (mergedKeyVersionSent > selectedKeyVersion) {
+                    Log.w(TAG, "Clamped keyVersionSent from $mergedKeyVersionSent to $selectedKeyVersion for ${follower.pubkey.take(8)}")
+                }
+
+                byPubkey[follower.pubkey] = existing.copy(
+                    approved = existing.approved || follower.approved,
+                    keyVersionSent = clampedKeyVersionSent,
+                    addedAt = minOf(existing.addedAt, follower.addedAt)
+                )
+            }
+        }
+
+        return byPubkey.values.toList()
+    }
+
+    /**
+     * Merge two muted lists (union by pubkey).
+     * Once muted, stays muted (never auto-unmute from sync).
+     */
+    private fun mergeMutedLists(
+        local: List<MutedRider>,
+        remote: List<MutedRider>
+    ): List<MutedRider> {
+        val byPubkey = mutableMapOf<String, MutedRider>()
+
+        for (muted in local) {
+            byPubkey[muted.pubkey] = muted
+        }
+
+        for (muted in remote) {
+            if (!byPubkey.containsKey(muted.pubkey)) {
+                byPubkey[muted.pubkey] = muted
+            }
+            // If already muted locally, keep local entry (earlier mutedAt)
+        }
+
+        return byPubkey.values.toList()
     }
 
     /**
