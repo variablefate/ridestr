@@ -8,6 +8,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import java.util.concurrent.ConcurrentHashMap
@@ -327,19 +328,15 @@ class RelayManager(
     private fun handleEvent(event: Event, subscriptionId: String, relayUrl: String) {
         Log.d(TAG, "Received event ${event.id} (kind ${event.kind}) from $relayUrl")
 
-        // Add to events list for debug UI
-        scope.launch(Dispatchers.Main) {
-            val current = _events.value.toMutableList()
-            current.add(0, event to relayUrl)
-            if (current.size > 100) {
-                _events.value = current.take(100)
-            } else {
-                _events.value = current
-            }
+        // Add to events list for debug UI (atomic update)
+        _events.update { currentList ->
+            (listOf(event to relayUrl) + currentList).take(100)
         }
 
-        // Dispatch to subscription callback
-        subscriptions[subscriptionId]?.onEvent?.invoke(event, relayUrl)
+        // Dispatch to subscription callback (snapshot to avoid race with closeSubscription)
+        subscriptions[subscriptionId]?.let { subscription ->
+            subscription.onEvent.invoke(event, relayUrl)
+        }
     }
 
     private fun handleEose(subscriptionId: String, relayUrl: String) {
@@ -359,14 +356,9 @@ class RelayManager(
     private fun handleNotice(message: String, relayUrl: String) {
         Log.d(TAG, "Notice from $relayUrl: $message")
 
-        scope.launch(Dispatchers.Main) {
-            val current = _notices.value.toMutableList()
-            current.add(0, message to relayUrl)
-            if (current.size > 50) {
-                _notices.value = current.take(50)
-            } else {
-                _notices.value = current
-            }
+        // Atomic update
+        _notices.update { currentList ->
+            (listOf(message to relayUrl) + currentList).take(50)
         }
     }
 
