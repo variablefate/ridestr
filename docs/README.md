@@ -1,6 +1,6 @@
 # Ridestr Documentation
 
-**Last Updated**: 2026-01-27
+**Last Updated**: 2026-01-29
 
 Ridestr is a decentralized rideshare platform built on Nostr. This documentation provides comprehensive coverage of the protocol, architecture, and implementation.
 
@@ -20,6 +20,7 @@ Ridestr is a decentralized rideshare platform built on Nostr. This documentation
 | NUT-09 Restore | ✅ COMPLETE | Mint scanning for recovery |
 | Payment Integration | ✅ COMPLETE | Fully wired, HTLC escrow, NIP-60 sync |
 | RoadFlare Network | ✅ COMPLETE | Personal driver network, three-state mode, location sharing |
+| Security Hardening | ✅ COMPLETE | Backup exclusions, pubkey validation, WebSocket concurrency, signature verification |
 
 ---
 
@@ -154,3 +155,65 @@ ridestr/
 | Profile Sync | `common/.../sync/ProfileSyncManager.kt` | Sync orchestrator |
 | Rider State | `rider-app/.../viewmodels/RiderViewModel.kt` | ~2800 lines |
 | Driver State | `drivestr/.../viewmodels/DriverViewModel.kt` | ~2800 lines |
+
+---
+
+## Security Hardening (January 2026)
+
+### Summary
+
+| Component | Commit | Description |
+|-----------|--------|-------------|
+| Backup Exclusions | 420f54b | Fixed SharedPrefs filenames + privacy data exclusions |
+| Pubkey Validation | 420f54b | expectedDriverPubKey/expectedRiderPubKey wired in subscriptions |
+| WebSocket Concurrency | 0e658f6 | Bounded channel (256), connection generation tracking |
+| Signature Verification | d7c9064 | Relay-level event.verify() (NIP-01 Schnorr) |
+
+### Backup Exclusions
+
+**Files:** `*/res/xml/backup_rules.xml` and `*/res/xml/data_extraction_rules.xml` (both apps)
+
+**Excluded:**
+- **Secrets:** `ridestr_secure_keys.xml`, `ridestr_wallet_keys.xml`, `ridestr_wallet_storage.xml`, `ridestr_settings.xml`
+- **Privacy Data:** `ridestr_ride_history.xml`, `ridestr_saved_locations.xml`, `ridestr_vehicles.xml`, `roadflare_*.xml`
+
+**Rationale:** Nostr sync (Kind 30174, 30177) is the recovery path. Cloud backup exclusion prevents key exposure.
+
+### Pubkey Validation Wiring
+
+**NostrService.kt signatures:**
+```kotlin
+subscribeToAcceptance(offerEventId, expectedDriverPubKey, onAcceptance)
+subscribeToConfirmation(acceptanceEventId, scope, expectedRiderPubKey, onConfirmation)
+```
+
+**Call sites:**
+- `RiderViewModel`: Lines 1190, 1325, 1439, 1734, 1764, 2022 - pass `driverPubKey`
+- `DriverViewModel`: Lines 652, 1361, 2274, 3694 - pass `riderPubKey`
+- State subscriptions (NostrService.kt): Lines 722, 794 - pass expected pubkey
+
+### WebSocket Concurrency
+
+**RelayConnection.kt pattern:**
+```kotlin
+private val messageChannel = Channel<Pair<Long, String>>(capacity = 256)
+private var connectionGeneration = 0L  // Increments on connect()
+```
+
+**Prevents:** Memory exhaustion, stale callback corruption, race conditions, post-disconnect reconnects.
+
+### Signature Verification Flow
+
+```
+Relay message → RelayConnection.handleMessage()
+    → event.verify() (NIP-01) → reject if invalid
+    → onEvent → NostrService
+    → Parser with expectedPubKey → reject if mismatch
+    → ViewModel receives validated data
+```
+
+**Event parsers with expectedPubKey:**
+- `RideAcceptanceEvent.parse(event, expectedDriverPubKey)`
+- `RideConfirmationEvent.parseEncrypted(event, expectedRiderPubKey)`
+- `DriverRideStateEvent.parse(event, expectedDriverPubKey)`
+- `RiderRideStateEvent.parse(event, expectedRiderPubKey)`
