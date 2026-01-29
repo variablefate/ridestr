@@ -3806,31 +3806,64 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     // ========================================================================
 
     /**
-     * Ensure RoadFlare state is synced from Nostr if local state is missing.
+     * Ensure RoadFlare state is synced from Nostr.
      * Called before starting RoadFlare broadcasting to handle cross-device sync.
      *
-     * This fixes the case where a driver imports their key on a new device
-     * (e.g., phone vs emulator) and local RoadFlare state is empty.
+     * ALWAYS fetches from Nostr and compares timestamps - if Nostr has newer data
+     * (higher keyUpdatedAt), it replaces the local state. This fixes the case where
+     * two devices have different RoadFlare keys and ensures we always use the latest.
      *
-     * @return true if state was restored from Nostr, false if local state existed or fetch failed
+     * @return true if state was restored/updated from Nostr, false otherwise
      */
     private suspend fun ensureRoadflareStateSynced(): Boolean {
         val currentState = driverRoadflareRepository.state.value
+        val localKeyUpdatedAt = currentState?.keyUpdatedAt ?: 0L
+        val localKeyVersion = currentState?.roadflareKey?.version ?: 0
 
-        // If no key and no followers, try fetching from Nostr
-        if (currentState?.roadflareKey == null && currentState?.followers.isNullOrEmpty()) {
-            Log.d(TAG, "Local RoadFlare state missing, fetching from Nostr...")
+        Log.d(TAG, "Checking RoadFlare state: local key v$localKeyVersion, keyUpdatedAt=$localKeyUpdatedAt")
 
-            val remoteState = nostrService.fetchDriverRoadflareState()
-            if (remoteState != null) {
+        // Always fetch from Nostr to check for newer state
+        val remoteState = nostrService.fetchDriverRoadflareState()
+
+        if (remoteState != null) {
+            val remoteKeyUpdatedAt = remoteState.keyUpdatedAt ?: 0L
+            val remoteKeyVersion = remoteState.roadflareKey?.version ?: 0
+
+            Log.d(TAG, "Remote RoadFlare state: key v$remoteKeyVersion, keyUpdatedAt=$remoteKeyUpdatedAt")
+
+            // Determine if we should use remote state:
+            // 1. Local has no key but remote does
+            // 2. Remote has newer keyUpdatedAt timestamp
+            // 3. Remote has higher key version (fallback if timestamps equal)
+            val shouldRestore = when {
+                currentState?.roadflareKey == null && remoteState.roadflareKey != null -> {
+                    Log.d(TAG, "Local has no key, using remote")
+                    true
+                }
+                remoteKeyUpdatedAt > localKeyUpdatedAt -> {
+                    Log.d(TAG, "Remote has newer timestamp ($remoteKeyUpdatedAt > $localKeyUpdatedAt)")
+                    true
+                }
+                remoteKeyUpdatedAt == localKeyUpdatedAt && remoteKeyVersion > localKeyVersion -> {
+                    Log.d(TAG, "Same timestamp but remote has higher version ($remoteKeyVersion > $localKeyVersion)")
+                    true
+                }
+                else -> {
+                    Log.d(TAG, "Local state is current or newer, keeping local")
+                    false
+                }
+            }
+
+            if (shouldRestore) {
                 driverRoadflareRepository.restoreFromBackup(remoteState)
-                Log.d(TAG, "Restored RoadFlare state: key=${remoteState.roadflareKey != null}, " +
+                Log.d(TAG, "Restored RoadFlare state from Nostr: key v$remoteKeyVersion, " +
                           "followers=${remoteState.followers.size}")
                 return true
-            } else {
-                Log.d(TAG, "No RoadFlare state found on Nostr")
             }
+        } else {
+            Log.d(TAG, "No RoadFlare state found on Nostr")
         }
+
         return false
     }
 
