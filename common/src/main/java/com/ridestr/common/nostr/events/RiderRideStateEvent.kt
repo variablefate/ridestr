@@ -107,9 +107,19 @@ object RiderRideStateEvent {
 
     /**
      * Parse a rider ride state event to extract current phase and history.
+     * @param event The event to parse
+     * @param expectedRiderPubKey Optional: If provided, validates that event.pubKey matches.
+     *                            Use when receiving state updates from an expected rider.
      */
-    fun parse(event: Event): RiderRideStateData? {
+    fun parse(event: Event, expectedRiderPubKey: String? = null): RiderRideStateData? {
         if (event.kind != RideshareEventKinds.RIDER_RIDE_STATE) return null
+
+        // Validate sender if expected pubkey provided (security: prevents spoofed state updates)
+        if (expectedRiderPubKey != null && event.pubKey != expectedRiderPubKey) {
+            android.util.Log.w("RiderRideStateEvent",
+                "Rejecting rider state from unexpected pubkey: ${event.pubKey.take(16)} (expected ${expectedRiderPubKey.take(16)})")
+            return null
+        }
 
         return try {
             val json = JSONObject(event.content)

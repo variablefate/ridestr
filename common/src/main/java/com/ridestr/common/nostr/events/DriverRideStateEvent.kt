@@ -95,9 +95,19 @@ object DriverRideStateEvent {
 
     /**
      * Parse a driver ride state event to extract current status and history.
+     * @param event The event to parse
+     * @param expectedDriverPubKey Optional: If provided, validates that event.pubKey matches.
+     *                             Use when receiving state updates from an expected driver.
      */
-    fun parse(event: Event): DriverRideStateData? {
+    fun parse(event: Event, expectedDriverPubKey: String? = null): DriverRideStateData? {
         if (event.kind != RideshareEventKinds.DRIVER_RIDE_STATE) return null
+
+        // Validate sender if expected pubkey provided (security: prevents spoofed state updates)
+        if (expectedDriverPubKey != null && event.pubKey != expectedDriverPubKey) {
+            android.util.Log.w("DriverRideStateEvent",
+                "Rejecting driver state from unexpected pubkey: ${event.pubKey.take(16)} (expected ${expectedDriverPubKey.take(16)})")
+            return null
+        }
 
         return try {
             val json = JSONObject(event.content)

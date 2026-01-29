@@ -60,9 +60,19 @@ object RideConfirmationEvent {
 
     /**
      * Parse a ride confirmation event (encrypted content must be decrypted separately).
+     * @param event The event to parse
+     * @param expectedRiderPubKey Optional: If provided, validates that event.pubKey matches.
+     *                            Use when expecting confirmation from a specific rider.
      */
-    fun parseEncrypted(event: Event): RideConfirmationDataEncrypted? {
+    fun parseEncrypted(event: Event, expectedRiderPubKey: String? = null): RideConfirmationDataEncrypted? {
         if (event.kind != RideshareEventKinds.RIDE_CONFIRMATION) return null
+
+        // Validate sender if expected pubkey provided (security: prevents spoofed confirmations)
+        if (expectedRiderPubKey != null && event.pubKey != expectedRiderPubKey) {
+            android.util.Log.w("RideConfirmationEvent",
+                "Rejecting confirmation from unexpected pubkey: ${event.pubKey.take(16)} (expected ${expectedRiderPubKey.take(16)})")
+            return null
+        }
 
         return try {
             var acceptanceEventId: String? = null

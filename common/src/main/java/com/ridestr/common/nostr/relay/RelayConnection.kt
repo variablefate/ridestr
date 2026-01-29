@@ -2,6 +2,7 @@ package com.ridestr.common.nostr.relay
 
 import android.util.Log
 import com.vitorpamplona.quartz.nip01Core.core.Event
+import com.vitorpamplona.quartz.nip01Core.crypto.verify
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -151,6 +152,13 @@ class RelayConnection(
                     val subscriptionId = json.getString(1)
                     val eventJson = json.getJSONObject(2)
                     val event = Event.fromJson(eventJson.toString())
+
+                    // Verify signature before processing (NIP-01 compliance)
+                    if (!event.verify()) {
+                        Log.w(TAG, "[$url] Rejecting event ${event.id.take(8)} - invalid signature from ${event.pubKey.take(8)}")
+                        return
+                    }
+
                     onEvent(event, subscriptionId, url)
                 }
                 "EOSE" -> {
