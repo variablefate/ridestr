@@ -139,11 +139,17 @@ class NostrService(
 
     /**
      * Broadcast driver availability.
-     * @param location Current driver location
+     *
+     * @param location Driver location (null for ROADFLARE_ONLY mode - invisible to geographic search)
+     * @param status Driver status (STATUS_AVAILABLE or STATUS_OFFLINE)
+     * @param vehicle Optional vehicle info
+     * @param mintUrl Driver's Cashu mint URL
+     * @param paymentMethods Supported payment methods
      * @return The event ID if successful, null on failure
      */
     suspend fun broadcastAvailability(
-        location: Location,
+        location: Location? = null,
+        status: String = DriverAvailabilityEvent.STATUS_AVAILABLE,
         vehicle: Vehicle? = null,
         mintUrl: String? = null,
         paymentMethods: List<String> = listOf("cashu")
@@ -158,63 +164,16 @@ class NostrService(
             val event = DriverAvailabilityEvent.create(
                 signer = signer,
                 location = location,
+                status = status,
                 vehicle = vehicle,
                 mintUrl = mintUrl,
                 paymentMethods = paymentMethods
             )
             relayManager.publish(event)
-            Log.d(TAG, "Broadcast availability: ${event.id}, vehicle: ${vehicle?.shortName() ?: "none"}, mint: ${mintUrl ?: "none"}")
+            Log.d(TAG, "Broadcast availability: status=$status, location=${location != null}, vehicle=${vehicle?.shortName() ?: "none"} (${event.id})")
             event.id
         } catch (e: Exception) {
             Log.e(TAG, "Failed to broadcast availability", e)
-            null
-        }
-    }
-
-    /**
-     * Broadcast driver going offline.
-     * @param lastLocation Last known location (for context)
-     * @return The event ID if successful, null on failure
-     */
-    suspend fun broadcastOffline(lastLocation: Location): String? {
-        val signer = keyManager.getSigner()
-        if (signer == null) {
-            Log.e(TAG, "Cannot broadcast offline: Not logged in")
-            return null
-        }
-
-        return try {
-            val event = DriverAvailabilityEvent.createOffline(signer, lastLocation)
-            relayManager.publish(event)
-            Log.d(TAG, "Broadcast offline: ${event.id}")
-            event.id
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to broadcast offline", e)
-            null
-        }
-    }
-
-    /**
-     * Broadcast availability without location for ROADFLARE_ONLY mode.
-     * Driver is trackable by pubkey but invisible to geographic searches.
-     *
-     * @param status Driver status (STATUS_AVAILABLE or STATUS_OFFLINE)
-     * @return The event ID if successful, null on failure
-     */
-    suspend fun broadcastAvailabilityWithoutLocation(status: String = DriverAvailabilityEvent.STATUS_AVAILABLE): String? {
-        val signer = keyManager.getSigner()
-        if (signer == null) {
-            Log.e(TAG, "Cannot broadcast locationless availability: Not logged in")
-            return null
-        }
-
-        return try {
-            val event = DriverAvailabilityEvent.createWithoutLocation(signer, status)
-            relayManager.publish(event)
-            Log.d(TAG, "Broadcast locationless availability: $status (${event.id})")
-            event.id
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to broadcast locationless availability", e)
             null
         }
     }

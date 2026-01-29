@@ -27,10 +27,13 @@ object DriverAvailabilityEvent {
 
     /**
      * Create and sign a driver availability event.
-     * Includes geohash tags for geographic filtering and optional vehicle info.
+     *
+     * If location is provided, includes geohash tags for geographic filtering.
+     * If location is null, creates a locationless event (for ROADFLARE_ONLY mode)
+     * that is invisible to geographic searches but trackable by pubkey.
      *
      * @param signer The NostrSigner to sign the event
-     * @param location Current driver location
+     * @param location Driver location (null for ROADFLARE_ONLY mode)
      * @param status Driver status (STATUS_AVAILABLE or STATUS_OFFLINE)
      * @param vehicle Optional vehicle info to include in the event
      * @param mintUrl Driver's Cashu mint URL (for multi-mint support)
@@ -38,15 +41,16 @@ object DriverAvailabilityEvent {
      */
     suspend fun create(
         signer: NostrSigner,
-        location: Location,
+        location: Location? = null,
         status: String = STATUS_AVAILABLE,
         vehicle: Vehicle? = null,
         mintUrl: String? = null,
         paymentMethods: List<String> = listOf("cashu")
     ): Event {
-        val approxLocation = location.approximate()
+        val approxLocation = location?.approximate()
+
         val content = JSONObject().apply {
-            put("approx_location", approxLocation.toJson())
+            approxLocation?.let { put("approx_location", it.toJson()) }
             put("status", status)
             // Include vehicle info if provided
             vehicle?.let {
@@ -62,15 +66,6 @@ object DriverAvailabilityEvent {
             }
         }.toString()
 
-        // Generate geohash tags at different precision levels
-        // 3 chars (~100mi) for wide area, 4 chars (~24mi) for regional, 5 chars (~5km) for local
-        val geohashTags = approxLocation.geohashTags(minPrecision = 3, maxPrecision = 5)
-
-        Log.d(TAG, "=== DRIVER AVAILABILITY EVENT ===")
-        Log.d(TAG, "Original: ${location.lat}, ${location.lon}")
-        Log.d(TAG, "Approx: ${approxLocation.lat}, ${approxLocation.lon}")
-        Log.d(TAG, "Geohash tags: $geohashTags")
-
         val tags = mutableListOf(
             // d-tag required for parameterized replaceable events (Kind 30xxx)
             // Relays use this to identify which event to replace per author
@@ -78,67 +73,27 @@ object DriverAvailabilityEvent {
             arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG)
         )
 
-        // Add geohash tags for location-based filtering
-        geohashTags.forEach { geohash ->
-            tags.add(arrayOf(RideshareTags.GEOHASH, geohash))
+        // Add geohash tags only if location provided (for geographic filtering)
+        // ROADFLARE_ONLY mode omits location to stay invisible to geographic searches
+        approxLocation?.let { loc ->
+            val geohashTags = loc.geohashTags(minPrecision = 3, maxPrecision = 5)
+            geohashTags.forEach { geohash ->
+                tags.add(arrayOf(RideshareTags.GEOHASH, geohash))
+            }
+            Log.d(TAG, "Geohash tags: $geohashTags")
         }
 
         // Add NIP-40 expiration (30 minutes)
         val expiration = RideshareExpiration.minutesFromNow(RideshareExpiration.DRIVER_AVAILABILITY_MINUTES)
         tags.add(arrayOf(RideshareTags.EXPIRATION, expiration.toString()))
 
+        Log.d(TAG, "=== DRIVER AVAILABILITY EVENT ===")
+        Log.d(TAG, "Status: $status, Location: ${if (location != null) "yes" else "none (ROADFLARE_ONLY)"}")
+
         return signer.sign<Event>(
             createdAt = System.currentTimeMillis() / 1000,
             kind = RideshareEventKinds.DRIVER_AVAILABILITY,
             tags = tags.toTypedArray(),
-            content = content
-        )
-    }
-
-    /**
-     * Create an offline event (driver going unavailable).
-     * @param signer The NostrSigner to sign the event
-     * @param lastLocation Last known location (will be approximate)
-     */
-    suspend fun createOffline(
-        signer: NostrSigner,
-        lastLocation: Location
-    ): Event {
-        return create(signer, lastLocation, STATUS_OFFLINE)
-    }
-
-    /**
-     * Create a location-less availability event for ROADFLARE_ONLY mode.
-     * This event has status but no location/geohash, making the driver
-     * invisible to geographic searches while still trackable by pubkey.
-     *
-     * @param signer The NostrSigner to sign the event
-     * @param status Driver status (STATUS_AVAILABLE or STATUS_OFFLINE)
-     */
-    suspend fun createWithoutLocation(
-        signer: NostrSigner,
-        status: String = STATUS_AVAILABLE
-    ): Event {
-        val content = JSONObject().apply {
-            put("status", status)
-        }.toString()
-
-        val expiration = RideshareExpiration.minutesFromNow(RideshareExpiration.DRIVER_AVAILABILITY_MINUTES)
-
-        val tags = arrayOf(
-            arrayOf("d", "rideshare-availability"),
-            arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG),
-            arrayOf(RideshareTags.EXPIRATION, expiration.toString())
-            // NO geohash tags - invisible to geographic searches
-        )
-
-        Log.d(TAG, "=== LOCATIONLESS AVAILABILITY EVENT ===")
-        Log.d(TAG, "Status: $status (ROADFLARE_ONLY mode)")
-
-        return signer.sign<Event>(
-            createdAt = System.currentTimeMillis() / 1000,
-            kind = RideshareEventKinds.DRIVER_AVAILABILITY,
-            tags = tags,
             content = content
         )
     }

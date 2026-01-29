@@ -825,7 +825,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Publish locationless Kind 30173 so availability subscription works
         // (Driver is trackable by pubkey but invisible to geographic searches)
         viewModelScope.launch {
-            nostrService.broadcastAvailabilityWithoutLocation(DriverAvailabilityEvent.STATUS_AVAILABLE)
+            nostrService.broadcastAvailability(
+                location = null,
+                status = DriverAvailabilityEvent.STATUS_AVAILABLE
+            )
         }
     }
 
@@ -858,13 +861,19 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             // Broadcast offline status based on previous mode
             if (wasRoadflareOnly) {
                 // ROADFLARE_ONLY: locationless offline (preserves privacy)
-                val eventId = nostrService.broadcastAvailabilityWithoutLocation(DriverAvailabilityEvent.STATUS_OFFLINE)
+                val eventId = nostrService.broadcastAvailability(
+                    location = null,
+                    status = DriverAvailabilityEvent.STATUS_OFFLINE
+                )
                 if (eventId != null) {
                     Log.d(TAG, "Broadcast locationless offline status: $eventId")
                 }
             } else if (lastLocation != null) {
                 // AVAILABLE: offline with location (needed for geographic removal)
-                val eventId = nostrService.broadcastOffline(lastLocation)
+                val eventId = nostrService.broadcastAvailability(
+                    location = lastLocation,
+                    status = DriverAvailabilityEvent.STATUS_OFFLINE
+                )
                 if (eventId != null) {
                     Log.d(TAG, "Broadcast offline status: $eventId")
                     // Don't add to publishedAvailabilityEventIds - we want this to persist
