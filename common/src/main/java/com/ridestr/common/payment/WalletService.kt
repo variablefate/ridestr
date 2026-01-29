@@ -111,6 +111,14 @@ class WalletService(
     // === PUBLIC API (Simple wallet operations) ===
 
     /**
+     * Check if any underlying storage is using unencrypted fallback.
+     * This happens when EncryptedSharedPreferences fails to initialize
+     * (e.g., on emulators, rooted devices, or devices without hardware-backed keystore).
+     */
+    fun isUsingUnencryptedStorage(): Boolean =
+        walletKeyManager.isUsingFallback() || _walletStorage.isUsingFallback()
+
+    /**
      * Get current balance in satoshis.
      */
     fun getBalance(): Long = _balance.value.availableSats

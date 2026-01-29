@@ -49,6 +49,7 @@ import com.ridestr.common.settings.SettingsManager
 import com.ridestr.common.ui.AccountBottomSheet
 import com.ridestr.common.ui.AccountSafetyScreen
 import com.ridestr.common.ui.DeveloperOptionsScreen
+import com.ridestr.common.ui.EncryptionFallbackWarningDialog
 import com.ridestr.common.ui.RelayManagementScreen
 import com.ridestr.common.ui.WalletSettingsScreen
 import com.ridestr.common.ui.RelaySignalIndicator
@@ -935,6 +936,19 @@ fun MainScreen(
     // Account bottom sheet state
     var showAccountSheet by remember { mutableStateOf(false) }
 
+    // Encryption fallback warning state
+    var showEncryptionWarning by remember { mutableStateOf(false) }
+
+    // Check for encryption fallback on startup (release builds only)
+    LaunchedEffect(keyManager, walletService) {
+        if (com.drivestr.app.BuildConfig.DEBUG) return@LaunchedEffect  // Skip in debug builds
+
+        val anyUnencrypted = keyManager.isUsingUnencryptedStorage()
+            || walletService?.isUsingUnencryptedStorage() == true
+        showEncryptionWarning = anyUnencrypted
+            && !settingsManager.getEncryptionFallbackWarned()
+    }
+
     // Vehicle repository state
     val vehicles by vehicleRepository.vehicles.collectAsState()
 
@@ -1245,6 +1259,16 @@ fun MainScreen(
             onRelaySettings = onOpenRelaySettings,
             onLogout = onLogout,
             onDismiss = { showAccountSheet = false }
+        )
+    }
+
+    // Encryption fallback warning dialog (non-cancelable)
+    if (showEncryptionWarning) {
+        EncryptionFallbackWarningDialog(
+            onDismiss = {
+                settingsManager.setEncryptionFallbackWarned(true)
+                showEncryptionWarning = false
+            }
         )
     }
 }

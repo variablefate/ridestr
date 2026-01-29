@@ -81,6 +81,9 @@ class SettingsManager(context: Context) {
         private const val KEY_FAVORITE_LN_ADDRESSES = "favorite_ln_addresses"
         const val MAX_FAVORITE_ADDRESSES = 10
 
+        // Security warning dismissal
+        private const val KEY_ENCRYPTION_FALLBACK_WARNED = "encryption_fallback_warned"
+
         // Default manual location: Las Vegas (Fremont St)
         private const val DEFAULT_MANUAL_LAT = 36.1699
         private const val DEFAULT_MANUAL_LON = -115.1398
@@ -872,5 +875,23 @@ class SettingsManager(context: Context) {
     fun isFavoriteLnAddress(address: String): Boolean {
         val normalized = address.lowercase().trim()
         return _favoriteLnAddresses.value.any { it.address.lowercase() == normalized }
+    }
+
+    // ===================
+    // SECURITY WARNING DISMISSAL
+    // ===================
+
+    /**
+     * Check if the user has been warned about encryption fallback.
+     * Direct prefs read (not StateFlow) to avoid sync issues on startup.
+     */
+    fun getEncryptionFallbackWarned(): Boolean =
+        prefs.getBoolean(KEY_ENCRYPTION_FALLBACK_WARNED, false)
+
+    /**
+     * Mark that the user has been warned about encryption fallback.
+     */
+    fun setEncryptionFallbackWarned(warned: Boolean) {
+        prefs.edit().putBoolean(KEY_ENCRYPTION_FALLBACK_WARNED, warned).apply()
     }
 }
