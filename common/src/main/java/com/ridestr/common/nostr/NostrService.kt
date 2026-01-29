@@ -933,10 +933,13 @@ class NostrService(
      * @param pickupRouteMin Pre-calculated driver→pickup duration in minutes (optional)
      * @param rideRouteKm Pre-calculated pickup→destination distance in km (optional)
      * @param rideRouteMin Pre-calculated pickup→destination duration in minutes (optional)
-     * @param paymentHash HTLC payment hash for escrow (optional)
      * @param mintUrl Rider's Cashu mint URL (optional)
      * @param paymentMethod Payment method (default "cashu")
      * @param isRoadflare True for RoadFlare requests from favorite drivers
+     *
+     * NOTE: paymentHash is NOT included in offers - it's sent in confirmation (Kind 3175)
+     * after driver accepts. This ensures HTLC is locked with the correct driver wallet key.
+     *
      * @return The event ID if successful, null on failure
      */
     suspend fun sendRideOffer(
@@ -949,9 +952,8 @@ class NostrService(
         pickupRouteMin: Double? = null,
         rideRouteKm: Double? = null,
         rideRouteMin: Double? = null,
-        paymentHash: String? = null,
         mintUrl: String? = null,
-        paymentMethod: String = "cashu",
+        paymentMethod: String? = "cashu",
         isRoadflare: Boolean = false
     ): String? {
         val signer = keyManager.getSigner()
@@ -972,14 +974,13 @@ class NostrService(
                 pickupRouteMin = pickupRouteMin,
                 rideRouteKm = rideRouteKm,
                 rideRouteMin = rideRouteMin,
-                paymentHash = paymentHash,
                 mintUrl = mintUrl,
-                paymentMethod = paymentMethod,
+                paymentMethod = paymentMethod ?: "cashu",
                 isRoadflare = isRoadflare
             )
             relayManager.publish(event)
             val offerType = if (isRoadflare) "RoadFlare" else "ride"
-            Log.d(TAG, "Sent $offerType offer to ${driverPubKey.take(16)}: ${event.id}${paymentHash?.let { " with payment hash" } ?: ""}, method: $paymentMethod")
+            Log.d(TAG, "Sent $offerType offer to ${driverPubKey.take(16)}: ${event.id}, method: ${paymentMethod ?: "cashu"}")
             event.id
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send ride offer", e)
@@ -991,11 +992,15 @@ class NostrService(
      * Confirm a ride with precise pickup location (encrypted).
      * @param acceptance The driver's acceptance
      * @param precisePickup Precise pickup location (will be encrypted)
+     * @param paymentHash HTLC payment hash for escrow verification (moved from offer for correct timing)
+     * @param escrowToken Optional escrow token (for cross-mint bridge)
      * @return The event ID if successful, null on failure
      */
     suspend fun confirmRide(
         acceptance: RideAcceptanceData,
-        precisePickup: Location
+        precisePickup: Location,
+        paymentHash: String? = null,
+        escrowToken: String? = null
     ): String? {
         val signer = keyManager.getSigner()
         if (signer == null) {
@@ -1008,10 +1013,12 @@ class NostrService(
                 signer = signer,
                 acceptanceEventId = acceptance.eventId,
                 driverPubKey = acceptance.driverPubKey,
-                precisePickup = precisePickup
+                precisePickup = precisePickup,
+                paymentHash = paymentHash,
+                escrowToken = escrowToken
             )
             relayManager.publish(event)
-            Log.d(TAG, "Confirmed ride: ${event.id}")
+            Log.d(TAG, "Confirmed ride: ${event.id}${paymentHash?.let { " with payment hash" } ?: ""}")
             event.id
         } catch (e: Exception) {
             Log.e(TAG, "Failed to confirm ride", e)

@@ -1165,6 +1165,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             val riderMintUrl = walletService?.getSavedMintUrl()
             val paymentMethod = settingsManager.defaultPaymentMethod.value
 
+            // NOTE: paymentHash is NOT sent in offer - it's sent in confirmation (Kind 3175)
+            // after driver accepts. This ensures HTLC is locked with the correct driver wallet key.
             val eventId = nostrService.sendRideOffer(
                 driverPubKey = driver.driverPubKey,
                 driverAvailabilityEventId = driver.eventId,
@@ -1175,7 +1177,6 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 pickupRouteMin = pickupRoute?.let { it.durationSeconds / 60.0 },
                 rideRouteKm = rideRoute?.distanceKm,
                 rideRouteMin = rideRoute?.let { it.durationSeconds / 60.0 },
-                paymentHash = paymentHash,  // Include in offer for HTLC escrow
                 mintUrl = riderMintUrl,
                 paymentMethod = paymentMethod
             )
@@ -1301,6 +1302,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             val riderMintUrl = walletService?.getSavedMintUrl()
             val paymentMethod = settingsManager.defaultPaymentMethod.value
 
+            // NOTE: paymentHash is NOT sent in offer - it's sent in confirmation (Kind 3175)
+            // after driver accepts. This ensures HTLC is locked with the correct driver wallet key.
             val eventId = nostrService.sendRideOffer(
                 driverPubKey = driverPubKey,
                 driverAvailabilityEventId = null,  // RoadFlare has no availability event
@@ -1311,7 +1314,6 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 pickupRouteMin = pickupRoute?.let { it.durationSeconds / 60.0 },
                 rideRouteKm = rideRoute?.distanceKm,
                 rideRouteMin = rideRoute?.let { it.durationSeconds / 60.0 },
-                paymentHash = paymentHash,
                 mintUrl = riderMintUrl,
                 paymentMethod = paymentMethod ?: "cashu",
                 isRoadflare = true
@@ -1414,6 +1416,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 )
             } else null
 
+            // NOTE: paymentHash is NOT sent in offer - it's sent in confirmation (Kind 3175)
+            // No HTLC for alternate payment — payment happens outside the app
             val eventId = nostrService.sendRideOffer(
                 driverPubKey = driverPubKey,
                 driverAvailabilityEventId = null,  // RoadFlare has no availability event
@@ -1424,7 +1428,6 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 pickupRouteMin = pickupRoute?.let { it.durationSeconds / 60.0 },
                 rideRouteKm = rideRoute?.distanceKm,
                 rideRouteMin = rideRoute?.let { it.durationSeconds / 60.0 },
-                paymentHash = null, // No HTLC for alternate payment
                 mintUrl = riderMintUrl,
                 paymentMethod = paymentMethod,
                 isRoadflare = true
@@ -1704,6 +1707,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         val riderMintUrl = walletService?.getSavedMintUrl()
         val paymentMethod = settingsManager.defaultPaymentMethod.value
 
+        // NOTE: paymentHash is NOT sent in offer - it's sent in confirmation (Kind 3175)
+        // after driver accepts. This ensures HTLC is locked with the correct driver wallet key.
         val eventId = nostrService.sendRideOffer(
             driverPubKey = driverPubKey,
             driverAvailabilityEventId = null,  // RoadFlare has no availability event
@@ -1714,7 +1719,6 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             pickupRouteMin = pickupRoute?.let { it.durationSeconds / 60.0 },
             rideRouteKm = rideRoute?.distanceKm,
             rideRouteMin = rideRoute?.let { it.durationSeconds / 60.0 },
-            paymentHash = paymentHash,
             mintUrl = riderMintUrl,
             paymentMethod = paymentMethod ?: "cashu",
             isRoadflare = true
@@ -2380,13 +2384,17 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isConfirmingRide = true)
 
+            // Pass paymentHash in confirmation (moved from offer for correct HTLC timing)
+            // Manual path doesn't have escrow locked yet, so escrowToken is null
             val eventId = nostrService.confirmRide(
                 acceptance = acceptance,
-                precisePickup = pickup
+                precisePickup = pickup,
+                paymentHash = state.activePaymentHash,
+                escrowToken = null  // Manual path doesn't lock escrow
             )
 
             if (eventId != null) {
-                Log.d(TAG, "Confirmed ride: $eventId")
+                Log.d(TAG, "Confirmed ride: $eventId${state.activePaymentHash?.let { " with payment hash" } ?: ""}")
                 myRideEventIds.add(eventId)  // Track for cleanup
 
                 // Close acceptance subscription - we don't need it anymore
@@ -2927,9 +2935,13 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 Log.e(TAG, "lockForRide returned null - ride will proceed WITHOUT payment security")
             }
 
+            // Pass paymentHash in confirmation (moved from offer for correct HTLC timing)
+            // Driver needs paymentHash for PIN verification and HTLC claim
             val eventId = nostrService.confirmRide(
                 acceptance = acceptance,
-                precisePickup = pickupToSend  // Send precise if driver is close, approximate otherwise
+                precisePickup = pickupToSend,  // Send precise if driver is close, approximate otherwise
+                paymentHash = paymentHash,
+                escrowToken = escrowToken
             )
 
             if (eventId != null) {

@@ -98,6 +98,9 @@ object RideOfferEvent {
      * Content is NIP-44 encrypted to protect pickup/destination from public view.
      * This is now the default flow for privacy.
      *
+     * NOTE: paymentHash is NOT included in offers - it's sent in confirmation (Kind 3175)
+     * after driver accepts. This ensures HTLC is locked with the correct driver wallet key.
+     *
      * @param pickupRouteKm Optional pre-calculated driver→pickup distance in km
      * @param pickupRouteMin Optional pre-calculated driver→pickup duration in minutes
      * @param rideRouteKm Optional pre-calculated pickup→destination distance in km
@@ -117,8 +120,7 @@ object RideOfferEvent {
         pickupRouteMin: Double? = null,
         rideRouteKm: Double? = null,
         rideRouteMin: Double? = null,
-        // Payment rails fields
-        paymentHash: String? = null,
+        // Payment rails fields - destinationGeohash only (paymentHash moved to confirmation)
         destinationGeohash: String? = null,
         // Multi-mint support (Issue #13)
         mintUrl: String? = null,
@@ -135,8 +137,7 @@ object RideOfferEvent {
             pickupRouteMin?.let { put("pickup_route_min", it) }
             rideRouteKm?.let { put("ride_route_km", it) }
             rideRouteMin?.let { put("ride_route_min", it) }
-            // Payment rails: hash for HTLC escrow, geohash for settlement verification
-            paymentHash?.let { put("payment_hash", it) }
+            // Payment rails: geohash for settlement verification (paymentHash moved to confirmation)
             destinationGeohash?.let { put("destination_geohash", it) }
             // Multi-mint support (Issue #13)
             mintUrl?.let { put("mint_url", it) }

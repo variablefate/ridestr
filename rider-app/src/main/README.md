@@ -206,6 +206,13 @@ Race condition fix prevents duplicate confirmation events:
 - Driver has 30-second timeout waiting for confirmation
 - Only "Cancel Ride" button available during confirmation
 
+### PaymentHash in Confirmation (January 2026)
+paymentHash is now sent in confirmation (Kind 3175), not offer (Kind 3173):
+- `autoConfirmRide()` at line 2940 passes `paymentHash` and `escrowToken` to `confirmRide()`
+- This ensures HTLC is locked with the correct driver wallet key AFTER acceptance
+- Fixes boost bug where resending offer overwrote driver's paymentHash with null
+- Driver extracts paymentHash from `confirmation.paymentHash` in `subscribeToConfirmation()`
+
 ### Cancel After PIN Verification (January 2026)
 If rider cancels after preimage was shared with driver:
 - `attemptCancelRide()` checks `preimageShared || pinVerified` (line 1547)

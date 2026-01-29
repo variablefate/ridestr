@@ -1,7 +1,7 @@
 # Ridestr Nostr Event Protocol
 
-**Version**: 1.4
-**Last Updated**: 2026-01-24
+**Version**: 1.5
+**Last Updated**: 2026-01-29
 
 This document defines all Nostr event kinds used in the Ridestr rideshare application.
 
@@ -383,15 +383,15 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
   "pickup_route_min": <duration>,
   "ride_route_km": <distance>,
   "ride_route_min": <duration>,
-  "payment_hash": "<sha256_of_preimage>",
   "destination_geohash": "<geohash_for_settlement>",
   "mint_url": "<rider_cashu_mint_url>",
   "payment_method": "cashu"
 }
 ```
 
+**Note (January 2026)**: `payment_hash` was removed from offers and moved to confirmation (Kind 3175). This ensures HTLC is locked with the correct driver wallet key AFTER acceptance.
+
 **Payment Fields** (implemented):
-- `payment_hash`: SHA256 hash of preimage for HTLC escrow verification
 - `destination_geohash`: Used for settlement location verification
 
 **Multi-Mint Fields** (Issue #13):
@@ -462,14 +462,15 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 **Content** (JSON, encrypted to driver):
 ```json
 {
-  "riderPubKey": "<rider_pubkey>",
-  "driverPubKey": "<driver_pubkey>",
-  "acceptanceEventId": "<acceptance_event_id>",
-  "pickupGeohash": "<geohash_precision_7>",
-  "pin": "<4_digit_pin>",
-  "timestamp": <unix_timestamp>
+  "precise_pickup": { "lat": <lat>, "lon": <lon>, "geohash": "<geohash>" },
+  "payment_hash": "<sha256_of_preimage>",
+  "escrow_token": "<htlc_token_if_same_mint>"
 }
 ```
+
+**Payment Fields** (January 2026 migration):
+- `payment_hash`: SHA256 hash of preimage for HTLC escrow verification (moved from offer)
+- `escrow_token`: HTLC token for same-mint payment (null for cross-mint)
 
 **IMPORTANT**: The confirmation event ID is used as the `d-tag` for all subsequent ride state events (30180, 30181).
 
@@ -698,13 +699,13 @@ The driver's `wallet_pubkey` in Kind 3174 acceptance ensures the rider locks fun
 ```
 RIDER                                    DRIVER
   |                                         |
-  |-- Kind 3173 (payment_hash) ------------>|
+  |-- Kind 3173 (offer, no payment_hash) -->|
   |                                         |
   |<-- Kind 3174 (wallet_pubkey) -----------|
   |                                         |
   |  [lockForRide(wallet_pubkey)]           |
   |                                         |
-  |-- Kind 3175 (confirm) ----------------->|
+  |-- Kind 3175 (payment_hash+escrowToken)->|
   |                                         |
   |<-- Kind 30180 (pin_submit) -------------|
   |                                         |
@@ -717,6 +718,8 @@ RIDER                                    DRIVER
   |                    [claimHtlcPayment()] |
   |                                         |
 ```
+
+**Note**: As of January 2026, `payment_hash` is sent in confirmation (Kind 3175), not offer (Kind 3173). This ensures HTLC is locked with the correct driver wallet key AFTER acceptance.
 
 ---
 
@@ -731,7 +734,7 @@ RIDER                           NOSTR RELAY                         DRIVER
   |                                   |   (Driver publishes availability)
   |                                   |                                |
   |---------- Kind 3173 ------------->|                                |
-  |   (Ride Offer + payment_hash)     |----------- Kind 3173 --------->|
+  |   (Ride Offer, no payment_hash)   |----------- Kind 3173 --------->|
   |                                   |                                |
   |                                   |<---------- Kind 3174 ----------|
   |<--------- Kind 3174 --------------|   (Acceptance + wallet_pubkey) |
@@ -739,7 +742,7 @@ RIDER                           NOSTR RELAY                         DRIVER
   |  [lockForRide(wallet_pubkey)]     |                                |
   |                                   |                                |
   |---------- Kind 3175 ------------->|                                |
-  |   (Confirmation + PIN)            |----------- Kind 3175 --------->|
+  |   (Confirm + payment_hash)        |----------- Kind 3175 --------->|
   |                                   |                                |
   |                                   |<---------- Kind 30180 ---------|
   |<-------- Kind 30180 --------------|   (Driver state: EN_ROUTE)     |

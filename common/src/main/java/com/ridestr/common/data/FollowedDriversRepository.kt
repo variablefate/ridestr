@@ -1,19 +1,23 @@
 package com.ridestr.common.data
 
 import android.content.Context
+import android.util.Log
 import com.ridestr.common.nostr.events.FollowedDriver
 import com.ridestr.common.nostr.events.RoadflareKey
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONArray
+import org.json.JSONObject
+
+private const val TAG = "FollowedDriversRepo"
 
 /**
  * Repository for managing rider's followed drivers list for RoadFlare.
  * Stores drivers and their RoadFlare decryption keys in SharedPreferences.
  *
- * NOTE: Driver names are NOT stored here - they are fetched from Nostr profiles
- * dynamically and cached in memory via [driverNames].
+ * Driver names are cached and persisted to SharedPreferences for instant display
+ * on app startup (no pubkey flash while waiting for profile fetch).
  *
  * This is the local cache of Kind 30011 data. The source of truth is Nostr,
  * but local storage allows offline access and faster app startup.
@@ -23,17 +27,52 @@ class FollowedDriversRepository(context: Context) {
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     /**
-     * In-memory cache of driver display names, fetched from Nostr profiles.
+     * Cache of driver display names, fetched from Nostr profiles.
+     * Persisted to SharedPreferences for instant display on app startup.
      * Key = driver pubkey, Value = display name
      */
-    private val _driverNames = MutableStateFlow<Map<String, String>>(emptyMap())
+    private val _driverNames = MutableStateFlow<Map<String, String>>(loadCachedNames())
     val driverNames: StateFlow<Map<String, String>> = _driverNames.asStateFlow()
 
     /**
+     * Load cached driver names from SharedPreferences.
+     */
+    private fun loadCachedNames(): Map<String, String> {
+        val json = prefs.getString(KEY_DRIVER_NAMES, null) ?: return emptyMap()
+        return try {
+            val obj = JSONObject(json)
+            val result = mutableMapOf<String, String>()
+            obj.keys().forEach { key ->
+                result[key] = obj.getString(key)
+            }
+            Log.d(TAG, "Loaded ${result.size} cached driver names")
+            result
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to load cached driver names", e)
+            emptyMap()
+        }
+    }
+
+    /**
+     * Persist driver names to SharedPreferences.
+     */
+    private fun persistNames() {
+        val json = JSONObject(_driverNames.value).toString()
+        prefs.edit().putString(KEY_DRIVER_NAMES, json).apply()
+    }
+
+    /**
      * Cache a driver's display name (fetched from their Nostr profile).
+     * Only caches names for followed drivers to prevent unbounded cache growth.
+     * Persists to SharedPreferences for instant display on app startup.
      */
     fun cacheDriverName(pubkey: String, name: String) {
+        // Only cache if this is a followed driver (safety check to prevent unbounded growth)
+        if (_drivers.value.none { it.pubkey == pubkey }) {
+            return
+        }
         _driverNames.value = _driverNames.value + (pubkey to name)
+        persistNames()
     }
 
     /**
@@ -98,10 +137,16 @@ class FollowedDriversRepository(context: Context) {
 
     /**
      * Remove a driver from favorites.
+     * Also removes their cached name to prevent orphaned entries.
      */
     fun removeDriver(pubkey: String) {
         _drivers.value = _drivers.value.filter { it.pubkey != pubkey }
         saveDrivers()
+        // Remove from name cache and persist
+        if (_driverNames.value.containsKey(pubkey)) {
+            _driverNames.value = _driverNames.value - pubkey
+            persistNames()
+        }
     }
 
     /**
@@ -179,16 +224,21 @@ class FollowedDriversRepository(context: Context) {
     }
 
     /**
-     * Clear all followed drivers (for logout).
+     * Clear all followed drivers and cached names (for logout).
      */
     fun clearAll() {
-        prefs.edit().remove(KEY_DRIVERS).apply()
+        prefs.edit()
+            .remove(KEY_DRIVERS)
+            .remove(KEY_DRIVER_NAMES)
+            .apply()
         _drivers.value = emptyList()
+        _driverNames.value = emptyMap()
     }
 
     companion object {
         private const val PREFS_NAME = "roadflare_followed_drivers"
         private const val KEY_DRIVERS = "drivers"
+        private const val KEY_DRIVER_NAMES = "driver_names"
 
         @Volatile
         private var INSTANCE: FollowedDriversRepository? = null

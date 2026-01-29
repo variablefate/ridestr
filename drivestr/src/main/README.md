@@ -178,9 +178,17 @@ The phantom cancellation bug was caused by not clearing history between rides.
 - Fix: Always call `clearDriverStateHistory()` at the START of a new ride
 
 ### Payment Claiming
-- `claimHtlcPayment()` called at line 1621 after ride completion
+- `claimHtlcPayment()` called at line 2220 after ride completion
 - Driver receives preimage from rider's Kind 30181 event
 - **Note**: P2PK witness signatures not implemented - empty array passed
+
+### PaymentHash from Confirmation (January 2026)
+paymentHash is now extracted from confirmation (Kind 3175), not offer (Kind 3173):
+- `acceptOffer()` at line 1331 sets `activePaymentHash = null`
+- `subscribeToConfirmation()` at line 2302 extracts `confirmation.paymentHash`
+- Line 2315 stores it: `activePaymentHash = paymentHash`
+- This ensures driver receives paymentHash AFTER rider has locked HTLC with correct wallet key
+- All existing null checks (lines 1914, 2127, 2238) remain safe during transition window
 
 ### Wallet Refresh on HTLC Claim (January 2026)
 `WalletService.claimHtlcPayment()` now performs automatic NIP-60 refresh after successful claim:

@@ -41,7 +41,7 @@ The `common` module contains all shared code used by both rider and driver apps:
 | `DriverAvailabilityEvent.kt` | 30173 | Driver broadcasts availability with geohash |
 | `RideOfferEvent.kt` | 3173 | Rider sends offer to driver (NIP-44 encrypted). `isRoadflare` flag detected from `["t","roadflare"]` tag. |
 | `RideAcceptanceEvent.kt` | 3174 | Driver accepts ride offer (includes `wallet_pubkey`) |
-| `RideConfirmationEvent.kt` | 3175 | Rider confirms with PIN |
+| `RideConfirmationEvent.kt` | 3175 | Rider confirms with paymentHash + escrowToken (moved from offer in Jan 2026) |
 | `DriverRideStateEvent.kt` | 30180 | Driver status updates (history-based) |
 | `RiderRideStateEvent.kt` | 30181 | Rider location/preimage sharing (history-based) |
 | `RideshareChatEvent.kt` | 3178 | In-ride encrypted chat |
@@ -103,7 +103,7 @@ CREATED → ACCEPTED → CONFIRMED → EN_ROUTE → ARRIVED → IN_PROGRESS → 
 | `RideHistoryRepository.kt` | Ride history storage (with grace period protection) | `addRide()`, `syncFromNostr()`, `backupToNostr()`, `clearAllHistoryAndDeleteFromNostr()` |
 | `VehicleRepository.kt` | Driver vehicles | `addVehicle()`, `updateVehicle()`, `setPrimaryVehicle()` |
 | `SavedLocationRepository.kt` | Rider saved locations | `addRecent()`, `pinAsFavorite()`, `restoreFromBackup()` |
-| `FollowedDriversRepository.kt` | Rider's followed drivers (RoadFlare) | `addDriver()`, `removeDriver()`, `updateDriverKey()`, `getDrivers()` |
+| `FollowedDriversRepository.kt` | Rider's followed drivers (RoadFlare) + persisted name cache | `addDriver()`, `removeDriver()`, `updateDriverKey()`, `getDrivers()`, `cacheDriverName()` (persists to SharedPreferences) |
 | `DriverRoadflareRepository.kt` | Driver's RoadFlare state | `getRoadflareKey()`, `approveFollower()`, `muteRider()`, `updateKeyUpdatedAt()` |
 
 ### RoadFlare (`java/com/ridestr/common/roadflare/`)

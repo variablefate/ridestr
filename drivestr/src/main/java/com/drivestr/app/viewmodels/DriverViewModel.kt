@@ -1257,6 +1257,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             clearDriverStateHistory()
 
             // STATE_MACHINE: Initialize context for new ride and validate ACCEPT transition
+            // NOTE: paymentHash is NOT in offer anymore - it comes in confirmation (Kind 3175)
             val myPubkey = nostrService.getPubKeyHex() ?: ""
             val newContext = RideContext.forOffer(
                 riderPubkey = offer.riderPubKey,
@@ -1264,7 +1265,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 destination = offer.destination,
                 fareEstimateSats = offer.fareEstimate.toLong(),
                 offerEventId = offer.eventId,
-                paymentHash = offer.paymentHash,
+                paymentHash = null,  // paymentHash now comes in confirmation, not offer
                 riderMintUrl = offer.mintUrl,
                 paymentMethod = offer.paymentMethod ?: "cashu"
             )
@@ -1307,11 +1308,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 closeRoadflareOfferSubscription()  // Close RoadFlare offer subscription if active
                 deleteAllAvailabilityEvents()
 
-                // Extract payment hash for HTLC escrow (if present in offer)
-                val paymentHash = offer.paymentHash
-                if (paymentHash != null) {
-                    Log.d(TAG, "Offer includes HTLC payment hash: ${paymentHash.take(16)}...")
-                }
+                // NOTE: paymentHash is NOT in offer anymore - it comes in confirmation (Kind 3175)
+                // This ensures HTLC is locked with the correct driver wallet key after acceptance.
+                // Driver will extract paymentHash from confirmation in subscribeToConfirmation()
 
                 // Determine payment path (same mint vs cross-mint)
                 val riderMintUrl = offer.mintUrl
@@ -1328,8 +1327,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     pinAttempts = 0,
                     confirmationWaitStartMs = System.currentTimeMillis(),  // Start confirmation timer
                     statusMessage = "Ride accepted! Waiting for rider confirmation...",
-                    // HTLC escrow tracking
-                    activePaymentHash = paymentHash,
+                    // HTLC escrow tracking - paymentHash comes in confirmation now
+                    activePaymentHash = null,  // Will be set when confirmation received
                     activePreimage = null,
                     activeEscrowToken = null,
                     canSettleEscrow = false,
@@ -2299,18 +2298,33 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             // Note: The actual service status update happens in autoStartRouteToPickup() below
             val context = getApplication<Application>()
 
-            // Store confirmation data
+            // Extract payment data from confirmation (moved from offer for correct HTLC timing)
+            val paymentHash = confirmation.paymentHash
+            val escrowToken = confirmation.escrowToken
+            if (paymentHash != null) {
+                Log.d(TAG, "Confirmation includes HTLC payment hash: ${paymentHash.take(16)}...")
+            }
+            if (escrowToken != null) {
+                Log.d(TAG, "Confirmation includes escrow token (${escrowToken.length} chars)")
+            }
+
+            // Store confirmation data including payment info
             _uiState.value = _uiState.value.copy(
                 confirmationEventId = confirmation.eventId,
-                precisePickupLocation = confirmation.precisePickup
+                precisePickupLocation = confirmation.precisePickup,
+                activePaymentHash = paymentHash,
+                activeEscrowToken = escrowToken
             )
 
             // STATE_MACHINE: Update state to CONFIRMED after receiving confirmation
+            // RideContext.withConfirmation() already supports paymentHash and escrowToken
             updateStateMachineState(
                 RideState.CONFIRMED,
                 rideContext?.withConfirmation(
                     confirmationEventId = confirmation.eventId,
-                    precisePickup = confirmation.precisePickup
+                    precisePickup = confirmation.precisePickup,
+                    paymentHash = paymentHash,
+                    escrowToken = escrowToken
                 )
             )
 

@@ -1,6 +1,6 @@
 # Ridestr Module Connections
 
-**Last Updated**: 2026-01-27
+**Last Updated**: 2026-01-29
 
 This document provides a comprehensive view of how all modules connect in the Ridestr codebase. Use this as a reference when making changes to understand what might be affected.
 
@@ -180,11 +180,11 @@ sequenceDiagram
 
     R->>RVM: Request ride
     RVM->>RVM: generatePreimage()
-    RVM->>D: Kind 3173 (offer with paymentHash)
+    RVM->>D: Kind 3173 (offer WITHOUT paymentHash)
     D->>DVM: Receive offer
     DVM->>R: Kind 3174 (acceptance with wallet_pubkey)
 
-    Note over RVM: HTLC locked AFTER acceptance
+    Note over RVM: HTLC locked AFTER acceptance using driver's walletPubKey
 
     RVM->>WS: lockForRide(fareSats, paymentHash, walletPubKey)
     WS->>WS: selectProofsForSpending()
@@ -201,7 +201,7 @@ sequenceDiagram
     WS-->>RVM: EscrowLock created
 
     R->>RVM: Confirm ride
-    RVM->>D: Kind 3175 (confirmation with PIN)
+    RVM->>D: Kind 3175 (confirmation with paymentHash + escrowToken)
 
     Note over R,D: Driver navigates to pickup
 
