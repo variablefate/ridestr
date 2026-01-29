@@ -649,7 +649,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
             // Re-subscribe to relevant events
             if (acceptanceEventId != null && stage == DriverStage.RIDE_ACCEPTED) {
-                subscribeToConfirmation(acceptanceEventId)
+                subscribeToConfirmation(acceptanceEventId, offer.riderPubKey)
                 // Note: We don't subscribe to rider ride state here yet - we do that after confirmation
             }
 
@@ -1358,7 +1358,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
                 // Subscribe to rider's confirmation to get precise pickup location
                 // Note: Confirmation references our acceptance event ID, not the offer ID
-                subscribeToConfirmation(eventId)
+                subscribeToConfirmation(eventId, offer.riderPubKey)
                 // Note: We'll subscribe to rider ride state after receiving confirmation
 
                 // Subscribe to rider profile to get their name for ride history
@@ -2271,13 +2271,13 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      * Subscribe to rider's confirmation to get precise pickup location.
      * Auto-transitions to EN_ROUTE_TO_PICKUP and sends status update.
      */
-    private fun subscribeToConfirmation(acceptanceEventId: String) {
+    private fun subscribeToConfirmation(acceptanceEventId: String, riderPubKey: String) {
         confirmationSubscriptionId?.let { nostrService.closeSubscription(it) }
 
         // Start confirmation timeout - if no confirmation arrives, rider may have cancelled
         startConfirmationTimeout()
 
-        confirmationSubscriptionId = nostrService.subscribeToConfirmation(acceptanceEventId, viewModelScope) { confirmation ->
+        confirmationSubscriptionId = nostrService.subscribeToConfirmation(acceptanceEventId, viewModelScope, riderPubKey) { confirmation ->
             Log.d(TAG, "Received ride confirmation: ${confirmation.eventId}")
             Log.d(TAG, "Precise pickup: ${confirmation.precisePickup.lat}, ${confirmation.precisePickup.lon}")
 
@@ -3691,7 +3691,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 saveRideState()
 
                 // Subscribe to rider's confirmation
-                subscribeToConfirmation(eventId)
+                subscribeToConfirmation(eventId, request.riderPubKey)
                 // Note: We'll subscribe to rider ride state after receiving confirmation
 
                 // Subscribe to rider profile to get their name for ride history

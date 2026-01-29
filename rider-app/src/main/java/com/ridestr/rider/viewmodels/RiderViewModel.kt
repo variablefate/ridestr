@@ -1187,8 +1187,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 // CRITICAL: Clear rider state history from any previous ride
                 // This clears deduplication sets so new driver events aren't incorrectly filtered
                 clearRiderStateHistory()
-                // Subscribe to acceptance for this offer
-                subscribeToAcceptance(eventId)
+                // Subscribe to acceptance for this offer (direct offer to specific driver)
+                subscribeToAcceptance(eventId, driver.driverPubKey)
                 // Monitor driver availability - notify rider if driver goes offline
                 subscribeToSelectedDriverAvailability(driver.driverPubKey)
                 // Start timeout for acceptance
@@ -1322,7 +1322,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             if (eventId != null) {
                 Log.d(TAG, "Sent RoadFlare offer to ${driverPubKey.take(16)}: $eventId")
                 myRideEventIds.add(eventId)
-                subscribeToAcceptance(eventId)
+                subscribeToAcceptance(eventId, driverPubKey)
                 subscribeToSelectedDriverAvailability(driverPubKey)
                 startAcceptanceTimeout()
                 val fareWithFees = fareEstimate * (1 + FEE_BUFFER_PERCENT)
@@ -1436,7 +1436,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             if (eventId != null) {
                 Log.d(TAG, "Sent RoadFlare offer with $paymentMethod to ${driverPubKey.take(16)}: $eventId")
                 myRideEventIds.add(eventId)
-                subscribeToAcceptance(eventId)
+                subscribeToAcceptance(eventId, driverPubKey)
                 subscribeToSelectedDriverAvailability(driverPubKey)
                 startAcceptanceTimeout()
                 val fareWithFees = fareEstimate * (1 + FEE_BUFFER_PERCENT)
@@ -1731,7 +1731,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             // Subscribe to acceptance (first call sets up the state)
             if (state.pendingOfferEventId == null) {
                 // First offer in batch - set up the main subscription
-                subscribeToAcceptance(eventId)
+                subscribeToAcceptance(eventId, driverPubKey)
                 startAcceptanceTimeout()
                 clearRiderStateHistory()
 
@@ -1761,7 +1761,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 )
             } else {
                 // Additional offer in batch - just subscribe to this one too
-                nostrService.subscribeToAcceptance(eventId) { acceptance ->
+                nostrService.subscribeToAcceptance(eventId, driverPubKey) { acceptance ->
                     // Route to the main acceptance handler
                     handleBatchAcceptance(acceptance)
                 }
@@ -2019,7 +2019,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             if (eventId != null) {
                 Log.d(TAG, "Sent boosted $offerType offer: $eventId")
                 myRideEventIds.add(eventId)  // Track for cleanup
-                subscribeToAcceptance(eventId)
+                subscribeToAcceptance(eventId, driverPubKey)
                 startAcceptanceTimeout()
                 _uiState.value = _uiState.value.copy(
                     isSendingOffer = false,
@@ -2777,10 +2777,10 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun subscribeToAcceptance(offerEventId: String) {
+    private fun subscribeToAcceptance(offerEventId: String, expectedDriverPubKey: String) {
         acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
 
-        acceptanceSubscriptionId = nostrService.subscribeToAcceptance(offerEventId) { acceptance ->
+        acceptanceSubscriptionId = nostrService.subscribeToAcceptance(offerEventId, expectedDriverPubKey) { acceptance ->
             Log.d(TAG, "Driver accepted ride: ${acceptance.eventId}")
 
             // Cancel the acceptance timeout - driver responded

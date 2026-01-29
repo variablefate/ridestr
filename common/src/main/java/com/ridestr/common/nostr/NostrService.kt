@@ -719,7 +719,7 @@ class NostrService(
             tags = mapOf("d" to listOf(confirmationEventId))
         ) { event, _ ->
             Log.d(TAG, "Received driver ride state ${event.id} from ${event.pubKey.take(8)}")
-            DriverRideStateEvent.parse(event)?.let { data ->
+            DriverRideStateEvent.parse(event, expectedDriverPubKey = driverPubKey)?.let { data ->
                 onState(data)
             }
         }
@@ -791,7 +791,7 @@ class NostrService(
             tags = mapOf("d" to listOf(confirmationEventId))
         ) { event, _ ->
             Log.d(TAG, "Received rider ride state ${event.id} from ${event.pubKey.take(8)}")
-            RiderRideStateEvent.parse(event)?.let { data ->
+            RiderRideStateEvent.parse(event, expectedRiderPubKey = riderPubKey)?.let { data ->
                 onState(data)
             }
         }
@@ -1318,20 +1318,24 @@ class NostrService(
     }
 
     /**
-     * Subscribe to ride acceptances for a specific offer.
+     * Subscribe to ride acceptances for a specific direct offer.
+     * Use subscribeToAcceptancesForOffer() for broadcast offers that accept any driver.
+     *
      * @param offerEventId The offer event ID to watch
-     * @param onAcceptance Called when acceptance is received
+     * @param expectedDriverPubKey The driver pubkey this direct offer was sent to (required)
+     * @param onAcceptance Called when acceptance is received from expected driver
      * @return Subscription ID for closing later
      */
     fun subscribeToAcceptance(
         offerEventId: String,
+        expectedDriverPubKey: String,
         onAcceptance: (RideAcceptanceData) -> Unit
     ): String {
         return relayManager.subscribe(
             kinds = listOf(RideshareEventKinds.RIDE_ACCEPTANCE),
             tags = mapOf("e" to listOf(offerEventId))
         ) { event, _ ->
-            RideAcceptanceEvent.parse(event)?.let { data ->
+            RideAcceptanceEvent.parse(event, expectedDriverPubKey = expectedDriverPubKey)?.let { data ->
                 onAcceptance(data)
             }
         }
@@ -1340,22 +1344,25 @@ class NostrService(
     /**
      * Subscribe to ride confirmations for a specific acceptance (driver listens for rider's confirmation).
      * Automatically decrypts the precise pickup location.
+     *
      * @param acceptanceEventId The acceptance event ID to watch
      * @param scope CoroutineScope for async decryption (use viewModelScope in ViewModels)
+     * @param expectedRiderPubKey The rider pubkey from the offer (required for validation)
      * @param onConfirmation Called when confirmation is received (with decrypted location)
      * @return Subscription ID for closing later
      */
     fun subscribeToConfirmation(
         acceptanceEventId: String,
         scope: CoroutineScope,
+        expectedRiderPubKey: String,
         onConfirmation: (RideConfirmationData) -> Unit
     ): String {
         return relayManager.subscribe(
             kinds = listOf(RideshareEventKinds.RIDE_CONFIRMATION),
             tags = mapOf("e" to listOf(acceptanceEventId))
         ) { event, _ ->
-            // Parse encrypted confirmation
-            RideConfirmationEvent.parseEncrypted(event)?.let { encryptedData ->
+            // Parse encrypted confirmation, validating sender matches expected rider
+            RideConfirmationEvent.parseEncrypted(event, expectedRiderPubKey = expectedRiderPubKey)?.let { encryptedData ->
                 // Decrypt using driver's key
                 val signer = keyManager.getSigner()
                 if (signer != null) {

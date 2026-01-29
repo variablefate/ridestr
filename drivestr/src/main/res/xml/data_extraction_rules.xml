@@ -5,20 +5,36 @@
 -->
 <data-extraction-rules>
     <cloud-backup>
-        <!-- Exclude all SharedPreferences containing secrets -->
-        <exclude domain="sharedpref" path="secure_key_storage.xml" />
-        <exclude domain="sharedpref" path="wallet_keys.xml" />
-        <exclude domain="sharedpref" path="wallet_storage.xml" />
-        <exclude domain="sharedpref" path="drivestr_settings.xml" />
-        <!-- Exclude EncryptedSharedPreferences master key -->
+        <!-- Exclude secrets -->
+        <exclude domain="sharedpref" path="ridestr_secure_keys.xml" />
+        <exclude domain="sharedpref" path="ridestr_wallet_keys.xml" />
+        <exclude domain="sharedpref" path="ridestr_wallet_storage.xml" />
+        <exclude domain="sharedpref" path="ridestr_settings.xml" />
         <exclude domain="sharedpref" path="__androidx_security_crypto_encrypted_file_pref__.xml" />
+        <!-- Exclude privacy-sensitive location/history data (Nostr sync is recovery path) -->
+        <exclude domain="sharedpref" path="ridestr_ride_history.xml" />
+        <exclude domain="sharedpref" path="ridestr_saved_locations.xml" />
+        <exclude domain="sharedpref" path="ridestr_vehicles.xml" />
+        <exclude domain="sharedpref" path="roadflare_followed_drivers.xml" />
+        <exclude domain="sharedpref" path="roadflare_driver_state.xml" />
+        <exclude domain="sharedpref" path="tile_discovery_cache.xml" />
+        <exclude domain="sharedpref" path="profile_picture_prefs.xml" />
+        <exclude domain="sharedpref" path="remote_config.xml" />
     </cloud-backup>
     <device-transfer>
-        <!-- Also exclude from device-to-device transfer -->
-        <exclude domain="sharedpref" path="secure_key_storage.xml" />
-        <exclude domain="sharedpref" path="wallet_keys.xml" />
-        <exclude domain="sharedpref" path="wallet_storage.xml" />
-        <exclude domain="sharedpref" path="drivestr_settings.xml" />
+        <!-- Same exclusions for device-to-device transfer -->
+        <exclude domain="sharedpref" path="ridestr_secure_keys.xml" />
+        <exclude domain="sharedpref" path="ridestr_wallet_keys.xml" />
+        <exclude domain="sharedpref" path="ridestr_wallet_storage.xml" />
+        <exclude domain="sharedpref" path="ridestr_settings.xml" />
         <exclude domain="sharedpref" path="__androidx_security_crypto_encrypted_file_pref__.xml" />
+        <exclude domain="sharedpref" path="ridestr_ride_history.xml" />
+        <exclude domain="sharedpref" path="ridestr_saved_locations.xml" />
+        <exclude domain="sharedpref" path="ridestr_vehicles.xml" />
+        <exclude domain="sharedpref" path="roadflare_followed_drivers.xml" />
+        <exclude domain="sharedpref" path="roadflare_driver_state.xml" />
+        <exclude domain="sharedpref" path="tile_discovery_cache.xml" />
+        <exclude domain="sharedpref" path="profile_picture_prefs.xml" />
+        <exclude domain="sharedpref" path="remote_config.xml" />
     </device-transfer>
 </data-extraction-rules>

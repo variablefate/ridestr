@@ -94,7 +94,7 @@ This document provides a complete reference of all functions, state fields, and 
 |----------|---------|---------------------|
 | `subscribeToDrivers()` | Subscribe to driver availability in area | Kind 30173 |
 | `resubscribeToDrivers()` | Refresh driver subscription with new geohash | Kind 30173 |
-| `subscribeToAcceptance(offerEventId)` | Listen for ride acceptance | Kind 3174 |
+| `subscribeToAcceptance(offerEventId, expectedDriverPubKey)` | Listen for ride acceptance (direct offers only) | Kind 3174 |
 | `subscribeToDriverRideState(confirmationId, driverPubKey)` | Listen for driver status updates | Kind 30180 |
 | `subscribeToCancellation(confirmationId)` | Listen for driver cancellation | Kind 3179 |
 | `subscribeToChat(confirmationId, driverPubKey)` | Listen for chat messages | Kind 3178 |
