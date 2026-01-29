@@ -30,6 +30,7 @@ object RoadflareKeyAckEvent {
      * @param driverPubKey The driver's Nostr pubkey (encryption target)
      * @param keyVersion The key version that was received
      * @param keyUpdatedAt The key update timestamp that was received
+     * @param status The ack status: "received" (normal) or "stale" (request key refresh)
      * @param expirationSeconds How long until the event expires (default 5 minutes)
      */
     suspend fun create(
@@ -37,6 +38,7 @@ object RoadflareKeyAckEvent {
         driverPubKey: String,
         keyVersion: Int,
         keyUpdatedAt: Long,
+        status: String = "received",
         expirationSeconds: Long = DEFAULT_EXPIRATION_SECONDS
     ): Event? {
         val now = System.currentTimeMillis() / 1000
@@ -45,7 +47,7 @@ object RoadflareKeyAckEvent {
         val contentJson = JSONObject().apply {
             put("keyVersion", keyVersion)
             put("keyUpdatedAt", keyUpdatedAt)
-            put("status", "received")
+            put("status", status)
             put("riderPubKey", signer.pubKey)
         }
 

@@ -769,7 +769,11 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         } else {
             // Fresh start: launch foreground service and RoadFlare broadcasting
             DriverOnlineService.start(context)
-            startRoadflareBroadcasting()
+            // Sync RoadFlare state from Nostr if local state is missing (cross-device sync)
+            viewModelScope.launch {
+                ensureRoadflareStateSynced()
+                startRoadflareBroadcasting()
+            }
         }
     }
 
@@ -818,13 +822,15 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Start foreground service (needed for background location)
         DriverOnlineService.start(context)
 
-        // Start RoadFlare broadcasting + offer subscription (RoadFlare-tagged only)
-        startRoadflareBroadcasting()
-        subscribeToRoadflareOffers()
-
-        // Publish locationless Kind 30173 so availability subscription works
-        // (Driver is trackable by pubkey but invisible to geographic searches)
+        // Sync RoadFlare state from Nostr if local state is missing (cross-device sync)
+        // then start RoadFlare broadcasting + offer subscription (RoadFlare-tagged only)
         viewModelScope.launch {
+            ensureRoadflareStateSynced()
+            startRoadflareBroadcasting()
+            subscribeToRoadflareOffers()
+
+            // Publish locationless Kind 30173 so availability subscription works
+            // (Driver is trackable by pubkey but invisible to geographic searches)
             nostrService.broadcastAvailability(
                 location = null,
                 status = DriverAvailabilityEvent.STATUS_AVAILABLE
@@ -3798,6 +3804,35 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     // ========================================================================
     // RoadFlare Location Broadcasting
     // ========================================================================
+
+    /**
+     * Ensure RoadFlare state is synced from Nostr if local state is missing.
+     * Called before starting RoadFlare broadcasting to handle cross-device sync.
+     *
+     * This fixes the case where a driver imports their key on a new device
+     * (e.g., phone vs emulator) and local RoadFlare state is empty.
+     *
+     * @return true if state was restored from Nostr, false if local state existed or fetch failed
+     */
+    private suspend fun ensureRoadflareStateSynced(): Boolean {
+        val currentState = driverRoadflareRepository.state.value
+
+        // If no key and no followers, try fetching from Nostr
+        if (currentState?.roadflareKey == null && currentState?.followers.isNullOrEmpty()) {
+            Log.d(TAG, "Local RoadFlare state missing, fetching from Nostr...")
+
+            val remoteState = nostrService.fetchDriverRoadflareState()
+            if (remoteState != null) {
+                driverRoadflareRepository.restoreFromBackup(remoteState)
+                Log.d(TAG, "Restored RoadFlare state: key=${remoteState.roadflareKey != null}, " +
+                          "followers=${remoteState.followers.size}")
+                return true
+            } else {
+                Log.d(TAG, "No RoadFlare state found on Nostr")
+            }
+        }
+        return false
+    }
 
     /**
      * Start RoadFlare location broadcasting to followers.

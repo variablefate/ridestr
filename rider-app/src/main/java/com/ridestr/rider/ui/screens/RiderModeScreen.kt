@@ -3488,9 +3488,17 @@ private fun RoadflareDriverSelectionSheet(
 ) {
     val scope = rememberCoroutineScope()
 
-    // Track driver locations by pubkey (from Kind 30014)
-    val driverLocations = remember { mutableStateMapOf<String, Location>() }
+    // Track driver locations by pubkey (from Kind 30014) with status and timestamp for staleness filtering
+    data class RoadflareDriverState(
+        val location: Location,
+        val status: String,
+        val timestamp: Long
+    )
+    val driverLocations = remember { mutableStateMapOf<String, RoadflareDriverState>() }
     val driverNames = remember { mutableStateMapOf<String, String>() }
+
+    // Track last createdAt per driver to reject out-of-order events
+    val lastLocationCreatedAt = remember { mutableStateMapOf<String, Long>() }
 
     // Subscribe to driver locations
     var locationSubId by remember { mutableStateOf<String?>(null) }
@@ -3523,15 +3531,34 @@ private fun RoadflareDriverSelectionSheet(
                         event = event
                     )
                     if (locationData != null) {
-                        // Check status: remove offline drivers (like regular rides do)
-                        if (locationData.tagStatus == com.ridestr.common.nostr.events.RoadflareLocationEvent.Status.OFFLINE) {
-                            driverLocations.remove(event.pubKey)
-                            android.util.Log.d("RoadflareSelection", "Driver ${event.pubKey.take(8)} went offline - removed from selection")
+                        val eventCreatedAt = event.createdAt
+
+                        // Check if event has expired (NIP-40 expiration tag)
+                        val isExpired = com.ridestr.common.nostr.events.RoadflareLocationEvent.isExpired(event)
+
+                        // Check if this is older than what we already have (out-of-order)
+                        val lastSeen = lastLocationCreatedAt[event.pubKey] ?: 0L
+                        val isOutOfOrder = eventCreatedAt < lastSeen
+
+                        if (!isExpired && !isOutOfOrder) {
+                            lastLocationCreatedAt[event.pubKey] = eventCreatedAt
+
+                            // Check status: remove offline drivers (like regular rides do)
+                            if (locationData.tagStatus == com.ridestr.common.nostr.events.RoadflareLocationEvent.Status.OFFLINE) {
+                                driverLocations.remove(event.pubKey)
+                                android.util.Log.d("RoadflareSelection", "Driver ${event.pubKey.take(8)} went offline - removed from selection")
+                            } else {
+                                driverLocations[event.pubKey] = RoadflareDriverState(
+                                    location = Location(
+                                        lat = locationData.location.lat,
+                                        lon = locationData.location.lon
+                                    ),
+                                    status = locationData.tagStatus,
+                                    timestamp = eventCreatedAt
+                                )
+                            }
                         } else {
-                            driverLocations[event.pubKey] = Location(
-                                lat = locationData.location.lat,
-                                lon = locationData.location.lon
-                            )
+                            android.util.Log.d("RoadflareSelection", "Rejected stale/out-of-order 30014: expired=$isExpired, outOfOrder=$isOutOfOrder")
                         }
                     }
                 }
@@ -3648,10 +3675,17 @@ private fun RoadflareDriverSelectionSheet(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(drivers, key = { it.pubkey }) { driver ->
-                    val driverLocation = driverLocations[driver.pubkey]
+                    val driverState = driverLocations[driver.pubkey]
+                    val driverLocation = driverState?.location  // Extract Location from wrapper
                     val driverName = driverNames[driver.pubkey] ?: driver.pubkey.take(8) + "..."
                     val hasKey = driver.roadflareKey != null
-                    val isOnline = driverLocation != null
+
+                    // Check if online and fresh (< 10 min old)
+                    val staleThresholdSec = 10 * 60  // 10 minutes
+                    val nowSec = System.currentTimeMillis() / 1000
+                    val isOnline = driverState != null &&
+                        driverState.status == com.ridestr.common.nostr.events.RoadflareLocationEvent.Status.ONLINE &&
+                        (nowSec - driverState.timestamp) < staleThresholdSec
 
                     // Calculate fare if we have location
                     val fareSats = if (driverLocation != null && pickupLocation != null) {
@@ -3698,11 +3732,26 @@ private fun RoadflareDriverSelectionSheet(
             HorizontalDivider()
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Send to all button
-            val eligibleDrivers = drivers.filter { it.roadflareKey != null }
+            // Send to all button - only include online drivers with fresh timestamps (< 10 min)
+            val now = System.currentTimeMillis() / 1000
+            val staleThreshold = 10 * 60  // 10 minutes in seconds
+
+            val eligibleDrivers = drivers.filter { driver ->
+                driver.roadflareKey != null &&
+                driverLocations[driver.pubkey]?.let { state ->
+                    val isOnline = state.status == com.ridestr.common.nostr.events.RoadflareLocationEvent.Status.ONLINE
+                    val isFresh = (now - state.timestamp) < staleThreshold
+                    isOnline && isFresh
+                } ?: false  // Exclude drivers with no location data
+            }
+            // Convert RoadflareDriverState map to Location map for the callback
+            val eligibleLocations = driverLocations.filterKeys { pubkey ->
+                eligibleDrivers.any { it.pubkey == pubkey }
+            }.mapValues { it.value.location }
+
             Button(
                 onClick = {
-                    onSendToAll(eligibleDrivers, driverLocations.toMap())
+                    onSendToAll(eligibleDrivers, eligibleLocations)
                 },
                 enabled = eligibleDrivers.isNotEmpty() && !isSending,
                 modifier = Modifier.fillMaxWidth()

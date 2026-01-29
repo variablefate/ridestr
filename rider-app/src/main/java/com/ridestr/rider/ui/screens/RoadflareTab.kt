@@ -146,6 +146,9 @@ fun RoadflareTab(
     // Track driver locations by pubkey
     val driverLocations = remember { mutableStateMapOf<String, DriverLocationState>() }
 
+    // Track last createdAt per driver to reject out-of-order events (Part C fix)
+    val lastLocationCreatedAt = remember { mutableStateMapOf<String, Long>() }
+
     // Fetch driver profiles to get their display names (first name only)
     LaunchedEffect(drivers, nostrService) {
         if (nostrService == null) return@LaunchedEffect
@@ -206,16 +209,30 @@ fun RoadflareTab(
             )
 
             if (locationData != null) {
-                Log.d(TAG, "Updated driver ${driverPubKey.take(8)} status=${locationData.tagStatus} (was: ${driverLocations[driverPubKey]?.status})")
+                val eventCreatedAt = event.createdAt  // Use event timestamp consistently
 
-                driverLocations[driverPubKey] = DriverLocationState(
-                    pubkey = driverPubKey,
-                    lat = locationData.location.lat,
-                    lon = locationData.location.lon,
-                    status = locationData.tagStatus,
-                    timestamp = locationData.location.timestamp,
-                    keyVersion = locationData.keyVersion
-                )
+                // Check if event has expired (NIP-40 expiration tag)
+                val isExpired = RoadflareLocationEvent.isExpired(event)
+
+                // Check if this is older than what we already have (out-of-order)
+                val lastSeen = lastLocationCreatedAt[driverPubKey] ?: 0L
+                val isOutOfOrder = eventCreatedAt < lastSeen
+
+                if (!isExpired && !isOutOfOrder) {
+                    lastLocationCreatedAt[driverPubKey] = eventCreatedAt
+                    Log.d(TAG, "Updated driver ${driverPubKey.take(8)} status=${locationData.tagStatus} (was: ${driverLocations[driverPubKey]?.status})")
+
+                    driverLocations[driverPubKey] = DriverLocationState(
+                        pubkey = driverPubKey,
+                        lat = locationData.location.lat,
+                        lon = locationData.location.lon,
+                        status = locationData.tagStatus,
+                        timestamp = eventCreatedAt,  // Use event.createdAt for ordering consistency
+                        keyVersion = locationData.keyVersion
+                    )
+                } else {
+                    Log.d(TAG, "Rejected stale/out-of-order 30014 from ${driverPubKey.take(8)}: expired=$isExpired, outOfOrder=$isOutOfOrder (event=$eventCreatedAt, lastSeen=$lastSeen)")
+                }
             } else {
                 Log.w(TAG, "Failed to decrypt location from ${driverPubKey.take(8)}")
             }
@@ -237,10 +254,13 @@ fun RoadflareTab(
     // Track which drivers have stale keys (need key refresh from driver)
     val staleKeyDrivers = remember { mutableStateMapOf<String, Boolean>() }
 
+    // Track when we last requested a key refresh for each driver (rate limiting)
+    val keyRefreshRequests = remember { mutableStateMapOf<String, Long>() }
+
     // Pull to refresh state
     var isRefreshing by remember { mutableStateOf(false) }
 
-    // Check for stale keys on refresh
+    // Check for stale keys on refresh - also auto-request key refresh
     fun checkStaleKeys() {
         if (nostrService == null) return
         scope.launch {
@@ -252,6 +272,30 @@ fun RoadflareTab(
                     if (currentKeyUpdatedAt != null && currentKeyUpdatedAt > storedKeyUpdatedAt) {
                         Log.d(TAG, "Stale key detected for driver ${driver.pubkey.take(8)}: stored=$storedKeyUpdatedAt, current=$currentKeyUpdatedAt")
                         staleKeyDrivers[driver.pubkey] = true
+
+                        // Auto-request key refresh (rate-limited to once per hour per driver)
+                        val lastRefreshRequest = keyRefreshRequests[driver.pubkey] ?: 0L
+                        val now = System.currentTimeMillis()
+                        val oneHourMs = 3600_000L  // 1 hour in milliseconds
+
+                        if (now - lastRefreshRequest > oneHourMs) {
+                            keyRefreshRequests[driver.pubkey] = now
+
+                            // Send Kind 3188 with status="stale" to request key refresh
+                            val eventId = nostrService.publishRoadflareKeyAck(
+                                driverPubKey = driver.pubkey,
+                                keyVersion = driver.roadflareKey?.version ?: 0,
+                                keyUpdatedAt = storedKeyUpdatedAt,
+                                status = "stale"  // Indicates refresh request
+                            )
+                            if (eventId != null) {
+                                Log.d(TAG, "Requested key refresh for ${driver.pubkey.take(8)}: eventId=${eventId.take(8)}")
+                            } else {
+                                Log.w(TAG, "Failed to request key refresh for ${driver.pubkey.take(8)}")
+                            }
+                        } else {
+                            Log.d(TAG, "Skipping key refresh request for ${driver.pubkey.take(8)} - rate limited (last request ${(now - lastRefreshRequest) / 1000}s ago)")
+                        }
                     } else {
                         staleKeyDrivers[driver.pubkey] = false
                     }

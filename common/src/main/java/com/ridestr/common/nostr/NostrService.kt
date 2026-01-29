@@ -2463,12 +2463,14 @@ class NostrService(
      * @param driverPubKey The driver's pubkey (encryption target)
      * @param keyVersion The key version that was received
      * @param keyUpdatedAt The key update timestamp that was received
+     * @param status The ack status: "received" (normal) or "stale" (request key refresh)
      * @return Event ID if successful, null on failure
      */
     suspend fun publishRoadflareKeyAck(
         driverPubKey: String,
         keyVersion: Int,
-        keyUpdatedAt: Long
+        keyUpdatedAt: Long,
+        status: String = "received"
     ): String? {
         val signer = keyManager.getSigner() ?: run {
             Log.e(TAG, "publishRoadflareKeyAck: No signer available")
@@ -2488,10 +2490,10 @@ class NostrService(
         }
 
         return try {
-            val event = RoadflareKeyAckEvent.create(signer, driverPubKey, keyVersion, keyUpdatedAt)
+            val event = RoadflareKeyAckEvent.create(signer, driverPubKey, keyVersion, keyUpdatedAt, status)
             if (event != null) {
                 relayManager.publish(event)
-                Log.d(TAG, "Published RoadFlare key ack v$keyVersion to ${driverPubKey.take(8)}... (expires in 5 min)")
+                Log.d(TAG, "Published RoadFlare key ack v$keyVersion status=$status to ${driverPubKey.take(8)}... (expires in 5 min)")
                 event.id
             } else {
                 Log.e(TAG, "Failed to create RoadFlare key ack event")

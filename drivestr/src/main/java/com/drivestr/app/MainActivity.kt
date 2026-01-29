@@ -366,6 +366,7 @@ fun DrivestrApp() {
 
         // Subscribe to RoadFlare key acknowledgements (Kind 3188)
         // When a rider receives and stores our key, they send back an ack
+        // Also handles key refresh requests (status="stale")
         val ackSubId = nostrService.subscribeToRoadflareKeyAcks { event, relayUrl ->
             android.util.Log.d("MainActivity", "Received RoadFlare key ack from ${event.pubKey.take(16)}")
 
@@ -377,12 +378,47 @@ fun DrivestrApp() {
                         if (ackData != null) {
                             android.util.Log.d("MainActivity", "Key ack: rider=${ackData.riderPubKey.take(16)} version=${ackData.keyVersion} status=${ackData.status}")
 
-                            // Update follower to mark key as confirmed received
-                            val follower = driverRoadflareRepo.getFollowers().find { it.pubkey == ackData.riderPubKey }
-                            if (follower != null && ackData.keyVersion == follower.keyVersionSent) {
-                                android.util.Log.d("MainActivity", "Follower ${ackData.riderPubKey.take(16)} confirmed key v${ackData.keyVersion}")
-                                // Key version matches - follower has confirmed receipt
-                                // No need to update anything - keyVersionSent already tracks this
+                            // Security: Verify authorship - claimed pubkey matches event signer
+                            val pubkeyMatches = ackData.riderPubKey == event.pubKey
+                            if (!pubkeyMatches) {
+                                android.util.Log.w("MainActivity", "Key ack pubkey mismatch - ignoring (claimed=${ackData.riderPubKey.take(8)}, signer=${event.pubKey.take(8)})")
+                            } else {
+                                // Verify authorized follower (approved + not muted)
+                                val follower = driverRoadflareRepo.getFollowers().find { it.pubkey == ackData.riderPubKey }
+                                val isMuted = driverRoadflareRepo.getMutedPubkeys().contains(ackData.riderPubKey)
+                                val isAuthorized = follower != null && follower.approved && !isMuted
+
+                                if (!isAuthorized) {
+                                    android.util.Log.w("MainActivity", "Key ack from unauthorized follower - ignoring")
+                                } else {
+                                    val currentKeyUpdatedAt = driverRoadflareRepo.getKeyUpdatedAt() ?: 0L
+
+                                    // Check if re-send needed: status != "received" OR ack has stale timestamp
+                                    if (ackData.status != "received" || ackData.keyUpdatedAt < currentKeyUpdatedAt) {
+                                        android.util.Log.d("MainActivity", "Re-sending key to ${ackData.riderPubKey.take(8)} (status=${ackData.status}, ackKeyUpdatedAt=${ackData.keyUpdatedAt}, currentKeyUpdatedAt=$currentKeyUpdatedAt)")
+
+                                        val currentKey = driverRoadflareRepo.state.value?.roadflareKey
+                                        if (currentKey != null) {
+                                            val success = roadflareKeyManager.sendKeyToFollower(
+                                                signer = signer,
+                                                followerPubkey = ackData.riderPubKey,
+                                                key = currentKey,
+                                                keyUpdatedAt = currentKeyUpdatedAt
+                                            )
+                                            if (success) {
+                                                android.util.Log.d("MainActivity", "Re-sent key v${currentKey.version} to ${ackData.riderPubKey.take(8)}")
+                                                driverRoadflareRepo.markFollowerKeySent(ackData.riderPubKey, currentKey.version)
+                                            } else {
+                                                android.util.Log.e("MainActivity", "Failed to re-send key to ${ackData.riderPubKey.take(8)}")
+                                            }
+                                        } else {
+                                            android.util.Log.w("MainActivity", "No current key to re-send")
+                                        }
+                                    } else if (ackData.keyVersion == follower.keyVersionSent) {
+                                        android.util.Log.d("MainActivity", "Follower ${ackData.riderPubKey.take(16)} confirmed key v${ackData.keyVersion}")
+                                        // Key version matches - follower has confirmed receipt
+                                    }
+                                }
                             }
                         }
                     } catch (e: Exception) {

@@ -628,7 +628,27 @@ sequenceDiagram
     Note over R,D: Rider receives key
     R->>N: Kind 3188 (key acknowledgement)
     N->>D: Kind 3188 delivered
+
+    Note over R,D: Key refresh (if stale)
+    R->>R: Detect stale key (stored < current)
+    R->>N: Kind 3188 (status="stale")
+    N->>D: Kind 3188 delivered
+    D->>D: Verify follower authorized
+    D->>N: Kind 3186 (re-send current key)
+    N->>R: Kind 3186 delivered
 ```
+
+### Key Refresh Flow (January 2026)
+
+When rider detects stale key via `checkStaleKeys()`:
+1. Compares `storedKeyUpdatedAt` vs `currentKeyUpdatedAt` from Kind 30012
+2. Rate-limited to 1 request per hour per driver
+3. Sends Kind 3188 with `status="stale"` to request refresh
+
+Driver handles refresh request in `MainActivity.kt`:
+1. Verifies pubkey authorship (claimed matches event signer)
+2. Verifies follower is authorized (approved + not muted)
+3. Re-sends current key via `roadflareKeyManager.sendKeyToFollower()`
 
 ### Follower State Machine
 
@@ -664,3 +684,6 @@ sequenceDiagram
 | Fetch driver key timestamp | `NostrService.kt` | `fetchDriverKeyUpdatedAt()` |
 | Send follow notification | `NostrService.kt` | `publishRoadflareFollowNotify()` |
 | Subscribe to key acks | `NostrService.kt` | `subscribeToRoadflareKeyAcks()` |
+| Ensure state synced | `DriverViewModel.kt` | `ensureRoadflareStateSynced()` |
+| Check stale keys | `RoadflareTab.kt` | `checkStaleKeys()` |
+| Handle key refresh | `MainActivity.kt (driver)` | Key ack handler (status="stale") |
