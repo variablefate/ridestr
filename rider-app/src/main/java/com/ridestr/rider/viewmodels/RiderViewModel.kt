@@ -1166,7 +1166,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             val paymentMethod = settingsManager.defaultPaymentMethod.value
 
             val eventId = nostrService.sendRideOffer(
-                driverAvailability = driver,
+                driverPubKey = driver.driverPubKey,
+                driverAvailabilityEventId = driver.eventId,
                 pickup = pickup,
                 destination = destination,
                 fareEstimate = fareEstimate,
@@ -1196,6 +1197,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     pendingOfferEventId = eventId,
                     rideStage = RideStage.WAITING_FOR_ACCEPTANCE,
                     acceptanceTimeoutStartMs = System.currentTimeMillis(),
+                    directOfferTimedOut = false,  // Reset from any previous timeout
                     statusMessage = "Waiting for driver to accept...",
                     // CRITICAL: Clear old ride state to prevent stale filtering
                     confirmationEventId = null,
@@ -1299,8 +1301,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             val riderMintUrl = walletService?.getSavedMintUrl()
             val paymentMethod = settingsManager.defaultPaymentMethod.value
 
-            val eventId = nostrService.sendRoadflareOffer(
+            val eventId = nostrService.sendRideOffer(
                 driverPubKey = driverPubKey,
+                driverAvailabilityEventId = null,  // RoadFlare has no availability event
                 pickup = pickup,
                 destination = destination,
                 fareEstimate = fareEstimate,
@@ -1310,7 +1313,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 rideRouteMin = rideRoute?.let { it.durationSeconds / 60.0 },
                 paymentHash = paymentHash,
                 mintUrl = riderMintUrl,
-                paymentMethod = paymentMethod ?: "cashu"
+                paymentMethod = paymentMethod ?: "cashu",
+                isRoadflare = true
             )
 
             if (eventId != null) {
@@ -1319,11 +1323,13 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 subscribeToAcceptance(eventId)
                 subscribeToSelectedDriverAvailability(driverPubKey)
                 startAcceptanceTimeout()
+                val fareWithFees = fareEstimate * (1 + FEE_BUFFER_PERCENT)
                 _uiState.value = _uiState.value.copy(
                     isSendingOffer = false,
                     pendingOfferEventId = eventId,
                     rideStage = RideStage.WAITING_FOR_ACCEPTANCE,
                     acceptanceTimeoutStartMs = System.currentTimeMillis(),
+                    directOfferTimedOut = false,  // Reset from any previous timeout
                     statusMessage = "Waiting for driver to accept...",
                     confirmationEventId = null,
                     acceptance = null,
@@ -1332,7 +1338,12 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     pinAttempts = 0,
                     escrowToken = null,
                     activePreimage = preimage,
-                    activePaymentHash = paymentHash
+                    activePaymentHash = paymentHash,
+                    // RoadFlare-specific: Store fare and driver info for boost
+                    fareEstimate = fareEstimate,
+                    fareEstimateWithFees = fareWithFees,
+                    roadflareTargetDriverPubKey = driverPubKey,
+                    roadflareTargetDriverLocation = driverLocation
                 )
 
                 val myPubkey = nostrService.getPubKeyHex() ?: ""
@@ -1403,8 +1414,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 )
             } else null
 
-            val eventId = nostrService.sendRoadflareOffer(
+            val eventId = nostrService.sendRideOffer(
                 driverPubKey = driverPubKey,
+                driverAvailabilityEventId = null,  // RoadFlare has no availability event
                 pickup = pickup,
                 destination = destination,
                 fareEstimate = fareEstimate,
@@ -1414,7 +1426,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 rideRouteMin = rideRoute?.let { it.durationSeconds / 60.0 },
                 paymentHash = null, // No HTLC for alternate payment
                 mintUrl = riderMintUrl,
-                paymentMethod = paymentMethod
+                paymentMethod = paymentMethod,
+                isRoadflare = true
             )
 
             if (eventId != null) {
@@ -1423,11 +1436,13 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 subscribeToAcceptance(eventId)
                 subscribeToSelectedDriverAvailability(driverPubKey)
                 startAcceptanceTimeout()
+                val fareWithFees = fareEstimate * (1 + FEE_BUFFER_PERCENT)
                 _uiState.value = _uiState.value.copy(
                     isSendingOffer = false,
                     pendingOfferEventId = eventId,
                     rideStage = RideStage.WAITING_FOR_ACCEPTANCE,
                     acceptanceTimeoutStartMs = System.currentTimeMillis(),
+                    directOfferTimedOut = false,  // Reset from any previous timeout
                     statusMessage = "Waiting for driver to accept...",
                     confirmationEventId = null,
                     acceptance = null,
@@ -1436,7 +1451,12 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     pinAttempts = 0,
                     escrowToken = null,
                     activePreimage = null,
-                    activePaymentHash = null
+                    activePaymentHash = null,
+                    // RoadFlare-specific: Store fare and driver info for boost
+                    fareEstimate = fareEstimate,
+                    fareEstimateWithFees = fareWithFees,
+                    roadflareTargetDriverPubKey = driverPubKey,
+                    roadflareTargetDriverLocation = driverLocation
                 )
 
                 val fareAmount = fareEstimate.toLong()
@@ -1684,8 +1704,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         val riderMintUrl = walletService?.getSavedMintUrl()
         val paymentMethod = settingsManager.defaultPaymentMethod.value
 
-        val eventId = nostrService.sendRoadflareOffer(
+        val eventId = nostrService.sendRideOffer(
             driverPubKey = driverPubKey,
+            driverAvailabilityEventId = null,  // RoadFlare has no availability event
             pickup = pickup,
             destination = destination,
             fareEstimate = fareEstimate,
@@ -1695,7 +1716,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             rideRouteMin = rideRoute?.let { it.durationSeconds / 60.0 },
             paymentHash = paymentHash,
             mintUrl = riderMintUrl,
-            paymentMethod = paymentMethod ?: "cashu"
+            paymentMethod = paymentMethod ?: "cashu",
+            isRoadflare = true
         )
 
         if (eventId != null) {
@@ -1711,12 +1733,14 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
                 val myPubkey = nostrService.getPubKeyHex() ?: ""
                 val fareAmount = fareEstimate.toLong()
+                val fareWithFees = fareEstimate * (1 + FEE_BUFFER_PERCENT)
 
                 _uiState.value = _uiState.value.copy(
                     isSendingOffer = false,
                     pendingOfferEventId = eventId,
                     rideStage = RideStage.WAITING_FOR_ACCEPTANCE,
                     acceptanceTimeoutStartMs = System.currentTimeMillis(),
+                    directOfferTimedOut = false,  // Reset from any previous timeout
                     confirmationEventId = null,
                     acceptance = null,
                     pinVerified = false,
@@ -1724,7 +1748,12 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     pinAttempts = 0,
                     escrowToken = null,
                     activePreimage = preimage,
-                    activePaymentHash = paymentHash
+                    activePaymentHash = paymentHash,
+                    // RoadFlare-specific: Store fare and driver info for boost
+                    fareEstimate = fareEstimate,
+                    fareEstimateWithFees = fareWithFees,
+                    roadflareTargetDriverPubKey = driverPubKey,
+                    roadflareTargetDriverLocation = driverLocation
                 )
             } else {
                 // Additional offer in batch - just subscribe to this one too
@@ -1876,6 +1905,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * Boost the fare on a direct offer and resend to the same driver.
      * Includes pre-calculated route metrics.
+     *
+     * Supports both regular offers (with selectedDriver) and RoadFlare offers
+     * (using roadflareTargetDriverPubKey/roadflareTargetDriverLocation fallback).
      */
     fun boostDirectOffer() {
         val state = _uiState.value
@@ -1886,7 +1918,17 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        val driver = state.selectedDriver ?: return
+        // Support both regular offers (selectedDriver) and RoadFlare (tracked pubkey)
+        val driverPubKey = state.selectedDriver?.driverPubKey
+            ?: state.roadflareTargetDriverPubKey
+            ?: return
+
+        val driverAvailabilityEventId = state.selectedDriver?.eventId  // null for RoadFlare
+        val driverLocation = state.selectedDriver?.approxLocation
+            ?: state.roadflareTargetDriverLocation
+
+        val isRoadflare = state.selectedDriver == null  // True if using RoadFlare target
+
         val currentFare = state.fareEstimate ?: return
         val pickup = state.pickupLocation ?: return
         val destination = state.destination ?: return
@@ -1927,23 +1969,24 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             acceptanceSubscriptionId = null
 
             // Update fare in state - reset timeout flag since we're boosting
-            val newFareWithFees = newFare * (1 + FEE_BUFFER_PERCENT)
+            val newFareWithFeesDouble = newFare * (1 + FEE_BUFFER_PERCENT)
             _uiState.value = _uiState.value.copy(
                 fareEstimate = newFare,
-                fareEstimateWithFees = newFareWithFees,
+                fareEstimateWithFees = newFareWithFeesDouble,
                 directOfferBoostSats = state.directOfferBoostSats + boostAmount,
                 pendingOfferEventId = null,
                 directOfferTimedOut = false,
                 isSendingOffer = true
             )
 
-            Log.d(TAG, "Boosting direct offer fare from $currentFare to $newFare sats (displayed: $newFareWithFees, total boost: ${state.directOfferBoostSats + boostAmount} sats)")
+            val offerType = if (isRoadflare) "RoadFlare" else "direct"
+            Log.d(TAG, "Boosting $offerType offer fare from $currentFare to $newFare sats (displayed: $newFareWithFeesDouble, total boost: ${state.directOfferBoostSats + boostAmount} sats)")
 
-            // Calculate driver→pickup route for accurate metrics
-            val pickupRoute = if (routingService.isReady()) {
+            // Calculate driver→pickup route for accurate metrics (only if we have driver location)
+            val pickupRoute = if (driverLocation != null && routingService.isReady()) {
                 routingService.calculateRoute(
-                    originLat = driver.approxLocation.lat,
-                    originLon = driver.approxLocation.lon,
+                    originLat = driverLocation.lat,
+                    originLon = driverLocation.lon,
                     destLat = pickup.lat,
                     destLon = pickup.lon
                 )
@@ -1955,7 +1998,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
             // Resend offer to same driver with new fare and route metrics
             val eventId = nostrService.sendRideOffer(
-                driverAvailability = driver,
+                driverPubKey = driverPubKey,
+                driverAvailabilityEventId = driverAvailabilityEventId,
                 pickup = pickup,
                 destination = destination,
                 fareEstimate = newFare,
@@ -1964,11 +2008,12 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 rideRouteKm = rideRoute?.distanceKm,
                 rideRouteMin = rideRoute?.let { it.durationSeconds / 60.0 },
                 mintUrl = riderMintUrl,
-                paymentMethod = paymentMethod
+                paymentMethod = paymentMethod,
+                isRoadflare = isRoadflare
             )
 
             if (eventId != null) {
-                Log.d(TAG, "Sent boosted ride offer: $eventId")
+                Log.d(TAG, "Sent boosted $offerType offer: $eventId")
                 myRideEventIds.add(eventId)  // Track for cleanup
                 subscribeToAcceptance(eventId)
                 startAcceptanceTimeout()
@@ -4287,6 +4332,10 @@ data class RiderUiState(
 
     // Driver availability (Issue #22)
     val showDriverUnavailableDialog: Boolean = false,        // Show dialog when driver goes offline
+
+    // RoadFlare target tracking (for boost functionality)
+    val roadflareTargetDriverPubKey: String? = null,         // Driver pubkey when using RoadFlare
+    val roadflareTargetDriverLocation: Location? = null,     // Driver location when using RoadFlare
 
     // UI
     val statusMessage: String = "Find available drivers",

@@ -920,7 +920,12 @@ class NostrService(
 
     /**
      * Send a ride offer to a driver.
-     * @param driverAvailability The driver's availability event
+     *
+     * This unified method handles both regular offers (with driver availability event)
+     * and RoadFlare offers (direct to driver pubkey without availability event).
+     *
+     * @param driverPubKey The driver's Nostr public key
+     * @param driverAvailabilityEventId The driver's availability event ID (null for RoadFlare)
      * @param pickup Pickup location
      * @param destination Destination location
      * @param fareEstimate Estimated fare in sats
@@ -928,10 +933,15 @@ class NostrService(
      * @param pickupRouteMin Pre-calculated driver→pickup duration in minutes (optional)
      * @param rideRouteKm Pre-calculated pickup→destination distance in km (optional)
      * @param rideRouteMin Pre-calculated pickup→destination duration in minutes (optional)
+     * @param paymentHash HTLC payment hash for escrow (optional)
+     * @param mintUrl Rider's Cashu mint URL (optional)
+     * @param paymentMethod Payment method (default "cashu")
+     * @param isRoadflare True for RoadFlare requests from favorite drivers
      * @return The event ID if successful, null on failure
      */
     suspend fun sendRideOffer(
-        driverAvailability: DriverAvailabilityData,
+        driverPubKey: String,
+        driverAvailabilityEventId: String? = null,
         pickup: Location,
         destination: Location,
         fareEstimate: Double,
@@ -939,10 +949,10 @@ class NostrService(
         pickupRouteMin: Double? = null,
         rideRouteKm: Double? = null,
         rideRouteMin: Double? = null,
-        paymentHash: String? = null,  // HTLC payment hash for escrow
+        paymentHash: String? = null,
         mintUrl: String? = null,
         paymentMethod: String = "cashu",
-        isRoadflare: Boolean = false  // True for RoadFlare requests from favorite drivers
+        isRoadflare: Boolean = false
     ): String? {
         val signer = keyManager.getSigner()
         if (signer == null) {
@@ -953,8 +963,8 @@ class NostrService(
         return try {
             val event = RideOfferEvent.create(
                 signer = signer,
-                driverAvailabilityEventId = driverAvailability.eventId,
-                driverPubKey = driverAvailability.driverPubKey,
+                driverAvailabilityEventId = driverAvailabilityEventId,
+                driverPubKey = driverPubKey,
                 pickup = pickup,
                 destination = destination,
                 fareEstimate = fareEstimate,
@@ -968,71 +978,11 @@ class NostrService(
                 isRoadflare = isRoadflare
             )
             relayManager.publish(event)
-            Log.d(TAG, "Sent ride offer: ${event.id}${paymentHash?.let { " with payment hash" } ?: ""}, method: $paymentMethod")
+            val offerType = if (isRoadflare) "RoadFlare" else "ride"
+            Log.d(TAG, "Sent $offerType offer to ${driverPubKey.take(16)}: ${event.id}${paymentHash?.let { " with payment hash" } ?: ""}, method: $paymentMethod")
             event.id
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send ride offer", e)
-            null
-        }
-    }
-
-    /**
-     * Send a RoadFlare ride offer to a favorite driver.
-     * Unlike regular offers, this doesn't require a driver availability event.
-     *
-     * @param driverPubKey The driver's Nostr public key
-     * @param pickup The pickup location
-     * @param destination The destination location
-     * @param fareEstimate The estimated fare in sats
-     * @param pickupRouteKm Optional driver→pickup distance (if driver location known)
-     * @param pickupRouteMin Optional driver→pickup duration
-     * @param rideRouteKm Optional pickup→destination distance
-     * @param rideRouteMin Optional pickup→destination duration
-     * @param paymentHash HTLC payment hash for escrow
-     * @param mintUrl Rider's Cashu mint URL
-     * @param paymentMethod Payment method (default "cashu")
-     * @return The event ID if successful, null on failure
-     */
-    suspend fun sendRoadflareOffer(
-        driverPubKey: String,
-        pickup: Location,
-        destination: Location,
-        fareEstimate: Double,
-        pickupRouteKm: Double? = null,
-        pickupRouteMin: Double? = null,
-        rideRouteKm: Double? = null,
-        rideRouteMin: Double? = null,
-        paymentHash: String? = null,
-        mintUrl: String? = null,
-        paymentMethod: String = "cashu"
-    ): String? {
-        val signer = keyManager.getSigner()
-        if (signer == null) {
-            Log.e(TAG, "Cannot send RoadFlare offer: Not logged in")
-            return null
-        }
-
-        return try {
-            val event = RideOfferEvent.create(
-                signer = signer,
-                driverPubKey = driverPubKey,
-                pickup = pickup,
-                destination = destination,
-                fareEstimate = fareEstimate,
-                pickupRouteKm = pickupRouteKm,
-                pickupRouteMin = pickupRouteMin,
-                rideRouteKm = rideRouteKm,
-                rideRouteMin = rideRouteMin,
-                paymentHash = paymentHash,
-                mintUrl = mintUrl,
-                paymentMethod = paymentMethod,
-                isRoadflare = true
-            )
-            relayManager.publish(event)
-            Log.d(TAG, "Sent RoadFlare offer to ${driverPubKey.take(16)}: ${event.id}")
-            event.id
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to send RoadFlare offer", e)
             null
         }
     }
