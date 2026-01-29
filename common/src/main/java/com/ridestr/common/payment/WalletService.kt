@@ -155,12 +155,14 @@ class WalletService(
             Log.d(TAG, "Connected to wallet provider: $mintUrl")
 
             // Verify hash_to_curve implementation against NUT-00 test vectors
+            // FAIL CLOSED: If crypto implementation doesn't match spec, abort connection
             val htcPassed = CashuCrypto.verifyHashToCurveTestVectors()
             if (!htcPassed) {
-                Log.e(TAG, "CRITICAL: hash_to_curve implementation does not match NUT-00 spec!")
-            } else {
-                Log.d(TAG, "hash_to_curve verification PASSED")
+                Log.e(TAG, "CRITICAL: hash_to_curve implementation does not match NUT-00 spec! Aborting connection.")
+                _isConnected.value = false
+                return false
             }
+            Log.d(TAG, "hash_to_curve verification PASSED")
 
             // CRITICAL: Check for and recover pending blinded operations first
             try {

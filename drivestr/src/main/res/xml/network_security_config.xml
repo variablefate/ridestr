@@ -1,9 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    Network security configuration
+    Production: Only trust system CAs to prevent MITM attacks
+    Debug: Also trust user CAs for development/testing
+-->
 <network-security-config>
     <base-config>
         <trust-anchors>
             <certificates src="system" />
-            <certificates src="user" />
         </trust-anchors>
     </base-config>
+    <!-- Debug-only: Allow user-installed CAs for development -->
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </debug-overrides>
 </network-security-config>

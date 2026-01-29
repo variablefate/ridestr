@@ -1,3 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    Backup rules for Android 11 and below (API 30 and below)
+    Excludes sensitive data from Google Drive backup
+-->
 <full-backup-content>
+    <!-- Exclude all SharedPreferences containing secrets -->
+    <exclude domain="sharedpref" path="secure_key_storage.xml" />
+    <exclude domain="sharedpref" path="wallet_keys.xml" />
+    <exclude domain="sharedpref" path="wallet_storage.xml" />
+    <exclude domain="sharedpref" path="ridestr_settings.xml" />
+    <!-- Exclude EncryptedSharedPreferences master key -->
+    <exclude domain="sharedpref" path="__androidx_security_crypto_encrypted_file_pref__.xml" />
 </full-backup-content>
