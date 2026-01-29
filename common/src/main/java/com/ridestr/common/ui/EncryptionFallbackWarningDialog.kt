@@ -15,7 +15,8 @@ import androidx.compose.ui.window.DialogProperties
 
 /**
  * Non-cancelable warning dialog shown when storage falls back to unencrypted SharedPreferences.
- * This can happen on emulators, rooted devices, or devices without hardware-backed keystore.
+ * This can happen on emulators, rooted devices, devices without hardware-backed keystore,
+ * or due to keystore corruption/transient initialization failures.
  *
  * The dialog warns users that their Nostr key, wallet mnemonic, and transaction data
  * are stored in plaintext and could be read by other apps with root access.
@@ -43,10 +44,10 @@ fun EncryptionFallbackWarningDialog(
         },
         text = {
             Text(
-                "This device lacks hardware-backed encryption. Your Nostr key, wallet mnemonic, " +
+                "Encrypted storage is unavailable on this device. Your Nostr key, wallet mnemonic, " +
                 "and transaction data are stored in plaintext.\n\n" +
                 "Other apps with root access could read this data.\n\n" +
-                "Consider using a device with hardware-backed keystore for better security."
+                "This may occur on emulators, rooted devices, or due to keystore issues."
             )
         },
         confirmButton = {

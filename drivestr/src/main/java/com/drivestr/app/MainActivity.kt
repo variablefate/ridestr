@@ -939,10 +939,8 @@ fun MainScreen(
     // Encryption fallback warning state
     var showEncryptionWarning by remember { mutableStateOf(false) }
 
-    // Check for encryption fallback on startup (release builds only)
+    // Check for encryption fallback on startup
     LaunchedEffect(keyManager, walletService) {
-        if (com.drivestr.app.BuildConfig.DEBUG) return@LaunchedEffect  // Skip in debug builds
-
         val anyUnencrypted = keyManager.isUsingUnencryptedStorage()
             || walletService?.isUsingUnencryptedStorage() == true
         showEncryptionWarning = anyUnencrypted
