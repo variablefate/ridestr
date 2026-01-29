@@ -1013,51 +1013,87 @@ fun MainScreen(
         DriverOnlineService.clearAlerts(context)
     }
 
+    // Extracted refresh logic - used by both UI refresh button and background sync
+    suspend fun refreshRoadflareFollowers() = withContext(Dispatchers.IO) {
+        val driverPubkey = keyManager.getPubKeyHex() ?: return@withContext
+
+        // Guard: skip if not connected
+        if (!nostrService.isConnected()) {
+            android.util.Log.d("RoadflareRefresh", "Skipping refresh - not connected")
+            return@withContext
+        }
+
+        val foundFollowers = mutableSetOf<String>()
+        val subscriptionId = nostrService.queryRoadflareFollowers(driverPubkey) { riderPubKey ->
+            foundFollowers.add(riderPubKey)
+        }
+        kotlinx.coroutines.delay(3000)
+        nostrService.closeSubscription(subscriptionId)
+
+        val existingFollowers = driverRoadflareRepository.getFollowers()
+        val existingPubkeys = existingFollowers.map { it.pubkey }.toSet()
+        var stateChanged = false
+
+        // Add new followers
+        for (pubkey in foundFollowers) {
+            if (pubkey !in existingPubkeys) {
+                driverRoadflareRepository.addFollower(
+                    com.ridestr.common.nostr.events.RoadflareFollower(
+                        pubkey = pubkey,
+                        name = "",
+                        addedAt = System.currentTimeMillis() / 1000,
+                        approved = false,
+                        keyVersionSent = 0
+                    )
+                )
+                stateChanged = true
+            }
+        }
+
+        // Verify existing followers not found in p-tag query
+        val followersToVerify = existingFollowers.filter { it.pubkey !in foundFollowers }
+        for (follower in followersToVerify) {
+            val verification = nostrService.verifyFollowerStatus(
+                followerPubKey = follower.pubkey,
+                driverPubKey = driverPubkey,
+                currentKeyUpdatedAt = driverRoadflareRepository.getKeyUpdatedAt()
+            )
+            if (verification != null && !verification.stillFollowing) {
+                driverRoadflareRepository.removeFollower(follower.pubkey)
+                driverRoadflareRepository.unmuteRider(follower.pubkey)  // Also clear from muted list
+                stateChanged = true
+            }
+        }
+
+        // Fetch profiles for followers missing display names
+        val pubkeysNeedingNames = mutableSetOf<String>()
+        for (pubkey in foundFollowers) {
+            if (pubkey !in existingPubkeys) pubkeysNeedingNames.add(pubkey)
+        }
+        for (follower in existingFollowers) {
+            if (follower.name.isBlank()) pubkeysNeedingNames.add(follower.pubkey)
+        }
+        for (pubkey in pubkeysNeedingNames) {
+            nostrService.subscribeToProfile(pubkey) { profile ->
+                val fullName = profile.displayName ?: profile.name
+                val firstName = fullName?.split(" ")?.firstOrNull()
+                if (!firstName.isNullOrBlank()) {
+                    driverRoadflareRepository.updateFollowerName(pubkey, firstName)
+                }
+            }
+        }
+
+        android.util.Log.d("RoadflareRefresh", "Refresh complete: found=${foundFollowers.size}, stateChanged=$stateChanged")
+        if (stateChanged) {
+            profileSyncManager.backupProfileData()
+        }
+    }
+
     // Observe sync-triggered refresh from DriverViewModel
-    // When DriverViewModel merges RoadFlare state, it triggers this to detect unfollowed riders
     LaunchedEffect(driverViewModel) {
         driverViewModel.syncTriggeredRefresh.collect {
             android.util.Log.d("MainActivity", "Sync triggered background refresh")
-            withContext(Dispatchers.IO) {
-                val driverPubkey = keyManager.getPubKeyHex() ?: return@withContext
-
-                // Guard: skip if not connected
-                if (!nostrService.isConnected()) {
-                    android.util.Log.d("RoadflareRefresh", "Skipping refresh - not connected")
-                    return@withContext
-                }
-
-                val foundFollowers = mutableSetOf<String>()
-                val subscriptionId = nostrService.queryRoadflareFollowers(driverPubkey) { riderPubKey ->
-                    foundFollowers.add(riderPubKey)
-                }
-                kotlinx.coroutines.delay(3000)
-                nostrService.closeSubscription(subscriptionId)
-
-                val existingFollowers = driverRoadflareRepository.getFollowers()
-                val existingPubkeys = existingFollowers.map { it.pubkey }.toSet()
-                var stateChanged = false
-
-                // Verify existing followers not found in p-tag query
-                val followersToVerify = existingFollowers.filter { it.pubkey !in foundFollowers }
-                for (follower in followersToVerify) {
-                    val verification = nostrService.verifyFollowerStatus(
-                        followerPubKey = follower.pubkey,
-                        driverPubKey = driverPubkey,
-                        currentKeyUpdatedAt = driverRoadflareRepository.getKeyUpdatedAt()
-                    )
-                    if (verification != null && !verification.stillFollowing) {
-                        driverRoadflareRepository.removeFollower(follower.pubkey)
-                        driverRoadflareRepository.unmuteRider(follower.pubkey)  // Also clear from muted list
-                        stateChanged = true
-                    }
-                }
-
-                android.util.Log.d("RoadflareRefresh", "Background refresh complete: found=${foundFollowers.size}, stateChanged=$stateChanged")
-                if (stateChanged) {
-                    profileSyncManager.backupProfileData()
-                }
-            }
+            refreshRoadflareFollowers()
         }
     }
 
@@ -1206,73 +1242,7 @@ fun MainScreen(
                         }
                     },
                     onRefreshFollowers = {
-                        // Query for followers via p-tag search on Kind 30011
-                        val foundFollowers = mutableSetOf<String>()
-                        val subscriptionId = nostrService.queryRoadflareFollowers(driverPubkey) { riderPubKey ->
-                            foundFollowers.add(riderPubKey)
-                        }
-                        kotlinx.coroutines.delay(3000)
-                        nostrService.closeSubscription(subscriptionId)
-
-                        val existingFollowers = driverRoadflareRepository.getFollowers()
-                        val existingPubkeys = existingFollowers.map { it.pubkey }.toSet()
-                        var stateChanged = false
-
-                        // Add new followers
-                        for (pubkey in foundFollowers) {
-                            if (pubkey !in existingPubkeys) {
-                                driverRoadflareRepository.addFollower(
-                                    com.ridestr.common.nostr.events.RoadflareFollower(
-                                        pubkey = pubkey,
-                                        name = "",
-                                        addedAt = System.currentTimeMillis() / 1000,
-                                        approved = false,
-                                        keyVersionSent = 0
-                                    )
-                                )
-                                stateChanged = true
-                            }
-                        }
-
-                        // Verify existing followers not found in p-tag query
-                        val followersToVerify = existingFollowers.filter { it.pubkey !in foundFollowers }
-                        for (follower in followersToVerify) {
-                            val verification = nostrService.verifyFollowerStatus(
-                                followerPubKey = follower.pubkey,
-                                driverPubKey = driverPubkey,
-                                currentKeyUpdatedAt = driverRoadflareRepository.getKeyUpdatedAt()
-                            )
-                            if (verification != null && !verification.stillFollowing) {
-                                driverRoadflareRepository.removeFollower(follower.pubkey)
-                                driverRoadflareRepository.unmuteRider(follower.pubkey)  // Also clear from muted list
-                                stateChanged = true
-                            }
-                        }
-
-                        // Fetch profiles for any followers missing display names
-                        val pubkeysNeedingNames = mutableSetOf<String>()
-                        // New followers
-                        for (pubkey in foundFollowers) {
-                            if (pubkey !in existingPubkeys) pubkeysNeedingNames.add(pubkey)
-                        }
-                        // Existing followers with blank names
-                        for (follower in existingFollowers) {
-                            if (follower.name.isBlank()) pubkeysNeedingNames.add(follower.pubkey)
-                        }
-                        for (pubkey in pubkeysNeedingNames) {
-                            nostrService.subscribeToProfile(pubkey) { profile ->
-                                val fullName = profile.displayName ?: profile.name
-                                val firstName = fullName?.split(" ")?.firstOrNull()
-                                if (!firstName.isNullOrBlank()) {
-                                    driverRoadflareRepository.updateFollowerName(pubkey, firstName)
-                                }
-                            }
-                        }
-
-                        android.util.Log.d("RoadflareRefresh", "Refresh complete: found=${foundFollowers.size}, verified=${followersToVerify.size}, changed=$stateChanged")
-                        if (stateChanged) {
-                            profileSyncManager.backupProfileData()
-                        }
+                        refreshRoadflareFollowers()
                     },
                     modifier = Modifier.padding(innerPadding)
                 )
