@@ -48,6 +48,7 @@ import kotlinx.coroutines.tasks.await
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.ridestr.common.nostr.events.AdminConfig
 import com.ridestr.common.nostr.events.DriverAvailabilityData
+import com.ridestr.common.nostr.events.PaymentMethod
 import com.ridestr.common.nostr.events.Location
 import com.ridestr.common.nostr.events.RideshareChatData
 import com.ridestr.common.nostr.events.UserProfile
@@ -187,18 +188,15 @@ fun RiderModeScreen(
             text = {
                 Column {
                     Text(
-                        "You need ${"%,d".format(uiState.insufficientFundsAmount)} more sats to request this ride."
+                        "You need ${"%,d".format(uiState.insufficientFundsAmount)} more sats to request this ride. This includes a small buffer for potential mint fees."
                     )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        "This includes a small buffer for potential mint fees.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    if (hasAlternateMethods) {
+                    if (uiState.insufficientFundsIsRoadflare) {
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(
-                            "Since this is a RoadFlare ride, you can continue with an alternate payment method.",
+                            if (hasAlternateMethods)
+                                "Since this is a RoadFlare ride, you can continue with an alternate payment method."
+                            else
+                                "Since this is a RoadFlare ride, you can set up alternative payment methods to proceed without bitcoin.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.primary
                         )
@@ -206,35 +204,113 @@ fun RiderModeScreen(
                 }
             },
             confirmButton = {
-                Column(horizontalAlignment = Alignment.End) {
-                    Button(
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (uiState.insufficientFundsIsRoadflare) {
+                        if (hasAlternateMethods) {
+                            Button(
+                                onClick = {
+                                    val method = roadflarePaymentMethods.value.first()
+                                    viewModel.sendRoadflareOfferWithAlternatePayment(method)
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("Use Alternative Payment")
+                            }
+                        } else {
+                            Button(
+                                onClick = {
+                                    viewModel.dismissInsufficientFundsDialog()
+                                    viewModel.showAlternatePaymentSetup()
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("Set Alternative Payment")
+                            }
+                        }
+                    }
+                    OutlinedButton(
                         onClick = {
                             val depositAmount = uiState.depositAmountNeeded
                             viewModel.dismissInsufficientFundsDialog()
                             onOpenWalletWithDeposit(depositAmount)
-                        }
+                        },
+                        modifier = Modifier.fillMaxWidth()
                     ) {
                         Text("Deposit ${"%,d".format(uiState.depositAmountNeeded)} sats")
                     }
-                    if (hasAlternateMethods) {
-                        Spacer(modifier = Modifier.height(4.dp))
-                        OutlinedButton(
-                            onClick = {
-                                // Use the first configured alternate payment method
-                                val method = roadflarePaymentMethods.value.first()
-                                viewModel.sendRoadflareOfferWithAlternatePayment(method)
-                            }
+                    TextButton(
+                        onClick = { viewModel.dismissInsufficientFundsDialog() },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Cancel")
+                    }
+                }
+            },
+            dismissButton = {}
+        )
+    }
+
+    // Alternate payment setup dialog for RoadFlare
+    if (uiState.showAlternatePaymentSetupDialog) {
+        val currentMethods = settingsManager.roadflarePaymentMethods.collectAsState()
+
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissAlternatePaymentSetup() },
+            icon = {
+                Icon(
+                    Icons.Default.Payment,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            },
+            title = { Text("Alternative Payment Methods") },
+            text = {
+                Column {
+                    Text(
+                        "Select payment methods you can use for RoadFlare rides when you don't have enough bitcoin.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    PaymentMethod.ROADFLARE_ALTERNATE_METHODS.forEach { method ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp)
                         ) {
-                            val methodName = roadflarePaymentMethods.value.firstOrNull()?.let { value ->
-                                com.ridestr.common.nostr.events.PaymentMethod.fromString(value)?.displayName ?: value
-                            } ?: "Alternate"
-                            Text("Continue with $methodName")
+                            Checkbox(
+                                checked = method.value in currentMethods.value,
+                                onCheckedChange = { checked ->
+                                    val updated = if (checked) {
+                                        currentMethods.value + method.value
+                                    } else {
+                                        currentMethods.value - method.value
+                                    }
+                                    settingsManager.setRoadflarePaymentMethods(updated)
+                                }
+                            )
+                            Text(
+                                text = method.displayName,
+                                style = MaterialTheme.typography.bodyLarge,
+                                modifier = Modifier.padding(start = 8.dp)
+                            )
                         }
                     }
                 }
             },
+            confirmButton = {
+                Button(
+                    onClick = { viewModel.dismissAlternatePaymentSetup() },
+                    enabled = currentMethods.value.isNotEmpty()
+                ) {
+                    Text("Done")
+                }
+            },
             dismissButton = {
-                TextButton(onClick = { viewModel.dismissInsufficientFundsDialog() }) {
+                TextButton(onClick = { viewModel.dismissAlternatePaymentSetup() }) {
                     Text("Cancel")
                 }
             }
@@ -3422,10 +3498,11 @@ private fun RoadflareDriverSelectionSheet(
     DisposableEffect(drivers, nostrService) {
         if (nostrService == null) return@DisposableEffect onDispose {}
 
-        // Fetch driver profile names
+        // Fetch driver profile names (prefer displayName over username)
         drivers.forEach { driver ->
             nostrService.subscribeToProfile(driver.pubkey) { profile ->
-                profile.name?.let { name ->
+                val fullName = profile.displayName ?: profile.name
+                fullName?.let { name ->
                     driverNames[driver.pubkey] = name.split(" ").firstOrNull() ?: name
                 }
             }
@@ -3446,10 +3523,16 @@ private fun RoadflareDriverSelectionSheet(
                         event = event
                     )
                     if (locationData != null) {
-                        driverLocations[event.pubKey] = Location(
-                            lat = locationData.location.lat,
-                            lon = locationData.location.lon
-                        )
+                        // Check status: remove offline drivers (like regular rides do)
+                        if (locationData.tagStatus == com.ridestr.common.nostr.events.RoadflareLocationEvent.Status.OFFLINE) {
+                            driverLocations.remove(event.pubKey)
+                            android.util.Log.d("RoadflareSelection", "Driver ${event.pubKey.take(8)} went offline - removed from selection")
+                        } else {
+                            driverLocations[event.pubKey] = Location(
+                                lat = locationData.location.lat,
+                                lon = locationData.location.lon
+                            )
+                        }
                     }
                 }
             }

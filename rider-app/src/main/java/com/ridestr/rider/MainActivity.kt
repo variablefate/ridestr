@@ -968,7 +968,7 @@ fun MainScreen(
                     // Dynamic title based on current tab
                     Text(
                         text = when (currentTab) {
-                            Tab.RIDE -> "Rider Mode"
+                            Tab.RIDE -> "Request a Ride"
                             Tab.ROADFLARE -> "RoadFlare"
                             Tab.WALLET -> "Wallet"
                             Tab.HISTORY -> "History"

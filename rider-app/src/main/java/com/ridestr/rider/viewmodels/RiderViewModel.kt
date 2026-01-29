@@ -2548,6 +2548,24 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Show alternate payment setup dialog for RoadFlare rides.
+     */
+    fun showAlternatePaymentSetup() {
+        _uiState.value = _uiState.value.copy(
+            showAlternatePaymentSetupDialog = true
+        )
+    }
+
+    /**
+     * Dismiss alternate payment setup dialog.
+     */
+    fun dismissAlternatePaymentSetup() {
+        _uiState.value = _uiState.value.copy(
+            showAlternatePaymentSetupDialog = false
+        )
+    }
+
+    /**
      * Toggle expanded search to find drivers in a wider area (~20 mile radius).
      */
     fun toggleExpandedSearch() {
@@ -4249,6 +4267,7 @@ data class RiderUiState(
     val insufficientFundsIsRoadflare: Boolean = false, // True when from RoadFlare offer path
     val pendingRoadflareDriverPubKey: String? = null,   // Driver pubkey for deferred RoadFlare offer
     val pendingRoadflareDriverLocation: Location? = null, // Driver location for deferred RoadFlare offer
+    val showAlternatePaymentSetupDialog: Boolean = false, // Show dialog to set alternate payment methods
 
     // Cancel warning dialog (shown when cancelling after PIN verification)
     val showCancelWarningDialog: Boolean = false,

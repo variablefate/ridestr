@@ -108,15 +108,54 @@ object DriverAvailabilityEvent {
     }
 
     /**
+     * Create a location-less availability event for ROADFLARE_ONLY mode.
+     * This event has status but no location/geohash, making the driver
+     * invisible to geographic searches while still trackable by pubkey.
+     *
+     * @param signer The NostrSigner to sign the event
+     * @param status Driver status (STATUS_AVAILABLE or STATUS_OFFLINE)
+     */
+    suspend fun createWithoutLocation(
+        signer: NostrSigner,
+        status: String = STATUS_AVAILABLE
+    ): Event {
+        val content = JSONObject().apply {
+            put("status", status)
+        }.toString()
+
+        val expiration = RideshareExpiration.minutesFromNow(RideshareExpiration.DRIVER_AVAILABILITY_MINUTES)
+
+        val tags = arrayOf(
+            arrayOf("d", "rideshare-availability"),
+            arrayOf(RideshareTags.HASHTAG, RideshareTags.RIDESHARE_TAG),
+            arrayOf(RideshareTags.EXPIRATION, expiration.toString())
+            // NO geohash tags - invisible to geographic searches
+        )
+
+        Log.d(TAG, "=== LOCATIONLESS AVAILABILITY EVENT ===")
+        Log.d(TAG, "Status: $status (ROADFLARE_ONLY mode)")
+
+        return signer.sign<Event>(
+            createdAt = System.currentTimeMillis() / 1000,
+            kind = RideshareEventKinds.DRIVER_AVAILABILITY,
+            tags = tags,
+            content = content
+        )
+    }
+
+    /**
      * Parse a driver availability event to extract the location, status, vehicle, and payment info.
+     * Location is optional - ROADFLARE_ONLY mode events don't include it.
      */
     fun parse(event: Event): DriverAvailabilityData? {
         if (event.kind != RideshareEventKinds.DRIVER_AVAILABILITY) return null
 
         return try {
             val json = JSONObject(event.content)
-            val locationJson = json.getJSONObject("approx_location")
-            val location = Location.fromJson(locationJson)
+            // Location is optional (ROADFLARE_ONLY mode doesn't include it)
+            val locationJson = json.optJSONObject("approx_location")
+            val location = locationJson?.let { Location.fromJson(it) }
+                ?: Location(0.0, 0.0)  // Dummy location for locationless events
             // Default to "available" for backwards compatibility
             val status = json.optString("status", STATUS_AVAILABLE)
 
@@ -140,21 +179,19 @@ object DriverAvailabilityEvent {
                 paymentMethods.add("cashu")
             }
 
-            location?.let {
-                DriverAvailabilityData(
-                    eventId = event.id,
-                    driverPubKey = event.pubKey,
-                    approxLocation = it,
-                    createdAt = event.createdAt,
-                    status = status,
-                    carMake = carMake,
-                    carModel = carModel,
-                    carColor = carColor,
-                    carYear = carYear,
-                    mintUrl = mintUrl,
-                    paymentMethods = paymentMethods
-                )
-            }
+            DriverAvailabilityData(
+                eventId = event.id,
+                driverPubKey = event.pubKey,
+                approxLocation = location,
+                createdAt = event.createdAt,
+                status = status,
+                carMake = carMake,
+                carModel = carModel,
+                carColor = carColor,
+                carYear = carYear,
+                mintUrl = mintUrl,
+                paymentMethods = paymentMethods
+            )
         } catch (e: Exception) {
             null
         }

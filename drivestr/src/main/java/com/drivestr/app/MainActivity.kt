@@ -1021,7 +1021,7 @@ fun MainScreen(
                     onClick = { currentTab = Tab.DRIVE }
                 )
                 NavigationBarItem(
-                    icon = { Icon(Icons.Default.People, contentDescription = null) },
+                    icon = { Icon(Icons.Default.Flare, contentDescription = null) },
                     label = { Text("RoadFlare") },
                     selected = currentTab == Tab.ROADFLARE,
                     onClick = { currentTab = Tab.ROADFLARE }
@@ -1066,6 +1066,9 @@ fun MainScreen(
                 // Get driver's display name from cached profile
                 val driverDisplayName by nostrService.userDisplayName.collectAsState()
 
+                // Check if driver is actually online (AVAILABLE stage)
+                val isDriverOnline = driverUiState.stage == com.drivestr.app.viewmodels.DriverStage.AVAILABLE
+
                 RoadflareTab(
                     driverRoadflareRepository = driverRoadflareRepository,
                     driverPubkey = driverPubkey,
@@ -1073,6 +1076,7 @@ fun MainScreen(
                     driverName = driverDisplayName,
                     settingsManager = settingsManager,
                     backgroundAlertsEnabled = roadflareAlertsEnabled,
+                    isDriverOnline = isDriverOnline,
                     onApproveFollower = { pubkey ->
                         scope.launch {
                             val signer = nostrService.keyManager.getSigner()

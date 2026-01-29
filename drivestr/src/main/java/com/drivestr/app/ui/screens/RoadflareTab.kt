@@ -2,6 +2,10 @@ package com.drivestr.app.ui.screens
 
 import android.content.Intent
 import android.graphics.Bitmap
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -15,6 +19,7 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
@@ -43,6 +48,7 @@ fun RoadflareTab(
     driverName: String = "",
     settingsManager: SettingsManager? = null,
     backgroundAlertsEnabled: Boolean = false,
+    isDriverOnline: Boolean = false,
     onApproveFollower: (String) -> Unit = {},
     onDeclineFollower: (String) -> Unit = {},
     onRemoveFollower: (String) -> Unit = {},
@@ -58,6 +64,8 @@ fun RoadflareTab(
     val hasKey = state?.roadflareKey != null
 
     var showRemoveDialog by remember { mutableStateOf<RoadflareFollower?>(null) }
+    var showQrCode by remember { mutableStateOf(false) }
+    var showPaymentMethods by remember { mutableStateOf(false) }
 
     // Pull to refresh state
     var isRefreshing by remember { mutableStateOf(false) }
@@ -121,22 +129,127 @@ fun RoadflareTab(
                     hasKey = hasKey,
                     followerCount = approvedFollowers.size,
                     pendingCount = pendingFollowers.size,
-                    backgroundAlertsEnabled = backgroundAlertsEnabled
+                    backgroundAlertsEnabled = backgroundAlertsEnabled,
+                    isDriverOnline = isDriverOnline
                 )
             }
 
-            // QR Code section
+            // QR Code section with animated expand/collapse
             item {
-                QrCodeCard(
-                    driverNpub = driverNpub,
-                    driverName = driverName
+                val qrChevronRotation by animateFloatAsState(
+                    targetValue = if (showQrCode) 180f else 0f,
+                    label = "qrChevronRotation"
                 )
+
+                Column {
+                    // Header card (always visible)
+                    OutlinedCard(
+                        onClick = { showQrCode = !showQrCode },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(20.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.QrCode,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(32.dp)
+                            )
+                            Spacer(modifier = Modifier.width(16.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Share Your Code with Riders",
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                                Text(
+                                    text = "Show your RoadFlare QR code",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Icon(
+                                Icons.Default.KeyboardArrowDown,
+                                contentDescription = if (showQrCode) "Collapse" else "Expand",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.rotate(qrChevronRotation)
+                            )
+                        }
+                    }
+
+                    // Animated QR code content
+                    AnimatedVisibility(
+                        visible = showQrCode,
+                        enter = expandVertically(),
+                        exit = shrinkVertically()
+                    ) {
+                        QrCodeContent(
+                            driverNpub = driverNpub,
+                            driverName = driverName
+                        )
+                    }
+                }
             }
 
-            // Accepted payment methods section
+            // Accepted payment methods section with animated expand/collapse
             if (settingsManager != null) {
                 item {
-                    AcceptedPaymentMethodsCard(settingsManager = settingsManager)
+                    val paymentChevronRotation by animateFloatAsState(
+                        targetValue = if (showPaymentMethods) 180f else 0f,
+                        label = "paymentChevronRotation"
+                    )
+
+                    Column {
+                        // Header card (always visible)
+                        OutlinedCard(
+                            onClick = { showPaymentMethods = !showPaymentMethods },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(16.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.Payment,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Accepted Payment Methods",
+                                        style = MaterialTheme.typography.titleMedium
+                                    )
+                                    Text(
+                                        text = "Non-bitcoin methods for RoadFlare",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Icon(
+                                    Icons.Default.KeyboardArrowDown,
+                                    contentDescription = if (showPaymentMethods) "Collapse" else "Expand",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.rotate(paymentChevronRotation)
+                                )
+                            }
+                        }
+
+                        // Animated payment methods content
+                        AnimatedVisibility(
+                            visible = showPaymentMethods,
+                            enter = expandVertically(),
+                            exit = shrinkVertically()
+                        ) {
+                            PaymentMethodsContent(settingsManager = settingsManager)
+                        }
+                    }
                 }
             }
 
@@ -224,16 +337,19 @@ private fun BroadcastStatusCard(
     followerCount: Int,
     pendingCount: Int = 0,
     backgroundAlertsEnabled: Boolean = false,
+    isDriverOnline: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val statusColor = when {
         pendingCount > 0 -> MaterialTheme.colorScheme.tertiary
+        !isDriverOnline -> MaterialTheme.colorScheme.outline  // Offline takes priority
         hasKey && followerCount > 0 -> MaterialTheme.colorScheme.primary
         else -> MaterialTheme.colorScheme.outline
     }
 
     val statusText = when {
         pendingCount > 0 -> "$pendingCount Pending Request${if (pendingCount != 1) "s" else ""}"
+        !isDriverOnline -> "Offline"  // Check actual driver status FIRST
         hasKey && followerCount > 0 -> "Available"
         hasKey -> "Ready (no followers yet)"
         else -> "Not Set Up"
@@ -241,12 +357,14 @@ private fun BroadcastStatusCard(
 
     val statusIcon = when {
         pendingCount > 0 -> Icons.Default.PersonAdd
+        !isDriverOnline -> Icons.Default.SensorsOff  // Offline icon
         hasKey && followerCount > 0 -> Icons.Default.Sensors
         else -> Icons.Default.SensorsOff
     }
 
     val statusSubtitle = when {
         pendingCount > 0 -> null
+        !isDriverOnline -> null  // No subtitle when offline
         hasKey && followerCount > 0 && backgroundAlertsEnabled ->
             "Location visible to $followerCount follower${if (followerCount != 1) "s" else ""} \u2022 Background alerts on"
         hasKey && followerCount > 0 ->
@@ -294,10 +412,10 @@ private fun BroadcastStatusCard(
 }
 
 /**
- * Card with QR code for driver's profile.
+ * QR code content (displayed inside AnimatedVisibility).
  */
 @Composable
-private fun QrCodeCard(
+private fun QrCodeContent(
     driverNpub: String,
     driverName: String,
     modifier: Modifier = Modifier
@@ -317,7 +435,9 @@ private fun QrCodeCard(
     }
 
     Card(
-        modifier = modifier.fillMaxWidth()
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp)
     ) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -325,21 +445,6 @@ private fun QrCodeCard(
                 .fillMaxWidth()
                 .padding(24.dp)
         ) {
-            Text(
-                text = "Your RoadFlare QR Code",
-                style = MaterialTheme.typography.titleMedium
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = "Riders scan this to add you to their favorites",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
             // QR Code
             if (qrBitmap != null) {
                 Surface(
@@ -390,6 +495,14 @@ private fun QrCodeCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
+            Spacer(modifier = Modifier.height(4.dp))
+
+            Text(
+                text = "Riders scan this to add you to their favorites",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
             Spacer(modifier = Modifier.height(12.dp))
 
             // Share button
@@ -398,7 +511,7 @@ private fun QrCodeCard(
                 onClick = {
                     val intent = Intent(Intent.ACTION_SEND).apply {
                         type = "text/plain"
-                        putExtra(Intent.EXTRA_TEXT, "nostr:$driverNpub")
+                        putExtra(Intent.EXTRA_TEXT, driverNpub)
                     }
                     context.startActivity(Intent.createChooser(intent, "Share your RoadFlare profile"))
                 }
@@ -451,7 +564,7 @@ private fun EmptyFollowersCard(
             Spacer(modifier = Modifier.height(4.dp))
 
             Text(
-                text = "Share your QR code with riders you meet. They'll be able to see your location and send you ride requests.",
+                text = "Share your QR code with riders who really loved your service and want you as their go-to driver. If they follow you, they'll be able to see your location and request you personally anytime you're online.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -650,39 +763,21 @@ private fun generateQrCode(content: String, size: Int): Bitmap? {
 }
 
 /**
- * Card for driver to select which alternate payment methods they accept from RoadFlare riders.
+ * Payment methods content (displayed inside AnimatedVisibility).
  */
 @Composable
-private fun AcceptedPaymentMethodsCard(settingsManager: SettingsManager) {
+private fun PaymentMethodsContent(settingsManager: SettingsManager) {
     val currentMethods by settingsManager.roadflarePaymentMethods.collectAsState()
 
     Card(
-        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
         )
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    Icons.Default.Payment,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(20.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "Accepted Payment Methods",
-                    style = MaterialTheme.typography.titleMedium
-                )
-            }
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "Select non-bitcoin methods you accept from RoadFlare riders.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(8.dp))
             PaymentMethod.ROADFLARE_ALTERNATE_METHODS.forEach { method ->
                 Row(
                     verticalAlignment = Alignment.CenterVertically,

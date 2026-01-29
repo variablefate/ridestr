@@ -15,8 +15,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.ridestr.rider.R
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.ridestr.common.data.FollowedDriversRepository
@@ -184,6 +186,8 @@ fun RoadflareTab(
         Log.d(TAG, "Subscribing to locations from ${driverPubkeys.size} drivers with keys")
 
         subscriptionId = nostrService.subscribeToRoadflareLocations(driverPubkeys) { event, relayUrl ->
+            Log.d(TAG, "Received RoadFlare location event from ${event.pubKey.take(8)} via $relayUrl")
+
             // Find the driver and their RoadFlare key
             val driverPubKey = event.pubKey
             val driver = driversWithKeys.find { it.pubkey == driverPubKey }
@@ -202,8 +206,7 @@ fun RoadflareTab(
             )
 
             if (locationData != null) {
-                Log.d(TAG, "Received location from ${driverPubKey.take(8)}: " +
-                    "${locationData.location.lat}, ${locationData.location.lon}, status=${locationData.tagStatus}")
+                Log.d(TAG, "Updated driver ${driverPubKey.take(8)} status=${locationData.tagStatus} (was: ${driverLocations[driverPubKey]?.status})")
 
                 driverLocations[driverPubKey] = DriverLocationState(
                     pubkey = driverPubKey,
@@ -436,10 +439,10 @@ private fun EmptyDriversState(
         modifier = modifier.padding(32.dp)
     ) {
         Icon(
-            imageVector = Icons.Default.People,
+            painter = painterResource(R.drawable.ic_roadflare),
             contentDescription = null,
-            modifier = Modifier.size(80.dp),
-            tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+            modifier = Modifier.size(140.dp),
+            tint = MaterialTheme.colorScheme.primary
         )
 
         Spacer(modifier = Modifier.height(24.dp))
@@ -453,7 +456,7 @@ private fun EmptyDriversState(
 
         Text(
             text = "Add drivers you've met and trust to your personal RoadFlare network. Send out a RoadFlare and it requests a ride straight from your trusted circle of favorite drivers.",
-            style = MaterialTheme.typography.bodyLarge,
+            style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 16.dp)
         )
@@ -646,16 +649,19 @@ private fun DriverStatusBadge(
         (now - it.timestamp) > 300 // 5 minutes
     } ?: true
 
+    // Priority order: stale key -> no key -> explicit OFFLINE -> stale data -> status-based
+    // IMPORTANT: Check explicit OFFLINE status BEFORE staleness to ensure immediate offline detection
     val (color, text) = when {
         hasStaleKey -> MaterialTheme.colorScheme.error to "Key Outdated"
         !hasKey -> MaterialTheme.colorScheme.outline to "Pending"
-        locationState == null || isStale -> MaterialTheme.colorScheme.outline to "Offline"
+        locationState == null -> MaterialTheme.colorScheme.outline to "Offline"
+        locationState.status == RoadflareLocationEvent.Status.OFFLINE ->
+            MaterialTheme.colorScheme.outline to "Offline"  // Explicit offline FIRST (before staleness)
+        isStale -> MaterialTheme.colorScheme.outline to "Offline"  // Stale fallback
         locationState.status == RoadflareLocationEvent.Status.ONLINE ->
             MaterialTheme.colorScheme.primary to "Available"
         locationState.status == RoadflareLocationEvent.Status.ON_RIDE ->
             MaterialTheme.colorScheme.tertiary to "On Ride"
-        locationState.status == RoadflareLocationEvent.Status.OFFLINE ->
-            MaterialTheme.colorScheme.outline to "Offline"
         else -> MaterialTheme.colorScheme.outline to "Offline"
     }
 

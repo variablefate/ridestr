@@ -14,9 +14,12 @@ import com.ridestr.common.data.RideHistoryRepository
 import com.ridestr.common.data.Vehicle
 import com.ridestr.common.roadflare.RoadflareLocationBroadcaster
 import com.ridestr.common.nostr.NostrService
+import com.ridestr.common.nostr.events.RoadflareLocation
+import com.ridestr.common.nostr.events.RoadflareLocationEvent
 import com.ridestr.common.nostr.events.RideHistoryEntry
 import com.ridestr.common.nostr.events.geohash
 import com.ridestr.common.nostr.events.BroadcastRideOfferData
+import com.ridestr.common.nostr.events.DriverAvailabilityEvent
 import com.ridestr.common.nostr.events.DriverRideAction
 import com.ridestr.common.nostr.events.DriverRideStateEvent
 import com.ridestr.common.nostr.events.DriverStatusType
@@ -799,7 +802,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
     /**
      * Go to RoadFlare-only mode: broadcast location to followers and receive
-     * RoadFlare-tagged offers, but don't broadcast Kind 30173 availability.
+     * RoadFlare-tagged offers. Broadcasts Kind 30173 WITHOUT location/geohash
+     * so driver is invisible to geographic searches but trackable by pubkey.
      */
     fun goRoadflareOnly(location: Location, vehicle: Vehicle?) {
         val context = getApplication<Application>()
@@ -817,6 +821,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Start RoadFlare broadcasting + offer subscription (RoadFlare-tagged only)
         startRoadflareBroadcasting()
         subscribeToRoadflareOffers()
+
+        // Publish locationless Kind 30173 so availability subscription works
+        // (Driver is trackable by pubkey but invisible to geographic searches)
+        viewModelScope.launch {
+            nostrService.broadcastAvailabilityWithoutLocation(DriverAvailabilityEvent.STATUS_AVAILABLE)
+        }
     }
 
     /**
@@ -840,13 +850,20 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         broadcastRoadflareOfflineStatus()
         stopRoadflareBroadcasting()
 
-        // Capture location before launching coroutine
+        // Capture state before launching coroutine
         val lastLocation = currentState.currentLocation
+        val wasRoadflareOnly = currentState.stage == DriverStage.ROADFLARE_ONLY
 
         viewModelScope.launch {
-            // Broadcast offline status - let it remain on relays as signal to riders
-            // (expires in 30 min via NIP-40, giving riders time to receive and remove driver)
-            if (lastLocation != null) {
+            // Broadcast offline status based on previous mode
+            if (wasRoadflareOnly) {
+                // ROADFLARE_ONLY: locationless offline (preserves privacy)
+                val eventId = nostrService.broadcastAvailabilityWithoutLocation(DriverAvailabilityEvent.STATUS_OFFLINE)
+                if (eventId != null) {
+                    Log.d(TAG, "Broadcast locationless offline status: $eventId")
+                }
+            } else if (lastLocation != null) {
+                // AVAILABLE: offline with location (needed for geographic removal)
                 val eventId = nostrService.broadcastOffline(lastLocation)
                 if (eventId != null) {
                     Log.d(TAG, "Broadcast offline status: $eventId")
@@ -3051,16 +3068,29 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      * the driver go offline immediately rather than waiting for staleness timeout.
      */
     private fun broadcastRoadflareOfflineStatus() {
-        val broadcaster = roadflareLocationBroadcaster ?: return
         viewModelScope.launch {
-            val location = _uiState.value.currentLocation
-            if (location != null) {
-                val androidLocation = android.location.Location("").apply {
-                    latitude = location.lat
-                    longitude = location.lon
-                }
-                broadcaster.broadcastNow(androidLocation)
-            }
+            val location = _uiState.value.currentLocation ?: return@launch
+            val roadflareState = driverRoadflareRepository?.state?.value ?: return@launch
+            val roadflareKey = roadflareState.roadflareKey ?: return@launch
+            val signer = nostrService.getSigner() ?: return@launch
+
+            // Create location with OFFLINE status
+            val offlineLocation = RoadflareLocation(
+                lat = location.lat,
+                lon = location.lon,
+                timestamp = System.currentTimeMillis() / 1000,
+                status = RoadflareLocationEvent.Status.OFFLINE
+            )
+
+            // Publish directly to Nostr with OFFLINE status
+            nostrService.publishRoadflareLocation(
+                signer = signer,
+                roadflarePubKey = roadflareKey.publicKey,
+                location = offlineLocation,
+                keyVersion = roadflareKey.version
+            )
+
+            Log.d(TAG, "Published OFFLINE RoadFlare status")
         }
     }
 

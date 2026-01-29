@@ -195,6 +195,31 @@ class NostrService(
     }
 
     /**
+     * Broadcast availability without location for ROADFLARE_ONLY mode.
+     * Driver is trackable by pubkey but invisible to geographic searches.
+     *
+     * @param status Driver status (STATUS_AVAILABLE or STATUS_OFFLINE)
+     * @return The event ID if successful, null on failure
+     */
+    suspend fun broadcastAvailabilityWithoutLocation(status: String = DriverAvailabilityEvent.STATUS_AVAILABLE): String? {
+        val signer = keyManager.getSigner()
+        if (signer == null) {
+            Log.e(TAG, "Cannot broadcast locationless availability: Not logged in")
+            return null
+        }
+
+        return try {
+            val event = DriverAvailabilityEvent.createWithoutLocation(signer, status)
+            relayManager.publish(event)
+            Log.d(TAG, "Broadcast locationless availability: $status (${event.id})")
+            event.id
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to broadcast locationless availability", e)
+            null
+        }
+    }
+
+    /**
      * Request deletion of events (NIP-09).
      * Used to clean up old availability events to prevent relay spam.
      *
