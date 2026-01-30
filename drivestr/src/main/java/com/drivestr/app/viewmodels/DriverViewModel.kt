@@ -48,6 +48,7 @@ import com.ridestr.common.state.RideStateMachine
 import com.ridestr.common.state.TransitionResult
 import com.ridestr.common.state.fromDriverStage
 import com.ridestr.common.state.toDriverStageName
+import com.drivestr.app.BuildConfig
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -3877,7 +3878,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             val mergedFollowers = mergeFollowerLists(
                 currentState?.followers ?: emptyList(),
                 remoteState.followers,
-                selectedKeyVersion
+                selectedKeyVersion,
+                localUpdatedAt,
+                remoteUpdatedAt
             )
 
             // Merge muted lists (union - never auto-unmute)
@@ -3946,7 +3949,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     private fun mergeFollowerLists(
         local: List<RoadflareFollower>,
         remote: List<RoadflareFollower>,
-        selectedKeyVersion: Int
+        selectedKeyVersion: Int,
+        localUpdatedAt: Long,
+        remoteUpdatedAt: Long
     ): List<RoadflareFollower> {
         val byPubkey = mutableMapOf<String, RoadflareFollower>()
 
@@ -3975,6 +3980,22 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     keyVersionSent = clampedKeyVersionSent,
                     addedAt = minOf(existing.addedAt, follower.addedAt)
                 )
+            }
+        }
+
+        // If remote is newer than local, prune local-only followers (they were removed on Nostr)
+        // If local is newer, keep local-only followers (they're legitimate, remote is stale)
+        if (remoteUpdatedAt > localUpdatedAt) {
+            val remotePubkeys = remote.map { it.pubkey }.toSet()
+            val localOnlyPubkeys = local.map { it.pubkey }.filter { it !in remotePubkeys }
+
+            if (localOnlyPubkeys.isNotEmpty()) {
+                if (BuildConfig.DEBUG) {
+                    Log.d(TAG, "Remote newer ($remoteUpdatedAt > $localUpdatedAt), pruning ${localOnlyPubkeys.size} stale local-only followers")
+                }
+                for (pubkey in localOnlyPubkeys) {
+                    byPubkey.remove(pubkey)
+                }
             }
         }
 
