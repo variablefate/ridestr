@@ -1,7 +1,7 @@
 # Ridestr Nostr Event Protocol
 
-**Version**: 1.5
-**Last Updated**: 2026-01-29
+**Version**: 1.6
+**Last Updated**: 2026-01-30
 
 This document defines all Nostr event kinds used in the Ridestr rideshare application.
 
@@ -695,6 +695,13 @@ Ridestr uses Cashu NUT-14 Hash Time-Locked Contracts (HTLC) for trustless paymen
 
 The driver's `wallet_pubkey` in Kind 3174 acceptance ensures the rider locks funds to the correct key.
 
+### HTLC Preimage Storage (January 2026)
+The preimage is now stored in `PendingHtlc` when calling `lockForRide()`:
+- Enables future-proof refunds if mints enforce hash verification
+- `refundExpiredHtlc()` uses stored preimage when available
+- Falls back to zeros placeholder for old HTLCs (mint compatibility workaround)
+- Preimage stored in same encrypted SharedPreferences as wallet keys
+
 ### Escrow Token Flow
 ```
 RIDER                                    DRIVER
@@ -1086,12 +1093,22 @@ RoadFlare enables riders to build a personal rideshare network from drivers they
 }
 ```
 
-**When Sent**:
-- Rider receives Kind 3186 key share → stores key → sends Kind 3188 acknowledgement
+**Status Values**:
+| Status | Meaning | Driver Action |
+|--------|---------|---------------|
+| `received` | Key successfully stored | None (confirmation) |
+| `stale` | Rider's stored key is outdated | Re-send current key via Kind 3186 |
 
-**Purpose**:
-- Confirms to driver that follower has received the current key
-- Allows driver to verify key distribution succeeded
+**When Sent**:
+- `status="received"`: Rider receives Kind 3186 → stores key → acknowledges receipt
+- `status="stale"`: Rider detects outdated key → requests refresh (rate-limited: 1/hour/driver)
+
+**Key Refresh Flow** (January 2026):
+1. Rider subscribes to driver's Kind 30012, compares `key_updated_at` tag vs stored timestamp
+2. If driver's timestamp > stored → key is stale
+3. Rider sends Kind 3188 with `status="stale"` and their stored `keyUpdatedAt`
+4. Driver verifies: pubkey matches claimed `riderPubKey`, follower is approved + not muted
+5. If valid, driver re-sends current key via Kind 3186
 
 ---
 

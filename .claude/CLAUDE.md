@@ -44,6 +44,32 @@ See [docs/README.md](../docs/README.md) for full documentation.
 | Payment debugging | `docs/architecture/PAYMENT_ARCHITECTURE.md` | `.claude/skills/cashu-wallet.md` |
 | Understand ride flow | `docs/architecture/STATE_MACHINES.md` | `.claude/skills/ridestr-protocol/SKILL.md` |
 | Event structure | `docs/protocol/NOSTR_EVENTS.md` | Event source files in `common/.../events/` |
+| Debug RoadFlare issue | This file "RoadFlare Architecture" | `docs/CONNECTIONS.md#roadflare-system` |
+
+## Ride Flow Overview
+
+> **Full sequence diagrams**: See [docs/CONNECTIONS.md](../docs/CONNECTIONS.md#offer-types-comparison)
+
+### Offer Type Comparison
+
+| Aspect | Direct Offer | Broadcast Offer | RoadFlare Offer |
+|--------|--------------|-----------------|-----------------|
+| **Kind 3173 Content** | NIP-44 encrypted | Plaintext (~1km approx) | NIP-44 encrypted |
+| **Target** | Specific driver (p-tag) | All in area (g-tags) | Specific driver (p-tag + roadflare tag) |
+| **Driver Discovery** | Kind 30173 availability | Kind 30173 + geohash | Kind 30014 encrypted location |
+| **Privacy** | High | Medium (approximate location public) | High |
+| **Recommended** | ✅ Primary method | ⚠️ Advanced/Discouraged | ✅ Primary for trusted network |
+| **Pre-requisites** | Driver broadcasting | Route calculated | Follower approved + key received |
+
+### Key Methods by Offer Type
+
+| Type | RiderViewModel | NostrService |
+|------|---------------|--------------|
+| Direct | `sendRideOffer()` | `sendRideOffer()` |
+| Broadcast | `broadcastRideRequest()` | `broadcastRideRequest()` |
+| RoadFlare | `sendRoadflareOffer()` | `sendRideOffer()` (isRoadflare=true) |
+
+**Broadcast Privacy Note:** Uses `location.approximate()` (~1km precision). UI shows privacy warning dialog before allowing broadcast.
 
 ## Nostr Event Kinds (NIP-014173)
 
@@ -71,6 +97,90 @@ See [docs/README.md](../docs/README.md) for full documentation.
 | Kind | Type | Purpose | d-tag |
 |------|------|---------|-------|
 | 30182 | Param. Replaceable | Platform config (fare rates, mints, versions) | `ridestr-admin-config` |
+
+### RoadFlare Events
+| Kind | Type | Purpose |
+|------|------|---------|
+| 30011 | Param. Replaceable | Followed Drivers (rider's favorites + keys) |
+| 30012 | Param. Replaceable | Driver RoadFlare State (keypair, followers, muted) |
+| 30014 | Param. Replaceable | Location Broadcast (encrypted, 5-min expiry) |
+| 3186 | Regular | Key Share (driver→follower DM, 5-min expiry) |
+| 3187 | Regular | Follow Notification (**DEPRECATED** - use p-tag query) |
+| 3188 | Regular | Key Acknowledgement (confirm receipt or refresh request) |
+
+## RoadFlare Architecture
+
+> **Full diagrams**: See [docs/CONNECTIONS.md](../docs/CONNECTIONS.md#roadflare-system)
+
+RoadFlare enables riders to build a **personal rideshare network** of trusted drivers. Drivers broadcast encrypted locations; only approved followers can see them.
+
+### Encryption Model (Shared Keypair)
+```
+Driver broadcasts:    nip44Encrypt(location, roadflarePubKey)
+Follower decrypts:    nip44Decrypt(ciphertext, driverPubKey) using stored roadflarePrivKey
+
+ECDH commutative:     ECDH(driver_priv, roadflare_pub) == ECDH(roadflare_priv, driver_pub)
+```
+**Efficiency**: 1 encryption for N followers (vs N separate NIP-44 DMs)
+
+### Follower Lifecycle
+```
+PENDING → APPROVED → KEY_SENT → ACTIVE
+                         ↓ (driver "Remove")
+                       MUTED → key rotation → can restore later
+```
+
+### Follower Actions by App
+
+| Action | App | What Actually Happens |
+|--------|-----|----------------------|
+| **"Approve"** | Driver | Sends Kind 3186 (key share), marks `approved=true` |
+| **"Decline"** | Driver | Deletes from `followers[]` (clean removal, no restore) |
+| **"Remove"** | Driver | **Mutes internally** → `muted[]` → rotates key |
+| **"Remove"** | Rider | **Actually deletes** from favorites → Kind 30011 update |
+| **Re-add** | Rider | Fresh pending state (driver must re-approve, no memory) |
+
+**Key insight:** Driver "Remove" = mute (preserves data), Rider "Remove" = actual delete.
+
+**Note:** `unmuteRider()` exists in code but UI for restoring muted followers is not yet implemented.
+
+### Driver Availability States
+
+| Mode | Kind 30173 | Kind 30014 | Offers Received |
+|------|-----------|-----------|-----------------|
+| **OFFLINE** | None | None | None |
+| **ROADFLARE_ONLY** | No location (privacy) | Broadcasting | Only `roadflare`-tagged |
+| **AVAILABLE** | Has location + geohash | Broadcasting | All offers |
+| **ON_RIDE** | Stopped (NIP-09 deleted) | `ON_RIDE` status | None |
+
+**Key insight:** Kind 30014 never stops while online - only status changes: `ONLINE` → `ON_RIDE` → `OFFLINE`
+
+### Key Files
+
+| Component | File | Method |
+|-----------|------|--------|
+| Follower management | `RoadflareKeyManager.kt` | `approveFollower()`, `handleMuteFollower()`, `rotateKey()` |
+| Location broadcast | `RoadflareLocationBroadcaster.kt` | `startBroadcasting()`, `setOnRide()` |
+| Cross-device sync | `DriverViewModel.kt:3801` | `ensureRoadflareStateSynced()` |
+| Stale key detection | `RoadflareTab.kt` | `checkStaleKeys()` |
+| Key refresh handler | `MainActivity.kt` | Kind 3188 handler (status="stale") |
+
+## Payment Methods
+
+| Method | Status | Implementation |
+|--------|--------|----------------|
+| **Cashu HTLC** | ✅ Working | NUT-14 escrow with deferred locking |
+| **Lightning Direct** | 🚧 Planned | Driver invoice, rider pays |
+| **Fiat Cash** | 🚧 Planned | Cash on delivery, trust-based |
+| **RoadFlare Alternates** | ✅ Working | Zelle, PayPal, Cash, etc. (no escrow) |
+
+### Critical Design: Nostr Key ≠ Wallet Key
+
+For security isolation, identity and payment use **different keys**:
+- **Nostr key**: User identity, event signing, NIP-44 encryption
+- **Wallet key**: P2PK escrow claims, BIP-340 Schnorr signatures
+
+Driver's `wallet_pubkey` in Kind 3174 ensures HTLC is locked to correct key.
 
 ## Critical Debugging Insight
 **When debugging data issues, ALWAYS trace data at BOTH:**
@@ -458,85 +568,33 @@ Relay message → RelayConnection.handleMessage()
 
 ## RoadFlare Status Detection (January 2026)
 
+> **See also**: [RoadFlare Architecture](#roadflare-architecture) for follower lifecycle and encryption model.
+
 ### Problem Summary
 RoadFlare screens showed drivers as offline even when online due to:
-1. **Cross-device sync gap**: RoadFlare state only synced during onboarding, not on resume/go-online
-2. **Out-of-order 30014 events**: No timestamp checks → late OFFLINE could override newer ONLINE
-3. **Selection sheet staleness**: Treated any location as "online" forever
-4. **Stale keys**: Rider may have outdated RoadFlare key
+1. **Cross-device sync gap**: State only synced during onboarding, not on go-online
+2. **Out-of-order events**: Late OFFLINE could override newer ONLINE
+3. **Stale keys**: Rider has outdated key after driver rotated
 
-### Fixes Implemented
+### Fixes Reference
 
-| Fix | Files | Description |
-|-----|-------|-------------|
-| Auto-sync on go-online | `DriverViewModel.kt:3801` | `ensureRoadflareStateSynced()` fetches state from Nostr if local is empty |
-| Out-of-order rejection | `RoadflareTab.kt:150,208-235` | Track `lastLocationCreatedAt`, reject events with older timestamps |
-| Staleness filter | `RiderModeScreen.kt:3491-3560,3732-3745` | `RoadflareDriverState` wrapper, 10-min freshness check |
-| Auto key refresh | `RoadflareTab.kt:257-307` | Send Kind 3188 with `status="stale"` on stale key detection |
-| Key refresh handler | `MainActivity.kt:367-428` | Driver re-sends key when ack has status≠"received" or stale timestamp |
+| Fix | File | Method |
+|-----|------|--------|
+| Cross-device sync | `DriverViewModel.kt:3801` | `ensureRoadflareStateSynced()` |
+| Out-of-order rejection | `RoadflareTab.kt:208-235` | `lastLocationCreatedAt` tracking |
+| Staleness filter | `RiderModeScreen.kt:3491-3560` | 10-min freshness check |
+| Key refresh | `RoadflareTab.kt:257-307` | Kind 3188 with `status="stale"` |
 
-### Key API Changes
-
-**RoadflareKeyAckEvent.create()** - Added `status` parameter (default="received"):
-```kotlin
-// Normal ack:
-create(signer, driverPubKey, keyVersion, keyUpdatedAt)
-// Refresh request:
-create(signer, driverPubKey, keyVersion, keyUpdatedAt, status = "stale")
-```
-
-**NostrService.publishRoadflareKeyAck()** - Added `status` parameter:
-```kotlin
-publishRoadflareKeyAck(driverPubKey, keyVersion, keyUpdatedAt, status = "stale")
-```
-
-### Auto-Sync on Go-Online (Cross-Device Fix)
+### Key Refresh API
 
 ```kotlin
-// DriverViewModel.kt:3801
-private suspend fun ensureRoadflareStateSynced(): Boolean {
-    val currentState = driverRoadflareRepository.state.value
-    if (currentState?.roadflareKey == null && currentState?.followers.isNullOrEmpty()) {
-        val remoteState = nostrService.fetchDriverRoadflareState()
-        if (remoteState != null) {
-            driverRoadflareRepository.restoreFromBackup(remoteState)
-            return true
-        }
-    }
-    return false
-}
-```
+// Request refresh (rider):
+NostrService.publishRoadflareKeyAck(driverPubKey, keyVersion, keyUpdatedAt, status = "stale")
 
-Called from `proceedGoOnline()` and `goRoadflareOnly()` via `viewModelScope.launch`.
-
-### Out-of-Order Event Rejection
-
-```kotlin
-// RoadflareTab.kt:208-235
-val eventCreatedAt = event.createdAt
-val isExpired = RoadflareLocationEvent.isExpired(event)
-val lastSeen = lastLocationCreatedAt[driverPubKey] ?: 0L
-val isOutOfOrder = eventCreatedAt < lastSeen
-
-if (!isExpired && !isOutOfOrder) {
-    lastLocationCreatedAt[driverPubKey] = eventCreatedAt
-    // Update driverLocations...
-}
-```
-
-### Key Refresh Flow
-
-```
-Rider detects stale key (checkStaleKeys):
-1. storedKeyUpdatedAt < currentKeyUpdatedAt from Kind 30012
-2. Rate-limit: 1 request per hour per driver
-3. Send Kind 3188 with status="stale"
-
-Driver receives Kind 3188:
-1. Verify pubkey authorship (ackData.riderPubKey == event.pubKey)
-2. Verify follower authorized (approved + not muted)
-3. If status != "received" OR keyUpdatedAt < currentKeyUpdatedAt:
-   → Re-send key via roadflareKeyManager.sendKeyToFollower()
+// Handler (driver - MainActivity.kt):
+// 1. Verify pubkey authorship
+// 2. Verify follower authorized (approved + not muted)
+// 3. Re-send key via roadflareKeyManager.sendKeyToFollower()
 ```
 
 ## Profile Sync Architecture

@@ -1,7 +1,7 @@
 # Ridestr State Machines
 
-**Version**: 1.0
-**Last Updated**: 2026-01-27
+**Version**: 1.1
+**Last Updated**: 2026-01-30
 
 This document defines the state machines for both Rider and Driver applications.
 
@@ -382,3 +382,95 @@ riderRideStateSubscriptionId: String?
 cancellationSubscriptionId: String?
 chatSubscriptionId: String?
 ```
+
+---
+
+## Offer Types and State Machine Entry
+
+Three ways to enter the ride state machine, each with different discovery and privacy characteristics:
+
+### Offer Type Comparison
+
+| Type | Privacy | Entry Point (Rider) | Entry Point (Driver) |
+|------|---------|---------------------|---------------------|
+| **Direct Offer** | High (encrypted) | `sendRideOffer()` | `acceptOffer()` |
+| **Broadcast Offer** | Medium (~1km approx) | `broadcastRideRequest()` | `acceptBroadcastRequest()` |
+| **RoadFlare Offer** | High (encrypted) | `sendRoadflareOffer()` | `acceptOffer()` (isRoadflare=true) |
+
+### Direct Offer Flow
+```
+Rider: IDLE → [sendRideOffer()] → WAITING_FOR_ACCEPTANCE
+Driver: AVAILABLE → [acceptOffer()] → RIDE_ACCEPTED
+```
+
+### Broadcast Offer Flow
+```
+Rider: IDLE → [broadcastRideRequest()] → BROADCASTING_REQUEST
+Driver: AVAILABLE → [acceptBroadcastRequest()] → RIDE_ACCEPTED
+Note: First driver acceptance wins
+```
+
+### RoadFlare Offer Flow
+```
+Rider: IDLE → [sendRoadflareOffer()] → WAITING_FOR_ACCEPTANCE
+Driver: ROADFLARE_ONLY → [acceptOffer()] → RIDE_ACCEPTED
+Note: Requires follower approval + key exchange
+```
+
+---
+
+## Payment Flow Integration
+
+Payment (HTLC escrow) is tightly integrated with the state machine:
+
+### Payment Timing
+
+| State Transition | Payment Action |
+|-----------------|----------------|
+| DRIVER_ACCEPTED | `lockForRide()` - HTLC locked with driver's `wallet_pubkey` |
+| RIDE_CONFIRMED | `paymentHash` + `escrowToken` sent in Kind 3175 |
+| IN_PROGRESS (after PIN) | `preimage_share` published in Kind 30181 |
+| COMPLETED | Driver calls `claimHtlcPayment()` with preimage |
+
+### Deferred HTLC Locking
+
+HTLC is locked AFTER driver acceptance (not in offer):
+
+```
+1. Rider sends Kind 3173 (offer WITHOUT paymentHash)
+2. Driver sends Kind 3174 (acceptance WITH wallet_pubkey)
+3. Rider calls lockForRide(wallet_pubkey) → creates HTLC
+4. Rider sends Kind 3175 (confirmation WITH paymentHash + escrowToken)
+```
+
+This ensures HTLC is locked to the correct driver wallet key.
+
+### HTLC Preimage Storage (January 2026)
+
+Preimage is stored in `PendingHtlc` for future-proof refunds:
+- `lockForRide()` now accepts `preimage` parameter
+- Stored preimage used in `refundExpiredHtlc()` if mint requires it
+- Falls back to zeros for old HTLCs without stored preimage
+
+---
+
+## Driver Availability States
+
+When driver is online, they can be in different availability modes:
+
+### Availability Mode vs Ride Stage
+
+| Mode | Kind 30173 | Kind 30014 | Offers Received |
+|------|-----------|-----------|-----------------|
+| **OFFLINE** | None | None | None |
+| **ROADFLARE_ONLY** | No location (privacy) | Broadcasting | Only `roadflare`-tagged |
+| **AVAILABLE** | Has location + geohash | Broadcasting | All offers |
+
+### Availability Changes When Accepting Ride
+
+| Event | Kind 30173 | Kind 30014 |
+|-------|-----------|-----------|
+| Accept ride | Stops + NIP-09 deletion | Continues with `ON_RIDE` status |
+| Go offline | Final `OFFLINE` status → deletion | `OFFLINE` status → stops |
+
+**Key insight:** Kind 30014 (RoadFlare location) never stops while driver is online - only the status changes: `ONLINE` → `ON_RIDE` → `OFFLINE`
