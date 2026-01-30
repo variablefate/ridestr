@@ -1328,7 +1328,7 @@ class CashuBackend(
 
             // Step 7: Execute swap at mint with retry strategy
             // If preimage is null, first try spec-compliant (no preimage), then retry with zeros fallback
-            fun executeSwap(inputs: JSONArray): Pair<Boolean, String?> {
+            fun executeSwap(inputs: JSONArray): Triple<Boolean, String?, Int> {
                 val swapRequest = JSONObject().apply {
                     put("inputs", inputs)
                     put("outputs", outputsArray)
@@ -1342,12 +1342,12 @@ class CashuBackend(
                 return client.newCall(request).execute().use { response ->
                     val responseBody = response.body?.string()
                     Log.d(TAG, "Refund swap response: ${response.code}")
-                    Pair(response.isSuccessful, responseBody)
+                    Triple(response.isSuccessful, responseBody, response.code)
                 }
             }
 
             Log.d(TAG, "Sending refund swap with ${htlcProofs.size} HTLC inputs, ${outputPremints.size} outputs")
-            var (success, responseBody) = executeSwap(inputsArray)
+            var (success, responseBody, responseCode) = executeSwap(inputsArray)
 
             // If failed and we omitted preimage, retry with zeros fallback for non-compliant mints
             if (!success && preimage == null) {
@@ -1360,6 +1360,7 @@ class CashuBackend(
                     val retryResult = executeSwap(retryInputs)
                     success = retryResult.first
                     responseBody = retryResult.second
+                    responseCode = retryResult.third
                 }
             }
 
@@ -1367,7 +1368,7 @@ class CashuBackend(
                 Log.e(TAG, "Refund swap failed: $responseBody")
                 // Keep pending operation for recovery
                 return@withContext HtlcRefundOutcome.Failure.MintRejected(
-                    code = 400,
+                    code = responseCode,
                     body = responseBody,
                     mintUrl = targetMint
                 )
