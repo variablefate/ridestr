@@ -3883,6 +3883,29 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 remoteUpdatedAt
             )
 
+            // Verify followers against Kind 30011 to filter out unfollowed riders immediately
+            val driverPubKey = nostrService.getPubKeyHex()
+            val verifiedFollowers = if (driverPubKey != null && mergedFollowers.isNotEmpty()) {
+                val queryResult = nostrService.queryCurrentFollowerPubkeys(driverPubKey)
+                if (!queryResult.success) {
+                    // Query failed/timed out - fallback to merged list
+                    if (BuildConfig.DEBUG) {
+                        Log.w(TAG, "Kind 30011 query timed out, using merged followers as fallback")
+                    }
+                    mergedFollowers
+                } else {
+                    // Query succeeded - filter even if result is empty (legitimate zero followers)
+                    val filteredFollowers = mergedFollowers.filter { it.pubkey in queryResult.followers }
+                    val removedCount = mergedFollowers.size - filteredFollowers.size
+                    if (removedCount > 0 && BuildConfig.DEBUG) {
+                        Log.d(TAG, "Filtered $removedCount stale followers via Kind 30011 verification")
+                    }
+                    filteredFollowers
+                }
+            } else {
+                mergedFollowers
+            }
+
             // Merge muted lists (union - never auto-unmute)
             val mergedMuted = mergeMutedLists(
                 currentState?.muted ?: emptyList(),
@@ -3893,7 +3916,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             val mergedState = DriverRoadflareState(
                 eventId = if (useRemoteKey) remoteState.eventId else currentState?.eventId,
                 roadflareKey = if (useRemoteKey) remoteState.roadflareKey else currentState?.roadflareKey,
-                followers = mergedFollowers,
+                followers = verifiedFollowers,
                 muted = mergedMuted,
                 keyUpdatedAt = if (useRemoteKey) remoteKeyUpdatedAt else localKeyUpdatedAt,
                 lastBroadcastAt = maxOf(currentState?.lastBroadcastAt ?: 0L, remoteState.lastBroadcastAt ?: 0L),
@@ -3918,9 +3941,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     Log.d(TAG, "Pushed merged state to Nostr")
                 }
 
-                // Signal background refresh after sync completes (to detect unfollowed riders)
+                // Signal background refresh to fetch display names and detect new followers
                 viewModelScope.launch {
-                    delay(2000)
                     _syncTriggeredRefresh.emit(Unit)
                 }
 

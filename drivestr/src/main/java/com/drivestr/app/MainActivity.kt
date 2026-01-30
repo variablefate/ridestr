@@ -1213,8 +1213,9 @@ fun MainScreen(
                 // Get driver's display name from cached profile
                 val driverDisplayName by nostrService.userDisplayName.collectAsState()
 
-                // Check if driver is actually online (AVAILABLE stage)
-                val isDriverOnline = driverUiState.stage == com.drivestr.app.viewmodels.DriverStage.AVAILABLE
+                // Check if driver is online for RoadFlare purposes (AVAILABLE or ROADFLARE_ONLY)
+                val isDriverOnline = driverUiState.stage == com.drivestr.app.viewmodels.DriverStage.AVAILABLE ||
+                                     driverUiState.stage == com.drivestr.app.viewmodels.DriverStage.ROADFLARE_ONLY
 
                 RoadflareTab(
                     driverRoadflareRepository = driverRoadflareRepository,

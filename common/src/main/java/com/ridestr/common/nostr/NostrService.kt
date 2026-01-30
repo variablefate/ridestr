@@ -2630,6 +2630,52 @@ class NostrService(
     }
 
     /**
+     * Result of querying current followers via Kind 30011.
+     * Distinguishes successful query (even if empty) from timeout/failure.
+     */
+    data class FollowerQueryResult(
+        val followers: Set<String>,
+        val success: Boolean  // true if EOSE received, false if timeout
+    )
+
+    /**
+     * Query for current followers (EOSE-aware, suspending).
+     * Returns a result containing rider pubkeys who currently have this driver in their Kind 30011.
+     * Used for filtering stale followers during sync.
+     *
+     * @param driverPubKey The driver's pubkey (hex) to search for
+     * @param timeoutMs Query timeout in milliseconds
+     * @return FollowerQueryResult with followers set and success flag (true if EOSE received)
+     */
+    suspend fun queryCurrentFollowerPubkeys(
+        driverPubKey: String,
+        timeoutMs: Long = 3000L
+    ): FollowerQueryResult = withContext(Dispatchers.IO) {
+        val followers = mutableSetOf<String>()
+        val eoseFollowers = CompletableDeferred<String>()
+
+        val subscriptionId = relayManager.subscribe(
+            kinds = listOf(RideshareEventKinds.ROADFLARE_FOLLOWED_DRIVERS),
+            tags = mapOf("p" to listOf(driverPubKey)),
+            onEose = { relayUrl -> eoseFollowers.complete(relayUrl) }
+        ) { event, _ ->
+            followers.add(event.pubKey)
+        }
+
+        // Wait for EOSE or timeout
+        val eoseReceived = withTimeoutOrNull(timeoutMs) { eoseFollowers.await() } != null
+        if (eoseReceived) {
+            delay(100)  // Brief delay for any trailing events
+        }
+        relayManager.closeSubscription(subscriptionId)
+
+        if (com.ridestr.common.BuildConfig.DEBUG) {
+            Log.d(TAG, "queryCurrentFollowerPubkeys: found ${followers.size} followers, success=$eoseReceived")
+        }
+        return@withContext FollowerQueryResult(followers, eoseReceived)
+    }
+
+    /**
      * Verify a follower's status by checking their Kind 30011 event.
      * Returns info about whether:
      * 1. Driver is still in follower's p-tags (not unfollowed)
