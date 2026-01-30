@@ -251,7 +251,9 @@ enum class PendingHtlcStatus {
     /** Rider refunded the HTLC after locktime expired */
     REFUNDED,
     /** HTLC failed (e.g., swap error) */
-    FAILED
+    FAILED,
+    /** User acknowledged HTLC cannot be recovered (e.g., wallet key mismatch) */
+    IRRECOVERABLE
 }
 
 /**

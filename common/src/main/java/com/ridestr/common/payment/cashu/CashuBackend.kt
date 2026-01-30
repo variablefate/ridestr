@@ -1223,23 +1223,25 @@ class CashuBackend(
             }
             Log.d(TAG, "Fetched keyset ${keyset.id} from token's mint: $targetMint")
 
-            // Step 4b: Check proof states with NUT-07 (diagnostic)
-            try {
-                val secrets = htlcProofs.map { it.secret }
-                val stateMap = verifyProofStatesBySecretAtMint(secrets, targetMint)
-                Log.d(TAG, "=== NUT-07 PROOF STATES ===")
-                stateMap?.forEach { (secret, state) ->
-                    Log.d(TAG, "Proof ${secret.take(20)}...: $state")
+            // Step 4b: Check proof states with NUT-07 (diagnostic - debug builds only)
+            if (com.ridestr.common.BuildConfig.DEBUG) {
+                try {
+                    val secrets = htlcProofs.map { it.secret }
+                    val stateMap = verifyProofStatesBySecretAtMint(secrets, targetMint)
+                    Log.d(TAG, "=== NUT-07 PROOF STATES ===")
+                    stateMap?.forEach { (secret, state) ->
+                        Log.d(TAG, "Proof ${secret.take(20)}...: $state")
+                    }
+                    val spentCount = stateMap?.count { it.value == ProofStateResult.SPENT } ?: 0
+                    val pendingCount = stateMap?.count { it.value == ProofStateResult.PENDING } ?: 0
+                    val unspentCount = stateMap?.count { it.value == ProofStateResult.UNSPENT } ?: 0
+                    Log.d(TAG, "States: $unspentCount unspent, $pendingCount pending, $spentCount spent")
+                    if (spentCount > 0) {
+                        Log.e(TAG, "WARNING: $spentCount proofs already SPENT - refund will fail!")
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "NUT-07 state check failed (non-fatal): ${e.message}")
                 }
-                val spentCount = stateMap?.count { it.value == ProofStateResult.SPENT } ?: 0
-                val pendingCount = stateMap?.count { it.value == ProofStateResult.PENDING } ?: 0
-                val unspentCount = stateMap?.count { it.value == ProofStateResult.UNSPENT } ?: 0
-                Log.d(TAG, "States: $unspentCount unspent, $pendingCount pending, $spentCount spent")
-                if (spentCount > 0) {
-                    Log.e(TAG, "WARNING: $spentCount proofs already SPENT - refund will fail!")
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "NUT-07 state check failed (non-fatal): ${e.message}")
             }
 
             // Step 5: Create plain output secrets (NUT-13 deterministic)
@@ -1247,42 +1249,48 @@ class CashuBackend(
             val outputPremints = generatePreMintSecrets(outputAmounts, keyset.id)
 
             // Step 6: Build swap request with refund witness
-            // Refund path: empty preimage + signature (NUT-14 spec)
-            // Empty preimage "" indicates refund path after locktime
-            val inputsArray = JSONArray()
-            htlcProofs.forEachIndexed { index, proof ->
-                // Log the HTLC secret structure for debugging
-                Log.d(TAG, "=== HTLC PROOF $index ===")
-                Log.d(TAG, "Secret: ${proof.secret.take(100)}...")
-                Log.d(TAG, "Amount: ${proof.amount}, ID: ${proof.id}")
+            // Strategy: If we have real preimage, use it. If not, try spec-compliant (no preimage),
+            // then retry with zeros fallback for non-compliant mints.
 
-                // Create P2PK signature for refund
-                val sig = signP2pkProof(proof.secret, proof.C)
-                Log.d(TAG, "Signature created: ${sig != null}, sig=${sig?.take(32)}...")
+            // Helper to build inputsArray with or without preimage
+            fun buildInputsArray(includePreimage: Boolean, useZeros: Boolean): JSONArray {
+                val inputs = JSONArray()
+                htlcProofs.forEachIndexed { index, proof ->
+                    val sig = signP2pkProof(proof.secret, proof.C)
+                    if (com.ridestr.common.BuildConfig.DEBUG) {
+                        Log.d(TAG, "HTLC proof $index: amount=${proof.amount}, signature created=${sig != null}")
+                    }
 
-                // NUT-14 spec: Refund path after locktime should work with signature alone.
-                // However, some mints (e.g., themilkroad.org) require preimage field even for refunds.
-                // Use real preimage if stored; zeros fallback is a compatibility workaround for
-                // non-spec-compliant mints that don't verify the hash.
-                val witnessPreimage = preimage ?: "0".repeat(64)
-                // SECURITY: Do not log witnessJson - it contains the preimage
-                Log.d(TAG, "Using ${if (preimage != null) "stored preimage" else "zeros fallback"} for witness")
-                val witnessJson = JSONObject().apply {
-                    put("preimage", witnessPreimage)
-                    put("signatures", JSONArray().apply {
-                        if (sig != null) put(sig)
+                    val witnessJson = JSONObject().apply {
+                        if (includePreimage) {
+                            val preimageValue = if (useZeros) "0".repeat(64) else preimage
+                            if (preimageValue != null) {
+                                put("preimage", preimageValue)
+                            }
+                        }
+                        // Note: preimage field omitted entirely when includePreimage=false
+                        put("signatures", JSONArray().apply {
+                            if (sig != null) put(sig)
+                        })
+                    }.toString()
+
+                    inputs.put(JSONObject().apply {
+                        put("amount", proof.amount)
+                        put("id", proof.id)
+                        put("secret", proof.secret)
+                        put("C", proof.C)
+                        put("witness", witnessJson)
                     })
-                }.toString()
-
-                inputsArray.put(JSONObject().apply {
-                    put("amount", proof.amount)
-                    put("id", proof.id)
-                    put("secret", proof.secret)
-                    put("C", proof.C)
-                    put("witness", witnessJson)
-                })
+                }
+                return inputs
             }
-            Log.d(TAG, "Created refund witnesses for ${htlcProofs.size} proofs")
+
+            // First attempt: use real preimage if available, otherwise try spec-compliant (omit preimage)
+            val inputsArray = buildInputsArray(
+                includePreimage = preimage != null,
+                useZeros = false
+            )
+            Log.d(TAG, "Created refund witnesses for ${htlcProofs.size} proofs (preimage=${preimage != null})")
 
             val outputsArray = JSONArray()
             outputPremints.forEach { pms ->
@@ -1292,13 +1300,6 @@ class CashuBackend(
                     put("B_", pms.B_)
                 })
             }
-
-            val swapRequest = JSONObject().apply {
-                put("inputs", inputsArray)
-                put("outputs", outputsArray)
-            }.toString()
-
-            Log.d(TAG, "Sending refund swap with ${htlcProofs.size} HTLC inputs, ${outputPremints.size} outputs")
 
             // CRITICAL: Save pending operation BEFORE sending request
             val operationId = java.util.UUID.randomUUID().toString()
@@ -1325,29 +1326,54 @@ class CashuBackend(
             walletStorage.savePendingBlindedOp(pendingOp)
             Log.d(TAG, "Saved pending HTLC refund operation: $operationId ($totalAmount sats)")
 
-            // Step 7: Execute swap at mint
-            val request = Request.Builder()
-                .url("$targetMint/v1/swap")
-                .post(swapRequest.toRequestBody(JSON_MEDIA_TYPE))
-                .build()
+            // Step 7: Execute swap at mint with retry strategy
+            // If preimage is null, first try spec-compliant (no preimage), then retry with zeros fallback
+            fun executeSwap(inputs: JSONArray): Pair<Boolean, String?> {
+                val swapRequest = JSONObject().apply {
+                    put("inputs", inputs)
+                    put("outputs", outputsArray)
+                }.toString()
 
-            val signaturesResult = client.newCall(request).execute().use { response ->
-                val responseBody = response.body?.string()
-                Log.d(TAG, "Refund swap response: ${response.code}")
+                val request = Request.Builder()
+                    .url("$targetMint/v1/swap")
+                    .post(swapRequest.toRequestBody(JSON_MEDIA_TYPE))
+                    .build()
 
-                if (!response.isSuccessful) {
-                    Log.e(TAG, "Refund swap failed: ${response.code} - $responseBody")
-                    // Keep pending operation for recovery
-                    return@withContext HtlcRefundOutcome.Failure.MintRejected(
-                        code = response.code,
-                        body = responseBody,
-                        mintUrl = targetMint
-                    )
+                return client.newCall(request).execute().use { response ->
+                    val responseBody = response.body?.string()
+                    Log.d(TAG, "Refund swap response: ${response.code}")
+                    Pair(response.isSuccessful, responseBody)
                 }
-
-                val json = JSONObject(responseBody ?: "{}")
-                json.getJSONArray("signatures")
             }
+
+            Log.d(TAG, "Sending refund swap with ${htlcProofs.size} HTLC inputs, ${outputPremints.size} outputs")
+            var (success, responseBody) = executeSwap(inputsArray)
+
+            // If failed and we omitted preimage, retry with zeros fallback for non-compliant mints
+            if (!success && preimage == null) {
+                val errorMsg = responseBody?.lowercase() ?: ""
+                val needsPreimage = errorMsg.contains("preimage") || errorMsg.contains("htlc")
+
+                if (needsPreimage) {
+                    Log.d(TAG, "Mint requires preimage, retrying with zeros fallback")
+                    val retryInputs = buildInputsArray(includePreimage = true, useZeros = true)
+                    val retryResult = executeSwap(retryInputs)
+                    success = retryResult.first
+                    responseBody = retryResult.second
+                }
+            }
+
+            if (!success) {
+                Log.e(TAG, "Refund swap failed: $responseBody")
+                // Keep pending operation for recovery
+                return@withContext HtlcRefundOutcome.Failure.MintRejected(
+                    code = 400,
+                    body = responseBody,
+                    mintUrl = targetMint
+                )
+            }
+
+            val signaturesResult = JSONObject(responseBody ?: "{}").getJSONArray("signatures")
 
             // Step 8: Unblind signatures to get plain proofs - CRITICAL: Use keyset ID from response
             val plainProofs = mutableListOf<CashuProof>()
@@ -3465,14 +3491,32 @@ class CashuBackend(
                 val json = JSONObject(body)
                 val keysets = json.getJSONArray("keysets")
 
-                // Find active keyset for sat unit
+                // Find active keyset for sat unit (two-pass: prefer explicit active=true)
+                var foundKeysetId: String? = null
+
+                // First pass: look for explicitly active=true sat keyset
                 for (i in 0 until keysets.length()) {
                     val ks = keysets.getJSONObject(i)
-                    if (ks.optBoolean("active", true) && ks.optString("unit", "sat") == "sat") {
-                        return@use ks.getString("id")
+                    if (ks.has("active") && ks.getBoolean("active") &&
+                        ks.optString("unit", "sat") == "sat") {
+                        foundKeysetId = ks.getString("id")
+                        break
                     }
                 }
-                null
+
+                // Second pass: if no explicit active, use first sat keyset with warning
+                if (foundKeysetId == null) {
+                    for (i in 0 until keysets.length()) {
+                        val ks = keysets.getJSONObject(i)
+                        if (ks.optString("unit", "sat") == "sat") {
+                            Log.w(TAG, "Mint $mintUrl: no keyset has explicit active=true, using first sat keyset ${ks.optString("id")}")
+                            foundKeysetId = ks.getString("id")
+                            break
+                        }
+                    }
+                }
+
+                foundKeysetId
             } ?: return@withContext null
 
             // Fetch keys for active keyset
@@ -3540,14 +3584,32 @@ class CashuBackend(
                 val json = JSONObject(body)
                 val keysets = json.getJSONArray("keysets")
 
-                // Find active keyset for sat unit
+                // Find active keyset for sat unit (two-pass: prefer explicit active=true)
+                var foundKeysetId: String? = null
+
+                // First pass: look for explicitly active=true sat keyset
                 for (i in 0 until keysets.length()) {
                     val ks = keysets.getJSONObject(i)
-                    if (ks.optBoolean("active", true) && ks.optString("unit", "sat") == "sat") {
-                        return@use ks.getString("id")
+                    if (ks.has("active") && ks.getBoolean("active") &&
+                        ks.optString("unit", "sat") == "sat") {
+                        foundKeysetId = ks.getString("id")
+                        break
                     }
                 }
-                null
+
+                // Second pass: if no explicit active, use first sat keyset with warning
+                if (foundKeysetId == null) {
+                    for (i in 0 until keysets.length()) {
+                        val ks = keysets.getJSONObject(i)
+                        if (ks.optString("unit", "sat") == "sat") {
+                            Log.w(TAG, "Mint $mintUrl: no keyset has explicit active=true, using first sat keyset ${ks.optString("id")}")
+                            foundKeysetId = ks.getString("id")
+                            break
+                        }
+                    }
+                }
+
+                foundKeysetId
             } ?: return@withContext null
 
             // Fetch keys for active keyset
@@ -4351,14 +4413,31 @@ class CashuBackend(
                 val json = JSONObject(body)
                 val keysetsArray = json.optJSONArray("keysets") ?: return@withContext emptyList()
 
-                val ids = mutableListOf<String>()
+                // Two-pass: prefer explicitly active keysets, fall back to all sat keysets
+                val explicitlyActive = mutableListOf<String>()
+                val satKeysets = mutableListOf<String>()
+
                 for (i in 0 until keysetsArray.length()) {
                     val keyset = keysetsArray.getJSONObject(i)
                     val id = keyset.getString("id")
-                    val active = keyset.optBoolean("active", true)
-                    if (active) {
-                        ids.add(id)
+                    val unit = keyset.optString("unit", "sat")
+
+                    if (unit == "sat") {
+                        satKeysets.add(id)
+                        if (keyset.has("active") && keyset.getBoolean("active")) {
+                            explicitlyActive.add(id)
+                        }
                     }
+                }
+
+                // Prefer explicit, fall back to all sat keysets
+                val ids = if (explicitlyActive.isNotEmpty()) {
+                    explicitlyActive
+                } else {
+                    if (satKeysets.isNotEmpty()) {
+                        Log.w(TAG, "No keyset has explicit active=true, using all sat keysets")
+                    }
+                    satKeysets
                 }
 
                 Log.d(TAG, "Found ${ids.size} active keysets")

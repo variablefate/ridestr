@@ -63,22 +63,24 @@ fun RoadflareTab(
     val approvedFollowers = allFollowers.filter { it.approved && it.pubkey !in mutedPubkeys }
     val hasKey = state?.roadflareKey != null
 
-    // DEBUG: Log RoadFlare state on every change
+    // DEBUG: Log RoadFlare state on every change (debug builds only)
     LaunchedEffect(state, isDriverOnline) {
-        android.util.Log.d("RoadflareDebug", "=== DRIVER ROADFLARE STATE ===")
-        android.util.Log.d("RoadflareDebug", "isDriverOnline: $isDriverOnline")
-        android.util.Log.d("RoadflareDebug", "hasKey: $hasKey")
-        android.util.Log.d("RoadflareDebug", "roadflareKey.version: ${state?.roadflareKey?.version}")
-        android.util.Log.d("RoadflareDebug", "roadflareKey.publicKey: ${state?.roadflareKey?.publicKey?.take(16)}...")
-        android.util.Log.d("RoadflareDebug", "keyUpdatedAt: ${state?.keyUpdatedAt}")
-        android.util.Log.d("RoadflareDebug", "allFollowers: ${allFollowers.size}")
-        android.util.Log.d("RoadflareDebug", "approvedFollowers: ${approvedFollowers.size}")
-        android.util.Log.d("RoadflareDebug", "pendingFollowers: ${pendingFollowers.size}")
-        android.util.Log.d("RoadflareDebug", "mutedPubkeys: ${mutedPubkeys.size}")
-        for (f in approvedFollowers) {
-            android.util.Log.d("RoadflareDebug", "  approved: ${f.pubkey.take(8)} name=${f.name} keyVersionSent=${f.keyVersionSent}")
+        if (com.drivestr.app.BuildConfig.DEBUG) {
+            android.util.Log.d("RoadflareDebug", "=== DRIVER ROADFLARE STATE ===")
+            android.util.Log.d("RoadflareDebug", "isDriverOnline: $isDriverOnline")
+            android.util.Log.d("RoadflareDebug", "hasKey: $hasKey")
+            android.util.Log.d("RoadflareDebug", "roadflareKey.version: ${state?.roadflareKey?.version}")
+            android.util.Log.d("RoadflareDebug", "roadflareKey.publicKey: ${state?.roadflareKey?.publicKey?.take(16)}...")
+            android.util.Log.d("RoadflareDebug", "keyUpdatedAt: ${state?.keyUpdatedAt}")
+            android.util.Log.d("RoadflareDebug", "allFollowers: ${allFollowers.size}")
+            android.util.Log.d("RoadflareDebug", "approvedFollowers: ${approvedFollowers.size}")
+            android.util.Log.d("RoadflareDebug", "pendingFollowers: ${pendingFollowers.size}")
+            android.util.Log.d("RoadflareDebug", "mutedPubkeys: ${mutedPubkeys.size}")
+            for (f in approvedFollowers) {
+                android.util.Log.d("RoadflareDebug", "  approved: ${f.pubkey.take(8)} name=${f.name} keyVersionSent=${f.keyVersionSent}")
+            }
+            android.util.Log.d("RoadflareDebug", "=========================")
         }
-        android.util.Log.d("RoadflareDebug", "=========================")
     }
 
     var showRemoveDialog by remember { mutableStateOf<RoadflareFollower?>(null) }

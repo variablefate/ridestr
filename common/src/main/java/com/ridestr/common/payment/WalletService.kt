@@ -241,6 +241,33 @@ class WalletService(
     }
 
     /**
+     * Mark an HTLC as irrecoverable after user acknowledges it cannot be refunded.
+     * This clears it from pending sats calculation.
+     *
+     * Use this when:
+     * - Refund failed with WalletKeyMismatch (user restored wallet with different key)
+     * - HTLC has been locked for >30 minutes and refund attempts consistently fail
+     *
+     * @param escrowId The HTLC escrow ID to acknowledge
+     * @return true if successfully marked irrecoverable, false if not found or not eligible
+     */
+    suspend fun acknowledgeIrrecoverableHtlc(escrowId: String): Boolean {
+        val htlc = walletStorage.getPendingHtlcs().find { it.escrowId == escrowId } ?: return false
+
+        // Only allow acknowledging LOCKED HTLCs that have failed refund
+        if (htlc.status != PendingHtlcStatus.LOCKED) return false
+
+        // Must be past locktime (refundable window) - isRefundable() handles seconds conversion internally
+        if (!htlc.isRefundable()) return false
+
+        Log.w(TAG, "User acknowledged irrecoverable HTLC: $escrowId (${htlc.amountSats} sats)")
+
+        walletStorage.updateHtlcStatus(escrowId, PendingHtlcStatus.IRRECOVERABLE)
+        recalculatePendingSats()
+        return true
+    }
+
+    /**
      * Disconnect from current wallet provider.
      */
     fun disconnect() {

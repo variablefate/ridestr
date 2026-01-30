@@ -130,32 +130,34 @@ class RoadflareLocationBroadcaster(
      */
     private suspend fun broadcastIfReady(locationProvider: suspend () -> Location?) {
         val state = repository.state.value
-        Log.d(TAG, "=== BROADCAST CHECK ===")
-        Log.d(TAG, "state: ${state != null}")
 
         // Check if we have a RoadFlare key
         val roadflareKey = state?.roadflareKey
-        Log.d(TAG, "roadflareKey: ${roadflareKey != null}, version=${roadflareKey?.version}")
         if (roadflareKey == null) {
-            Log.d(TAG, "No RoadFlare key, skipping broadcast")
+            if (com.ridestr.common.BuildConfig.DEBUG) {
+                Log.d(TAG, "No RoadFlare key, skipping broadcast")
+            }
             return
         }
 
         // Check if we have any active followers
         val activeFollowers = repository.getActiveFollowerPubkeys()
-        Log.d(TAG, "activeFollowers: ${activeFollowers.size}")
-        for (pubkey in activeFollowers) {
-            Log.d(TAG, "  active: ${pubkey.take(8)}")
+        if (com.ridestr.common.BuildConfig.DEBUG) {
+            Log.d(TAG, "Broadcast check: ${activeFollowers.size} active followers")
         }
         if (activeFollowers.isEmpty()) {
-            Log.d(TAG, "No active followers, skipping broadcast")
+            if (com.ridestr.common.BuildConfig.DEBUG) {
+                Log.d(TAG, "No active followers, skipping broadcast")
+            }
             return
         }
 
         // Get current location
         val location = locationProvider()
         if (location == null) {
-            Log.d(TAG, "No location available, skipping broadcast")
+            if (com.ridestr.common.BuildConfig.DEBUG) {
+                Log.d(TAG, "No location available, skipping broadcast")
+            }
             return
         }
 

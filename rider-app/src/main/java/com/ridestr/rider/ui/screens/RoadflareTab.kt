@@ -149,19 +149,21 @@ fun RoadflareTab(
     // Track last createdAt per driver to reject out-of-order events (Part C fix)
     val lastLocationCreatedAt = remember { mutableStateMapOf<String, Long>() }
 
-    // DEBUG: Log rider's followed drivers state
+    // DEBUG: Log rider's followed drivers state (debug builds only)
     LaunchedEffect(drivers) {
-        Log.d(TAG, "=== RIDER ROADFLARE STATE ===")
-        Log.d(TAG, "Total followed drivers: ${drivers.size}")
-        for (driver in drivers) {
-            val hasKey = driver.roadflareKey != null
-            Log.d(TAG, "  driver: ${driver.pubkey.take(8)} hasKey=$hasKey keyVersion=${driver.roadflareKey?.version} keyUpdatedAt=${driver.roadflareKey?.keyUpdatedAt}")
-            if (hasKey) {
-                Log.d(TAG, "    roadflareKey.publicKey: ${driver.roadflareKey?.publicKey?.take(16)}...")
-                Log.d(TAG, "    roadflareKey.privateKey exists: ${driver.roadflareKey?.privateKey?.isNotEmpty() == true}")
+        if (com.ridestr.rider.BuildConfig.DEBUG) {
+            Log.d(TAG, "=== RIDER ROADFLARE STATE ===")
+            Log.d(TAG, "Total followed drivers: ${drivers.size}")
+            for (driver in drivers) {
+                val hasKey = driver.roadflareKey != null
+                Log.d(TAG, "  driver: ${driver.pubkey.take(8)} hasKey=$hasKey keyVersion=${driver.roadflareKey?.version} keyUpdatedAt=${driver.roadflareKey?.keyUpdatedAt}")
+                if (hasKey) {
+                    Log.d(TAG, "    roadflareKey.publicKey: ${driver.roadflareKey?.publicKey?.take(16)}...")
+                    Log.d(TAG, "    roadflareKey.privateKey exists: ${driver.roadflareKey?.privateKey?.isNotEmpty() == true}")
+                }
             }
+            Log.d(TAG, "=============================")
         }
-        Log.d(TAG, "=============================")
     }
 
     // Fetch driver profiles to get their display names (first name only)
