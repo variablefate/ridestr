@@ -413,6 +413,12 @@ enum class PendingHtlcStatus { LOCKED, CLAIMED, REFUNDED, FAILED }
 
 **Preimage Storage** (January 2026): The `preimage` field stores the real preimage for future-proof refunds. NUT-14 spec says refund path after locktime should work with signature alone, but some mints (e.g., themilkroad.org) require the preimage field even for refunds. Old HTLCs without stored preimage fall back to zeros workaround.
 
+**Refund Error Code Fix** (January 2026): HTLC refund failures now propagate the actual HTTP status code (429, 500, etc.) instead of hard-coded 400. This helps identify rate limiting vs server errors:
+```kotlin
+// WalletService displays: "Mint rejected refund (429)" for rate limiting
+// Instead of generic: "Mint rejected refund (400)"
+```
+
 ### Storage (WalletStorage.kt)
 - `savePendingHtlc(htlc)` - Save when HTLC locked
 - `getPendingHtlcs()` - Get all pending HTLCs
@@ -1123,6 +1129,25 @@ When cross-mint bridge payment fails, the ride is now auto-cancelled with a clea
 3. Driver receives cancellation and can accept other rides
 
 **Key File**: `RiderViewModel.kt:2443-2456` - `executeBridgePayment()`
+
+---
+
+## Debug Logging Gates (January 2026)
+
+Verbose debug logging is now gated behind `BuildConfig.DEBUG` to reduce log spam in release builds:
+
+```kotlin
+if (BuildConfig.DEBUG) {
+    Log.d(TAG, "Verbose debug info...")
+}
+```
+
+**Locations gated:**
+- `CashuBackend.kt` - HTLC refund retry attempts
+- `RoadflareLocationBroadcaster.kt` - Location broadcast details
+- `DriverRoadflareRepository.kt` - State sync details
+
+**Note:** Requires `buildConfig = true` in module's `build.gradle.kts` under `buildFeatures`.
 
 ---
 

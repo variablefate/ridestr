@@ -2,6 +2,7 @@ package com.ridestr.rider.ui.screens
 
 import android.content.Intent
 import android.util.Log
+import com.ridestr.rider.BuildConfig
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -151,7 +152,7 @@ fun RoadflareTab(
 
     // DEBUG: Log rider's followed drivers state (debug builds only)
     LaunchedEffect(drivers) {
-        if (com.ridestr.rider.BuildConfig.DEBUG) {
+        if (BuildConfig.DEBUG) {
             Log.d(TAG, "=== RIDER ROADFLARE STATE ===")
             Log.d(TAG, "Total followed drivers: ${drivers.size}")
             for (driver in drivers) {

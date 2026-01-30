@@ -2,6 +2,7 @@ package com.drivestr.app.ui.screens
 
 import android.content.Intent
 import android.graphics.Bitmap
+import com.drivestr.app.BuildConfig
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.expandVertically
@@ -65,7 +66,7 @@ fun RoadflareTab(
 
     // DEBUG: Log RoadFlare state on every change (debug builds only)
     LaunchedEffect(state, isDriverOnline) {
-        if (com.drivestr.app.BuildConfig.DEBUG) {
+        if (BuildConfig.DEBUG) {
             android.util.Log.d("RoadflareDebug", "=== DRIVER ROADFLARE STATE ===")
             android.util.Log.d("RoadflareDebug", "isDriverOnline: $isDriverOnline")
             android.util.Log.d("RoadflareDebug", "hasKey: $hasKey")

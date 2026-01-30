@@ -904,7 +904,7 @@ RoadFlare System
     ├── DriverRoadflareStateEvent.kt (Kind 30012)
     ├── RoadflareLocationEvent.kt (Kind 30014)
     ├── RoadflareKeyShareEvent.kt (Kind 3186)
-    ├── RoadflareFollowNotifyEvent.kt (Kind 3187) - DEPRECATED
+    ├── RoadflareFollowNotifyEvent.kt (Kind 3187) - Real-time notification
     ├── RoadflareKeyAckEvent.kt (Kind 3188)
     ├── FollowedDriversSyncAdapter.kt
     └── DriverRoadflareSyncAdapter.kt

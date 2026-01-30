@@ -105,7 +105,7 @@ See [docs/README.md](../docs/README.md) for full documentation.
 | 30012 | Param. Replaceable | Driver RoadFlare State (keypair, followers, muted) |
 | 30014 | Param. Replaceable | Location Broadcast (encrypted, 5-min expiry) |
 | 3186 | Regular | Key Share (driver→follower DM, 5-min expiry) |
-| 3187 | Regular | Follow Notification (**DEPRECATED** - use p-tag query) |
+| 3187 | Regular | Follow Notification (short expiry, real-time UX; p-tag query is primary) |
 | 3188 | Regular | Key Acknowledgement (confirm receipt or refresh request) |
 
 ## RoadFlare Architecture

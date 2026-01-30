@@ -50,7 +50,7 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 | [30012](#kind-30012-driver-roadflare-state) | Driver RoadFlare State | Parameterized Replaceable | Driver's RoadFlare keypair, followers, muted list (NIP-44 to self). Public `key_updated_at` tag. |
 | [30014](#kind-30014-roadflare-location) | RoadFlare Location | Parameterized Replaceable | Driver's real-time location, 2-min interval, 5-min expiry (NIP-44 to RoadFlare pubkey) |
 | [3186](#kind-3186-roadflare-key-share) | RoadFlare Key Share | Regular | DM sharing RoadFlare private key with follower, 5-min expiry (NIP-44 to follower) |
-| [3187](#kind-3187-roadflare-follow-notify) | Follow Notification | Regular | **DEPRECATED** - Use p-tag query on Kind 30011 instead |
+| [3187](#kind-3187-roadflare-follow-notify) | Follow Notification | Regular | Real-time follow notification (short expiry); p-tag query is primary discovery |
 | [3188](#kind-3188-roadflare-key-ack) | Key Acknowledgement | Regular | Rider confirms key receipt to driver, 5-min expiry (NIP-44 to driver) |
 
 ---
@@ -1041,13 +1041,13 @@ RoadFlare enables riders to build a personal rideshare network from drivers they
 
 ---
 
-### Kind 3187: RoadFlare Follow Notification (DEPRECATED)
+### Kind 3187: RoadFlare Follow Notification
 
-**Purpose**: ~~Notifies driver when a rider follows or unfollows them.~~ **DEPRECATED** - Use p-tag query on Kind 30011 instead.
+**Purpose**: Real-time notification to driver when a rider follows them. Used for immediate UX feedback.
 
-**Type**: Regular Event
+**Type**: Regular Event (with short expiration)
 
-**Deprecation Note**: Drivers now discover followers by querying Kind 30011 events with their pubkey in p-tags. This is more reliable as the data persists in the rider's own event.
+**Design Note**: This event provides real-time notification for immediate driver feedback. The primary discovery mechanism is p-tag query on Kind 30011 (which persists). Kind 3187 is the "belt" to Kind 30011's "suspenders" - both ensure the driver sees new followers promptly.
 
 **Author**: Rider
 

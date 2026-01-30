@@ -1014,7 +1014,7 @@ fun MainScreen(
                     onClick = { currentTab = Tab.RIDE }
                 )
                 NavigationBarItem(
-                    icon = { Icon(Icons.Default.People, contentDescription = null) },
+                    icon = { Icon(Icons.Default.Flare, contentDescription = null) },
                     label = { Text("RoadFlare") },
                     selected = currentTab == Tab.ROADFLARE,
                     onClick = { currentTab = Tab.ROADFLARE }
