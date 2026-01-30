@@ -834,12 +834,25 @@ fun DrivestrApp() {
             }
 
             Screen.DEV_OPTIONS -> {
+                val driverViewModel: DriverViewModel = viewModel()
                 DeveloperOptionsScreen(
                     settingsManager = settingsManager,
                     isDriverApp = true,
                     nostrService = nostrService,
                     onOpenRelaySettings = { currentScreen = Screen.RELAY_SETTINGS },
                     onBack = { currentScreen = Screen.MAIN },
+                    // RoadFlare key debug callbacks
+                    onGetLocalKeyVersion = { driverRoadflareRepo.getKeyVersion() },
+                    onGetLocalKeyUpdatedAt = { driverRoadflareRepo.getKeyUpdatedAt() },
+                    onFetchNostrKeyUpdatedAt = {
+                        val myPubKey = nostrService.keyManager.getPubKeyHex()
+                        if (myPubKey != null) nostrService.fetchDriverKeyUpdatedAt(myPubKey) else null
+                    },
+                    onSyncRoadflareState = { driverViewModel.syncRoadflareState() },
+                    onRotateRoadflareKey = {
+                        val signer = nostrService.getSigner()
+                        if (signer != null) roadflareKeyManager.rotateKey(signer) else false
+                    },
                     modifier = Modifier.padding(innerPadding)
                 )
             }

@@ -3817,6 +3817,15 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
     /**
      * Ensure RoadFlare state is synced from Nostr using union merge.
+     * Sync RoadFlare state from Nostr (for debug menu).
+     * @return true if state changed, false otherwise
+     */
+    suspend fun syncRoadflareState(): Boolean {
+        return ensureRoadflareStateSynced()
+    }
+
+    /**
+     * Internal: Sync RoadFlare state from Nostr.
      * Called before starting RoadFlare broadcasting to handle cross-device sync.
      *
      * Uses union merge strategy:

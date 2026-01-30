@@ -32,6 +32,12 @@ fun DeveloperOptionsScreen(
     nostrService: NostrService? = null,
     onOpenRelaySettings: () -> Unit,
     onBack: () -> Unit,
+    // RoadFlare key debug (driver only)
+    onGetLocalKeyVersion: (() -> Int)? = null,
+    onGetLocalKeyUpdatedAt: (() -> Long?)? = null,
+    onFetchNostrKeyUpdatedAt: (suspend () -> Long?)? = null,
+    onSyncRoadflareState: (suspend () -> Boolean)? = null,
+    onRotateRoadflareKey: (suspend () -> Boolean)? = null,
     modifier: Modifier = Modifier
 ) {
     BackHandler(onBack = onBack)
@@ -204,6 +210,164 @@ fun DeveloperOptionsScreen(
                     )
 
                     Spacer(modifier = Modifier.height(8.dp))
+
+                    // RoadFlare Key Debug (driver only)
+                    if (onGetLocalKeyVersion != null) {
+                        Text(
+                            text = "RoadFlare Key Debug",
+                            style = MaterialTheme.typography.titleSmall,
+                            modifier = Modifier.padding(vertical = 4.dp)
+                        )
+
+                        var nostrKeyUpdatedAt by remember { mutableStateOf<Long?>(null) }
+                        var nostrFetchAttempted by remember { mutableStateOf(false) }
+                        var isFetchingNostr by remember { mutableStateOf(false) }
+                        var isSyncing by remember { mutableStateOf(false) }
+                        var isRotating by remember { mutableStateOf(false) }
+                        var statusMessage by remember { mutableStateOf<String?>(null) }
+
+                        val localKeyVersion = onGetLocalKeyVersion.invoke()
+                        val localKeyUpdatedAt = onGetLocalKeyUpdatedAt?.invoke()
+
+                        Card(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                            )
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                // Local Key Info
+                                Text("Local Key", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                                Text(
+                                    "Version: ${if (localKeyVersion == 0) "None" else localKeyVersion}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                                Text(
+                                    "Updated: ${localKeyUpdatedAt?.let { formatTimestamp(it) } ?: "N/A"}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontFamily = FontFamily.Monospace
+                                )
+
+                                Spacer(modifier = Modifier.height(12.dp))
+
+                                // Nostr Sync Status
+                                Text("Nostr Sync", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+
+                                val nostrTs = nostrKeyUpdatedAt
+                                val syncStatus = when {
+                                    isFetchingNostr -> "Checking..."
+                                    localKeyVersion == 0 && !nostrFetchAttempted -> "No local key - tap Check"
+                                    localKeyVersion == 0 && nostrTs != null -> "No local key (Nostr has one - Sync!)"
+                                    localKeyVersion == 0 && nostrFetchAttempted -> "No key anywhere"
+                                    !nostrFetchAttempted -> "Tap 'Check' to verify"
+                                    nostrTs == null -> "No key on Nostr"
+                                    localKeyUpdatedAt == nostrTs -> "✓ Matches Nostr"
+                                    localKeyUpdatedAt != null && nostrTs > localKeyUpdatedAt -> "⚠ Nostr has newer key"
+                                    localKeyUpdatedAt != null && nostrTs < localKeyUpdatedAt -> "⚠ Local is newer (needs push)"
+                                    else -> "⚠ Mismatch"
+                                }
+
+                                Text(
+                                    syncStatus,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = when {
+                                        syncStatus.startsWith("✓") -> MaterialTheme.colorScheme.primary
+                                        syncStatus.startsWith("⚠") || syncStatus.contains("Sync!") -> MaterialTheme.colorScheme.error
+                                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                    }
+                                )
+
+                                if (nostrKeyUpdatedAt != null) {
+                                    Text(
+                                        "Nostr timestamp: ${formatTimestamp(nostrKeyUpdatedAt!!)}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.height(12.dp))
+
+                                // Buttons
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    OutlinedButton(
+                                        onClick = {
+                                            isFetchingNostr = true
+                                            scope.launch {
+                                                nostrKeyUpdatedAt = onFetchNostrKeyUpdatedAt?.invoke()
+                                                nostrFetchAttempted = true
+                                                isFetchingNostr = false
+                                            }
+                                        },
+                                        enabled = !isFetchingNostr && !isSyncing && !isRotating,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        if (isFetchingNostr) {
+                                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                        }
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Check", style = MaterialTheme.typography.labelSmall)
+                                    }
+
+                                    Button(
+                                        onClick = {
+                                            isSyncing = true
+                                            scope.launch {
+                                                val synced = onSyncRoadflareState?.invoke() ?: false
+                                                isSyncing = false
+                                                statusMessage = if (synced) "Synced! Tap Check to verify" else "No changes"
+                                                nostrKeyUpdatedAt = null
+                                                nostrFetchAttempted = false
+                                            }
+                                        },
+                                        enabled = !isFetchingNostr && !isSyncing && !isRotating,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        if (isSyncing) {
+                                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
+                                        }
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Sync", style = MaterialTheme.typography.labelSmall)
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(8.dp))
+
+                                Button(
+                                    onClick = {
+                                        isRotating = true
+                                        scope.launch {
+                                            val rotated = onRotateRoadflareKey?.invoke() ?: false
+                                            isRotating = false
+                                            statusMessage = if (rotated) "Rotated! Tap Check to verify" else "Rotation failed"
+                                            nostrKeyUpdatedAt = null
+                                            nostrFetchAttempted = false
+                                        }
+                                    },
+                                    enabled = !isFetchingNostr && !isSyncing && !isRotating,
+                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    if (isRotating) {
+                                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onSecondary)
+                                    }
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Rotate Key (New Version)")
+                                }
+
+                                statusMessage?.let {
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
                 }
 
                 Text(
@@ -496,4 +660,10 @@ private fun SettingsNavigationRow(
             )
         }
     }
+}
+
+private fun formatTimestamp(epochSeconds: Long): String {
+    val date = java.util.Date(epochSeconds * 1000)
+    val format = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault())
+    return format.format(date)
 }
