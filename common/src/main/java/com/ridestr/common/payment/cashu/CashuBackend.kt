@@ -1141,7 +1141,8 @@ class CashuBackend(
      */
     suspend fun refundExpiredHtlc(
         htlcToken: String,
-        riderPubKey: String
+        riderPubKey: String,
+        preimage: String? = null  // Use if available, else zeros fallback
     ): HtlcRefundOutcome = withContext(Dispatchers.IO) {
         val currentMint = currentMintUrl
 
@@ -1222,18 +1223,52 @@ class CashuBackend(
             }
             Log.d(TAG, "Fetched keyset ${keyset.id} from token's mint: $targetMint")
 
+            // Step 4b: Check proof states with NUT-07 (diagnostic)
+            try {
+                val secrets = htlcProofs.map { it.secret }
+                val stateMap = verifyProofStatesBySecretAtMint(secrets, targetMint)
+                Log.d(TAG, "=== NUT-07 PROOF STATES ===")
+                stateMap?.forEach { (secret, state) ->
+                    Log.d(TAG, "Proof ${secret.take(20)}...: $state")
+                }
+                val spentCount = stateMap?.count { it.value == ProofStateResult.SPENT } ?: 0
+                val pendingCount = stateMap?.count { it.value == ProofStateResult.PENDING } ?: 0
+                val unspentCount = stateMap?.count { it.value == ProofStateResult.UNSPENT } ?: 0
+                Log.d(TAG, "States: $unspentCount unspent, $pendingCount pending, $spentCount spent")
+                if (spentCount > 0) {
+                    Log.e(TAG, "WARNING: $spentCount proofs already SPENT - refund will fail!")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "NUT-07 state check failed (non-fatal): ${e.message}")
+            }
+
             // Step 5: Create plain output secrets (NUT-13 deterministic)
             val outputAmounts = splitAmount(totalAmount)
             val outputPremints = generatePreMintSecrets(outputAmounts, keyset.id)
 
             // Step 6: Build swap request with refund witness
-            // Refund path: signature only (no preimage needed)
+            // Refund path: empty preimage + signature (NUT-14 spec)
+            // Empty preimage "" indicates refund path after locktime
             val inputsArray = JSONArray()
-            htlcProofs.forEach { proof ->
+            htlcProofs.forEachIndexed { index, proof ->
+                // Log the HTLC secret structure for debugging
+                Log.d(TAG, "=== HTLC PROOF $index ===")
+                Log.d(TAG, "Secret: ${proof.secret.take(100)}...")
+                Log.d(TAG, "Amount: ${proof.amount}, ID: ${proof.id}")
+
                 // Create P2PK signature for refund
                 val sig = signP2pkProof(proof.secret, proof.C)
+                Log.d(TAG, "Signature created: ${sig != null}, sig=${sig?.take(32)}...")
+
+                // NUT-14 spec: Refund path after locktime should work with signature alone.
+                // However, some mints (e.g., themilkroad.org) require preimage field even for refunds.
+                // Use real preimage if stored; zeros fallback is a compatibility workaround for
+                // non-spec-compliant mints that don't verify the hash.
+                val witnessPreimage = preimage ?: "0".repeat(64)
+                // SECURITY: Do not log witnessJson - it contains the preimage
+                Log.d(TAG, "Using ${if (preimage != null) "stored preimage" else "zeros fallback"} for witness")
                 val witnessJson = JSONObject().apply {
-                    // No preimage for refund path
+                    put("preimage", witnessPreimage)
                     put("signatures", JSONArray().apply {
                         if (sig != null) put(sig)
                     })
@@ -2031,6 +2066,70 @@ class CashuBackend(
             result
         } catch (e: Exception) {
             Log.e(TAG, "verifyProofStatesBySecret failed: ${e.message}", e)
+            null
+        }
+    }
+
+    /**
+     * Verify proof states at a specific mint (NUT-07).
+     * Used for HTLC refunds when token was created at a different mint than current.
+     */
+    suspend fun verifyProofStatesBySecretAtMint(secrets: List<String>, mintUrl: String): Map<String, ProofStateResult>? = withContext(Dispatchers.IO) {
+        if (secrets.isEmpty()) return@withContext emptyMap()
+
+        Log.d(TAG, "Verifying ${secrets.size} proof states at $mintUrl")
+
+        try {
+            // Compute Y values (hash_to_curve of each secret)
+            val yValues = secrets.mapNotNull { secret ->
+                CashuCrypto.hashToCurve(secret)?.let { secret to it }
+            }
+
+            if (yValues.size != secrets.size) {
+                Log.e(TAG, "Failed to compute Y for some secrets")
+                return@withContext null
+            }
+
+            // Build check request
+            val requestJson = JSONObject().apply {
+                put("Ys", JSONArray().apply {
+                    yValues.forEach { put(it.second) }
+                })
+            }.toString()
+
+            val request = Request.Builder()
+                .url("$mintUrl/v1/checkstate")
+                .post(requestJson.toRequestBody(JSON_MEDIA_TYPE))
+                .build()
+
+            val response = client.newCall(request).execute()
+            val responseBody = response.body?.string()
+
+            if (!response.isSuccessful) {
+                Log.e(TAG, "Check state failed at $mintUrl: ${response.code} - $responseBody")
+                return@withContext null
+            }
+
+            val json = JSONObject(responseBody ?: "{}")
+            val statesArray = json.getJSONArray("states")
+
+            // Map results back to secrets
+            val result = mutableMapOf<String, ProofStateResult>()
+            for (i in 0 until minOf(statesArray.length(), yValues.size)) {
+                val stateObj = statesArray.getJSONObject(i)
+                val stateStr = stateObj.getString("state")
+                val originalSecret = yValues[i].first
+                result[originalSecret] = when (stateStr.uppercase()) {
+                    "UNSPENT" -> ProofStateResult.UNSPENT
+                    "PENDING" -> ProofStateResult.PENDING
+                    "SPENT" -> ProofStateResult.SPENT
+                    else -> ProofStateResult.UNSPENT
+                }
+            }
+
+            result
+        } catch (e: Exception) {
+            Log.e(TAG, "verifyProofStatesBySecretAtMint failed: ${e.message}", e)
             null
         }
     }

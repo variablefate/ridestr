@@ -381,6 +381,7 @@ class WalletStorage(private val context: Context) {
             put("locktime", htlc.locktime)
             put("rider_pubkey", htlc.riderPubKey)
             put("payment_hash", htlc.paymentHash)
+            htlc.preimage?.let { put("preimage", it) }
             htlc.rideId?.let { put("ride_id", it) }
             put("created_at", htlc.createdAt)
             put("status", htlc.status.name)
@@ -396,6 +397,7 @@ class WalletStorage(private val context: Context) {
                 locktime = json.getLong("locktime"),
                 riderPubKey = json.getString("rider_pubkey"),
                 paymentHash = json.getString("payment_hash"),
+                preimage = json.optString("preimage").takeIf { it.isNotBlank() },
                 rideId = json.optString("ride_id").takeIf { it.isNotBlank() },
                 createdAt = json.optLong("created_at", System.currentTimeMillis()),
                 status = try {

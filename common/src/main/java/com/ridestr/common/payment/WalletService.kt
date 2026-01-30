@@ -1016,7 +1016,8 @@ class WalletService(
         amountSats: Long,
         paymentHash: String,
         driverPubKey: String,
-        expirySeconds: Long = 900L
+        expirySeconds: Long = 900L,
+        preimage: String? = null  // Stored for future-proof refunds if mint requires it
     ): EscrowLock? {
         if (!_isConnected.value) {
             Log.e(TAG, "Cannot lock funds - not connected to wallet provider")
@@ -1287,6 +1288,14 @@ class WalletService(
             expiresAt = locktime
         )
 
+        // Validate preimage format (must be exactly 64 hex chars)
+        val validatedPreimage = preimage?.trim()?.takeIf {
+            it.length == 64 && it.all { c -> c in '0'..'9' || c in 'a'..'f' || c in 'A'..'F' }
+        }
+        if (preimage != null && validatedPreimage == null) {
+            Log.w(TAG, "Invalid preimage format (expected 64 hex), not storing")
+        }
+
         // Save pending HTLC for potential refund if driver never claims
         val pendingHtlc = PendingHtlc(
             escrowId = escrowId,
@@ -1294,10 +1303,11 @@ class WalletService(
             amountSats = amountSats,
             locktime = locktime,
             riderPubKey = riderPubKey,
-            paymentHash = paymentHash
+            paymentHash = paymentHash,
+            preimage = validatedPreimage  // Only store if valid format
         )
         walletStorage.savePendingHtlc(pendingHtlc)
-        Log.d(TAG, "Saved pending HTLC for refund tracking: $escrowId, expires at $locktime")
+        Log.d(TAG, "Saved pending HTLC: $escrowId, ${amountSats} sats, preimage=${validatedPreimage != null}")
 
         // Update balance - ADD to pendingSats (in case of multiple concurrent HTLCs)
         val newBalance = _balance.value.availableSats - amountSats
@@ -1484,7 +1494,8 @@ class WalletService(
 
                 val refundOutcome = cashuBackend.refundExpiredHtlc(
                     htlcToken = htlc.htlcToken,
-                    riderPubKey = htlc.riderPubKey
+                    riderPubKey = htlc.riderPubKey,
+                    preimage = htlc.preimage  // Use stored preimage if available
                 )
 
                 when (refundOutcome) {
