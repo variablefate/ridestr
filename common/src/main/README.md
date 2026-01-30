@@ -21,7 +21,7 @@ The `common` module contains all shared code used by both rider and driver apps:
 | `WalletKeyManager.kt` | Wallet keypair + signing | `getPrivateKeyBytes()`, `signSchnorr()`, `getWalletPubKeyHex()`, `importPrivateKey()`, `importMnemonic()` |
 | `WalletStorage.kt` | Local persistence + NUT-13 counters | `savePendingDeposit()`, `getPendingDeposits()`, `removePendingDeposit()`, `getCachedBalance()`, `saveMintUrl()`, `savePendingBlindedOp()`, `getRecoverableBlindedOps()`, `savePendingHtlc()`, `getRefundableHtlcs()`, `getCounter()`, `incrementCounter()`, `getAllCounters()` |
 | `PaymentCrypto.kt` | Preimage/hash generation | `generatePreimage()`, `hashPreimage()` |
-| `PaymentModels.kt` | Data classes | `MintQuote`, `MeltQuote`, `PaymentTransaction`, `EscrowLock`, `PendingDeposit`, `ClaimResult`, `WalletBalance`, `PendingHtlc`, `PendingBlindedOperation`, `SeedRecoveryResult` |
+| `PaymentModels.kt` | Data classes | `MintQuote`, `MeltQuote`, `PaymentTransaction`, `EscrowLock`, `PendingDeposit`, `ClaimResult`, `WalletBalance`, `PendingHtlc` (with preimage for refunds), `PendingBlindedOperation`, `SeedRecoveryResult` |
 
 ### Nostr Layer (`java/com/ridestr/common/nostr/`)
 
@@ -261,6 +261,7 @@ Before HTLC swap, proofs are verified with mint to catch stale NIP-60 events:
 - `RiderViewModel.handleRideCompletion()` marks HTLC as claimed to prevent false refund attempts
 - `markHtlcClaimedByPaymentHash()` also clears `pendingSats` from balance (January 2026)
 - `PendingHtlc` stores `htlcToken` for refund even after ride ends - only cleaned up after 7 days
+- **Preimage storage** (January 2026): `PendingHtlc.preimage` stores the real preimage for future-proof refunds. NUT-14 spec says refund path after locktime should work with signature alone, but some mints require the preimage field. Old HTLCs without stored preimage fall back to zeros workaround.
 
 ### Automatic Wallet Refresh (January 2026)
 All major payment operations now trigger automatic wallet refresh to ensure balance consistency:
