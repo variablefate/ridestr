@@ -1137,17 +1137,17 @@ class CashuBackend(
      *
      * @param htlcToken The HTLC Cashu token to refund
      * @param riderPubKey The rider's wallet public key (must match refund tag in secret)
-     * @return HtlcRefundResult with refunded proofs, or null on failure
+     * @return HtlcRefundOutcome with success result or detailed failure info
      */
     suspend fun refundExpiredHtlc(
         htlcToken: String,
         riderPubKey: String
-    ): HtlcRefundResult? = withContext(Dispatchers.IO) {
-        val mintUrl = currentMintUrl
+    ): HtlcRefundOutcome = withContext(Dispatchers.IO) {
+        val currentMint = currentMintUrl
 
-        if (mintUrl == null) {
+        if (currentMint == null) {
             Log.e(TAG, "refundExpiredHtlc: mint not initialized")
-            return@withContext null
+            return@withContext HtlcRefundOutcome.Failure.MintNotInitialized
         }
 
         Log.d(TAG, "=== REFUNDING EXPIRED HTLC ===")
@@ -1157,25 +1157,35 @@ class CashuBackend(
             val parseResult = parseHtlcToken(htlcToken)
             if (parseResult == null) {
                 Log.e(TAG, "refundExpiredHtlc: failed to parse HTLC token")
-                return@withContext null
+                return@withContext HtlcRefundOutcome.Failure.TokenParseFailed
             }
 
             val (htlcProofs, tokenMintUrl) = parseResult
             val totalAmount = htlcProofs.sumOf { it.amount }
             Log.d(TAG, "Parsed ${htlcProofs.size} HTLC proofs totaling $totalAmount sats")
 
+            // === DIAGNOSTIC LOGGING ===
+            Log.d(TAG, "=== HTLC REFUND DIAGNOSTICS ===")
+            Log.d(TAG, "Token mint URL: $tokenMintUrl")
+            Log.d(TAG, "Current mint URL: $currentMint")
+            Log.d(TAG, "Mints match: ${tokenMintUrl.trimEnd('/') == currentMint.trimEnd('/')}")
+            Log.d(TAG, "HTLC refund pubkey (stored): ${riderPubKey.take(16)}...")
+            val currentWalletKey = walletKeyManager.getWalletPubKeyHex()
+            Log.d(TAG, "Current wallet pubkey: ${currentWalletKey?.take(16) ?: "NULL"}...")
+            Log.d(TAG, "Keys match: ${riderPubKey == currentWalletKey}")
+
             // Step 2: Verify locktime has expired
             val locktime = extractLocktimeFromSecret(htlcProofs.first().secret)
             if (locktime == null) {
                 Log.e(TAG, "refundExpiredHtlc: no locktime found in HTLC secret")
-                return@withContext null
+                return@withContext HtlcRefundOutcome.Failure.TokenParseFailed
             }
 
             val now = System.currentTimeMillis() / 1000
             val bufferSeconds = 120  // Account for clock skew between device and mint
             if (now <= locktime + bufferSeconds) {
                 Log.e(TAG, "refundExpiredHtlc: locktime not safely expired (now=$now, locktime=$locktime, buffer=${bufferSeconds}s)")
-                return@withContext null
+                return@withContext HtlcRefundOutcome.Failure.LocktimeNotExpired(locktime, now)
             }
             Log.d(TAG, "Locktime safely expired: now=$now > locktime+buffer=${locktime + bufferSeconds}")
 
@@ -1184,16 +1194,33 @@ class CashuBackend(
             if (refundKeys.isEmpty() || !refundKeys.contains(riderPubKey)) {
                 Log.e(TAG, "refundExpiredHtlc: rider pubkey not in refund tags")
                 Log.e(TAG, "Expected one of: ${refundKeys.take(2)}, got: ${riderPubKey.take(16)}...")
-                return@withContext null
+                return@withContext HtlcRefundOutcome.Failure.TokenParseFailed
             }
             Log.d(TAG, "Rider pubkey verified in refund tags")
 
-            // Step 4: Get keyset for creating new plain outputs
-            val keyset = getActiveKeyset()
-            if (keyset == null) {
-                Log.e(TAG, "refundExpiredHtlc: failed to get active keyset")
-                return@withContext null
+            // Step 3b: Verify current wallet key matches stored riderPubKey
+            // This catches the case where user restored wallet with different key
+            if (currentWalletKey != riderPubKey) {
+                Log.e(TAG, "WALLET KEY MISMATCH!")
+                Log.e(TAG, "  HTLC refund tag: ${riderPubKey.take(16)}...")
+                Log.e(TAG, "  Current wallet:  ${currentWalletKey?.take(16) ?: "NULL"}...")
+                Log.e(TAG, "  User likely restored wallet with different key")
+                return@withContext HtlcRefundOutcome.Failure.WalletKeyMismatch(
+                    expectedKey = riderPubKey,
+                    currentKey = currentWalletKey,
+                    tokenMintUrl = tokenMintUrl
+                )
             }
+
+            // Step 4: Get keyset from TOKEN's mint (not current mint)
+            // This fixes the keyset mismatch bug when user switched mints after creating HTLC
+            val targetMint = tokenMintUrl.trimEnd('/')
+            val keyset = getActiveKeysetFromMint(targetMint)
+            if (keyset == null) {
+                Log.e(TAG, "refundExpiredHtlc: failed to get active keyset from $targetMint")
+                return@withContext HtlcRefundOutcome.Failure.KeysetFetchFailed(targetMint)
+            }
+            Log.d(TAG, "Fetched keyset ${keyset.id} from token's mint: $targetMint")
 
             // Step 5: Create plain output secrets (NUT-13 deterministic)
             val outputAmounts = splitAmount(totalAmount)
@@ -1240,7 +1267,6 @@ class CashuBackend(
 
             // CRITICAL: Save pending operation BEFORE sending request
             val operationId = java.util.UUID.randomUUID().toString()
-            val targetMint = tokenMintUrl.trimEnd('/')
             val pendingOp = PendingBlindedOperation(
                 id = operationId,
                 operationType = BlindedOperationType.REFUND_HTLC,
@@ -1270,14 +1296,18 @@ class CashuBackend(
                 .post(swapRequest.toRequestBody(JSON_MEDIA_TYPE))
                 .build()
 
-            val signatures = client.newCall(request).execute().use { response ->
+            val signaturesResult = client.newCall(request).execute().use { response ->
                 val responseBody = response.body?.string()
                 Log.d(TAG, "Refund swap response: ${response.code}")
 
                 if (!response.isSuccessful) {
                     Log.e(TAG, "Refund swap failed: ${response.code} - $responseBody")
                     // Keep pending operation for recovery
-                    return@withContext null
+                    return@withContext HtlcRefundOutcome.Failure.MintRejected(
+                        code = response.code,
+                        body = responseBody,
+                        mintUrl = targetMint
+                    )
                 }
 
                 val json = JSONObject(responseBody ?: "{}")
@@ -1290,7 +1320,7 @@ class CashuBackend(
             keysetCache[keyset.id] = keyset
 
             for (i in 0 until outputPremints.size) {
-                val sig = signatures.getJSONObject(i)
+                val sig = signaturesResult.getJSONObject(i)
                 val pms = outputPremints[i]
                 val C_ = sig.getString("C_")
                 val responseKeysetId = sig.getString("id")
@@ -1321,16 +1351,16 @@ class CashuBackend(
             walletStorage.updateBlindedOpStatus(operationId, PendingOperationStatus.COMPLETED)
             Log.d(TAG, "Marked pending HTLC refund operation COMPLETED: $operationId (caller must clear after NIP-60 persist)")
 
-            HtlcRefundResult(
+            HtlcRefundOutcome.Success(HtlcRefundResult(
                 refundedProofs = plainProofs,
                 amountSats = totalAmount,
                 mintUrl = targetMint,
                 pendingOpId = operationId
-            )
+            ))
         } catch (e: Exception) {
             Log.e(TAG, "refundExpiredHtlc failed: ${e.message}", e)
             // Keep pending operation for recovery
-            null
+            HtlcRefundOutcome.Failure.Exception(e.message ?: "Unknown error")
         }
     }
 
@@ -1343,6 +1373,34 @@ class CashuBackend(
         val mintUrl: String,
         val pendingOpId: String? = null  // ID of pending op - caller must clear after NIP-60 publish
     )
+
+    /**
+     * Structured outcome for HTLC refund operations.
+     * Provides detailed failure information for diagnostics.
+     */
+    sealed class HtlcRefundOutcome {
+        data class Success(val result: HtlcRefundResult) : HtlcRefundOutcome()
+
+        sealed class Failure : HtlcRefundOutcome() {
+            object MintNotInitialized : Failure()
+            object TokenParseFailed : Failure()
+            data class LocktimeNotExpired(val locktime: Long, val now: Long) : Failure()
+            data class WalletKeyMismatch(
+                val expectedKey: String,
+                val currentKey: String?,
+                val tokenMintUrl: String
+            ) : Failure()
+            data class KeysetFetchFailed(
+                val tokenMintUrl: String
+            ) : Failure()
+            data class MintRejected(
+                val code: Int,
+                val body: String?,
+                val mintUrl: String
+            ) : Failure()
+            data class Exception(val message: String) : Failure()
+        }
+    }
 
     /**
      * Result of creating an HTLC lock (escrow).
@@ -3354,6 +3412,85 @@ class CashuBackend(
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to fetch keyset: ${e.message}", e)
+            null
+        }
+    }
+
+    /**
+     * Fetch active keyset from a specific mint URL.
+     * Used for HTLC refunds when token was created at a different mint than current.
+     * NOTE: Does NOT cache to mintKeysets - use only for one-off operations like refunds.
+     *
+     * @param mintUrl The mint URL to fetch keyset from
+     * @return MintKeyset if successful, null otherwise
+     */
+    suspend fun getActiveKeysetFromMint(mintUrl: String): MintKeyset? = withContext(Dispatchers.IO) {
+        try {
+            // First get list of keysets from the specified mint
+            val keysetsRequest = Request.Builder()
+                .url("$mintUrl/v1/keysets")
+                .get()
+                .build()
+
+            val activeKeysetId = client.newCall(keysetsRequest).execute().use { response ->
+                if (!response.isSuccessful) {
+                    Log.e(TAG, "Failed to fetch keysets from $mintUrl: ${response.code}")
+                    return@withContext null
+                }
+                val body = response.body?.string() ?: return@withContext null
+                val json = JSONObject(body)
+                val keysets = json.getJSONArray("keysets")
+
+                // Find active keyset for sat unit
+                for (i in 0 until keysets.length()) {
+                    val ks = keysets.getJSONObject(i)
+                    if (ks.optBoolean("active", true) && ks.optString("unit", "sat") == "sat") {
+                        return@use ks.getString("id")
+                    }
+                }
+                null
+            } ?: return@withContext null
+
+            // Fetch keys for active keyset
+            val keysRequest = Request.Builder()
+                .url("$mintUrl/v1/keys/$activeKeysetId")
+                .get()
+                .build()
+
+            client.newCall(keysRequest).execute().use { response ->
+                if (!response.isSuccessful) {
+                    Log.e(TAG, "Failed to fetch keys for $activeKeysetId from $mintUrl: ${response.code}")
+                    return@withContext null
+                }
+                val body = response.body?.string() ?: return@withContext null
+                val json = JSONObject(body)
+                val keysetsArray = json.getJSONArray("keysets")
+                if (keysetsArray.length() == 0) return@withContext null
+
+                val keysetJson = keysetsArray.getJSONObject(0)
+                val keysJson = keysetJson.getJSONObject("keys")
+
+                val keys = mutableMapOf<Long, String>()
+                val keyIterator = keysJson.keys()
+                while (keyIterator.hasNext()) {
+                    val amountStr = keyIterator.next()
+                    val pubkey = keysJson.getString(amountStr)
+                    // Skip amounts that overflow Long (e.g., 2^63 used by some mints)
+                    val amount = amountStr.toLongOrNull()
+                    if (amount != null && amount > 0) {
+                        keys[amount] = pubkey
+                    }
+                }
+
+                Log.d(TAG, "Fetched keyset $activeKeysetId from $mintUrl (${keys.size} denomination keys)")
+                MintKeyset(
+                    id = activeKeysetId,
+                    unit = "sat",
+                    keys = keys
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to fetch keyset from $mintUrl: ${e.message}", e)
             null
         }
     }

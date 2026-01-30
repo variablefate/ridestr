@@ -200,6 +200,24 @@ class WalletService(
                 Log.e(TAG, "Error syncing wallet on connect: ${e.message}")
             }
 
+            // Backup wallet key to NIP-60 (if not already backed up)
+            // This ensures new wallets get their key backed up immediately
+            try {
+                val currentMintUrl = cashuBackend.getCurrentMintUrl()
+                if (currentMintUrl != null) {
+                    // forceOverwrite=false to respect existing backups from other apps
+                    // NOTE: Returns false if existing metadata is from a different mint (safety feature)
+                    val published = nip60Sync?.publishWalletMetadata(currentMintUrl, forceOverwrite = false) ?: false
+                    if (published) {
+                        Log.d(TAG, "Published wallet metadata after connect")
+                    } else {
+                        Log.d(TAG, "Wallet metadata not published (may already exist or different mint)")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error publishing wallet metadata on connect: ${e.message}")
+            }
+
             // Recalculate pendingSats from active HTLCs (in case cache was stale)
             recalculatePendingSats()
         }
@@ -1017,6 +1035,18 @@ class WalletService(
             return null
         }
 
+        // CRITICAL: Ensure wallet key is backed up BEFORE creating any HTLC
+        // This protects existing users who may not have triggered connect() after the update
+        try {
+            val published = sync.publishWalletMetadata(mintUrl, forceOverwrite = false)
+            if (published) {
+                Log.d(TAG, "Backed up wallet key to NIP-60 before HTLC creation")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to backup wallet key before HTLC (non-fatal): ${e.message}")
+            // Don't block - the HTLC can still be created, just warn
+        }
+
         Log.d(TAG, "=== LOCKING FUNDS FOR RIDE ===")
         Log.d(TAG, "Amount: $amountSats sats, paymentHash: ${paymentHash.take(16)}...")
 
@@ -1436,96 +1466,135 @@ class WalletService(
         }
 
         Log.d(TAG, "=== REFUNDING ${refundable.size} EXPIRED HTLCs ===")
+
+        // Diagnostic logging for all HTLCs
+        val currentWalletKey = walletKeyManager.getWalletPubKeyHex()
+        Log.d(TAG, "=== HTLC REFUND DIAGNOSTICS ===")
+        Log.d(TAG, "Current wallet pubkey: ${currentWalletKey?.take(16) ?: "NULL"}...")
+        for (htlc in refundable) {
+            Log.d(TAG, "HTLC ${htlc.escrowId}: stored riderPubKey=${htlc.riderPubKey.take(16)}...")
+            Log.d(TAG, "  Keys match: ${htlc.riderPubKey == currentWalletKey}")
+        }
+
         val results = mutableListOf<HtlcRefundInfo>()
 
         for (htlc in refundable) {
             try {
                 Log.d(TAG, "Refunding HTLC: ${htlc.escrowId}, ${htlc.amountSats} sats")
 
-                val refundResult = cashuBackend.refundExpiredHtlc(
+                val refundOutcome = cashuBackend.refundExpiredHtlc(
                     htlcToken = htlc.htlcToken,
                     riderPubKey = htlc.riderPubKey
                 )
 
-                if (refundResult != null) {
-                    // Publish refunded proofs to NIP-60 with retry
-                    val sync = nip60Sync
-                    if (sync != null && refundResult.refundedProofs.isNotEmpty()) {
-                        var eventId: String? = null
-                        var publishAttempts = 0
-                        val maxAttempts = 3
+                when (refundOutcome) {
+                    is CashuBackend.HtlcRefundOutcome.Success -> {
+                        val refundResult = refundOutcome.result
 
-                        while (eventId == null && publishAttempts < maxAttempts) {
-                            publishAttempts++
-                            eventId = sync.publishProofs(refundResult.refundedProofs, refundResult.mintUrl)
-                            if (eventId == null && publishAttempts < maxAttempts) {
-                                Log.w(TAG, "Refund proof publish failed, retrying...")
-                                kotlinx.coroutines.delay(1000)
+                        // Publish refunded proofs to NIP-60 with retry
+                        val sync = nip60Sync
+                        if (sync != null && refundResult.refundedProofs.isNotEmpty()) {
+                            var eventId: String? = null
+                            var publishAttempts = 0
+                            val maxAttempts = 3
+
+                            while (eventId == null && publishAttempts < maxAttempts) {
+                                publishAttempts++
+                                eventId = sync.publishProofs(refundResult.refundedProofs, refundResult.mintUrl)
+                                if (eventId == null && publishAttempts < maxAttempts) {
+                                    Log.w(TAG, "Refund proof publish failed, retrying...")
+                                    kotlinx.coroutines.delay(1000)
+                                }
+                            }
+
+                            if (eventId != null) {
+                                Log.d(TAG, "Published ${refundResult.refundedProofs.size} refunded proofs to NIP-60: $eventId")
+                            } else {
+                                Log.e(TAG, "Failed to publish refunded proofs after $maxAttempts attempts")
+                                // Save recovery token for manual recovery
+                                saveRecoveryTokenFallback(refundResult.refundedProofs, refundResult.mintUrl, "nip60_refund_failed")
                             }
                         }
 
-                        if (eventId != null) {
-                            Log.d(TAG, "Published ${refundResult.refundedProofs.size} refunded proofs to NIP-60: $eventId")
-                        } else {
-                            Log.e(TAG, "Failed to publish refunded proofs after $maxAttempts attempts")
-                            // Save recovery token for manual recovery
-                            saveRecoveryTokenFallback(refundResult.refundedProofs, refundResult.mintUrl, "nip60_refund_failed")
+                        // NOW safe to clear pending refund operation - proofs are persisted (NIP-60 or RecoveryToken)
+                        if (refundResult.pendingOpId != null) {
+                            walletStorage.removePendingBlindedOp(refundResult.pendingOpId)
+                            Log.d(TAG, "Cleared pending HTLC refund operation: ${refundResult.pendingOpId}")
                         }
+
+                        // Update HTLC status
+                        walletStorage.updateHtlcStatus(htlc.escrowId, PendingHtlcStatus.REFUNDED)
+
+                        // Update balance
+                        val newBalance = _balance.value.availableSats + refundResult.amountSats
+                        _balance.value = _balance.value.copy(
+                            availableSats = newBalance,
+                            pendingSats = (_balance.value.pendingSats - htlc.amountSats).coerceAtLeast(0),
+                            lastUpdated = System.currentTimeMillis()
+                        )
+                        walletStorage.cacheBalance(_balance.value)
+
+                        // Record transaction
+                        addTransaction(PaymentTransaction(
+                            id = "refund-${htlc.escrowId}",
+                            type = TransactionType.ESCROW_REFUND,
+                            amountSats = refundResult.amountSats,
+                            timestamp = System.currentTimeMillis(),
+                            rideId = htlc.rideId,
+                            counterpartyPubKey = null,
+                            status = "HTLC expired - funds refunded"
+                        ))
+
+                        results.add(HtlcRefundInfo(
+                            escrowId = htlc.escrowId,
+                            amountSats = refundResult.amountSats,
+                            success = true
+                        ))
+
+                        Log.d(TAG, "Refunded ${refundResult.amountSats} sats from HTLC ${htlc.escrowId}")
                     }
 
-                    // NOW safe to clear pending refund operation - proofs are persisted (NIP-60 or RecoveryToken)
-                    if (refundResult.pendingOpId != null) {
-                        walletStorage.removePendingBlindedOp(refundResult.pendingOpId)
-                        Log.d(TAG, "Cleared pending HTLC refund operation: ${refundResult.pendingOpId}")
+                    is CashuBackend.HtlcRefundOutcome.Failure -> {
+                        // Map failure type to human-readable message
+                        val failureReason = when (refundOutcome) {
+                            is CashuBackend.HtlcRefundOutcome.Failure.WalletKeyMismatch ->
+                                "Wallet key changed. HTLC expects key ${refundOutcome.expectedKey.take(8)}..., " +
+                                "current key is ${refundOutcome.currentKey?.take(8) ?: "missing"}. " +
+                                "Restore original wallet key to refund."
+                            is CashuBackend.HtlcRefundOutcome.Failure.KeysetFetchFailed ->
+                                "Cannot connect to mint at ${refundOutcome.tokenMintUrl}. " +
+                                "Check your internet connection or try again later."
+                            is CashuBackend.HtlcRefundOutcome.Failure.MintRejected ->
+                                "Mint rejected refund (${refundOutcome.code}): ${refundOutcome.body?.take(100) ?: "No details"}"
+                            is CashuBackend.HtlcRefundOutcome.Failure.LocktimeNotExpired ->
+                                "Locktime not expired yet. Expires at ${java.util.Date(refundOutcome.locktime * 1000)}"
+                            is CashuBackend.HtlcRefundOutcome.Failure.MintNotInitialized ->
+                                "Wallet not connected to mint"
+                            is CashuBackend.HtlcRefundOutcome.Failure.TokenParseFailed ->
+                                "Failed to parse HTLC token (may be corrupted)"
+                            is CashuBackend.HtlcRefundOutcome.Failure.Exception ->
+                                "Error: ${refundOutcome.message}"
+                        }
+
+                        // Keep status as LOCKED so it can be retried on next connect/refresh.
+                        // Do NOT mark as FAILED — that would make recalculatePendingSats() drop
+                        // the pending amount, effectively losing track of the locked funds.
+                        Log.e(TAG, "Failed to refund HTLC ${htlc.escrowId}: $failureReason")
+                        results.add(HtlcRefundInfo(
+                            escrowId = htlc.escrowId,
+                            amountSats = htlc.amountSats,
+                            success = false,
+                            failureReason = failureReason
+                        ))
                     }
-
-                    // Update HTLC status
-                    walletStorage.updateHtlcStatus(htlc.escrowId, PendingHtlcStatus.REFUNDED)
-
-                    // Update balance
-                    val newBalance = _balance.value.availableSats + refundResult.amountSats
-                    _balance.value = _balance.value.copy(
-                        availableSats = newBalance,
-                        pendingSats = (_balance.value.pendingSats - htlc.amountSats).coerceAtLeast(0),
-                        lastUpdated = System.currentTimeMillis()
-                    )
-                    walletStorage.cacheBalance(_balance.value)
-
-                    // Record transaction
-                    addTransaction(PaymentTransaction(
-                        id = "refund-${htlc.escrowId}",
-                        type = TransactionType.ESCROW_REFUND,
-                        amountSats = refundResult.amountSats,
-                        timestamp = System.currentTimeMillis(),
-                        rideId = htlc.rideId,
-                        counterpartyPubKey = null,
-                        status = "HTLC expired - funds refunded"
-                    ))
-
-                    results.add(HtlcRefundInfo(
-                        escrowId = htlc.escrowId,
-                        amountSats = refundResult.amountSats,
-                        success = true
-                    ))
-
-                    Log.d(TAG, "Refunded ${refundResult.amountSats} sats from HTLC ${htlc.escrowId}")
-                } else {
-                    // Keep status as LOCKED so it can be retried on next connect/refresh.
-                    // Do NOT mark as FAILED — that would make recalculatePendingSats() drop
-                    // the pending amount, effectively losing track of the locked funds.
-                    Log.e(TAG, "Failed to refund HTLC ${htlc.escrowId} - keeping LOCKED for retry")
-                    results.add(HtlcRefundInfo(
-                        escrowId = htlc.escrowId,
-                        amountSats = htlc.amountSats,
-                        success = false
-                    ))
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error refunding HTLC ${htlc.escrowId}: ${e.message}", e)
                 results.add(HtlcRefundInfo(
                     escrowId = htlc.escrowId,
                     amountSats = htlc.amountSats,
-                    success = false
+                    success = false,
+                    failureReason = "Unexpected error: ${e.message}"
                 ))
             }
         }
@@ -1600,7 +1669,8 @@ class WalletService(
     data class HtlcRefundInfo(
         val escrowId: String,
         val amountSats: Long,
-        val success: Boolean
+        val success: Boolean,
+        val failureReason: String? = null
     )
 
     /**

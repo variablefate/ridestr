@@ -149,6 +149,21 @@ fun RoadflareTab(
     // Track last createdAt per driver to reject out-of-order events (Part C fix)
     val lastLocationCreatedAt = remember { mutableStateMapOf<String, Long>() }
 
+    // DEBUG: Log rider's followed drivers state
+    LaunchedEffect(drivers) {
+        Log.d(TAG, "=== RIDER ROADFLARE STATE ===")
+        Log.d(TAG, "Total followed drivers: ${drivers.size}")
+        for (driver in drivers) {
+            val hasKey = driver.roadflareKey != null
+            Log.d(TAG, "  driver: ${driver.pubkey.take(8)} hasKey=$hasKey keyVersion=${driver.roadflareKey?.version} keyUpdatedAt=${driver.roadflareKey?.keyUpdatedAt}")
+            if (hasKey) {
+                Log.d(TAG, "    roadflareKey.publicKey: ${driver.roadflareKey?.publicKey?.take(16)}...")
+                Log.d(TAG, "    roadflareKey.privateKey exists: ${driver.roadflareKey?.privateKey?.isNotEmpty() == true}")
+            }
+        }
+        Log.d(TAG, "=============================")
+    }
+
     // Fetch driver profiles to get their display names (first name only)
     LaunchedEffect(drivers, nostrService) {
         if (nostrService == null) return@LaunchedEffect
@@ -179,17 +194,27 @@ fun RoadflareTab(
         }
         subscriptionId = null
 
-        if (nostrService == null || drivers.isEmpty()) return@LaunchedEffect
+        if (nostrService == null || drivers.isEmpty()) {
+            Log.d(TAG, "Subscription skip: nostrService=${nostrService != null}, drivers.size=${drivers.size}")
+            return@LaunchedEffect
+        }
 
         // Only subscribe to drivers who have shared their RoadFlare key
         val driversWithKeys = drivers.filter { it.roadflareKey != null }
-        if (driversWithKeys.isEmpty()) return@LaunchedEffect
+        if (driversWithKeys.isEmpty()) {
+            Log.d(TAG, "Subscription skip: no drivers with keys (total drivers: ${drivers.size})")
+            return@LaunchedEffect
+        }
 
         val driverPubkeys = driversWithKeys.map { it.pubkey }
-        Log.d(TAG, "Subscribing to locations from ${driverPubkeys.size} drivers with keys")
+        Log.d(TAG, "=== SUBSCRIBING TO ROADFLARE LOCATIONS ===")
+        Log.d(TAG, "Drivers with keys: ${driverPubkeys.size}")
+        for (pubkey in driverPubkeys) {
+            Log.d(TAG, "  subscribing to: ${pubkey.take(8)}")
+        }
 
         subscriptionId = nostrService.subscribeToRoadflareLocations(driverPubkeys) { event, relayUrl ->
-            Log.d(TAG, "Received RoadFlare location event from ${event.pubKey.take(8)} via $relayUrl")
+            Log.d(TAG, "*** RECEIVED RoadFlare location event from ${event.pubKey.take(8)} kind=${event.kind} via $relayUrl")
 
             // Find the driver and their RoadFlare key
             val driverPubKey = event.pubKey
@@ -237,6 +262,7 @@ fun RoadflareTab(
                 Log.w(TAG, "Failed to decrypt location from ${driverPubKey.take(8)}")
             }
         }
+        Log.d(TAG, "Subscription created: subscriptionId=$subscriptionId")
     }
 
     // Clean up subscription on disposal

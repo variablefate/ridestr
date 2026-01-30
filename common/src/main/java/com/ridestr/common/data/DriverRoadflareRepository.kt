@@ -213,6 +213,17 @@ class DriverRoadflareRepository(context: Context) {
         val currentVersion = state.roadflareKey?.version ?: return emptyList()
         val mutedPubkeys = state.muted.map { it.pubkey }.toSet()
 
+        // Debug: log why followers may not be active
+        for (f in state.followers) {
+            val isApproved = f.approved
+            val hasCurrentKey = f.keyVersionSent == currentVersion
+            val isMuted = f.pubkey in mutedPubkeys
+            val isActive = isApproved && hasCurrentKey && !isMuted
+            if (!isActive) {
+                android.util.Log.d("RoadflareRepo", "Follower ${f.pubkey.take(8)} NOT active: approved=$isApproved, keyVersionSent=${f.keyVersionSent} vs current=$currentVersion, muted=$isMuted")
+            }
+        }
+
         return state.followers
             .filter { it.approved && it.keyVersionSent == currentVersion && it.pubkey !in mutedPubkeys }
             .map { it.pubkey }

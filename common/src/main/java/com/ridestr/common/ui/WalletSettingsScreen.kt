@@ -539,7 +539,9 @@ fun WalletSettingsScreen(
                                         } else if (results.isEmpty()) {
                                             "No expired HTLCs to refund"
                                         } else {
-                                            "Failed to refund ${results.size} HTLCs"
+                                            // Show first failure reason for better diagnostics
+                                            val firstFailure = results.firstOrNull { !it.success }
+                                            firstFailure?.failureReason ?: "Failed to refund ${results.size} HTLCs"
                                         }
                                         // Refresh lists
                                         pendingHtlcs = walletService.getPendingHtlcs()
@@ -566,7 +568,7 @@ fun WalletSettingsScreen(
                     }
 
                     Text(
-                        text = "HTLCs can only be refunded after their locktime expires (2 hours).",
+                        text = "HTLCs can only be refunded after their locktime expires (15 min + 2 min buffer).",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 8.dp)
