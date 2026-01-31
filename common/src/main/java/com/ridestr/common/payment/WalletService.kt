@@ -1078,9 +1078,8 @@ class WalletService(
         Log.d(TAG, "=== LOCKING FUNDS FOR RIDE ===")
         Log.d(TAG, "Amount: $amountSats sats, paymentHash: ${paymentHash.take(16)}...")
 
-        // CRITICAL: Force refresh NIP-60 before spending to ensure we have all proofs
-        // This prevents using stale cache that may miss recently refunded HTLC proofs
-        sync.clearCache()
+        // Force refresh NIP-60 before spending to ensure we have all proofs
+        // forceRefresh=true bypasses cache check; keeping cache intact provides fallback if relays unavailable
         sync.fetchProofs(forceRefresh = true)
 
         // Step 1: Select proofs from NIP-60
@@ -2204,9 +2203,8 @@ class WalletService(
             return Result.failure(Exception("Not connected to mint"))
         }
 
-        // CRITICAL: Force refresh NIP-60 before withdrawal to ensure we have all proofs
-        // This prevents using stale cache that may miss recently claimed HTLC proofs
-        sync.clearCache()
+        // Force refresh NIP-60 before withdrawal to ensure we have all proofs
+        // forceRefresh=true bypasses cache check; keeping cache intact provides fallback if relays unavailable
         sync.fetchProofs(forceRefresh = true)
 
         // NIP-60 PRIMARY: Select proofs from Nostr relays
@@ -2487,9 +2485,8 @@ class WalletService(
                 feeReserveSats = quote.feeReserve
             )
 
-            // CRITICAL: Force refresh NIP-60 before spending to ensure we have all proofs
-            // This prevents using stale cache that may miss recently claimed HTLC proofs
-            sync.clearCache()
+            // Force refresh NIP-60 before spending to ensure we have all proofs
+            // forceRefresh=true bypasses cache check; keeping cache intact provides fallback if relays unavailable
             sync.fetchProofs(forceRefresh = true)
 
             // Step 2: Select proofs from NIP-60

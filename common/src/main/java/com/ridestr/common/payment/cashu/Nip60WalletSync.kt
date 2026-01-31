@@ -235,7 +235,7 @@ class Nip60WalletSync(
 
         // Wait for relay connection
         if (!waitForRelayConnection()) {
-            Log.e(TAG, "fetchProofs: No relays connected - returning cached or empty")
+            Log.e(TAG, "fetchProofs: No relays connected - returning cached (${cachedProofs.size} proofs, ${cachedProofs.sumOf { it.amount }} sats)")
             return@withContext cachedProofs.toList()
         }
 
