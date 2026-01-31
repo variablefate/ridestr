@@ -223,10 +223,7 @@ class ProfileSyncAdapter(
      * Restore vehicles from backup, replacing local data.
      */
     private fun restoreVehicles(repository: VehicleRepository, vehicles: List<Vehicle>) {
-        repository.clearAll()
-        vehicles.forEach { vehicle ->
-            repository.addVehicle(vehicle)
-        }
+        repository.restoreFromBackup(vehicles)
     }
 
     /**

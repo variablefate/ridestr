@@ -113,12 +113,6 @@ class VehicleSyncAdapter(
      * Restore vehicles from backup, replacing local data.
      */
     private fun restoreVehicles(vehicles: List<Vehicle>) {
-        // Clear existing vehicles
-        vehicleRepository.clearAll()
-
-        // Add each vehicle from backup
-        vehicles.forEach { vehicle ->
-            vehicleRepository.addVehicle(vehicle)
-        }
+        vehicleRepository.restoreFromBackup(vehicles)
     }
 }

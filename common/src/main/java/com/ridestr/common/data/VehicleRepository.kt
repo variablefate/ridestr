@@ -188,6 +188,44 @@ class VehicleRepository(context: Context) {
         _vehicles.value = emptyList()
     }
 
+    /**
+     * Restore vehicles from backup, ensuring exactly one vehicle is primary.
+     * This bypasses addVehicle() to avoid the "first vehicle becomes primary" logic
+     * which would cause multiple vehicles to be marked primary after restore.
+     */
+    fun restoreFromBackup(vehicles: List<Vehicle>) {
+        if (vehicles.isEmpty()) {
+            clearAll()
+            return
+        }
+
+        // Normalize primary flag: ensure exactly one vehicle is primary
+        val primaryVehicles = vehicles.filter { it.isPrimary }
+        val normalizedVehicles = when {
+            primaryVehicles.size == 1 -> vehicles  // Already correct
+            primaryVehicles.isEmpty() -> {
+                // No primary set - make first one primary
+                vehicles.mapIndexed { index, v ->
+                    if (index == 0) v.copy(isPrimary = true) else v
+                }
+            }
+            else -> {
+                // Multiple primaries - keep only the first one marked as primary
+                val firstPrimaryId = primaryVehicles.first().id
+                vehicles.map { v ->
+                    if (v.isPrimary && v.id != firstPrimaryId) {
+                        v.copy(isPrimary = false)
+                    } else {
+                        v
+                    }
+                }
+            }
+        }
+
+        _vehicles.value = normalizedVehicles
+        saveVehicles()
+    }
+
     companion object {
         private const val PREFS_NAME = "ridestr_vehicles"
         private const val KEY_VEHICLES = "vehicles"
