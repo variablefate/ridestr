@@ -1534,6 +1534,14 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         riderPubKey: String,
         amountSats: Long
     ) {
+        // Guard: Don't create a new quote if one already exists for this ride
+        // This prevents race condition where rider pays first quote but driver tracks second
+        val existingQuoteId = _uiState.value.pendingDepositQuoteId
+        if (existingQuoteId != null) {
+            Log.d(TAG, "Deposit invoice already exists (quote=$existingQuoteId) - skipping duplicate")
+            return
+        }
+
         try {
             Log.d(TAG, "Requesting deposit invoice for $amountSats sats")
             val quote = walletService?.getDepositInvoice(amountSats)
