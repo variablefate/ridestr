@@ -1106,7 +1106,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 activePaymentHash = null,
                 activePreimage = null,
                 activeEscrowToken = null,
-                canSettleEscrow = false
+                canSettleEscrow = false,
+                pendingDepositQuoteId = null,
+                pendingDepositAmount = null
             )
 
             // Clear persisted ride state
@@ -1158,7 +1160,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             activePaymentHash = null,
             activePreimage = null,
             activeEscrowToken = null,
-            canSettleEscrow = false
+            canSettleEscrow = false,
+            pendingDepositQuoteId = null,
+            pendingDepositAmount = null
         )
 
         // Clear persisted ride state
@@ -1719,7 +1723,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 chatMessages = emptyList(),
                 isSendingMessage = false,
                 error = null,
-                statusMessage = "Ride cancelled"
+                statusMessage = "Ride cancelled",
+                pendingDepositQuoteId = null,
+                pendingDepositAmount = null
             )
 
             // Clean up ride events in background (non-blocking)
@@ -2090,7 +2096,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     _uiState.value = _uiState.value.copy(
                         activePreimage = bridgeComplete.preimage,
                         canSettleEscrow = false,
-                        crossMintPaymentComplete = true
+                        crossMintPaymentComplete = true,
+                        pendingDepositQuoteId = null,
+                        pendingDepositAmount = null
                     )
                 }
             } catch (e: Exception) {
@@ -2098,7 +2106,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 _uiState.value = _uiState.value.copy(
                     activePreimage = bridgeComplete.preimage,
                     canSettleEscrow = false,
-                    crossMintPaymentComplete = true
+                    crossMintPaymentComplete = true,
+                    pendingDepositQuoteId = null,
+                    pendingDepositAmount = null
                 )
             }
         }
@@ -2288,7 +2298,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 activeEscrowToken = null,
                 canSettleEscrow = false,
                 showPaymentWarningDialog = false,
-                paymentWarningStatus = null
+                paymentWarningStatus = null,
+                pendingDepositQuoteId = null,
+                pendingDepositAmount = null
             )
         }
     }
@@ -2429,7 +2441,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             acceptanceEventId = null,
             confirmationEventId = null,
             error = "Rider may have cancelled - no confirmation received",
-            statusMessage = "Ride cancelled - no response from rider"
+            statusMessage = "Ride cancelled - no response from rider",
+            pendingDepositQuoteId = null,
+            pendingDepositAmount = null
         )
 
         // Restart availability broadcasts if we have a location
@@ -2879,7 +2893,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 activePaymentHash = null,
                 activePreimage = null,
                 activeEscrowToken = null,
-                canSettleEscrow = false
+                canSettleEscrow = false,
+                pendingDepositQuoteId = null,
+                pendingDepositAmount = null
             )
 
             // Clear persisted ride state
