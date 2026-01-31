@@ -58,6 +58,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
+import com.ridestr.rider.BuildConfig
 
 /**
  * ViewModel for Rider mode.
@@ -415,7 +416,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             if (eventId != null) {
-                Log.d(TAG, "Shared encrypted preimage with driver: ${preimage.take(16)}...")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Shared encrypted preimage with driver: ${preimage.take(16)}...")
                 if (escrowToken != null) {
                     Log.d(TAG, "Also shared HTLC escrow token")
                 }
@@ -1142,7 +1143,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             // Generate HTLC preimage and payment hash for escrow
             val preimage = PaymentCrypto.generatePreimage()
             val paymentHash = PaymentCrypto.computePaymentHash(preimage)
-            Log.d(TAG, "Generated HTLC payment hash: ${paymentHash.take(16)}...")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Generated HTLC payment hash: ${paymentHash.take(16)}...")
 
             // NOTE: HTLC escrow is locked AFTER driver accepts (in autoConfirmRide)
             // This allows us to use the driver's wallet pubkey from the acceptance event
@@ -1287,7 +1288,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             // Generate HTLC preimage and payment hash
             val preimage = PaymentCrypto.generatePreimage()
             val paymentHash = PaymentCrypto.computePaymentHash(preimage)
-            Log.d(TAG, "Generated RoadFlare HTLC payment hash: ${paymentHash.take(16)}...")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Generated RoadFlare HTLC payment hash: ${paymentHash.take(16)}...")
 
             // Calculate route metrics if driver location is known
             val pickupRoute = if (driverLocation != null && routingService.isReady()) {
@@ -2093,7 +2094,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             // The actual locking happens in autoConfirmRide after driver accepts with wallet pubkey
             val preimage = PaymentCrypto.generatePreimage()
             val paymentHash = PaymentCrypto.computePaymentHash(preimage)
-            Log.d(TAG, "Generated HTLC payment hash for broadcast: ${paymentHash.take(16)}...")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Generated HTLC payment hash for broadcast: ${paymentHash.take(16)}...")
 
             // Send APPROXIMATE locations for privacy in broadcast
             // Precise locations revealed progressively when driver is close
@@ -2908,7 +2909,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             // For CROSS_MINT, payment happens via Lightning bridge at pickup
             val escrowToken = if (paymentPath == PaymentPath.SAME_MINT) {
                 Log.d(TAG, "=== ATTEMPTING ESCROW LOCK (SAME_MINT) ===")
-                Log.d(TAG, "fareAmount=$fareAmount, paymentHash=${paymentHash?.take(16)}...")
+                if (BuildConfig.DEBUG) Log.d(TAG, "fareAmount=$fareAmount, paymentHash=${paymentHash?.take(16)}...")
                 Log.d(TAG, "driverP2pkKey (${driverP2pkKey.length} chars)=${driverP2pkKey.take(16)}...")
                 Log.d(TAG, "walletService available: ${walletService != null}")
 

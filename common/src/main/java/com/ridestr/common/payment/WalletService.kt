@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import com.ridestr.common.BuildConfig
 
 /**
  * Unified wallet interface - hides Cashu/Lightning implementation details.
@@ -320,6 +321,9 @@ class WalletService(
 
         // Clear wallet key and mnemonic
         walletKeyManager.clearWalletKey()
+
+        // Clear NUT-13 keyset counters to prevent derivation issues after reset
+        walletStorage.clearCounters()
 
         // Reset state
         _balance.value = WalletBalance(0, 0, System.currentTimeMillis())
@@ -1076,7 +1080,7 @@ class WalletService(
         }
 
         Log.d(TAG, "=== LOCKING FUNDS FOR RIDE ===")
-        Log.d(TAG, "Amount: $amountSats sats, paymentHash: ${paymentHash.take(16)}...")
+        if (BuildConfig.DEBUG) Log.d(TAG, "Amount: $amountSats sats, paymentHash: ${paymentHash.take(16)}...")
 
         // Force refresh NIP-60 before spending to ensure we have all proofs
         // forceRefresh=true bypasses cache check; keeping cache intact provides fallback if relays unavailable
@@ -1698,10 +1702,10 @@ class WalletService(
             )
             walletStorage.cacheBalance(_balance.value)
 
-            Log.d(TAG, "Marked HTLC as claimed by paymentHash: ${paymentHash.take(16)}..., cleared ${htlc.amountSats} sats from pending")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Marked HTLC as claimed by paymentHash: ${paymentHash.take(16)}..., cleared ${htlc.amountSats} sats from pending")
             return true
         }
-        Log.w(TAG, "No pending HTLC found for paymentHash: ${paymentHash.take(16)}...")
+        if (BuildConfig.DEBUG) Log.w(TAG, "No pending HTLC found for paymentHash: ${paymentHash.take(16)}...")
         return false
     }
 
@@ -2532,7 +2536,7 @@ class WalletService(
             }
 
             // Lightning payment confirmed!
-            Log.d(TAG, "[BRIDGE $bridgePaymentId] Lightning payment confirmed! Preimage: ${result.paymentPreimage?.take(16)}...")
+            if (BuildConfig.DEBUG) Log.d(TAG, "[BRIDGE $bridgePaymentId] Lightning payment confirmed! Preimage: ${result.paymentPreimage?.take(16)}...")
             walletStorage.updateBridgePaymentStatus(
                 bridgePaymentId, BridgePaymentStatus.LIGHTNING_CONFIRMED,
                 lightningPreimage = result.paymentPreimage

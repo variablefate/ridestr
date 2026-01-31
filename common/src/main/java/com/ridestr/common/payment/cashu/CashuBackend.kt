@@ -2239,7 +2239,7 @@ class CashuBackend(
             }
 
             // Log first few Y values for debugging
-            if (yValues.isNotEmpty()) {
+            if (com.ridestr.common.BuildConfig.DEBUG && yValues.isNotEmpty()) {
                 Log.d(TAG, "verifyProofsBalance: First computed Y: ${yValues.first().second}")
                 Log.d(TAG, "verifyProofsBalance: First secret: ${yValues.first().first.take(32)}...")
             }

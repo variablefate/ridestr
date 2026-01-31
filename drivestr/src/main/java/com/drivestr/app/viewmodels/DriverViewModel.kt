@@ -1939,12 +1939,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     Log.e(TAG, "Failed to decrypt preimage - NIP-44 decryption returned null")
                     return@launch
                 }
-                Log.d(TAG, "Decrypted preimage: ${preimage.length} chars, ${preimage.take(16)}...")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Decrypted preimage: ${preimage.length} chars, ${preimage.take(16)}...")
 
                 // Verify preimage matches payment hash (if we have one)
                 val paymentHash = state.activePaymentHash
                 if (paymentHash != null) {
-                    Log.d(TAG, "Verifying preimage against payment hash: ${paymentHash.take(16)}...")
+                    if (BuildConfig.DEBUG) Log.d(TAG, "Verifying preimage against payment hash: ${paymentHash.take(16)}...")
                     if (!PaymentCrypto.verifyPreimage(preimage, paymentHash)) {
                         Log.e(TAG, "Preimage verification FAILED - hash mismatch!")
                         _uiState.value = state.copy(
@@ -1963,7 +1963,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 if (encryptedToken != null) {
                     escrowToken = nostrService.decryptFromUser(encryptedToken, riderPubKey)
                     if (escrowToken != null) {
-                        Log.d(TAG, "Decrypted escrow token: ${escrowToken.length} chars, ${escrowToken.take(30)}...")
+                        if (BuildConfig.DEBUG) Log.d(TAG, "Decrypted escrow token: ${escrowToken.length} chars, ${escrowToken.take(30)}...")
                     } else {
                         Log.e(TAG, "Failed to decrypt escrow token - NIP-44 decryption returned null")
                     }
@@ -2016,7 +2016,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         Log.d(TAG, "=== HANDLING BRIDGE COMPLETE (CROSS-MINT) ===")
         Log.d(TAG, "Amount: ${bridgeComplete.amountSats} sats")
         Log.d(TAG, "Fees: ${bridgeComplete.feesSats} sats")
-        Log.d(TAG, "Preimage: ${bridgeComplete.preimage.take(16)}...")
+        if (BuildConfig.DEBUG) Log.d(TAG, "Preimage: ${bridgeComplete.preimage.take(16)}...")
 
         // The Lightning preimage proves the rider paid the deposit invoice.
         // Now we need to claim the tokens from our mint using the stored quote ID.
@@ -2250,8 +2250,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             var settlementMessage = ""
             if (state.canSettleEscrow && state.activePreimage != null && state.activeEscrowToken != null) {
                 Log.d(TAG, "=== ATTEMPTING HTLC SETTLEMENT ===")
-                Log.d(TAG, "Preimage: ${state.activePreimage.take(16)}...")
-                Log.d(TAG, "Escrow token: ${state.activeEscrowToken.take(30)}...")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Preimage: ${state.activePreimage.take(16)}...")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Escrow token: ${state.activeEscrowToken.take(30)}...")
                 try {
                     val settlement = walletService?.claimHtlcPayment(
                         htlcToken = state.activeEscrowToken,
@@ -2340,7 +2340,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             val paymentHash = confirmation.paymentHash
             val escrowToken = confirmation.escrowToken
             if (paymentHash != null) {
-                Log.d(TAG, "Confirmation includes HTLC payment hash: ${paymentHash.take(16)}...")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Confirmation includes HTLC payment hash: ${paymentHash.take(16)}...")
             }
             if (escrowToken != null) {
                 Log.d(TAG, "Confirmation includes escrow token (${escrowToken.length} chars)")
