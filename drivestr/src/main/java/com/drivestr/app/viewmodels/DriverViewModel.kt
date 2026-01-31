@@ -52,12 +52,11 @@ import com.drivestr.app.BuildConfig
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
@@ -178,8 +177,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     val uiState: StateFlow<DriverUiState> = _uiState.asStateFlow()
 
     // Signal for background refresh after sync (observed by MainActivity)
-    private val _syncTriggeredRefresh = MutableSharedFlow<Unit>(replay = 0)
-    val syncTriggeredRefresh: SharedFlow<Unit> = _syncTriggeredRefresh.asSharedFlow()
+    // Carries verified follower pubkeys to avoid re-querying, null for full refresh
+    // Channel.CONFLATED: buffers one value (no lost emissions), consumed once (no stale replays)
+    private val _syncTriggeredRefresh = Channel<Set<String>?>(capacity = Channel.CONFLATED)
+    val syncTriggeredRefresh = _syncTriggeredRefresh.receiveAsFlow()
 
     private var availabilityJob: Job? = null
     private var chatRefreshJob: Job? = null
@@ -3885,16 +3886,18 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
             // Verify followers against Kind 30011 to filter out unfollowed riders immediately
             val driverPubKey = nostrService.getPubKeyHex()
+            var verifiedFollowerPubkeys: Set<String>? = null  // Capture for later emission
             val verifiedFollowers = if (driverPubKey != null && mergedFollowers.isNotEmpty()) {
                 val queryResult = nostrService.queryCurrentFollowerPubkeys(driverPubKey)
                 if (!queryResult.success) {
-                    // Query failed/timed out - fallback to merged list
+                    // Query failed/timed out - fallback to merged list (null = full refresh later)
                     if (BuildConfig.DEBUG) {
                         Log.w(TAG, "Kind 30011 query timed out, using merged followers as fallback")
                     }
                     mergedFollowers
                 } else {
-                    // Query succeeded - filter even if result is empty (legitimate zero followers)
+                    // Query succeeded - capture pubkeys to avoid re-querying in refresh
+                    verifiedFollowerPubkeys = queryResult.followers
                     val filteredFollowers = mergedFollowers.filter { it.pubkey in queryResult.followers }
                     val removedCount = mergedFollowers.size - filteredFollowers.size
                     if (removedCount > 0 && BuildConfig.DEBUG) {
@@ -3942,8 +3945,11 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 }
 
                 // Signal background refresh to fetch display names and detect new followers
-                viewModelScope.launch {
-                    _syncTriggeredRefresh.emit(Unit)
+                // Pass verified follower pubkeys to avoid re-querying Kind 30011
+                _syncTriggeredRefresh.trySend(verifiedFollowerPubkeys).also { result ->
+                    if (result.isFailure && BuildConfig.DEBUG) {
+                        Log.w(TAG, "Failed to send sync refresh signal: ${result.exceptionOrNull()}")
+                    }
                 }
 
                 return true

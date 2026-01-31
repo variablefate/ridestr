@@ -1027,7 +1027,7 @@ fun MainScreen(
     }
 
     // Extracted refresh logic - used by both UI refresh button and background sync
-    suspend fun refreshRoadflareFollowers() = withContext(Dispatchers.IO) {
+    suspend fun refreshRoadflareFollowers(verifiedFollowers: Set<String>? = null) = withContext(Dispatchers.IO) {
         val driverPubkey = keyManager.getPubKeyHex() ?: return@withContext
 
         // Guard: skip if not connected
@@ -1036,12 +1036,22 @@ fun MainScreen(
             return@withContext
         }
 
-        val foundFollowers = mutableSetOf<String>()
-        val subscriptionId = nostrService.queryRoadflareFollowers(driverPubkey) { riderPubKey ->
-            foundFollowers.add(riderPubKey)
+        val foundFollowers = if (verifiedFollowers != null) {
+            // Use pre-verified followers from sync, skip redundant query
+            if (BuildConfig.DEBUG) {
+                android.util.Log.d("RoadflareRefresh", "Using ${verifiedFollowers.size} pre-verified followers, skipping query")
+            }
+            verifiedFollowers.toMutableSet()
+        } else {
+            // Manual refresh or no pre-verified data - do full query
+            val followers = mutableSetOf<String>()
+            val subscriptionId = nostrService.queryRoadflareFollowers(driverPubkey) { riderPubKey ->
+                followers.add(riderPubKey)
+            }
+            kotlinx.coroutines.delay(3000)
+            nostrService.closeSubscription(subscriptionId)
+            followers
         }
-        kotlinx.coroutines.delay(3000)
-        nostrService.closeSubscription(subscriptionId)
 
         val existingFollowers = driverRoadflareRepository.getFollowers()
         val existingPubkeys = existingFollowers.map { it.pubkey }.toSet()
@@ -1104,9 +1114,9 @@ fun MainScreen(
 
     // Observe sync-triggered refresh from DriverViewModel
     LaunchedEffect(driverViewModel) {
-        driverViewModel.syncTriggeredRefresh.collect {
-            android.util.Log.d("MainActivity", "Sync triggered background refresh")
-            refreshRoadflareFollowers()
+        driverViewModel.syncTriggeredRefresh.collect { verifiedFollowers ->
+            android.util.Log.d("MainActivity", "Sync triggered background refresh (${verifiedFollowers?.let { "${it.size} cached" } ?: "full query"})")
+            refreshRoadflareFollowers(verifiedFollowers)
         }
     }
 
