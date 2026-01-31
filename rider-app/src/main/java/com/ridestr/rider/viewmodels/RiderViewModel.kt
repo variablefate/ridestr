@@ -2869,16 +2869,20 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
         val driverAlreadyClose = driverLocation?.let { pickup.isWithinMile(it) } == true
 
+        // RoadFlare rides always get precise pickup - it's a trusted driver network
+        val isRoadflareRide = _uiState.value.roadflareTargetDriverPubKey != null
+
         viewModelScope.launch {
             // Send APPROXIMATE pickup for privacy - precise location revealed when driver is close
-            // UNLESS driver is already within 1 mile, then send precise immediately
-            val pickupToSend = if (driverAlreadyClose) {
-                Log.d(TAG, "Driver already within 1 mile - sending precise pickup immediately")
+            // UNLESS: driver is already within 1 mile, OR this is a RoadFlare ride (trusted network)
+            val pickupToSend = if (driverAlreadyClose || isRoadflareRide) {
+                val reason = if (isRoadflareRide) "RoadFlare trusted network" else "driver within 1 mile"
+                Log.d(TAG, "Sending precise pickup immediately ($reason)")
                 pickup
             } else {
                 pickup.approximate()
             }
-            Log.d(TAG, "Sending pickup: ${pickupToSend.lat}, ${pickupToSend.lon} (precise: ${pickup.lat}, ${pickup.lon}, driver close: $driverAlreadyClose)")
+            Log.d(TAG, "Sending pickup: ${pickupToSend.lat}, ${pickupToSend.lon} (precise: ${pickup.lat}, ${pickup.lon}, roadflare: $isRoadflareRide, driver close: $driverAlreadyClose)")
 
             // Determine payment path (same mint vs cross-mint)
             val riderMintUrl = walletService?.getCurrentMintUrl()
