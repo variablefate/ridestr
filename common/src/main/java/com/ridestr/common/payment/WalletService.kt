@@ -1078,6 +1078,11 @@ class WalletService(
         Log.d(TAG, "=== LOCKING FUNDS FOR RIDE ===")
         Log.d(TAG, "Amount: $amountSats sats, paymentHash: ${paymentHash.take(16)}...")
 
+        // CRITICAL: Force refresh NIP-60 before spending to ensure we have all proofs
+        // This prevents using stale cache that may miss recently refunded HTLC proofs
+        sync.clearCache()
+        sync.fetchProofs(forceRefresh = true)
+
         // Step 1: Select proofs from NIP-60
         var selection = sync.selectProofsForSpending(amountSats, mintUrl)
 
@@ -2199,6 +2204,11 @@ class WalletService(
             return Result.failure(Exception("Not connected to mint"))
         }
 
+        // CRITICAL: Force refresh NIP-60 before withdrawal to ensure we have all proofs
+        // This prevents using stale cache that may miss recently claimed HTLC proofs
+        sync.clearCache()
+        sync.fetchProofs(forceRefresh = true)
+
         // NIP-60 PRIMARY: Select proofs from Nostr relays
         val selection = sync.selectProofsForSpending(quote.totalAmount, mintUrl)
         if (selection == null) {
@@ -2476,6 +2486,11 @@ class WalletService(
                 amountSats = quote.amount,
                 feeReserveSats = quote.feeReserve
             )
+
+            // CRITICAL: Force refresh NIP-60 before spending to ensure we have all proofs
+            // This prevents using stale cache that may miss recently claimed HTLC proofs
+            sync.clearCache()
+            sync.fetchProofs(forceRefresh = true)
 
             // Step 2: Select proofs from NIP-60
             val selection = sync.selectProofsForSpending(totalNeeded, mintUrl)
