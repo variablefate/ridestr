@@ -207,6 +207,17 @@ class SettingsManager(context: Context) {
         _activeVehicleId.value = vehicleId
     }
 
+    /**
+     * Clear activeVehicleId if it doesn't match any of the provided vehicle IDs.
+     * Called after vehicle restore to avoid orphaned references.
+     */
+    fun sanitizeActiveVehicleId(validVehicleIds: Set<String>) {
+        val currentId = _activeVehicleId.value
+        if (currentId != null && currentId !in validVehicleIds) {
+            setActiveVehicleId(null)
+        }
+    }
+
     // Currency display setting (default: USD)
     private val _displayCurrency = MutableStateFlow(
         try {

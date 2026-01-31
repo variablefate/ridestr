@@ -221,9 +221,12 @@ class ProfileSyncAdapter(
 
     /**
      * Restore vehicles from backup, replacing local data.
+     * Also sanitizes activeVehicleId if it points to a non-existent vehicle.
      */
     private fun restoreVehicles(repository: VehicleRepository, vehicles: List<Vehicle>) {
         repository.restoreFromBackup(vehicles)
+        // Sanitize activeVehicleId if it points to a non-existent vehicle
+        settingsManager.sanitizeActiveVehicleId(vehicles.map { it.id }.toSet())
     }
 
     /**
