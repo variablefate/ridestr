@@ -1112,6 +1112,20 @@ fun MainScreen(
         }
     }
 
+    // Combined refresh: sync Kind 30012 state first, then query followers
+    // This enables cross-device approval sync (e.g., approve on Phone A, pull-to-refresh on Phone B)
+    suspend fun refreshRoadflareStateAndFollowers() {
+        // Early exit if offline (avoids 15s wait in fetchDriverRoadflareState)
+        if (!nostrService.isConnected()) {
+            android.util.Log.d("RoadflareRefresh", "Skipping state sync - not connected")
+            return
+        }
+        // Sync driver's own state (cross-device approval sync via union merge)
+        driverViewModel.syncRoadflareState()
+        // Then refresh follower list (Kind 30011 p-tag query)
+        refreshRoadflareFollowers()
+    }
+
     // Observe sync-triggered refresh from DriverViewModel
     LaunchedEffect(driverViewModel) {
         driverViewModel.syncTriggeredRefresh.collect { verifiedFollowers ->
@@ -1266,7 +1280,7 @@ fun MainScreen(
                         }
                     },
                     onRefreshFollowers = {
-                        refreshRoadflareFollowers()
+                        refreshRoadflareStateAndFollowers()
                     },
                     modifier = Modifier.padding(innerPadding)
                 )
