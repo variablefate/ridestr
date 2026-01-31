@@ -1787,7 +1787,10 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.value = _uiState.value.copy(
                 acceptance = acceptance,
                 rideStage = RideStage.DRIVER_ACCEPTED,
-                statusMessage = "Driver accepted! Confirming ride..."
+                statusMessage = "Driver accepted! Confirming ride...",
+                // Update to actual accepting driver (may differ from first driver in batch)
+                roadflareTargetDriverPubKey = acceptance.driverPubKey,
+                roadflareTargetDriverLocation = null  // Clear stale location
             )
 
             // Auto-confirm the ride
