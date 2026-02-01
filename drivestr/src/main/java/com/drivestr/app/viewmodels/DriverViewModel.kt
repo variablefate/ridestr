@@ -48,10 +48,11 @@ import com.ridestr.common.state.RideStateMachine
 import com.ridestr.common.state.TransitionResult
 import com.ridestr.common.state.fromDriverStage
 import com.ridestr.common.state.toDriverStageName
+import com.ridestr.common.util.PeriodicRefreshJob
+import com.ridestr.common.util.RideHistoryBuilder
 import com.drivestr.app.BuildConfig
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -183,7 +184,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     val syncTriggeredRefresh = _syncTriggeredRefresh.receiveAsFlow()
 
     private var availabilityJob: Job? = null
-    private var chatRefreshJob: Job? = null
+    private var chatRefreshJob: PeriodicRefreshJob? = null
     private var pinVerificationTimeoutJob: Job? = null
     private var confirmationTimeoutJob: Job? = null  // Timeout for rider confirmation after acceptance
     private var offerSubscriptionId: String? = null                    // Direct offers (legacy/advanced)
@@ -1066,7 +1067,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Clear driver state history
         clearDriverStateHistory()
 
-        // Stop RoadFlare broadcasting (going offline)
+        // Broadcast OFFLINE status to RoadFlare followers before stopping
+        // Without this, followers still see "On Ride" from the last broadcast
+        broadcastRoadflareOfflineStatus()
         stopRoadflareBroadcasting()
 
         // Stop the foreground service
@@ -1196,12 +1199,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     val riderProfile = state.riderProfiles[offer.riderPubKey]
                     val historyEntry = RideHistoryEntry(
                         rideId = state.confirmationEventId ?: state.acceptanceEventId ?: offer.eventId,
-                        timestamp = System.currentTimeMillis() / 1000,
+                        timestamp = RideHistoryBuilder.currentTimestampSeconds(),
                         role = "driver",
                         counterpartyPubKey = offer.riderPubKey,
                         pickupGeohash = offer.approxPickup.geohash(6),  // ~1.2km precision
                         dropoffGeohash = offer.destination.geohash(6),
-                        distanceMiles = offer.rideRouteKm?.let { it * 0.621371 } ?: 0.0,  // Convert km to miles
+                        distanceMiles = RideHistoryBuilder.toDistanceMiles(offer.rideRouteKm),
                         durationMinutes = offer.rideRouteMin?.toInt() ?: 0,
                         fareSats = offer.fareEstimate.toLong(),
                         status = "completed",
@@ -1209,7 +1212,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                         vehicleMake = vehicle?.make,
                         vehicleModel = vehicle?.model,
                         // Rider profile info
-                        counterpartyFirstName = riderProfile?.bestName()?.split(" ")?.firstOrNull()
+                        counterpartyFirstName = RideHistoryBuilder.extractCounterpartyFirstName(riderProfile)
                     )
                     rideHistoryRepository.addRide(historyEntry)
                     Log.d(TAG, "Saved completed ride to history: ${historyEntry.rideId}")
@@ -1696,12 +1699,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     val vehicle = state.activeVehicle
                     val historyEntry = RideHistoryEntry(
                         rideId = confirmationEventId ?: state.acceptanceEventId ?: offer.eventId,
-                        timestamp = System.currentTimeMillis() / 1000,
+                        timestamp = RideHistoryBuilder.currentTimestampSeconds(),
                         role = "driver",
                         counterpartyPubKey = offer.riderPubKey,
                         pickupGeohash = offer.approxPickup.geohash(6),
                         dropoffGeohash = offer.destination.geohash(6),
-                        distanceMiles = offer.rideRouteKm?.let { it * 0.621371 } ?: 0.0,
+                        distanceMiles = RideHistoryBuilder.toDistanceMiles(offer.rideRouteKm),
                         durationMinutes = 0,  // Ride was cancelled, no actual duration
                         fareSats = 0,  // No fare earned for cancelled ride
                         status = "cancelled",
@@ -1738,7 +1741,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             chatSubscriptionId = null
             cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
             cancellationSubscriptionId = null
-            chatRefreshJob?.cancel()
+            chatRefreshJob?.stop()
             chatRefreshJob = null
 
             // Unsubscribe from rider profile
@@ -2589,26 +2592,22 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      */
     private fun startChatRefreshJob(confirmationEventId: String) {
         stopChatRefreshJob()
-        chatRefreshJob = viewModelScope.launch {
-            while (isActive) {
-                delay(CHAT_REFRESH_INTERVAL_MS)
-
-                // CRITICAL: Check cancellation IMMEDIATELY after delay
-                // Kotlin coroutine cancellation is cooperative - without this check,
-                // a cancelled job could execute one more iteration after waking up.
-                ensureActive()
-
+        chatRefreshJob = PeriodicRefreshJob(
+            scope = viewModelScope,
+            intervalMs = CHAT_REFRESH_INTERVAL_MS,
+            tag = TAG,
+            onTick = {
                 Log.d(TAG, "Refreshing chat subscription for ${confirmationEventId.take(8)}")
                 subscribeToChatMessages(confirmationEventId)
             }
-        }
+        ).also { it.start() }
     }
 
     /**
      * Stop the periodic chat refresh job.
      */
     private fun stopChatRefreshJob() {
-        chatRefreshJob?.cancel()
+        chatRefreshJob?.stop()
         chatRefreshJob = null
     }
 
@@ -2745,12 +2744,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             val vehicle = state.activeVehicle
             val historyEntry = RideHistoryEntry(
                 rideId = state.confirmationEventId ?: state.acceptanceEventId ?: offer.eventId,
-                timestamp = System.currentTimeMillis() / 1000,
+                timestamp = RideHistoryBuilder.currentTimestampSeconds(),
                 role = "driver",
                 counterpartyPubKey = offer.riderPubKey,
                 pickupGeohash = offer.approxPickup.geohash(6),
                 dropoffGeohash = offer.destination.geohash(6),
-                distanceMiles = offer.rideRouteKm?.let { it * 0.621371 } ?: 0.0,
+                distanceMiles = RideHistoryBuilder.toDistanceMiles(offer.rideRouteKm),
                 durationMinutes = 0,
                 fareSats = if (claimed) offer.fareEstimate.toLong() else 0,
                 status = if (claimed) "cancelled_claimed" else "cancelled",
@@ -2812,6 +2811,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Stop the foreground service and RoadFlare broadcasting if going offline
         if (newStage == DriverStage.OFFLINE) {
             DriverOnlineService.stop(context)
+            // Broadcast OFFLINE status before stopping so followers see driver go offline
+            broadcastRoadflareOfflineStatus()
             stopRoadflareBroadcasting()
             // Note: driverOnlineStatus is now set by DriverOnlineService (authoritative)
         } else {
@@ -2979,12 +2980,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                         val riderProfile = state.riderProfiles[offer.riderPubKey]
                         val historyEntry = RideHistoryEntry(
                             rideId = state.confirmationEventId ?: state.acceptanceEventId ?: offer.eventId,
-                            timestamp = System.currentTimeMillis() / 1000,
+                            timestamp = RideHistoryBuilder.currentTimestampSeconds(),
                             role = "driver",
                             counterpartyPubKey = offer.riderPubKey,
                             pickupGeohash = offer.approxPickup.geohash(6),  // ~1.2km precision
                             dropoffGeohash = offer.destination.geohash(6),
-                            distanceMiles = offer.rideRouteKm?.let { it * 0.621371 } ?: 0.0,  // Convert km to miles
+                            distanceMiles = RideHistoryBuilder.toDistanceMiles(offer.rideRouteKm),
                             durationMinutes = offer.rideRouteMin?.toInt() ?: 0,
                             fareSats = offer.fareEstimate.toLong(),
                             status = "completed",
@@ -2992,7 +2993,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                             vehicleMake = vehicle?.make,
                             vehicleModel = vehicle?.model,
                             // Rider profile info
-                            counterpartyFirstName = riderProfile?.bestName()?.split(" ")?.firstOrNull()
+                            counterpartyFirstName = RideHistoryBuilder.extractCounterpartyFirstName(riderProfile)
                         )
                         rideHistoryRepository.addRide(historyEntry)
                         Log.d(TAG, "Saved completed ride to history (go offline): ${historyEntry.rideId}")
@@ -4211,7 +4212,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         super.onCleared()
         stopBroadcasting()
         stopStaleRequestCleanup()
-        chatRefreshJob?.cancel()
+        chatRefreshJob?.stop()
         confirmationTimeoutJob?.cancel()
         offerSubscriptionId?.let { nostrService.closeSubscription(it) }
         roadflareOfferSubscriptionId?.let { nostrService.closeSubscription(it) }

@@ -48,9 +48,10 @@ import com.ridestr.common.state.RideState
 import com.ridestr.common.state.RideStateMachine
 import com.ridestr.common.state.TransitionResult
 import com.ridestr.common.state.riderStageFromDriverStatus
+import com.ridestr.common.util.PeriodicRefreshJob
+import com.ridestr.common.util.RideHistoryBuilder
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -164,7 +165,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     // Monitor selected driver's availability while waiting for acceptance
     private var selectedDriverAvailabilitySubId: String? = null
     private var staleDriverCleanupJob: Job? = null
-    private var chatRefreshJob: Job? = null
+    private var chatRefreshJob: PeriodicRefreshJob? = null
     private var acceptanceTimeoutJob: Job? = null
     private var broadcastTimeoutJob: Job? = null
     private val profileSubscriptionIds = mutableMapOf<String, String>()
@@ -2522,7 +2523,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     val driverProfile = driver?.let { state.driverProfiles[it.driverPubKey] }
                     val historyEntry = RideHistoryEntry(
                         rideId = confirmationId ?: state.pendingOfferEventId ?: "",
-                        timestamp = System.currentTimeMillis() / 1000,
+                        timestamp = RideHistoryBuilder.currentTimestampSeconds(),
                         role = "rider",
                         counterpartyPubKey = driver?.driverPubKey ?: driverPubKey ?: "",
                         pickupGeohash = state.pickupLocation?.geohash(6) ?: "",
@@ -2534,12 +2535,12 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                         dropoffLat = state.destination?.lat,
                         dropoffLon = state.destination?.lon,
                         dropoffAddress = state.destination?.addressLabel,
-                        distanceMiles = (state.routeResult?.distanceKm ?: 0.0) * 0.621371,
+                        distanceMiles = RideHistoryBuilder.toDistanceMiles(state.routeResult?.distanceKm),
                         durationMinutes = 0,  // Ride was cancelled, no actual duration
                         fareSats = 0,  // No fare charged for cancelled ride
                         status = "cancelled",
                         // Driver details for ride history
-                        counterpartyFirstName = driverProfile?.bestName()?.split(" ")?.firstOrNull(),
+                        counterpartyFirstName = RideHistoryBuilder.extractCounterpartyFirstName(driverProfile),
                         vehicleMake = driver?.carMake,
                         vehicleModel = driver?.carModel
                     )
@@ -3526,17 +3527,11 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      */
     private fun startChatRefreshJob(confirmationEventId: String) {
         stopChatRefreshJob()
-        chatRefreshJob = viewModelScope.launch {
-            while (isActive) {
-                delay(CHAT_REFRESH_INTERVAL_MS)
-
-                // CRITICAL: Check cancellation IMMEDIATELY after delay
-                // Kotlin coroutine cancellation is cooperative - cancel() only sets a flag.
-                // Without this check, a cancelled job suspended in delay() would execute
-                // one more iteration after waking up, potentially creating stale subscriptions
-                // that receive events from a previous ride (phantom cancellation bug).
-                ensureActive()
-
+        chatRefreshJob = PeriodicRefreshJob(
+            scope = viewModelScope,
+            intervalMs = CHAT_REFRESH_INTERVAL_MS,
+            tag = TAG,
+            onTick = {
                 Log.d(TAG, "Refreshing chat and driver state subscriptions for ${confirmationEventId.take(8)}")
                 subscribeToChatMessages(confirmationEventId)
                 // Refresh driver ride state subscription if we have acceptance data
@@ -3544,14 +3539,14 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     subscribeToDriverRideState(confirmationEventId, driverPubKey)
                 }
             }
-        }
+        ).also { it.start() }
     }
 
     /**
      * Stop the periodic chat refresh job.
      */
     private fun stopChatRefreshJob() {
-        chatRefreshJob?.cancel()
+        chatRefreshJob?.stop()
         chatRefreshJob = null
     }
 
@@ -3795,7 +3790,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val historyEntry = RideHistoryEntry(
                     rideId = state.confirmationEventId ?: state.pendingOfferEventId ?: "",
-                    timestamp = System.currentTimeMillis() / 1000,
+                    timestamp = RideHistoryBuilder.currentTimestampSeconds(),
                     role = "rider",
                     counterpartyPubKey = driver?.driverPubKey ?: state.acceptance?.driverPubKey ?: "",
                     pickupGeohash = state.pickupLocation?.geohash(6) ?: "",  // ~1.2km for compatibility
@@ -3807,12 +3802,12 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     dropoffLat = state.destination?.lat,
                     dropoffLon = state.destination?.lon,
                     dropoffAddress = state.destination?.addressLabel,
-                    distanceMiles = (state.routeResult?.distanceKm ?: 0.0) * 0.621371,
+                    distanceMiles = RideHistoryBuilder.toDistanceMiles(state.routeResult?.distanceKm),
                     durationMinutes = ((state.routeResult?.durationSeconds ?: 0.0) / 60).toInt(),
                     fareSats = finalFareSats,
                     status = "completed",
                     // Driver details for ride history
-                    counterpartyFirstName = driverProfile?.bestName()?.split(" ")?.firstOrNull(),
+                    counterpartyFirstName = RideHistoryBuilder.extractCounterpartyFirstName(driverProfile),
                     vehicleMake = driver?.carMake,
                     vehicleModel = driver?.carModel
                 )
@@ -3910,7 +3905,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 try {
                     val historyEntry = RideHistoryEntry(
                         rideId = state.confirmationEventId ?: state.pendingOfferEventId ?: "",
-                        timestamp = System.currentTimeMillis() / 1000,
+                        timestamp = RideHistoryBuilder.currentTimestampSeconds(),
                         role = "rider",
                         counterpartyPubKey = driver?.driverPubKey ?: state.acceptance?.driverPubKey ?: "",
                         pickupGeohash = state.pickupLocation?.geohash(6) ?: "",
@@ -3922,12 +3917,12 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                         dropoffLat = state.destination?.lat,
                         dropoffLon = state.destination?.lon,
                         dropoffAddress = state.destination?.addressLabel,
-                        distanceMiles = (state.routeResult?.distanceKm ?: 0.0) * 0.621371,
+                        distanceMiles = RideHistoryBuilder.toDistanceMiles(state.routeResult?.distanceKm),
                         durationMinutes = 0,  // Ride was cancelled, no actual duration
                         fareSats = 0,  // No fare charged for cancelled ride
                         status = "cancelled",
                         // Driver details for ride history
-                        counterpartyFirstName = driverProfile?.bestName()?.split(" ")?.firstOrNull(),
+                        counterpartyFirstName = RideHistoryBuilder.extractCounterpartyFirstName(driverProfile),
                         vehicleMake = driver?.carMake,
                         vehicleModel = driver?.carModel
                     )
@@ -4189,7 +4184,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         super.onCleared()
         staleDriverCleanupJob?.cancel()
-        chatRefreshJob?.cancel()
+        chatRefreshJob?.stop()
         acceptanceTimeoutJob?.cancel()
         broadcastTimeoutJob?.cancel()
         driverSubscriptionId?.let { nostrService.closeSubscription(it) }
