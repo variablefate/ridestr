@@ -85,13 +85,18 @@ object RoadflareKeyShareEvent {
 
         // Check if we're the intended recipient
         val recipientTag = event.tags.find { it.size >= 2 && it[0] == RideshareTags.PUBKEY_REF }
-        if (recipientTag?.get(1) != signer.pubKey) return null
+        if (recipientTag?.get(1) != signer.pubKey) {
+            android.util.Log.d("RoadflareKeyShareEvent", "Wrong recipient: expected=${signer.pubKey.take(8)}, got=${recipientTag?.get(1)?.take(8)}")
+            return null
+        }
 
         // Check if event has expired
         val expirationTag = event.tags.find { it.size >= 2 && it[0] == "expiration" }
         val expiration = expirationTag?.get(1)?.toLongOrNull()
-        if (expiration != null && expiration < System.currentTimeMillis() / 1000) {
-            return null // Event has expired
+        val now = System.currentTimeMillis() / 1000
+        if (expiration != null && expiration < now) {
+            android.util.Log.d("RoadflareKeyShareEvent", "Event expired: expiration=$expiration, now=$now, expired ${now - expiration}s ago")
+            return null
         }
 
         return try {
@@ -114,6 +119,7 @@ object RoadflareKeyShareEvent {
                 createdAt = event.createdAt
             )
         } catch (e: Exception) {
+            android.util.Log.e("RoadflareKeyShareEvent", "Decrypt/parse failed for eventId=${event.id.take(8)}: ${e.message}")
             null
         }
     }

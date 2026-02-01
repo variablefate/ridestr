@@ -294,7 +294,37 @@ fun RoadflareTab(
         if (nostrService == null) return
         scope.launch {
             drivers.forEach { driver ->
-                val storedKeyUpdatedAt = driver.roadflareKey?.keyUpdatedAt ?: 0L
+                val storedKey = driver.roadflareKey
+                val storedKeyUpdatedAt = storedKey?.keyUpdatedAt ?: 0L
+
+                // If we have no key yet, request a fresh key share (rate-limited).
+                if (storedKey == null) {
+                    val lastRefreshRequest = keyRefreshRequests[driver.pubkey] ?: 0L
+                    val now = System.currentTimeMillis()
+                    val oneHourMs = 3600_000L
+
+                    if (now - lastRefreshRequest > oneHourMs) {
+                        keyRefreshRequests[driver.pubkey] = now
+
+                        val eventId = nostrService.publishRoadflareKeyAck(
+                            driverPubKey = driver.pubkey,
+                            keyVersion = 0,
+                            keyUpdatedAt = 0L,
+                            status = "stale"
+                        )
+                        if (eventId != null) {
+                            Log.d(TAG, "Requested key refresh (no key) for ${driver.pubkey.take(8)}: eventId=${eventId.take(8)}")
+                        } else {
+                            Log.w(TAG, "Failed to request key refresh (no key) for ${driver.pubkey.take(8)}")
+                        }
+                    } else {
+                        Log.d(TAG, "Skipping key refresh (no key) for ${driver.pubkey.take(8)} - rate limited (last request ${(now - lastRefreshRequest) / 1000}s ago)")
+                    }
+
+                    staleKeyDrivers[driver.pubkey] = false
+                    return@forEach
+                }
+
                 if (storedKeyUpdatedAt > 0) {
                     // Fetch driver's current key_updated_at from their Kind 30012
                     val currentKeyUpdatedAt = nostrService.fetchDriverKeyUpdatedAt(driver.pubkey)

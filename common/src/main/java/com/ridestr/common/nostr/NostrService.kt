@@ -2423,15 +2423,16 @@ class NostrService(
         return try {
             val event = RoadflareKeyShareEvent.create(signer, followerPubKey, roadflareKey, keyUpdatedAt)
             if (event != null) {
+                Log.d(TAG, "Publishing Kind 3186 to ${followerPubKey.take(8)}: eventId=${event.id.take(8)}, relays=${relayManager.connectedCount()}")
                 relayManager.publish(event)
-                Log.d(TAG, "Published RoadFlare key share v${roadflareKey.version} to ${followerPubKey.take(8)}... (expires in 5 min)")
+                Log.d(TAG, "Published Kind 3186 to ${followerPubKey.take(8)}: eventId=${event.id.take(8)}, v${roadflareKey.version} (expires in 5 min)")
                 event.id
             } else {
-                Log.e(TAG, "Failed to create RoadFlare key share event")
+                Log.e(TAG, "Failed to create Kind 3186 event for ${followerPubKey.take(8)}")
                 null
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to publish RoadFlare key share", e)
+            Log.e(TAG, "Failed to publish Kind 3186 to ${followerPubKey.take(8)}", e)
             null
         }
     }

@@ -232,52 +232,57 @@ fun RidestrApp() {
         kotlinx.coroutines.delay(2000)
 
         val subId = nostrService.subscribeToRoadflareKeyShares { event, relayUrl ->
-            android.util.Log.d("MainActivity", "Received RoadFlare key share from ${event.pubKey.take(16)}")
+            android.util.Log.d("MainActivity", "Kind 3186 received: from=${event.pubKey.take(8)}, eventId=${event.id.take(8)}, relay=$relayUrl")
 
             val signer = nostrService.keyManager.getSigner()
-            if (signer != null) {
-                kotlinx.coroutines.runBlocking {
-                    try {
-                        val keyShareData = RoadflareKeyShareEvent.parseAndDecrypt(signer, event)
-                        if (keyShareData != null) {
-                            android.util.Log.d("MainActivity", "Key share: driver=${keyShareData.driverPubKey.take(16)} version=${keyShareData.roadflareKey.version}")
+            if (signer == null) {
+                android.util.Log.e("MainActivity", "Kind 3186: No signer available - cannot decrypt")
+                return@subscribeToRoadflareKeyShares
+            }
 
-                            // Update or add the driver with the new key
-                            val existingDriver = followedDriversRepo.drivers.value.find { it.pubkey == keyShareData.driverPubKey }
-                            if (existingDriver != null) {
-                                // Update existing driver with new key (including keyUpdatedAt)
-                                val updatedKey = keyShareData.roadflareKey.copy(keyUpdatedAt = keyShareData.keyUpdatedAt)
-                                followedDriversRepo.updateDriverKey(keyShareData.driverPubKey, updatedKey)
-                                android.util.Log.d("MainActivity", "Updated key for driver ${keyShareData.driverPubKey.take(16)} to v${keyShareData.roadflareKey.version}")
-                            } else {
-                                // Driver not in our list - they must have added us first
-                                // Add them with the key
-                                val newDriver = FollowedDriver(
-                                    pubkey = keyShareData.driverPubKey,
-                                    addedAt = System.currentTimeMillis() / 1000,
-                                    note = "",
-                                    roadflareKey = keyShareData.roadflareKey.copy(keyUpdatedAt = keyShareData.keyUpdatedAt)
-                                )
-                                followedDriversRepo.addDriver(newDriver)
-                                android.util.Log.d("MainActivity", "Added new driver ${keyShareData.driverPubKey.take(16)} with key v${keyShareData.roadflareKey.version}")
-                            }
+            kotlinx.coroutines.runBlocking {
+                try {
+                    val keyShareData = RoadflareKeyShareEvent.parseAndDecrypt(signer, event)
+                    if (keyShareData != null) {
+                        android.util.Log.d("MainActivity", "Kind 3186 parsed OK: driver=${keyShareData.driverPubKey.take(8)}, version=${keyShareData.roadflareKey.version}")
 
-                            // Send acknowledgement back to driver (Kind 3188)
-                            val ackEventId = nostrService.publishRoadflareKeyAck(
-                                driverPubKey = keyShareData.driverPubKey,
-                                keyVersion = keyShareData.roadflareKey.version,
-                                keyUpdatedAt = keyShareData.keyUpdatedAt
+                        // Update or add the driver with the new key
+                        val existingDriver = followedDriversRepo.drivers.value.find { it.pubkey == keyShareData.driverPubKey }
+                        if (existingDriver != null) {
+                            // Update existing driver with new key (including keyUpdatedAt)
+                            val updatedKey = keyShareData.roadflareKey.copy(keyUpdatedAt = keyShareData.keyUpdatedAt)
+                            followedDriversRepo.updateDriverKey(keyShareData.driverPubKey, updatedKey)
+                            android.util.Log.d("MainActivity", "Updated key for driver ${keyShareData.driverPubKey.take(16)} to v${keyShareData.roadflareKey.version}")
+                        } else {
+                            // Driver not in our list - they must have added us first
+                            // Add them with the key
+                            val newDriver = FollowedDriver(
+                                pubkey = keyShareData.driverPubKey,
+                                addedAt = System.currentTimeMillis() / 1000,
+                                note = "",
+                                roadflareKey = keyShareData.roadflareKey.copy(keyUpdatedAt = keyShareData.keyUpdatedAt)
                             )
-                            if (ackEventId != null) {
-                                android.util.Log.d("MainActivity", "Sent key ack to driver ${keyShareData.driverPubKey.take(16)}")
-                            }
-
-                            // Backup updated state to Nostr
-                            profileSyncManager.backupProfileData()
+                            followedDriversRepo.addDriver(newDriver)
+                            android.util.Log.d("MainActivity", "Added new driver ${keyShareData.driverPubKey.take(16)} with key v${keyShareData.roadflareKey.version}")
                         }
-                    } catch (e: Exception) {
-                        android.util.Log.e("MainActivity", "Error processing key share", e)
+
+                        // Send acknowledgement back to driver (Kind 3188)
+                        val ackEventId = nostrService.publishRoadflareKeyAck(
+                            driverPubKey = keyShareData.driverPubKey,
+                            keyVersion = keyShareData.roadflareKey.version,
+                            keyUpdatedAt = keyShareData.keyUpdatedAt
+                        )
+                        if (ackEventId != null) {
+                            android.util.Log.d("MainActivity", "Sent key ack to driver ${keyShareData.driverPubKey.take(16)}")
+                        }
+
+                        // Backup updated state to Nostr
+                        profileSyncManager.backupProfileData()
+                    } else {
+                        android.util.Log.w("MainActivity", "Kind 3186 parse FAILED: from=${event.pubKey.take(8)}, eventId=${event.id.take(8)} (expired or wrong recipient)")
                     }
+                } catch (e: Exception) {
+                    android.util.Log.e("MainActivity", "Kind 3186 processing error: from=${event.pubKey.take(8)}", e)
                 }
             }
         }
