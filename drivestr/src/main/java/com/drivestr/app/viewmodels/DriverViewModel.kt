@@ -778,6 +778,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             // Close roadflare-only subscription (full subscribeToOffers replaces it)
             closeRoadflareOfferSubscription()
             // RoadFlare broadcasting already running — don't restart
+            // Update service status from ROADFLARE_ONLY to AVAILABLE (service is authoritative)
+            DriverOnlineService.updateStatus(context, DriverStatus.Available(0))
         } else {
             // Fresh start: launch foreground service and RoadFlare broadcasting
             DriverOnlineService.start(context)
