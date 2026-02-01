@@ -148,6 +148,24 @@ CREATED → ACCEPTED → CONFIRMED → EN_ROUTE → ARRIVED → IN_PROGRESS → 
 | `TileManagementScreen.kt` | Offline map tile management |
 | `TileSetupScreen.kt` | Tile download region setup |
 
+### Shared UI Screens (`java/com/ridestr/common/ui/screens/`)
+
+Extracted from both apps to eliminate duplication. Each app keeps a thin wrapper for ViewModel integration.
+
+| File | Purpose | Params for Customization |
+|------|---------|--------------------------|
+| `KeyBackupScreen.kt` | Key backup display (100% identical between apps) | `npub`, `nsec`, `onBack` |
+| `ProfileSetupContent.kt` | Profile editing form (used by ProfileSetupScreen wrapper) | `roleDescriptionText`, `aboutPlaceholderText` |
+| `OnboardingComponents.kt` | Key setup + backup reminder screens | `headlineText`, `subtitleText` |
+
+### Shared UI Components (`java/com/ridestr/common/ui/components/`)
+
+Reusable composables extracted from both apps' SettingsScreen files.
+
+| File | Components | Notes |
+|------|------------|-------|
+| `SettingsComponents.kt` | `SettingsSwitchRow`, `SettingsNavigationRow`, `SettingsActionRow` | SwitchRow has `enabled: Boolean = true` param with alpha styling |
+
 ### Other Services
 
 | File | Purpose |

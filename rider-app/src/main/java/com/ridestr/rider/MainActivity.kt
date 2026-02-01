@@ -29,7 +29,7 @@ import com.ridestr.rider.ui.screens.RiderModeScreen
 import com.ridestr.rider.ui.screens.RoadflareTab
 import com.ridestr.rider.ui.screens.AddDriverScreen
 import com.ridestr.rider.ui.screens.HistoryScreen
-import com.ridestr.rider.ui.screens.KeyBackupScreen
+import com.ridestr.common.ui.screens.KeyBackupScreen
 import com.ridestr.rider.ui.screens.OnboardingScreen
 import com.ridestr.rider.ui.screens.ProfileSetupScreen
 import com.ridestr.rider.ui.screens.SettingsContent

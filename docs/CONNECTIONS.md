@@ -849,6 +849,10 @@ private var connectionGeneration = 0L  // Increments on connect()
 | **RelayManager** | `common/src/main/java/com/ridestr/common/nostr/relay/RelayManager.kt` |
 | **WalletDetailScreen** | `common/src/main/java/com/ridestr/common/ui/WalletDetailScreen.kt` |
 | **WalletSettingsScreen** | `common/src/main/java/com/ridestr/common/ui/WalletSettingsScreen.kt` |
+| **KeyBackupScreen** | `common/src/main/java/com/ridestr/common/ui/screens/KeyBackupScreen.kt` |
+| **ProfileSetupContent** | `common/src/main/java/com/ridestr/common/ui/screens/ProfileSetupContent.kt` |
+| **OnboardingComponents** | `common/src/main/java/com/ridestr/common/ui/screens/OnboardingComponents.kt` |
+| **SettingsComponents** | `common/src/main/java/com/ridestr/common/ui/components/SettingsComponents.kt` |
 | **RideHistoryRepository** | `common/src/main/java/com/ridestr/common/data/RideHistoryRepository.kt` |
 | **FollowedDriversRepository** | `common/src/main/java/com/ridestr/common/data/FollowedDriversRepository.kt` |
 | **DriverRoadflareRepository** | `common/src/main/java/com/ridestr/common/data/DriverRoadflareRepository.kt` |

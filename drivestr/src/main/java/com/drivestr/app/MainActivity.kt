@@ -30,7 +30,7 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.google.android.gms.location.LocationServices
 import com.drivestr.app.ui.screens.DriverModeScreen
-import com.drivestr.app.ui.screens.KeyBackupScreen
+import com.ridestr.common.ui.screens.KeyBackupScreen
 import com.drivestr.app.ui.screens.OnboardingScreen
 import com.drivestr.app.ui.screens.ProfileSetupScreen
 import com.drivestr.app.ui.screens.SettingsContent

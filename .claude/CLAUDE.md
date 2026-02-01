@@ -597,6 +597,62 @@ NostrService.publishRoadflareKeyAck(driverPubKey, keyVersion, keyUpdatedAt, stat
 // 3. Re-send key via roadflareKeyManager.sendKeyToFollower()
 ```
 
+## Shared UI Components (January 2026 Refactoring)
+
+### Overview
+Duplicated UI code was extracted from both apps into the common module to reduce maintenance burden.
+
+### Extracted Components
+
+| File | Components | Savings |
+|------|------------|---------|
+| `common/.../ui/screens/KeyBackupScreen.kt` | Key backup display (100% identical) | ~150 lines |
+| `common/.../ui/screens/ProfileSetupContent.kt` | Profile editing form | ~170 lines |
+| `common/.../ui/screens/OnboardingComponents.kt` | `KeySetupScreen`, `BackupReminderScreen` | ~270 lines |
+| `common/.../ui/components/SettingsComponents.kt` | `SettingsSwitchRow`, `SettingsNavigationRow`, `SettingsActionRow` | ~145 lines |
+
+### Pattern: Wrapper/Content Split
+
+For screens that need app-specific ViewModels, we use the **wrapper/content pattern**:
+- **Content composable** (in common): Takes primitive params, no app-specific types
+- **Wrapper composable** (in each app): Connects ViewModel to content
+
+```kotlin
+// In common: ProfileSetupContent.kt
+@Composable
+fun ProfileSetupContent(
+    npub: String?,                    // Primitives, not UiState
+    displayName: String,
+    roleDescriptionText: String,      // App-specific customization
+    aboutPlaceholderText: String,
+    onSave: () -> Unit,
+    // ...
+)
+
+// In rider-app: ProfileSetupScreen.kt
+@Composable
+fun ProfileSetupScreen(viewModel: ProfileViewModel, ...) {
+    val uiState by viewModel.uiState.collectAsState()
+    ProfileSetupContent(
+        npub = uiState.npub,
+        roleDescriptionText = "Tell drivers about yourself",
+        // ...
+    )
+}
+```
+
+### App-Specific Customization
+
+| Component | Rider App | Driver App |
+|-----------|-----------|------------|
+| ProfileSetupContent | "Tell drivers about yourself" | "Tell riders about yourself" |
+| KeySetupScreen | "Welcome to Ridestr" | "Welcome to Drivestr" |
+| SettingsSwitchRow | `enabled = true` (default) | Uses `enabled` param with alpha styling |
+
+### Files Deleted (Moved to Common)
+- `rider-app/.../KeyBackupScreen.kt`
+- `drivestr/.../KeyBackupScreen.kt`
+
 ## Profile Sync Architecture
 
 ### Overview
