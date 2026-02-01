@@ -7,10 +7,13 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
-import com.ridestr.rider.MainActivity
+import com.ridestr.common.notification.AlertType
+import com.ridestr.common.notification.NotificationCoordinator
 import com.ridestr.common.notification.NotificationHelper
 import com.ridestr.common.notification.SoundManager
 import com.ridestr.common.settings.SettingsManager
+import com.ridestr.rider.MainActivity
+import com.ridestr.rider.notification.RiderNotificationTextProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -30,17 +33,6 @@ sealed class RiderStatus : Serializable {
     data class DriverArrived(val driverName: String?) : RiderStatus()
     data class RideInProgress(val driverName: String?) : RiderStatus()
     object Cancelled : RiderStatus()
-}
-
-/**
- * Stackable alerts that persist until the app comes to foreground.
- * Multiple alerts can be stacked and displayed together in the notification.
- */
-sealed class StackableAlert : Serializable {
-    data class Chat(val preview: String) : StackableAlert()
-    data class DriverAccepted(val driverName: String?) : StackableAlert()
-    data class DriverEnRoute(val driverName: String?) : StackableAlert()
-    data class Arrived(val driverName: String?) : StackableAlert()
 }
 
 /**
@@ -98,7 +90,7 @@ class RiderActiveService : Service() {
          * Add a stackable alert (chat message or driver arrived).
          * Alerts persist until clearAlerts() is called (when app comes to foreground).
          */
-        fun addAlert(context: Context, alert: StackableAlert) {
+        fun addAlert(context: Context, alert: AlertType) {
             Log.d(TAG, "Adding alert: $alert")
             val intent = Intent(context, RiderActiveService::class.java).apply {
                 action = ACTION_ADD_ALERT
@@ -139,11 +131,8 @@ class RiderActiveService : Service() {
         }
     }
 
-    // Current base status (the underlying ride state)
-    private var currentStatus: RiderStatus = RiderStatus.Searching
-
-    // Stacked alerts that persist until cleared (when app comes to foreground)
-    private val alertStack = mutableListOf<StackableAlert>()
+    // Notification coordinator handles status text, channel, and alert stacking
+    private val coordinator = NotificationCoordinator(RiderNotificationTextProvider())
 
     // Coroutine scope for any async work
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
@@ -166,8 +155,8 @@ class RiderActiveService : Service() {
         when (intent?.action) {
             ACTION_START_SEARCHING -> {
                 Log.d(TAG, "Received START_SEARCHING action")
-                currentStatus = RiderStatus.Searching
-                alertStack.clear()
+                coordinator.updateStatus(RiderStatus.Searching)
+                coordinator.clearAlerts()
                 updateNotification()
             }
             ACTION_UPDATE_STATUS -> {
@@ -177,19 +166,19 @@ class RiderActiveService : Service() {
                 }
             }
             ACTION_ADD_ALERT -> {
-                val alert = intent.getSerializableExtra(EXTRA_ALERT) as? StackableAlert
+                val alert = intent.getSerializableExtra(EXTRA_ALERT) as? AlertType
                 if (alert != null) {
                     handleAddAlert(alert)
                 }
             }
             ACTION_CLEAR_ALERTS -> {
                 Log.d(TAG, "Clearing alert stack")
-                alertStack.clear()
+                coordinator.clearAlerts()
                 updateNotification()
             }
             ACTION_STOP -> {
                 Log.d(TAG, "Received STOP action")
-                alertStack.clear()
+                coordinator.clearAlerts()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
@@ -217,43 +206,43 @@ class RiderActiveService : Service() {
 
         when (status) {
             is RiderStatus.Searching -> {
-                currentStatus = status
-                alertStack.clear()  // Clear alerts when starting fresh search
+                // Clear alerts when starting fresh search
+                coordinator.clearAlerts()
+                coordinator.updateStatus(status)
                 updateNotification()
             }
             is RiderStatus.DriverAccepted -> {
-                currentStatus = status
                 // Play confirmation sound (respecting user settings)
                 val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
                 val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
                 SoundManager.playConfirmationAlert(this, soundEnabled, vibrationEnabled)
                 // Add to alert stack so it persists in notification when backgrounded
-                alertStack.add(StackableAlert.DriverAccepted(status.driverName))
+                coordinator.addAlert(AlertType.Accepted(status.driverName))
+                coordinator.updateStatus(status)
                 updateNotification()
             }
             is RiderStatus.DriverEnRoute -> {
-                currentStatus = status
-                // Replace accepted alert with en route alert
-                alertStack.removeAll { it is StackableAlert.DriverAccepted }
-                alertStack.add(StackableAlert.DriverEnRoute(status.driverName))
+                // coordinator.addAlert clears Accepted when adding EnRoute
+                coordinator.addAlert(AlertType.EnRoute(status.driverName))
+                coordinator.updateStatus(status)
                 updateNotification()
             }
             is RiderStatus.DriverArrived -> {
-                // Update base status AND add to alert stack
-                currentStatus = status
                 // Play driver arrived sound (respecting user settings)
                 val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
                 val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
                 SoundManager.playDriverArrivedAlert(this, soundEnabled, vibrationEnabled)
-                // Replace en route alert with arrived alert
-                alertStack.removeAll { it is StackableAlert.DriverEnRoute }
-                alertStack.add(StackableAlert.Arrived(status.driverName))
+                // coordinator.addAlert clears EnRoute when adding Arrived
+                coordinator.addAlert(AlertType.Arrived(status.driverName))
+                coordinator.updateStatus(status)
                 updateNotification()
             }
             is RiderStatus.RideInProgress -> {
-                currentStatus = status
                 // Clear ride status alerts when ride starts (keep chat messages)
-                alertStack.removeAll { it is StackableAlert.Arrived || it is StackableAlert.DriverEnRoute || it is StackableAlert.DriverAccepted }
+                coordinator.clearAlertsOfType(AlertType.Arrived::class.java)
+                coordinator.clearAlertsOfType(AlertType.EnRoute::class.java)
+                coordinator.clearAlertsOfType(AlertType.Accepted::class.java)
+                coordinator.updateStatus(status)
                 updateNotification()
             }
             is RiderStatus.Cancelled -> {
@@ -261,55 +250,46 @@ class RiderActiveService : Service() {
                 val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
                 val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
                 SoundManager.playCancellationAlert(this, soundEnabled, vibrationEnabled)
-                currentStatus = status
-                alertStack.clear()
+                // Clear ALL alerts on cancellation
+                coordinator.clearAlerts()
+                coordinator.updateStatus(status)
                 updateNotification()
             }
         }
     }
 
-    private fun handleAddAlert(alert: StackableAlert) {
+    private fun handleAddAlert(alert: AlertType) {
         Log.d(TAG, "Adding alert to stack: $alert")
 
         when (alert) {
-            is StackableAlert.Chat -> {
+            is AlertType.Chat -> {
                 // Play chat sound (respecting user settings)
                 val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
                 val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
                 SoundManager.playChatMessageAlert(this, soundEnabled, vibrationEnabled)
-                // Add to stack (allow multiple chat messages)
-                alertStack.add(alert)
             }
-            is StackableAlert.DriverAccepted -> {
+            is AlertType.Accepted -> {
                 // Play confirmation sound (respecting user settings)
                 val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
                 val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
                 SoundManager.playConfirmationAlert(this, soundEnabled, vibrationEnabled)
-                // Only add if not already present
-                if (alertStack.none { it is StackableAlert.DriverAccepted }) {
-                    alertStack.add(alert)
-                }
             }
-            is StackableAlert.DriverEnRoute -> {
-                // Replace accepted with en route
-                alertStack.removeAll { it is StackableAlert.DriverAccepted }
-                if (alertStack.none { it is StackableAlert.DriverEnRoute }) {
-                    alertStack.add(alert)
-                }
+            is AlertType.EnRoute -> {
+                // No sound for en route - transitional state
             }
-            is StackableAlert.Arrived -> {
+            is AlertType.Arrived -> {
                 // Play driver arrived sound (respecting user settings)
                 val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
                 val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
                 SoundManager.playDriverArrivedAlert(this, soundEnabled, vibrationEnabled)
-                // Replace en route with arrived
-                alertStack.removeAll { it is StackableAlert.DriverEnRoute }
-                if (alertStack.none { it is StackableAlert.Arrived }) {
-                    alertStack.add(alert)
-                }
+            }
+            else -> {
+                // Other alert types (driver-specific) - just add without sound
             }
         }
 
+        // coordinator.addAlert handles dedup and status-clearing logic
+        coordinator.addAlert(alert)
         updateNotification()
     }
 
@@ -323,106 +303,27 @@ class RiderActiveService : Service() {
     }
 
     private fun buildNotification(): android.app.Notification {
-        val (title, content) = getNotificationText()
+        // Use coordinator for notification data, fall back if status not yet set
+        val data = coordinator.buildNotificationData()
 
-        // Use high priority when there are alerts or important status changes
-        val isHighPriority = alertStack.isNotEmpty() || when (currentStatus) {
-            is RiderStatus.DriverAccepted,
-            is RiderStatus.DriverArrived,
-            is RiderStatus.Cancelled -> true
-            else -> false
-        }
-
-        return NotificationHelper.buildRiderStatusNotification(
-            context = this,
-            contentIntent = createContentIntent(),
-            title = title,
-            content = content,
-            isHighPriority = isHighPriority
-        )
-    }
-
-    private fun getNotificationText(): Pair<String, String> {
-        // If we have stacked alerts, show them
-        if (alertStack.isNotEmpty()) {
-            // Sort alerts: Chat messages first (most visible at top), then ride status alerts
-            val sortedAlerts = alertStack.sortedBy { alert ->
-                when (alert) {
-                    is StackableAlert.Chat -> 0  // Chat at top
-                    is StackableAlert.Arrived -> 1
-                    is StackableAlert.DriverEnRoute -> 2
-                    is StackableAlert.DriverAccepted -> 3
-                }
-            }
-
-            // Title is based on most important alert type present
-            val hasChat = sortedAlerts.any { it is StackableAlert.Chat }
-            val hasArrived = sortedAlerts.any { it is StackableAlert.Arrived }
-            val hasEnRoute = sortedAlerts.any { it is StackableAlert.DriverEnRoute }
-            val hasAccepted = sortedAlerts.any { it is StackableAlert.DriverAccepted }
-
-            val title = when {
-                hasChat && hasArrived -> "Driver arrived + Message"
-                hasChat && hasEnRoute -> "Driver on the way + Message"
-                hasChat && hasAccepted -> "Driver found + Message"
-                hasArrived -> "Driver has arrived!"
-                hasEnRoute -> "Driver on the way!"
-                hasAccepted -> "Driver found!"
-                hasChat -> "Message from Driver"
-                else -> "Alert"
-            }
-
-            // Content shows all stacked alerts (chat first)
-            val content = sortedAlerts.joinToString("\n") { alert ->
-                when (alert) {
-                    is StackableAlert.Chat -> {
-                        "Message: ${alert.preview.take(40)}"
-                    }
-                    is StackableAlert.Arrived -> {
-                        val name = alert.driverName ?: "Your driver"
-                        "$name is waiting at pickup"
-                    }
-                    is StackableAlert.DriverEnRoute -> {
-                        val name = alert.driverName ?: "Your driver"
-                        "$name is heading to you"
-                    }
-                    is StackableAlert.DriverAccepted -> {
-                        val name = alert.driverName ?: "A driver"
-                        "$name accepted your ride"
-                    }
-                }
-            }
-
-            return title to content
-        }
-
-        // No alerts - show base status
-        return getBaseStatusText(currentStatus)
-    }
-
-    private fun getBaseStatusText(status: RiderStatus): Pair<String, String> {
-        return when (status) {
-            is RiderStatus.Searching -> {
-                "Looking for a ride" to "Searching for drivers..."
-            }
-            is RiderStatus.DriverAccepted -> {
-                val name = status.driverName ?: "A driver"
-                "Driver found!" to "$name accepted your ride"
-            }
-            is RiderStatus.DriverEnRoute -> {
-                val name = status.driverName ?: "Your driver"
-                "Driver on the way" to "$name is heading to you"
-            }
-            is RiderStatus.DriverArrived -> {
-                val name = status.driverName ?: "Your driver"
-                "Driver has arrived!" to "$name is waiting at pickup"
-            }
-            is RiderStatus.RideInProgress -> {
-                "Ride in progress" to "On the way to destination"
-            }
-            is RiderStatus.Cancelled -> {
-                "Ride cancelled" to "Your ride was cancelled"
-            }
+        return if (data != null) {
+            NotificationHelper.buildRiderStatusNotification(
+                context = this,
+                contentIntent = createContentIntent(),
+                title = data.title,
+                content = data.content,
+                isHighPriority = data.isHighPriority,
+                channel = data.channel
+            )
+        } else {
+            // Fallback for service startup before first status update
+            NotificationHelper.buildRiderStatusNotification(
+                context = this,
+                contentIntent = createContentIntent(),
+                title = "Starting...",
+                content = "",
+                isHighPriority = false
+            )
         }
     }
 

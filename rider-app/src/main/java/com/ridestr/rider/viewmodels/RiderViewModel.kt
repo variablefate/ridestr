@@ -28,9 +28,9 @@ import com.ridestr.common.nostr.events.RiderRideStateEvent
 import com.ridestr.common.nostr.events.RideshareChatData
 import com.ridestr.common.nostr.events.UserProfile
 import com.ridestr.common.nostr.events.geohash
+import com.ridestr.common.notification.AlertType
 import com.ridestr.rider.service.RiderActiveService
 import com.ridestr.rider.service.RiderStatus
-import com.ridestr.rider.service.StackableAlert
 import kotlin.random.Random
 import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.routing.RouteResult
@@ -3486,7 +3486,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     val context = getApplication<Application>()
                     RiderActiveService.addAlert(
                         context,
-                        StackableAlert.Chat(chatData.message)
+                        AlertType.Chat(chatData.message)
                     )
                     Log.d(TAG, "Chat message received - added to alert stack")
                 }

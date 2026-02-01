@@ -6,8 +6,8 @@ import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.drivestr.app.service.DriverOnlineService
-import com.drivestr.app.service.DriverStackableAlert
 import com.drivestr.app.service.DriverStatus
+import com.ridestr.common.notification.AlertType
 import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.data.DriverRoadflareRepository
 import com.ridestr.common.data.RideHistoryRepository
@@ -832,8 +832,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             statusMessage = "Available for RoadFlare requests only"
         )
 
-        // Start foreground service (needed for background location)
-        DriverOnlineService.start(context)
+        // Start foreground service in ROADFLARE_ONLY mode immediately
+        // This avoids the race window where start() sets AVAILABLE then updateStatus()
+        // sets ROADFLARE_ONLY - during which RoadFlare requests could be dropped
+        DriverOnlineService.startRoadflareOnly(context)
 
         // Sync RoadFlare state from Nostr if local state is missing (cross-device sync)
         // then start RoadFlare broadcasting + offer subscription (RoadFlare-tagged only)
@@ -849,10 +851,6 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 status = DriverAvailabilityEvent.STATUS_AVAILABLE
             )
         }
-
-        // Update service to ROADFLARE_ONLY status
-        // Note: driverOnlineStatus is now set by DriverOnlineService (authoritative)
-        DriverOnlineService.updateStatus(context, DriverStatus.RoadflareOnly)
     }
 
     /**
@@ -2525,7 +2523,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     val context = getApplication<Application>()
                     DriverOnlineService.addAlert(
                         context,
-                        DriverStackableAlert.Chat(chatData.message)
+                        AlertType.Chat(chatData.message)
                     )
                     Log.d(TAG, "Chat message received - added to alert stack")
                 }
