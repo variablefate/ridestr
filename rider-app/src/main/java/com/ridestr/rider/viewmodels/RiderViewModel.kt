@@ -1781,7 +1781,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
         // Cancel the acceptance timeout
         cancelAcceptanceTimeout()
-        closeDriverAvailabilitySubscription()
+        // NOTE: Don't close availability subscription yet - keep monitoring through DRIVER_ACCEPTED
+        // in case driver goes offline before we send confirmation (Kind 3179 won't work without confId)
 
         // Only process if we're still waiting
         if (_uiState.value.rideStage == RideStage.WAITING_FOR_ACCEPTANCE) {
@@ -2406,6 +2407,10 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
                 acceptanceSubscriptionId = null
 
+                // Keep availability subscription OPEN - don't close until EN_ROUTE_PICKUP
+                // Driver may go offline after confirmation but before acknowledging.
+                // The availability subscription detects this and triggers cancellation.
+
                 // Subscribe to cancellation events from driver
                 subscribeToCancellation(eventId)
 
@@ -2789,8 +2794,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
             // Cancel the acceptance timeout - driver responded
             cancelAcceptanceTimeout()
-            // Stop monitoring driver availability - they accepted
-            closeDriverAvailabilitySubscription()
+            // NOTE: Don't close availability subscription yet - keep monitoring through DRIVER_ACCEPTED
+            // in case driver goes offline before confirmation is sent (Kind 3179 won't work without confId)
 
             // Only process if we're still waiting for acceptance
             // This prevents duplicate events from resetting the state after confirmation
@@ -2821,9 +2826,13 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         Log.d(TAG, "Monitoring availability for selected driver ${driverPubKey.take(8)}")
 
         selectedDriverAvailabilitySubId = nostrService.subscribeToDriverAvailability(driverPubKey) { availability ->
-            // Only care about this if we're still waiting for acceptance
-            if (_uiState.value.rideStage != RideStage.WAITING_FOR_ACCEPTANCE) {
-                Log.d(TAG, "Ignoring driver availability - not in WAITING_FOR_ACCEPTANCE stage")
+            val currentStage = _uiState.value.rideStage
+
+            // Only care about this if we're waiting for acceptance OR in early ride stages
+            // CRITICAL: Also check DRIVER_ACCEPTED because driver may cancel before confirmation
+            // arrives (the confirmation hasn't been sent yet, so Kind 3179 cancellation won't work)
+            if (currentStage !in listOf(RideStage.WAITING_FOR_ACCEPTANCE, RideStage.DRIVER_ACCEPTED)) {
+                Log.d(TAG, "Ignoring driver availability - not in pre-confirmation stage (stage=$currentStage)")
                 return@subscribeToDriverAvailability
             }
 
@@ -2831,11 +2840,18 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             if (!availability.isAvailable) {
                 Log.w(TAG, "Selected driver ${driverPubKey.take(8)} is no longer available (status: ${availability.status})")
 
-                // Show dialog to rider
-                _uiState.value = _uiState.value.copy(
-                    showDriverUnavailableDialog = true,
-                    statusMessage = "Driver is no longer available"
-                )
+                if (currentStage == RideStage.DRIVER_ACCEPTED) {
+                    // Driver cancelled after accepting but before we confirmed
+                    // This is effectively a cancellation - clean up and return to IDLE
+                    Log.w(TAG, "Driver went offline during DRIVER_ACCEPTED - treating as cancellation")
+                    handleDriverCancellation("Driver went offline")
+                } else {
+                    // Still waiting for acceptance - show dialog
+                    _uiState.value = _uiState.value.copy(
+                        showDriverUnavailableDialog = true,
+                        statusMessage = "Driver is no longer available"
+                    )
+                }
             }
         }
     }
@@ -2960,6 +2976,10 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 // Close acceptance subscription - we don't need it anymore
                 acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
                 acceptanceSubscriptionId = null
+
+                // Keep availability subscription OPEN - don't close until EN_ROUTE_PICKUP
+                // Driver may go offline after confirmation but before acknowledging.
+                // The availability subscription detects this and triggers cancellation.
 
                 // Update service status - keep DriverAccepted until driver sends EN_ROUTE_PICKUP
                 // AtoB Pattern: Don't transition notification until driver confirms state
@@ -3146,6 +3166,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         when (action.status) {
             DriverStatusType.EN_ROUTE_PICKUP -> {
                 Log.d(TAG, "Driver is en route to pickup (derived stage: $derivedStage)")
+                // NOW safe to close availability subscription - driver has acknowledged the ride
+                // and is actively driving. Any cancellation from here uses Kind 3179.
+                closeDriverAvailabilitySubscription()
                 RiderActiveService.updateStatus(context, RiderStatus.DriverEnRoute(driverName))
                 _uiState.value = state.copy(
                     lastDriverStatus = action.status,
@@ -3612,7 +3635,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             // Only process if we're in an active ride
-            if (currentState.rideStage !in listOf(RideStage.RIDE_CONFIRMED, RideStage.DRIVER_ARRIVED, RideStage.IN_PROGRESS)) {
+            // CRITICAL: Include DRIVER_ACCEPTED - rider stays in this stage until driver sends EN_ROUTE_PICKUP
+            // (AtoB pattern), so driver can cancel during the handshake window
+            if (currentState.rideStage !in listOf(RideStage.DRIVER_ACCEPTED, RideStage.RIDE_CONFIRMED, RideStage.DRIVER_ARRIVED, RideStage.IN_PROGRESS)) {
                 Log.w(TAG, "  >>> REJECTED: not in active ride stage <<<")
                 return@subscribeToCancellation
             }
@@ -3834,6 +3859,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         chatSubscriptionId = null
         cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
         cancellationSubscriptionId = null
+        // Also close availability subscription (may still be open if cancelled before EN_ROUTE_PICKUP)
+        closeDriverAvailabilitySubscription()
 
         // Clear rider state history
         clearRiderStateHistory()
