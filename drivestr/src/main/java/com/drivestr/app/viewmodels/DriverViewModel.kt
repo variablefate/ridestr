@@ -202,6 +202,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     private val takenOfferEventIds = mutableSetOf<String>()
     // Track offer IDs that the driver has declined/passed on
     private val declinedOfferEventIds = mutableSetOf<String>()
+    // Track mode before ride started (for "Stay Online" restoration)
+    private var stageBeforeRide: DriverStage? = null
     // Unified tracker: ALL events I publish during a ride (for cleanup on completion/cancellation)
     // Includes: acceptance, status updates, PIN submission, chat messages
     // Thread-safe list since events are added from multiple coroutines
@@ -864,6 +866,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
         if (currentState.stage != DriverStage.AVAILABLE && currentState.stage != DriverStage.ROADFLARE_ONLY) return
 
+        // Clear saved pre-ride mode when explicitly going offline
+        stageBeforeRide = null
+
         // Stop broadcasting and subscriptions based on current stage
         if (currentState.stage == DriverStage.AVAILABLE) {
             stopBroadcasting()
@@ -1016,6 +1021,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      */
     fun cancelRide() {
         val state = _uiState.value
+
+        // Clear saved pre-ride mode to prevent stale restore
+        stageBeforeRide = null
 
         // Guard: Already cancelling - prevent duplicate invocations
         if (state.isCancelling) {
@@ -1221,9 +1229,17 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         lastBroadcastTimeMs = 0L
         Log.d(TAG, "Reset broadcast state before going back online")
 
-        // Go online immediately - don't wait for cleanup
-        // Use goOnline directly with the captured vehicle (from state at start of function)
-        goOnline(location, state.activeVehicle)
+        // Restore pre-ride mode or default to full online
+        val restoreRoadflareOnly = stageBeforeRide == DriverStage.ROADFLARE_ONLY
+        stageBeforeRide = null  // Clear after use
+
+        // Go online immediately - restore previous mode
+        if (restoreRoadflareOnly) {
+            Log.d(TAG, "Restoring ROADFLARE_ONLY mode after ride completion")
+            goRoadflareOnly(location, state.activeVehicle)
+        } else {
+            goOnline(location, state.activeVehicle)
+        }
     }
 
     /**
@@ -1299,6 +1315,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             )
             rideContext = newContext
             rideState = RideState.CREATED  // Offer exists = CREATED state
+
+            // Save pre-ride mode for "Stay Online" restoration (MUST be before stage change)
+            stageBeforeRide = _uiState.value.stage
+
             validateTransition(RideEvent.Accept(
                 inputterPubkey = myPubkey,
                 driverPubkey = myPubkey,
@@ -1649,6 +1669,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      * Cancel the current ride (can be called at any stage).
      */
     fun cancelCurrentRide(reason: String = "driver_cancelled") {
+        // Clear saved pre-ride mode to prevent stale restore
+        stageBeforeRide = null
+
         val state = _uiState.value
         val confirmationEventId = state.confirmationEventId
         val riderPubKey = state.acceptedOffer?.riderPubKey
@@ -2253,6 +2276,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Stop chat refresh job since ride is ending
         stopChatRefreshJob()
 
+        // Reset RoadFlare on-ride status (broadcasts "ONLINE" instead of "ON_RIDE")
+        updateRoadflareOnRideStatus(false)
+
         viewModelScope.launch {
             // Attempt to settle HTLC escrow if we have preimage and token
             var settlementMessage = ""
@@ -2424,6 +2450,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      * This typically means the rider cancelled before we accepted.
      */
     private fun handleConfirmationTimeout() {
+        // Clear saved pre-ride mode to prevent stale restore
+        stageBeforeRide = null
+
         val context = getApplication<Application>()
 
         // Notify service of cancellation (plays sound, updates notification)
@@ -2722,6 +2751,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      * Perform cancellation cleanup (subscriptions, state, etc.)
      */
     private fun performCancellationCleanup(state: DriverUiState, offer: RideOfferData?, reason: String?) {
+        // Clear saved pre-ride mode to prevent stale restore
+        stageBeforeRide = null
+
         val context = getApplication<Application>()
 
         // Save cancelled ride to history (only if we had an accepted offer and not already saved)
@@ -3666,6 +3698,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             // CRITICAL: Clear history from any previous ride to prevent phantom cancellation bug
             // Without this, history from ride #1 (e.g., CANCELLED) would pollute ride #2's events
             clearDriverStateHistory()
+
+            // Save pre-ride mode for "Stay Online" restoration (MUST be before stage change)
+            stageBeforeRide = _uiState.value.stage
 
             _uiState.value = _uiState.value.copy(isProcessingOffer = true)
 
