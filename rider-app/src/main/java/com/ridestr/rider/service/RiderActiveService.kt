@@ -213,9 +213,7 @@ class RiderActiveService : Service() {
             }
             is RiderStatus.DriverAccepted -> {
                 // Play confirmation sound (respecting user settings)
-                val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
-                val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
-                SoundManager.playConfirmationAlert(this, soundEnabled, vibrationEnabled)
+                SoundManager.playConfirmationAlert(this, settingsManager)
                 // Add to alert stack so it persists in notification when backgrounded
                 coordinator.addAlert(AlertType.Accepted(status.driverName))
                 coordinator.updateStatus(status)
@@ -229,9 +227,7 @@ class RiderActiveService : Service() {
             }
             is RiderStatus.DriverArrived -> {
                 // Play driver arrived sound (respecting user settings)
-                val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
-                val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
-                SoundManager.playDriverArrivedAlert(this, soundEnabled, vibrationEnabled)
+                SoundManager.playDriverArrivedAlert(this, settingsManager)
                 // coordinator.addAlert clears EnRoute when adding Arrived
                 coordinator.addAlert(AlertType.Arrived(status.driverName))
                 coordinator.updateStatus(status)
@@ -247,9 +243,7 @@ class RiderActiveService : Service() {
             }
             is RiderStatus.Cancelled -> {
                 // Play cancellation sound (respecting user settings)
-                val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
-                val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
-                SoundManager.playCancellationAlert(this, soundEnabled, vibrationEnabled)
+                SoundManager.playCancellationAlert(this, settingsManager)
                 // Clear ALL alerts on cancellation
                 coordinator.clearAlerts()
                 coordinator.updateStatus(status)
@@ -264,24 +258,18 @@ class RiderActiveService : Service() {
         when (alert) {
             is AlertType.Chat -> {
                 // Play chat sound (respecting user settings)
-                val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
-                val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
-                SoundManager.playChatMessageAlert(this, soundEnabled, vibrationEnabled)
+                SoundManager.playChatMessageAlert(this, settingsManager)
             }
             is AlertType.Accepted -> {
                 // Play confirmation sound (respecting user settings)
-                val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
-                val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
-                SoundManager.playConfirmationAlert(this, soundEnabled, vibrationEnabled)
+                SoundManager.playConfirmationAlert(this, settingsManager)
             }
             is AlertType.EnRoute -> {
                 // No sound for en route - transitional state
             }
             is AlertType.Arrived -> {
                 // Play driver arrived sound (respecting user settings)
-                val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
-                val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
-                SoundManager.playDriverArrivedAlert(this, soundEnabled, vibrationEnabled)
+                SoundManager.playDriverArrivedAlert(this, settingsManager)
             }
             else -> {
                 // Other alert types (driver-specific) - just add without sound

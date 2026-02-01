@@ -1044,6 +1044,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Stop chat refresh job
         stopChatRefreshJob()
 
+        // Cancel timeout jobs synchronously to prevent race conditions
+        confirmationTimeoutJob?.cancel()
+        confirmationTimeoutJob = null
+        pinVerificationTimeoutJob?.cancel()
+        pinVerificationTimeoutJob = null
+
         // Close subscriptions
         confirmationSubscriptionId?.let { nostrService.closeSubscription(it) }
         confirmationSubscriptionId = null
@@ -1735,6 +1741,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             chatRefreshJob?.cancel()
             chatRefreshJob = null
 
+            // Unsubscribe from rider profile
+            state.acceptedOffer?.riderPubKey?.let { unsubscribeFromRiderProfile(it) }
+
             // Clear driver state history
             clearDriverStateHistory()
 
@@ -1755,6 +1764,11 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 isSendingMessage = false,
                 error = null,
                 statusMessage = "Ride cancelled",
+                // Clear HTLC escrow state
+                activePaymentHash = null,
+                activePreimage = null,
+                activeEscrowToken = null,
+                canSettleEscrow = false,
                 pendingDepositQuoteId = null,
                 pendingDepositAmount = null
             )
@@ -2464,6 +2478,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         riderRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
         riderRideStateSubscriptionId = null
 
+        // Unsubscribe from rider profile (capture before state reset)
+        val state = _uiState.value
+        state.acceptedOffer?.riderPubKey?.let { unsubscribeFromRiderProfile(it) }
+
         // Clear driver state history
         clearDriverStateHistory()
 
@@ -2754,6 +2772,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Clear saved pre-ride mode to prevent stale restore
         stageBeforeRide = null
 
+        // Cancel timeout jobs synchronously to prevent race conditions
+        confirmationTimeoutJob?.cancel()
+        confirmationTimeoutJob = null
+        pinVerificationTimeoutJob?.cancel()
+        pinVerificationTimeoutJob = null
+
         val context = getApplication<Application>()
 
         // Save cancelled ride to history (only if we had an accepted offer and not already saved)
@@ -2772,6 +2796,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         chatSubscriptionId = null
         cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
         cancellationSubscriptionId = null
+
+        // Unsubscribe from rider profile
+        offer?.riderPubKey?.let { unsubscribeFromRiderProfile(it) }
 
         // Clear driver state history
         clearDriverStateHistory()

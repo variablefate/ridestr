@@ -269,9 +269,7 @@ class DriverOnlineService : Service() {
                 coordinator.updateStatus(DriverStatus.Available(status.count))
                 coordinator.addAlert(AlertType.NewRideRequest(status.fare, status.distance))
                 // Play ride request sound (respecting user settings)
-                val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
-                val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
-                SoundManager.playRideRequestAlert(this, soundEnabled, vibrationEnabled)
+                SoundManager.playRideRequestAlert(this, settingsManager)
                 updateNotification()
             }
             is DriverStatus.EnRouteToPickup -> {
@@ -293,9 +291,7 @@ class DriverOnlineService : Service() {
             }
             is DriverStatus.Cancelled -> {
                 // Play cancellation sound (respecting user settings)
-                val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
-                val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
-                SoundManager.playCancellationAlert(this, soundEnabled, vibrationEnabled)
+                SoundManager.playCancellationAlert(this, settingsManager)
                 // Clear ALL alerts on cancellation
                 coordinator.clearAlerts()
                 // DON'T reset to Available - keep Cancelled until next action
@@ -317,15 +313,11 @@ class DriverOnlineService : Service() {
         when (alert) {
             is AlertType.Chat -> {
                 // Play chat sound (respecting user settings)
-                val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
-                val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
-                SoundManager.playChatMessageAlert(this, soundEnabled, vibrationEnabled)
+                SoundManager.playChatMessageAlert(this, settingsManager)
             }
             is AlertType.NewRideRequest -> {
                 // Play ride request sound (respecting user settings)
-                val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
-                val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
-                SoundManager.playRideRequestAlert(this, soundEnabled, vibrationEnabled)
+                SoundManager.playRideRequestAlert(this, settingsManager)
             }
             else -> {
                 // Other alert types (rider-specific) - just add without sound

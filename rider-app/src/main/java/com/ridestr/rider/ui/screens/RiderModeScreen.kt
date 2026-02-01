@@ -3681,8 +3681,8 @@ private fun RoadflareDriverSelectionSheet(
                     val driverName = driverNames[driver.pubkey] ?: driver.pubkey.take(8) + "..."
                     val hasKey = driver.roadflareKey != null
 
-                    // Check if online and fresh (< 10 min old)
-                    val staleThresholdSec = 10 * 60  // 10 minutes
+                    // Check if online and fresh (< 5 min old)
+                    val staleThresholdSec = 5 * 60  // 5 minutes (matches RoadflareTab)
                     val nowSec = System.currentTimeMillis() / 1000
                     val isOnline = driverState != null &&
                         driverState.status == com.ridestr.common.nostr.events.RoadflareLocationEvent.Status.ONLINE &&
@@ -3733,9 +3733,9 @@ private fun RoadflareDriverSelectionSheet(
             HorizontalDivider()
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Send to all button - only include online drivers with fresh timestamps (< 10 min)
+            // Send to all button - only include online drivers with fresh timestamps (< 5 min)
             val now = System.currentTimeMillis() / 1000
-            val staleThreshold = 10 * 60  // 10 minutes in seconds
+            val staleThreshold = 5 * 60  // 5 minutes (matches RoadflareTab)
 
             val eligibleDrivers = drivers.filter { driver ->
                 driver.roadflareKey != null &&
