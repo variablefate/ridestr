@@ -787,9 +787,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 startRoadflareBroadcasting()
             }
         }
-
-        // Track online status for RoadflareListenerService dedup (Finding 3)
-        settingsManager.setDriverOnlineStatus("AVAILABLE")
+        // Note: driverOnlineStatus is now set by DriverOnlineService (authoritative)
     }
 
     /**
@@ -852,10 +850,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             )
         }
 
-        // Track online status for RoadflareListenerService dedup (Finding 3)
-        // Update to ROADFLARE_ONLY after updating service status
+        // Update service to ROADFLARE_ONLY status
+        // Note: driverOnlineStatus is now set by DriverOnlineService (authoritative)
         DriverOnlineService.updateStatus(context, DriverStatus.RoadflareOnly)
-        settingsManager.setDriverOnlineStatus("ROADFLARE_ONLY")
     }
 
     /**
@@ -915,10 +912,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             lastBroadcastTimeMs = 0L
 
             // Stop the foreground service
+            // Note: driverOnlineStatus is now set by DriverOnlineService (authoritative)
             DriverOnlineService.stop(context)
-
-            // Track offline status (Finding 3)
-            settingsManager.setDriverOnlineStatus(null)
 
             // THEN update state after deletion completes
             _uiState.value = _uiState.value.copy(
@@ -1385,9 +1380,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
                 // Update RoadFlare broadcaster to indicate on-ride status
                 updateRoadflareOnRideStatus(true)
-
-                // Track in-ride status for RoadflareListenerService dedup (Finding 3)
-                settingsManager.setDriverOnlineStatus("IN_RIDE")
+                // Note: driverOnlineStatus is now set by DriverOnlineService (authoritative)
+                // Service will set "IN_RIDE" when updateStatus(EnRouteToPickup) is called later
 
                 // Save ride state for persistence
                 saveRideState()
@@ -2760,13 +2754,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         if (newStage == DriverStage.OFFLINE) {
             DriverOnlineService.stop(context)
             stopRoadflareBroadcasting()
-            // Track offline status (Finding 3)
-            settingsManager.setDriverOnlineStatus(null)
+            // Note: driverOnlineStatus is now set by DriverOnlineService (authoritative)
         } else {
             // Returning to AVAILABLE - reset on-ride status
             updateRoadflareOnRideStatus(false)
-            // Track available status (Finding 3)
-            settingsManager.setDriverOnlineStatus("AVAILABLE")
+            // Update service to Available status (service is authoritative for driverOnlineStatus)
+            DriverOnlineService.updateStatus(context, DriverStatus.Available(0))
         }
 
         // Resume broadcasting and subscriptions if returning to AVAILABLE
@@ -3746,9 +3739,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
                 // Update RoadFlare broadcaster to indicate on-ride status
                 updateRoadflareOnRideStatus(true)
-
-                // Track in-ride status for RoadflareListenerService dedup (Finding 3)
-                settingsManager.setDriverOnlineStatus("IN_RIDE")
+                // Note: driverOnlineStatus is now set by DriverOnlineService (authoritative)
+                // Service will set "IN_RIDE" when updateStatus(EnRouteToPickup) is called later
 
                 // Save ride state for persistence
                 saveRideState()

@@ -159,6 +159,9 @@ class DriverOnlineService : Service() {
     override fun onCreate() {
         super.onCreate()
         settingsManager = SettingsManager(this)
+        // Clear any stale status from previous process death (handles force-kill)
+        // Will be set correctly in onStartCommand
+        settingsManager?.setDriverOnlineStatus(null)
         Log.d(TAG, "Service created")
     }
 
@@ -172,12 +175,25 @@ class DriverOnlineService : Service() {
                 currentStatus = DriverStatus.Available(0)
                 alertStack.clear()
                 newRequestRevertJob?.cancel()
+                // Service is authoritative - set status immediately (closes race window)
+                settingsManager?.setDriverOnlineStatus("AVAILABLE")
                 updateNotification()
             }
             ACTION_UPDATE_STATUS -> {
                 val status = intent.getSerializableExtra(EXTRA_STATUS) as? DriverStatus
                 if (status != null) {
                     handleStatusUpdate(status)
+                    // Map DriverStatus to settings string (service is authoritative)
+                    val statusString = when (status) {
+                        is DriverStatus.Available -> "AVAILABLE"
+                        is DriverStatus.RoadflareOnly -> "ROADFLARE_ONLY"
+                        is DriverStatus.EnRouteToPickup,
+                        is DriverStatus.ArrivedAtPickup,
+                        is DriverStatus.RideInProgress -> "IN_RIDE"
+                        is DriverStatus.NewRequest -> "AVAILABLE"  // Still available, just got a request
+                        is DriverStatus.Cancelled -> "AVAILABLE"   // Returns to available after cancel
+                    }
+                    settingsManager?.setDriverOnlineStatus(statusString)
                 }
             }
             ACTION_ADD_ALERT -> {
@@ -195,6 +211,8 @@ class DriverOnlineService : Service() {
                 Log.d(TAG, "Received STOP action")
                 alertStack.clear()
                 newRequestRevertJob?.cancel()
+                // Clear status before stopping (service is authoritative)
+                settingsManager?.setDriverOnlineStatus(null)
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
@@ -214,6 +232,8 @@ class DriverOnlineService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         serviceScope.cancel()
+        // Clear status on service destroy (handles normal stop)
+        settingsManager?.setDriverOnlineStatus(null)
         Log.d(TAG, "Service destroyed")
     }
 
@@ -317,13 +337,15 @@ class DriverOnlineService : Service() {
             else -> false
         }
 
-        // Route notifications to appropriate channels (Finding 7)
-        val channel = when (currentStatus) {
-            is DriverStatus.Cancelled -> NotificationHelper.CHANNEL_RIDE_CANCELLED
-            is DriverStatus.EnRouteToPickup,
-            is DriverStatus.ArrivedAtPickup,
-            is DriverStatus.RideInProgress -> NotificationHelper.CHANNEL_RIDE_UPDATE
-            else -> null  // Use default logic
+        // Alerts take priority over status-based channel selection (Finding 9)
+        // This ensures chat messages AND ride requests get high-priority routing
+        val channel = when {
+            alertStack.isNotEmpty() -> NotificationHelper.CHANNEL_RIDE_REQUEST
+            currentStatus is DriverStatus.Cancelled -> NotificationHelper.CHANNEL_RIDE_CANCELLED
+            currentStatus is DriverStatus.EnRouteToPickup ||
+            currentStatus is DriverStatus.ArrivedAtPickup ||
+            currentStatus is DriverStatus.RideInProgress -> NotificationHelper.CHANNEL_RIDE_UPDATE
+            else -> null  // Default logic in NotificationHelper based on isHighPriority
         }
 
         return NotificationHelper.buildDriverStatusNotification(
