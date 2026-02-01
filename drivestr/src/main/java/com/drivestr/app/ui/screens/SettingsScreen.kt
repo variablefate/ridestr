@@ -15,7 +15,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import com.drivestr.app.service.RoadflareListenerService
 import com.drivestr.app.viewmodels.DriverStage
 import com.ridestr.common.settings.DisplayCurrency
 import com.ridestr.common.settings.DistanceUnit
@@ -195,13 +194,9 @@ fun SettingsContent(
                     "Only receive RoadFlare requests when app is open",
                 checked = roadflareAlertsEnabled,
                 onCheckedChange = { enabled ->
+                    // Only update the setting - MainActivity's LaunchedEffect handles
+                    // service lifecycle with permission gating (Finding 5, Finding 14)
                     settingsManager.setRoadflareAlertsEnabled(enabled)
-                    // Note: Service start/stop is handled by MainActivity's LaunchedEffect
-                    if (enabled) {
-                        RoadflareListenerService.start(context)
-                    } else {
-                        RoadflareListenerService.stop(context)
-                    }
                 }
             )
 

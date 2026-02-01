@@ -5,12 +5,15 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.Location
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -164,6 +167,16 @@ fun DrivestrApp() {
     // Settings manager (created first to get custom relays)
     val settingsManager = remember { SettingsManager(context) }
 
+    // Notification permission launcher for RoadFlare alerts (Finding 5)
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        android.util.Log.d("MainActivity", "RoadFlare notification permission result: $granted")
+        if (granted) {
+            RoadflareListenerService.start(context)
+        }
+    }
+
     // NostrService for relay connections (uses custom relays from settings)
     val nostrService = remember { NostrService(context, settingsManager.getEffectiveRelays()) }
 
@@ -287,11 +300,19 @@ fun DrivestrApp() {
         }
     }
 
-    // Start RoadFlare listener service if enabled
+    // Start RoadFlare listener service if enabled (with permission check - Finding 5)
     val roadflareAlertsEnabled by settingsManager.roadflareAlertsEnabled.collectAsState()
     LaunchedEffect(roadflareAlertsEnabled) {
         if (roadflareAlertsEnabled) {
-            RoadflareListenerService.start(context)
+            if (NotificationHelper.hasNotificationPermission(context)) {
+                RoadflareListenerService.start(context)
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                // Request permission - service will start in callback if granted
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            } else {
+                // Pre-Android 13, permission is implicit
+                RoadflareListenerService.start(context)
+            }
         } else {
             RoadflareListenerService.stop(context)
         }
@@ -1020,10 +1041,12 @@ fun MainScreen(
     val btcPriceUsd by driverViewModel.bitcoinPriceService.btcPriceUsd.collectAsState()
 
     // Ensure relay connections when app returns to foreground
-    // Also clear any stacked notification alerts
+    // Also clear any stacked notification alerts and RoadFlare request notifications
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
         driverViewModel.onResume()
         DriverOnlineService.clearAlerts(context)
+        // Cancel RoadFlare request notification when app foregrounds (Finding 4)
+        NotificationHelper.cancelNotification(context, RoadflareListenerService.NOTIFICATION_ID_ROADFLARE_REQUEST)
     }
 
     // Extracted refresh logic - used by both UI refresh button and background sync

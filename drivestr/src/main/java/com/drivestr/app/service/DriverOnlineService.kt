@@ -10,6 +10,7 @@ import android.util.Log
 import com.drivestr.app.MainActivity
 import com.ridestr.common.notification.NotificationHelper
 import com.ridestr.common.notification.SoundManager
+import com.ridestr.common.settings.SettingsManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -32,6 +33,7 @@ sealed class DriverStatus : Serializable {
     data class ArrivedAtPickup(val riderName: String?) : DriverStatus()
     data class RideInProgress(val riderName: String?) : DriverStatus()
     object Cancelled : DriverStatus()
+    object RoadflareOnly : DriverStatus()
 }
 
 /**
@@ -149,10 +151,14 @@ class DriverOnlineService : Service() {
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var newRequestRevertJob: Job? = null
 
+    // Settings for sound/vibration preferences
+    private var settingsManager: SettingsManager? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        settingsManager = SettingsManager(this)
         Log.d(TAG, "Service created")
     }
 
@@ -223,8 +229,10 @@ class DriverOnlineService : Service() {
             is DriverStatus.NewRequest -> {
                 // Update the request count in the base status
                 currentStatus = DriverStatus.Available(status.count)
-                // Play ride request sound
-                SoundManager.playRideRequestAlert(this)
+                // Play ride request sound (respecting user settings)
+                val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
+                val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
+                SoundManager.playRideRequestAlert(this, soundEnabled, vibrationEnabled)
                 // Add to alert stack so it persists
                 alertStack.add(DriverStackableAlert.NewRideRequest(status.fare, status.distance))
                 updateNotification()
@@ -247,10 +255,18 @@ class DriverOnlineService : Service() {
                 updateNotification()
             }
             is DriverStatus.Cancelled -> {
-                // Play cancellation sound
-                SoundManager.playCancellationAlert(this)
-                currentStatus = DriverStatus.Available(0)
+                // Play cancellation sound (respecting user settings)
+                val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
+                val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
+                SoundManager.playCancellationAlert(this, soundEnabled, vibrationEnabled)
+                // DON'T reset to Available - keep Cancelled until next action
+                currentStatus = status
                 alertStack.clear()
+                newRequestRevertJob?.cancel()
+                updateNotification()
+            }
+            is DriverStatus.RoadflareOnly -> {
+                currentStatus = status
                 newRequestRevertJob?.cancel()
                 updateNotification()
             }
@@ -262,14 +278,18 @@ class DriverOnlineService : Service() {
 
         when (alert) {
             is DriverStackableAlert.Chat -> {
-                // Play chat sound
-                SoundManager.playChatMessageAlert(this)
+                // Play chat sound (respecting user settings)
+                val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
+                val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
+                SoundManager.playChatMessageAlert(this, soundEnabled, vibrationEnabled)
                 // Add to stack (allow multiple chat messages)
                 alertStack.add(alert)
             }
             is DriverStackableAlert.NewRideRequest -> {
-                // Play ride request sound
-                SoundManager.playRideRequestAlert(this)
+                // Play ride request sound (respecting user settings)
+                val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
+                val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
+                SoundManager.playRideRequestAlert(this, soundEnabled, vibrationEnabled)
                 // Add to stack
                 alertStack.add(alert)
             }
@@ -297,12 +317,22 @@ class DriverOnlineService : Service() {
             else -> false
         }
 
+        // Route notifications to appropriate channels (Finding 7)
+        val channel = when (currentStatus) {
+            is DriverStatus.Cancelled -> NotificationHelper.CHANNEL_RIDE_CANCELLED
+            is DriverStatus.EnRouteToPickup,
+            is DriverStatus.ArrivedAtPickup,
+            is DriverStatus.RideInProgress -> NotificationHelper.CHANNEL_RIDE_UPDATE
+            else -> null  // Use default logic
+        }
+
         return NotificationHelper.buildDriverStatusNotification(
             context = this,
             contentIntent = createContentIntent(),
             title = title,
             content = content,
-            isHighPriority = isHighPriority
+            isHighPriority = isHighPriority,
+            channel = channel
         )
     }
 
@@ -373,6 +403,9 @@ class DriverOnlineService : Service() {
             }
             is DriverStatus.Cancelled -> {
                 "Ride cancelled" to "The rider cancelled"
+            }
+            is DriverStatus.RoadflareOnly -> {
+                "RoadFlare only" to "Available for trusted network only"
             }
         }
     }

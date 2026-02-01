@@ -84,6 +84,9 @@ class SettingsManager(context: Context) {
         // Security warning dismissal
         private const val KEY_ENCRYPTION_FALLBACK_WARNED = "encryption_fallback_warned"
 
+        // Driver online status (for cross-component coordination)
+        private const val KEY_DRIVER_ONLINE_STATUS = "driver_online_status"
+
         // Default manual location: Las Vegas (Fremont St)
         private const val DEFAULT_MANUAL_LAT = 36.1699
         private const val DEFAULT_MANUAL_LON = -115.1398
@@ -904,5 +907,27 @@ class SettingsManager(context: Context) {
      */
     fun setEncryptionFallbackWarned(warned: Boolean) {
         prefs.edit().putBoolean(KEY_ENCRYPTION_FALLBACK_WARNED, warned).apply()
+    }
+
+    // ===================
+    // DRIVER ONLINE STATUS (for cross-component coordination)
+    // ===================
+
+    // Driver online status - used for RoadflareListenerService dedup
+    private val _driverOnlineStatus = MutableStateFlow<String?>(prefs.getString(KEY_DRIVER_ONLINE_STATUS, null))
+    val driverOnlineStatus: StateFlow<String?> = _driverOnlineStatus.asStateFlow()
+
+    /**
+     * Set driver online status for cross-component coordination.
+     * Used by RoadflareListenerService to avoid duplicate notifications when DriverViewModel is active.
+     * Values: null (offline), "AVAILABLE", "ROADFLARE_ONLY", "IN_RIDE"
+     */
+    fun setDriverOnlineStatus(status: String?) {
+        if (status == null) {
+            prefs.edit().remove(KEY_DRIVER_ONLINE_STATUS).apply()
+        } else {
+            prefs.edit().putString(KEY_DRIVER_ONLINE_STATUS, status).apply()
+        }
+        _driverOnlineStatus.value = status
     }
 }

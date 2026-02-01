@@ -787,6 +787,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 startRoadflareBroadcasting()
             }
         }
+
+        // Track online status for RoadflareListenerService dedup (Finding 3)
+        settingsManager.setDriverOnlineStatus("AVAILABLE")
     }
 
     /**
@@ -848,6 +851,11 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 status = DriverAvailabilityEvent.STATUS_AVAILABLE
             )
         }
+
+        // Track online status for RoadflareListenerService dedup (Finding 3)
+        // Update to ROADFLARE_ONLY after updating service status
+        DriverOnlineService.updateStatus(context, DriverStatus.RoadflareOnly)
+        settingsManager.setDriverOnlineStatus("ROADFLARE_ONLY")
     }
 
     /**
@@ -908,6 +916,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
             // Stop the foreground service
             DriverOnlineService.stop(context)
+
+            // Track offline status (Finding 3)
+            settingsManager.setDriverOnlineStatus(null)
 
             // THEN update state after deletion completes
             _uiState.value = _uiState.value.copy(
@@ -1374,6 +1385,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
                 // Update RoadFlare broadcaster to indicate on-ride status
                 updateRoadflareOnRideStatus(true)
+
+                // Track in-ride status for RoadflareListenerService dedup (Finding 3)
+                settingsManager.setDriverOnlineStatus("IN_RIDE")
 
                 // Save ride state for persistence
                 saveRideState()
@@ -2746,9 +2760,13 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         if (newStage == DriverStage.OFFLINE) {
             DriverOnlineService.stop(context)
             stopRoadflareBroadcasting()
+            // Track offline status (Finding 3)
+            settingsManager.setDriverOnlineStatus(null)
         } else {
             // Returning to AVAILABLE - reset on-ride status
             updateRoadflareOnRideStatus(false)
+            // Track available status (Finding 3)
+            settingsManager.setDriverOnlineStatus("AVAILABLE")
         }
 
         // Resume broadcasting and subscriptions if returning to AVAILABLE
@@ -3728,6 +3746,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
                 // Update RoadFlare broadcaster to indicate on-ride status
                 updateRoadflareOnRideStatus(true)
+
+                // Track in-ride status for RoadflareListenerService dedup (Finding 3)
+                settingsManager.setDriverOnlineStatus("IN_RIDE")
 
                 // Save ride state for persistence
                 saveRideState()

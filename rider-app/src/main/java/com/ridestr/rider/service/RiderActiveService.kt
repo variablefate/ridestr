@@ -10,6 +10,7 @@ import android.util.Log
 import com.ridestr.rider.MainActivity
 import com.ridestr.common.notification.NotificationHelper
 import com.ridestr.common.notification.SoundManager
+import com.ridestr.common.settings.SettingsManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -147,10 +148,14 @@ class RiderActiveService : Service() {
     // Coroutine scope for any async work
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
+    // Settings for sound/vibration preferences
+    private var settingsManager: SettingsManager? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        settingsManager = SettingsManager(this)
         Log.d(TAG, "Service created")
     }
 
@@ -218,8 +223,10 @@ class RiderActiveService : Service() {
             }
             is RiderStatus.DriverAccepted -> {
                 currentStatus = status
-                // Play confirmation sound
-                SoundManager.playConfirmationAlert(this)
+                // Play confirmation sound (respecting user settings)
+                val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
+                val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
+                SoundManager.playConfirmationAlert(this, soundEnabled, vibrationEnabled)
                 // Add to alert stack so it persists in notification when backgrounded
                 alertStack.add(StackableAlert.DriverAccepted(status.driverName))
                 updateNotification()
@@ -234,8 +241,10 @@ class RiderActiveService : Service() {
             is RiderStatus.DriverArrived -> {
                 // Update base status AND add to alert stack
                 currentStatus = status
-                // Play driver arrived sound
-                SoundManager.playDriverArrivedAlert(this)
+                // Play driver arrived sound (respecting user settings)
+                val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
+                val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
+                SoundManager.playDriverArrivedAlert(this, soundEnabled, vibrationEnabled)
                 // Replace en route alert with arrived alert
                 alertStack.removeAll { it is StackableAlert.DriverEnRoute }
                 alertStack.add(StackableAlert.Arrived(status.driverName))
@@ -248,8 +257,10 @@ class RiderActiveService : Service() {
                 updateNotification()
             }
             is RiderStatus.Cancelled -> {
-                // Play cancellation sound
-                SoundManager.playCancellationAlert(this)
+                // Play cancellation sound (respecting user settings)
+                val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
+                val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
+                SoundManager.playCancellationAlert(this, soundEnabled, vibrationEnabled)
                 currentStatus = status
                 alertStack.clear()
                 updateNotification()
@@ -262,14 +273,18 @@ class RiderActiveService : Service() {
 
         when (alert) {
             is StackableAlert.Chat -> {
-                // Play chat sound
-                SoundManager.playChatMessageAlert(this)
+                // Play chat sound (respecting user settings)
+                val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
+                val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
+                SoundManager.playChatMessageAlert(this, soundEnabled, vibrationEnabled)
                 // Add to stack (allow multiple chat messages)
                 alertStack.add(alert)
             }
             is StackableAlert.DriverAccepted -> {
-                // Play confirmation sound
-                SoundManager.playConfirmationAlert(this)
+                // Play confirmation sound (respecting user settings)
+                val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
+                val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
+                SoundManager.playConfirmationAlert(this, soundEnabled, vibrationEnabled)
                 // Only add if not already present
                 if (alertStack.none { it is StackableAlert.DriverAccepted }) {
                     alertStack.add(alert)
@@ -283,8 +298,10 @@ class RiderActiveService : Service() {
                 }
             }
             is StackableAlert.Arrived -> {
-                // Play driver arrived sound
-                SoundManager.playDriverArrivedAlert(this)
+                // Play driver arrived sound (respecting user settings)
+                val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
+                val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
+                SoundManager.playDriverArrivedAlert(this, soundEnabled, vibrationEnabled)
                 // Replace en route with arrived
                 alertStack.removeAll { it is StackableAlert.DriverEnRoute }
                 if (alertStack.none { it is StackableAlert.Arrived }) {

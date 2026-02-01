@@ -258,8 +258,18 @@ class RoadflareListenerService : Service() {
     }
 
     private fun showRoadflareNotification(riderName: String?, fareSats: Double?, eventId: String) {
-        // Play alert sound
-        SoundManager.playRideRequestAlert(this)
+        // Check if driver is online (AVAILABLE or IN_RIDE) - DriverViewModel handles these
+        // Only show notification when OFFLINE or ROADFLARE_ONLY
+        val driverStatus = settingsManager?.driverOnlineStatus?.value
+        if (driverStatus == "AVAILABLE" || driverStatus == "IN_RIDE") {
+            Log.d(TAG, "Driver is online ($driverStatus), skipping notification (DriverViewModel will handle)")
+            return
+        }
+
+        // Play alert sound (respecting user settings)
+        val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
+        val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
+        SoundManager.playRideRequestAlert(this, soundEnabled, vibrationEnabled)
 
         // Format the notification content
         val displayName = riderName ?: "Someone"
@@ -273,13 +283,14 @@ class RoadflareListenerService : Service() {
             "$displayName has broadcasted a RoadFlare!"
         }
 
-        // Build notification
+        // Build notification (dismissible - isOngoing=false)
         val notification = NotificationHelper.buildDriverStatusNotification(
             context = this,
             contentIntent = createContentIntent(),
             title = "RoadFlare Request!",
             content = content,
-            isHighPriority = true
+            isHighPriority = true,
+            isOngoing = false  // Allow user to dismiss
         )
 
         NotificationHelper.showNotification(
