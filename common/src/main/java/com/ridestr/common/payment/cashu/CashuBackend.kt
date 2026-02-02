@@ -58,6 +58,10 @@ class CashuBackend(
         private val REQUIRED_NUTS = setOf(14, 5, 7)  // HTLC, Melt, Proof state
     }
 
+    // region ═══════════════════════════════════════════════════════════════════════
+    // INSTANCE STATE
+    // ═══════════════════════════════════════════════════════════════════════════════
+
     // cdk-kotlin wallet instance for real Cashu operations
     private var cdkWallet: CdkWallet? = null
     private var cdkDatabase: CdkWalletSqliteDatabase? = null
@@ -76,6 +80,12 @@ class CashuBackend(
 
     // NUT-17: WebSocket for real-time state updates
     private var webSocket: CashuWebSocket? = null
+
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // LIFECYCLE & CONNECTION
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Verify mint capabilities via NUT-06 info endpoint.
@@ -335,6 +345,12 @@ class CashuBackend(
      * Check if connected mint supports escrow (NUT-14/5/7).
      */
     fun supportsEscrow(): Boolean = mintCapabilities?.supportsEscrow() == true
+
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // MINT API - QUOTES (NUT-04/05)
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Get a melt quote from the mint (NUT-05).
@@ -663,6 +679,12 @@ class CashuBackend(
         null
     }
 
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // PROOF VERIFICATION (NUT-07)
+    // ═══════════════════════════════════════════════════════════════════════════════
+
     /**
      * Check proof states via NUT-07.
      *
@@ -715,11 +737,25 @@ class CashuBackend(
         }
     }
 
-    // ========================================
-    // NUT-14 HTLC Operations (REAL IMPLEMENTATION)
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // HTLC ESCROW (NUT-14) - CRITICAL PAYMENT CODE
     // Reference: https://github.com/cashubtc/nuts/blob/main/14.md
-    // Note: Primary HTLC creation is now via createHtlcTokenFromProofs() which takes NIP-60 proofs
-    // ========================================
+    //
+    // INVARIANT: createHtlcTokenFromProofs() MUST:
+    //   1. Save PendingBlindedOperation BEFORE mint call
+    //   2. Only delete pending op AFTER successful mint response
+    //   3. On failure, operation stays pending for recovery
+    //
+    // INVARIANT: claimHtlcTokenWithProofs() MUST:
+    //   1. Verify preimage matches hash BEFORE sending to mint
+    //   2. Publish proofs to NIP-60 AFTER successful claim
+    //
+    // INVARIANT: refundExpiredHtlc() MUST:
+    //   1. Verify locktime has passed BEFORE attempting refund
+    //   2. Use stored preimage (not zeros) for future-proof refunds
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Claim an HTLC-locked token using the preimage.
@@ -1480,12 +1516,25 @@ class CashuBackend(
     /**
      * HTLC proof structure (proof with NUT-10/14 secret format).
      */
+    /**
+     * Type alias for HtlcProof from CashuTokenCodec.
+     * Kept for backward compatibility with existing code.
+     */
+    @Deprecated("Use CashuTokenCodec.HtlcProof instead", ReplaceWith("CashuTokenCodec.HtlcProof"))
     data class HtlcProof(
         val amount: Long,
         val id: String,
         val secret: String,  // NUT-10 JSON format: ["HTLC", {...}]
         val C: String
-    )
+    ) {
+        /** Convert to CashuTokenCodec.HtlcProof */
+        fun toCodecProof() = CashuTokenCodec.HtlcProof(amount, id, secret, C)
+
+        companion object {
+            /** Create from CashuTokenCodec.HtlcProof */
+            fun fromCodecProof(p: CashuTokenCodec.HtlcProof) = HtlcProof(p.amount, p.id, p.secret, p.C)
+        }
+    }
 
     /**
      * Result of claiming an HTLC token.
@@ -1550,81 +1599,24 @@ class CashuBackend(
 
     /**
      * Extract payment_hash from NUT-10 HTLC secret.
+     * Delegates to CashuTokenCodec.
      */
-    private fun extractPaymentHashFromSecret(secret: String): String? {
-        return try {
-            val arr = JSONArray(secret)
-            if (arr.length() >= 2 && arr.getString(0) == "HTLC") {
-                val obj = arr.getJSONObject(1)
-                obj.getString("data")
-            } else {
-                null
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to extract payment_hash from secret: ${e.message}")
-            null
-        }
-    }
+    private fun extractPaymentHashFromSecret(secret: String): String? =
+        CashuTokenCodec.extractPaymentHashFromSecret(secret)
 
     /**
      * Extract locktime from NUT-10/14 HTLC secret.
-     * Format: ["HTLC", {"nonce": "...", "data": "...", "tags": [["locktime", "12345"], ...]}]
+     * Delegates to CashuTokenCodec.
      */
-    private fun extractLocktimeFromSecret(secret: String): Long? {
-        return try {
-            val arr = JSONArray(secret)
-            if (arr.length() >= 2 && arr.getString(0) == "HTLC") {
-                val obj = arr.getJSONObject(1)
-                val tags = obj.getJSONArray("tags")
-                var locktime: Long? = null
-                for (i in 0 until tags.length()) {
-                    val tag = tags.getJSONArray(i)
-                    if (tag.length() >= 2 && tag.getString(0) == "locktime") {
-                        locktime = tag.getString(1).toLongOrNull()
-                        break
-                    }
-                }
-                locktime
-            } else {
-                null
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to extract locktime from secret: ${e.message}")
-            null
-        }
-    }
+    private fun extractLocktimeFromSecret(secret: String): Long? =
+        CashuTokenCodec.extractLocktimeFromSecret(secret)
 
     /**
      * Extract refund public keys from NUT-10/14 HTLC secret.
-     * Format: ["HTLC", {"nonce": "...", "data": "...", "tags": [["refund", "key1", "key2"], ...]}]
+     * Delegates to CashuTokenCodec.
      */
-    private fun extractRefundKeysFromSecret(secret: String): List<String> {
-        return try {
-            val arr = JSONArray(secret)
-            if (arr.length() >= 2 && arr.getString(0) == "HTLC") {
-                val obj = arr.getJSONObject(1)
-                val tags = obj.getJSONArray("tags")
-                var refundKeys: List<String> = emptyList()
-                for (i in 0 until tags.length()) {
-                    val tag = tags.getJSONArray(i)
-                    if (tag.length() >= 2 && tag.getString(0) == "refund") {
-                        val keys = mutableListOf<String>()
-                        for (j in 1 until tag.length()) {
-                            keys.add(tag.getString(j))
-                        }
-                        refundKeys = keys
-                        break
-                    }
-                }
-                refundKeys
-            } else {
-                emptyList()
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to extract refund keys from secret: ${e.message}")
-            emptyList()
-        }
-    }
+    private fun extractRefundKeysFromSecret(secret: String): List<String> =
+        CashuTokenCodec.extractRefundKeysFromSecret(secret)
 
     /**
      * Compute P2PK signature for a proof.
@@ -1656,73 +1648,22 @@ class CashuBackend(
 
     /**
      * Encode HTLC proofs as a Cashu token (cashuA format).
+     * Delegates to CashuTokenCodec.
      */
     private fun encodeHtlcProofsAsToken(proofs: List<HtlcProof>, mintUrl: String): String {
-        val proofsArray = JSONArray()
-        proofs.forEach { proof ->
-            proofsArray.put(JSONObject().apply {
-                put("amount", proof.amount)
-                put("id", proof.id)
-                put("secret", proof.secret)
-                put("C", proof.C)
-            })
-        }
-
-        val tokenJson = JSONObject().apply {
-            put("token", JSONArray().put(JSONObject().apply {
-                put("mint", mintUrl)
-                put("proofs", proofsArray)
-            }))
-            put("unit", "sat")
-        }
-
-        return "cashuA" + android.util.Base64.encodeToString(
-            tokenJson.toString().toByteArray(),
-            android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP
-        )
+        val codecProofs = proofs.map { it.toCodecProof() }
+        return CashuTokenCodec.encodeHtlcProofsAsToken(codecProofs, mintUrl)
     }
 
     /**
      * Parse a Cashu token to extract HTLC proofs.
+     * Delegates to CashuTokenCodec.
      * @return Pair of (proofs, mintUrl) or null if invalid
      */
     private fun parseHtlcToken(token: String): Pair<List<HtlcProof>, String>? {
-        return try {
-            val base64 = when {
-                token.startsWith("cashuA") -> token.removePrefix("cashuA")
-                token.startsWith("cashuB") -> token.removePrefix("cashuB")
-                else -> {
-                    Log.e(TAG, "Invalid token prefix: ${token.take(10)}")
-                    return null
-                }
-            }
-
-            val jsonStr = String(android.util.Base64.decode(base64, android.util.Base64.URL_SAFE))
-            val json = JSONObject(jsonStr)
-
-            val tokenArray = json.getJSONArray("token")
-            if (tokenArray.length() == 0) return null
-
-            val firstMint = tokenArray.getJSONObject(0)
-            val mintUrl = firstMint.getString("mint")
-            val proofsArray = firstMint.getJSONArray("proofs")
-
-            val proofs = mutableListOf<HtlcProof>()
-            for (i in 0 until proofsArray.length()) {
-                val p = proofsArray.getJSONObject(i)
-                proofs.add(HtlcProof(
-                    amount = p.getLong("amount"),
-                    id = p.getString("id"),
-                    secret = p.getString("secret"),
-                    C = p.getString("C")
-                ))
-            }
-
-            Pair(proofs, mintUrl)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to parse HTLC token: ${e.message}")
-            null
-        }
+        val result = CashuTokenCodec.parseHtlcToken(token) ?: return null
+        val proofs = result.first.map { HtlcProof.fromCodecProof(it) }
+        return Pair(proofs, result.second)
     }
 
     /**
@@ -1921,28 +1862,17 @@ class CashuBackend(
         }
     }
 
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // TOKEN ENCODING & RECEIPT
+    // ═══════════════════════════════════════════════════════════════════════════════
+
     /**
      * Encode plain proofs as a Cashu token.
      */
-    private fun encodeProofsAsToken(proofs: List<CashuProof>, mintUrl: String): String {
-        val proofsArray = JSONArray()
-        proofs.forEach { proof ->
-            proofsArray.put(proof.toJson())
-        }
-
-        val tokenJson = JSONObject().apply {
-            put("token", JSONArray().put(JSONObject().apply {
-                put("mint", mintUrl)
-                put("proofs", proofsArray)
-            }))
-            put("unit", "sat")
-        }
-
-        return "cashuA" + android.util.Base64.encodeToString(
-            tokenJson.toString().toByteArray(),
-            android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP
-        )
-    }
+    private fun encodeProofsAsToken(proofs: List<CashuProof>, mintUrl: String): String =
+        CashuTokenCodec.encodeProofsAsToken(proofs, mintUrl)
 
     /**
      * Receive a token by swapping with the mint for fresh proofs.
@@ -2034,10 +1964,12 @@ class CashuBackend(
         )
     }
 
-    // ========================================
-    // NUT-07 Proof State Verification (Extended)
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // PROOF STATE VERIFICATION BY SECRET (NUT-07 Extended)
     // Reference: https://github.com/cashubtc/nuts/blob/main/07.md
-    // ========================================
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Proof state result from NUT-07 check (extended version).
@@ -2160,6 +2092,12 @@ class CashuBackend(
             null
         }
     }
+
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // BALANCE VERIFICATION
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Get verified balance by checking proof states with the mint (NUT-07).
@@ -2326,9 +2264,11 @@ class CashuBackend(
         }
     }
 
-    // ========================================
-    // API Discovery for HTLC Implementation
-    // ========================================
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // DEBUG & DIAGNOSTICS
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Debug function to discover cdk-kotlin HTLC API.
@@ -2455,6 +2395,12 @@ class CashuBackend(
         results
     }
 
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // DISCONNECT & CLEANUP
+    // ═══════════════════════════════════════════════════════════════════════════════
+
     /**
      * Disconnect from current mint.
      */
@@ -2477,6 +2423,12 @@ class CashuBackend(
         currentMintUrl = null
         mintCapabilities = null
     }
+
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // LOCAL STORAGE & CDK-KOTLIN DATABASE
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Get the actual balance from cdk-kotlin proofs stored in the database.
@@ -2826,10 +2778,12 @@ class CashuBackend(
         return null
     }
 
-    // ========================================
-    // NUT-04 Mint Operations (Deposits)
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // MINTING (NUT-04) - Lightning Deposits
     // Reference: https://github.com/cashubtc/nuts/blob/main/04.md
-    // ========================================
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Request a mint quote for depositing via Lightning.
@@ -3105,10 +3059,12 @@ class CashuBackend(
         }
     }
 
-    // ========================================
-    // NUT-05 Melt Operations (Withdrawals)
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // MELTING (NUT-05) - Lightning Withdrawals
     // Reference: https://github.com/cashubtc/nuts/blob/main/05.md
-    // ========================================
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Execute melt - burn tokens to pay Lightning invoice.
@@ -3463,9 +3419,11 @@ class CashuBackend(
         }
     }
 
-    // ========================================
-    // Deposit Recovery (for failed mints)
-    // ========================================
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // KEYSET MANAGEMENT (NUT-01/02) & DEPOSIT RECOVERY
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     // Cached keysets from mint
     private var mintKeysets: Map<String, MintKeyset>? = null
@@ -4227,7 +4185,12 @@ class CashuBackend(
         }
     }
 
-    // ==================== NUT-09 RESTORE ====================
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // RECOVERY (NUT-09)
+    // Reference: https://github.com/cashubtc/nuts/blob/main/09.md
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Restore proofs from mint using NUT-09 /v1/restore endpoint.
@@ -4449,6 +4412,12 @@ class CashuBackend(
             emptyList()
         }
     }
+
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // UTILITIES
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Split amount into powers of 2 (Cashu denomination strategy).
@@ -4675,6 +4644,8 @@ class CashuBackend(
         Log.e(TAG, "Could not extract amount from: $amount (class: $className)")
         return 0L
     }
+
+    // endregion
 }
 
 /**

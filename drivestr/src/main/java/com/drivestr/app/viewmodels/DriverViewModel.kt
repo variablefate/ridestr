@@ -2297,12 +2297,13 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         updateRoadflareOnRideStatus(false)
 
         viewModelScope.launch {
+            // Correlation ID for payment tracking
+            val rideCorrelationId = state.confirmationEventId?.take(8) ?: "unknown"
+
             // Attempt to settle HTLC escrow if we have preimage and token
             var settlementMessage = ""
             if (state.canSettleEscrow && state.activePreimage != null && state.activeEscrowToken != null) {
-                Log.d(TAG, "=== ATTEMPTING HTLC SETTLEMENT ===")
-                if (BuildConfig.DEBUG) Log.d(TAG, "Preimage: ${state.activePreimage.take(16)}...")
-                if (BuildConfig.DEBUG) Log.d(TAG, "Escrow token: ${state.activeEscrowToken.take(30)}...")
+                Log.d(TAG, "[RIDE $rideCorrelationId] Claiming HTLC: paymentHash=${state.activePaymentHash?.take(16)}...")
                 try {
                     val settlement = walletService?.claimHtlcPayment(
                         htlcToken = state.activeEscrowToken,
@@ -2311,20 +2312,19 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     )
 
                     if (settlement != null) {
-                        Log.d(TAG, "=== HTLC SETTLED SUCCESSFULLY ===")
-                        Log.d(TAG, "Received ${settlement.amountSats} sats")
+                        Log.d(TAG, "[RIDE $rideCorrelationId] Claim SUCCESS: received ${settlement.amountSats} sats")
                         settlementMessage = " + ${settlement.amountSats} sats received"
                     } else {
-                        Log.e(TAG, "Failed to settle HTLC escrow - claimHtlcPayment returned null")
+                        Log.e(TAG, "[RIDE $rideCorrelationId] Claim FAILED: claimHtlcPayment returned null")
                         settlementMessage = " (payment claim failed)"
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Error settling HTLC escrow: ${e.message}", e)
+                    Log.e(TAG, "[RIDE $rideCorrelationId] Claim ERROR: ${e.message}", e)
                     settlementMessage = " (payment error)"
                 }
             } else if (state.activePaymentHash != null) {
                 // Had payment hash but no preimage/token - log for debugging
-                Log.w(TAG, "Ride had HTLC but settlement not possible - preimage=${state.activePreimage != null}, token=${state.activeEscrowToken != null}")
+                Log.w(TAG, "[RIDE $rideCorrelationId] Cannot settle - preimage=${state.activePreimage != null}, token=${state.activeEscrowToken != null}")
                 settlementMessage = " (no payment received)"
             }
 
@@ -2595,7 +2595,6 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         chatRefreshJob = PeriodicRefreshJob(
             scope = viewModelScope,
             intervalMs = CHAT_REFRESH_INTERVAL_MS,
-            tag = TAG,
             onTick = {
                 Log.d(TAG, "Refreshing chat subscription for ${confirmationEventId.take(8)}")
                 subscribeToChatMessages(confirmationEventId)
@@ -2690,11 +2689,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     fun claimPaymentAfterCancellation() {
         val state = _uiState.value
         val offer = state.acceptedOffer
+        val rideCorrelationId = state.confirmationEventId?.take(8) ?: "unknown"
 
         viewModelScope.launch {
             // Attempt to settle HTLC escrow
             if (state.canSettleEscrow && state.activePreimage != null && state.activeEscrowToken != null) {
-                Log.d(TAG, "Claiming payment after rider cancellation...")
+                Log.d(TAG, "[RIDE $rideCorrelationId] Claiming payment after rider cancellation...")
                 try {
                     val result = walletService?.claimHtlcPayment(
                         htlcToken = state.activeEscrowToken,
@@ -2703,15 +2703,15 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     val claimed = result != null
 
                     if (claimed) {
-                        Log.d(TAG, "Successfully claimed payment after rider cancellation")
+                        Log.d(TAG, "[RIDE $rideCorrelationId] Claim after cancellation SUCCESS")
                         // Save to history with fare earned
                         saveCancelledRideToHistory(state, offer, claimed = true)
                     } else {
-                        Log.e(TAG, "Failed to claim payment after rider cancellation")
+                        Log.e(TAG, "[RIDE $rideCorrelationId] Claim after cancellation FAILED")
                         saveCancelledRideToHistory(state, offer, claimed = false)
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Error claiming payment: ${e.message}", e)
+                    Log.e(TAG, "[RIDE $rideCorrelationId] Claim after cancellation ERROR: ${e.message}", e)
                     saveCancelledRideToHistory(state, offer, claimed = false)
                 }
             }

@@ -47,6 +47,11 @@ class NostrService(
     val keyManager = KeyManager(context)
     val relayManager = RelayManager(relays)
 
+    // Domain services
+    private val cryptoHelper = NostrCryptoHelper(keyManager)
+    private val profileBackupService = ProfileBackupService(relayManager, keyManager)
+    private val roadflareDomainService = RoadflareDomainService(relayManager, keyManager)
+
     /**
      * Connection states for all relays.
      */
@@ -55,29 +60,22 @@ class NostrService(
     /**
      * Cached display name of the logged-in user.
      * Updated when profile is fetched.
+     *
+     * NOTE: Delegates to profileBackupService but kept on facade for backward compatibility
+     * with existing callers (MainActivity, etc.) that use nostrService.userDisplayName.collectAsState()
      */
-    private val _userDisplayName = MutableStateFlow("")
-    val userDisplayName: StateFlow<String> = _userDisplayName.asStateFlow()
+    val userDisplayName: StateFlow<String>
+        get() = profileBackupService.userDisplayName
 
     /**
      * Set the user's display name (called when profile is loaded).
      */
-    fun setUserDisplayName(name: String) {
-        _userDisplayName.value = name
-    }
+    fun setUserDisplayName(name: String) = profileBackupService.setUserDisplayName(name)
 
     /**
      * Fetch and cache the current user's display name from their profile.
      */
-    fun fetchAndCacheUserDisplayName() {
-        val myPubKey = keyManager.getPubKeyHex() ?: return
-        subscribeToProfile(myPubKey) { profile ->
-            val name = profile.displayName ?: profile.name ?: ""
-            if (name.isNotEmpty()) {
-                _userDisplayName.value = name
-            }
-        }
-    }
+    fun fetchAndCacheUserDisplayName() = profileBackupService.fetchAndCacheUserDisplayName()
 
     /**
      * Connect to all configured relays.
@@ -806,15 +804,7 @@ class NostrService(
     suspend fun encryptLocationForRiderState(
         location: Location,
         driverPubKey: String
-    ): String? {
-        val signer = keyManager.getSigner() ?: return null
-        return try {
-            signer.nip44Encrypt(location.toJson().toString(), driverPubKey)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to encrypt location", e)
-            null
-        }
-    }
+    ): String? = cryptoHelper.encryptLocationForRiderState(location, driverPubKey)
 
     /**
      * Decrypt a location from rider ride state history.
@@ -825,16 +815,7 @@ class NostrService(
     suspend fun decryptLocationFromRiderState(
         encryptedLocation: String,
         riderPubKey: String
-    ): Location? {
-        val signer = keyManager.getSigner() ?: return null
-        return try {
-            val decrypted = signer.nip44Decrypt(encryptedLocation, riderPubKey)
-            Location.fromJson(org.json.JSONObject(decrypted))
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to decrypt location", e)
-            null
-        }
-    }
+    ): Location? = cryptoHelper.decryptLocationFromRiderState(encryptedLocation, riderPubKey)
 
     /**
      * Encrypt a PIN for inclusion in driver ride state history.
@@ -845,15 +826,7 @@ class NostrService(
     suspend fun encryptPinForDriverState(
         pin: String,
         riderPubKey: String
-    ): String? {
-        val signer = keyManager.getSigner() ?: return null
-        return try {
-            signer.nip44Encrypt(pin, riderPubKey)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to encrypt PIN", e)
-            null
-        }
-    }
+    ): String? = cryptoHelper.encryptPinForDriverState(pin, riderPubKey)
 
     /**
      * Encrypt arbitrary string data for a specific user (NIP-44).
@@ -866,15 +839,7 @@ class NostrService(
     suspend fun encryptForUser(
         data: String,
         recipientPubKey: String
-    ): String? {
-        val signer = keyManager.getSigner() ?: return null
-        return try {
-            signer.nip44Encrypt(data, recipientPubKey)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to encrypt data for user", e)
-            null
-        }
-    }
+    ): String? = cryptoHelper.encryptForUser(data, recipientPubKey)
 
     /**
      * Decrypt arbitrary string data from a specific user (NIP-44).
@@ -887,15 +852,7 @@ class NostrService(
     suspend fun decryptFromUser(
         encryptedData: String,
         senderPubKey: String
-    ): String? {
-        val signer = keyManager.getSigner() ?: return null
-        return try {
-            signer.nip44Decrypt(encryptedData, senderPubKey)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to decrypt data from user", e)
-            null
-        }
-    }
+    ): String? = cryptoHelper.decryptFromUser(encryptedData, senderPubKey)
 
     /**
      * Decrypt a PIN from driver ride state history.
@@ -906,15 +863,7 @@ class NostrService(
     suspend fun decryptPinFromDriverState(
         encryptedPin: String,
         driverPubKey: String
-    ): String? {
-        val signer = keyManager.getSigner() ?: return null
-        return try {
-            signer.nip44Decrypt(encryptedPin, driverPubKey)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to decrypt PIN", e)
-            null
-        }
-    }
+    ): String? = cryptoHelper.decryptPinFromDriverState(encryptedPin, driverPubKey)
 
     // ==================== Rider Operations ====================
 
@@ -1270,10 +1219,15 @@ class NostrService(
     ): String {
         Log.d(TAG, "Subscribing to availability for driver ${driverPubKey.take(8)}")
 
+        // Align with STALE_DRIVER_TIMEOUT_MS (10 min) - drivers broadcast every ~5 min
+        // Using shorter window might miss valid availability events
+        val tenMinutesAgo = (System.currentTimeMillis() / 1000) - (10 * 60)
+
         return relayManager.subscribe(
             kinds = listOf(RideshareEventKinds.DRIVER_AVAILABILITY),
             authors = listOf(driverPubKey),
-            tags = mapOf("t" to listOf(RideshareTags.RIDESHARE_TAG))
+            tags = mapOf("t" to listOf(RideshareTags.RIDESHARE_TAG)),
+            since = tenMinutesAgo  // Filter out very old events from relay history
         ) { event, _ ->
             DriverAvailabilityEvent.parse(event)?.let { data ->
                 Log.d(TAG, "Driver ${driverPubKey.take(8)} availability: ${data.status}")
@@ -1540,23 +1494,8 @@ class NostrService(
      * @param profile The user profile to publish
      * @return The event ID if successful, null on failure
      */
-    suspend fun publishProfile(profile: UserProfile): String? {
-        val signer = keyManager.getSigner()
-        if (signer == null) {
-            Log.e(TAG, "Cannot publish profile: Not logged in")
-            return null
-        }
-
-        return try {
-            val event = MetadataEvent.create(signer, profile)
-            relayManager.publish(event)
-            Log.d(TAG, "Published profile: ${event.id}")
-            event.id
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to publish profile", e)
-            null
-        }
-    }
+    suspend fun publishProfile(profile: UserProfile): String? =
+        profileBackupService.publishProfile(profile)
 
     /**
      * Subscribe to a user's profile updates.
@@ -1567,17 +1506,7 @@ class NostrService(
     fun subscribeToProfile(
         pubKeyHex: String,
         onProfile: (UserProfile) -> Unit
-    ): String {
-        return relayManager.subscribe(
-            kinds = listOf(MetadataEvent.KIND),
-            authors = listOf(pubKeyHex),
-            limit = 1
-        ) { event, _ ->
-            MetadataEvent.parse(event)?.let { profile ->
-                onProfile(profile)
-            }
-        }
-    }
+    ): String = profileBackupService.subscribeToProfile(pubKeyHex, onProfile)
 
     /**
      * Subscribe to the current user's own profile.
@@ -1586,10 +1515,7 @@ class NostrService(
      */
     fun subscribeToOwnProfile(
         onProfile: (UserProfile) -> Unit
-    ): String? {
-        val myPubKey = keyManager.getPubKeyHex() ?: return null
-        return subscribeToProfile(myPubKey, onProfile)
-    }
+    ): String? = profileBackupService.subscribeToOwnProfile(onProfile)
 
     // ========================================
     // RIDE HISTORY BACKUP (Kind 30174)
@@ -1606,41 +1532,7 @@ class NostrService(
     suspend fun publishRideHistoryBackup(
         rides: List<RideHistoryEntry>,
         stats: RideHistoryStats
-    ): String? {
-        val signer = keyManager.getSigner()
-        if (signer == null) {
-            Log.e(TAG, "Cannot publish ride history: Not logged in")
-            return null
-        }
-
-        // Wait for relay connection (up to 15 seconds)
-        var waitedMs = 0L
-        while (!relayManager.isConnected() && waitedMs < 15000) {
-            Log.d(TAG, "publishRideHistoryBackup: Waiting for relay... (${waitedMs}ms)")
-            delay(500)
-            waitedMs += 500
-        }
-
-        if (!relayManager.isConnected()) {
-            Log.e(TAG, "publishRideHistoryBackup: No relays connected - backup NOT saved!")
-            return null
-        }
-
-        return try {
-            val event = RideHistoryEvent.create(signer, rides, stats)
-            if (event != null) {
-                relayManager.publish(event)
-                Log.d(TAG, "Published ride history backup: ${event.id} (${rides.size} rides) to ${relayManager.connectedCount()} relays")
-                event.id
-            } else {
-                Log.e(TAG, "Failed to create ride history event")
-                null
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to publish ride history", e)
-            null
-        }
-    }
+    ): String? = profileBackupService.publishRideHistoryBackup(rides, stats)
 
     /**
      * Fetch the user's ride history from Nostr relays.
@@ -1648,86 +1540,18 @@ class NostrService(
      *
      * @return Decrypted ride history data, or null if not found or decryption fails
      */
-    suspend fun fetchRideHistory(): RideHistoryData? {
-        val signer = keyManager.getSigner()
-        val myPubKey = keyManager.getPubKeyHex()
-        if (signer == null || myPubKey == null) {
-            Log.e(TAG, "Cannot fetch ride history: Not logged in")
-            return null
-        }
-
-        return withContext(Dispatchers.IO) {
-            // Wait for relay connection (up to 15 seconds)
-            var waitedMs = 0L
-            while (!relayManager.isConnected() && waitedMs < 15000) {
-                Log.d(TAG, "fetchRideHistory: Waiting for relay... (${waitedMs}ms)")
-                delay(500)
-                waitedMs += 500
-            }
-
-            if (!relayManager.isConnected()) {
-                Log.e(TAG, "fetchRideHistory: No relays connected - cannot restore")
-                return@withContext null
-            }
-
-            Log.d(TAG, "Fetching ride history from ${relayManager.connectedCount()} relays for ${myPubKey.take(16)}...")
-
-            try {
-                var rawEvent: com.vitorpamplona.quartz.nip01Core.core.Event? = null
-                val eoseHistory = CompletableDeferred<String>()
-                val subscriptionId = relayManager.subscribe(
-                    kinds = listOf(RideshareEventKinds.RIDE_HISTORY_BACKUP),
-                    authors = listOf(myPubKey),
-                    tags = mapOf("d" to listOf(RideHistoryEvent.D_TAG)),
-                    limit = 1,
-                    onEose = { relayUrl -> eoseHistory.complete(relayUrl) }
-                ) { event, relayUrl ->
-                    Log.d(TAG, "Received ride history event ${event.id} from $relayUrl")
-                    rawEvent = event
-                }
-
-                // Wait for EOSE or timeout
-                if (withTimeoutOrNull(8000L) { eoseHistory.await() } != null) delay(200)
-                relayManager.closeSubscription(subscriptionId)
-
-                // Decrypt outside callback
-                val result = rawEvent?.let { event ->
-                    RideHistoryEvent.parseAndDecrypt(signer, event)?.also { data ->
-                        Log.d(TAG, "Decrypted ride history: ${data.rides.size} rides")
-                    }
-                }
-                if (result == null) {
-                    Log.d(TAG, "No ride history backup found on relays")
-                }
-                result
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to fetch ride history", e)
-                null
-            }
-        }
-    }
+    suspend fun fetchRideHistory(): RideHistoryData? = profileBackupService.fetchRideHistory()
 
     /**
      * Delete ride history backup from relays (NIP-09).
      * @param reason Reason for deletion
      * @return True if deletion request was sent
      */
-    suspend fun deleteRideHistoryBackup(reason: String = "user requested"): Boolean {
-        val myPubKey = keyManager.getPubKeyHex() ?: return false
-
-        return try {
-            // First find the current history event ID
-            val historyData = fetchRideHistory()
-            if (historyData != null) {
-                deleteEvents(listOf(historyData.eventId), reason)
-                Log.d(TAG, "Deleted ride history backup: ${historyData.eventId}")
-            }
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to delete ride history", e)
-            false
-        }
-    }
+    suspend fun deleteRideHistoryBackup(reason: String = "user requested"): Boolean =
+        profileBackupService.deleteRideHistoryBackup(
+            deleteEvents = { eventIds, r -> deleteEvents(eventIds, r) },
+            reason = reason
+        )
 
     // ==================== Profile Backup (Unified) ====================
 
@@ -1744,41 +1568,7 @@ class NostrService(
         vehicles: List<Vehicle>,
         savedLocations: List<SavedLocation>,
         settings: SettingsBackup
-    ): String? {
-        val signer = keyManager.getSigner()
-        if (signer == null) {
-            Log.e(TAG, "Cannot backup profile: Not logged in")
-            return null
-        }
-
-        // Wait for relay connection (up to 15 seconds)
-        var waitedMs = 0L
-        while (!relayManager.isConnected() && waitedMs < 15000) {
-            Log.d(TAG, "publishProfileBackup: Waiting for relay... (${waitedMs}ms)")
-            delay(500)
-            waitedMs += 500
-        }
-
-        if (!relayManager.isConnected()) {
-            Log.e(TAG, "publishProfileBackup: No relays connected - backup NOT saved!")
-            return null
-        }
-
-        return try {
-            val event = ProfileBackupEvent.create(signer, vehicles, savedLocations, settings)
-            if (event != null) {
-                relayManager.publish(event)
-                Log.d(TAG, "Published profile backup: ${event.id} (${vehicles.size} vehicles, ${savedLocations.size} locations) to ${relayManager.connectedCount()} relays")
-                event.id
-            } else {
-                Log.e(TAG, "Failed to create profile backup event")
-                null
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to backup profile", e)
-            null
-        }
-    }
+    ): String? = profileBackupService.publishProfileBackup(vehicles, savedLocations, settings)
 
     /**
      * Fetch the user's profile backup from Nostr relays.
@@ -1786,64 +1576,7 @@ class NostrService(
      *
      * @return Decrypted profile data, or null if not found or decryption fails
      */
-    suspend fun fetchProfileBackup(): ProfileBackupData? {
-        val signer = keyManager.getSigner()
-        val myPubKey = keyManager.getPubKeyHex()
-        if (signer == null || myPubKey == null) {
-            Log.e(TAG, "Cannot fetch profile backup: Not logged in")
-            return null
-        }
-
-        return withContext(Dispatchers.IO) {
-            // Wait for relay connection (up to 15 seconds)
-            var waitedMs = 0L
-            while (!relayManager.isConnected() && waitedMs < 15000) {
-                Log.d(TAG, "fetchProfileBackup: Waiting for relay... (${waitedMs}ms)")
-                delay(500)
-                waitedMs += 500
-            }
-
-            if (!relayManager.isConnected()) {
-                Log.e(TAG, "fetchProfileBackup: No relays connected - cannot restore")
-                return@withContext null
-            }
-
-            Log.d(TAG, "Fetching profile backup from ${relayManager.connectedCount()} relays for ${myPubKey.take(16)}...")
-
-            try {
-                var rawEvent: com.vitorpamplona.quartz.nip01Core.core.Event? = null
-                val eoseProfile = CompletableDeferred<String>()
-                val subscriptionId = relayManager.subscribe(
-                    kinds = listOf(RideshareEventKinds.PROFILE_BACKUP),
-                    authors = listOf(myPubKey),
-                    tags = mapOf("d" to listOf(ProfileBackupEvent.D_TAG)),
-                    limit = 1,
-                    onEose = { relayUrl -> eoseProfile.complete(relayUrl) }
-                ) { event, relayUrl ->
-                    Log.d(TAG, "Received profile backup event ${event.id} from $relayUrl")
-                    rawEvent = event
-                }
-
-                // Wait for EOSE or timeout
-                if (withTimeoutOrNull(8000L) { eoseProfile.await() } != null) delay(200)
-                relayManager.closeSubscription(subscriptionId)
-
-                // Decrypt outside callback
-                val result = rawEvent?.let { event ->
-                    ProfileBackupEvent.parseAndDecrypt(signer, event)?.also { data ->
-                        Log.d(TAG, "Decrypted profile backup: ${data.vehicles.size} vehicles, ${data.savedLocations.size} locations")
-                    }
-                }
-                if (result == null) {
-                    Log.d(TAG, "No profile backup found on relays")
-                }
-                result
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to fetch profile backup", e)
-                null
-            }
-        }
-    }
+    suspend fun fetchProfileBackup(): ProfileBackupData? = profileBackupService.fetchProfileBackup()
 
     // ==================== Vehicle Backup (DEPRECATED) ====================
 
@@ -1855,41 +1588,9 @@ class NostrService(
      * @deprecated Use [publishProfileBackup] instead. Vehicles are now part of unified profile backup.
      */
     @Deprecated("Use publishProfileBackup instead", ReplaceWith("publishProfileBackup(vehicles, emptyList(), SettingsBackup())"))
-    suspend fun backupVehicles(vehicles: List<Vehicle>): String? {
-        val signer = keyManager.getSigner()
-        if (signer == null) {
-            Log.e(TAG, "Cannot backup vehicles: Not logged in")
-            return null
-        }
-
-        // Wait for relay connection (up to 15 seconds)
-        var waitedMs = 0L
-        while (!relayManager.isConnected() && waitedMs < 15000) {
-            Log.d(TAG, "backupVehicles: Waiting for relay... (${waitedMs}ms)")
-            delay(500)
-            waitedMs += 500
-        }
-
-        if (!relayManager.isConnected()) {
-            Log.e(TAG, "backupVehicles: No relays connected - backup NOT saved!")
-            return null
-        }
-
-        return try {
-            val event = VehicleBackupEvent.create(signer, vehicles)
-            if (event != null) {
-                relayManager.publish(event)
-                Log.d(TAG, "Published vehicle backup: ${event.id} (${vehicles.size} vehicles) to ${relayManager.connectedCount()} relays")
-                event.id
-            } else {
-                Log.e(TAG, "Failed to create vehicle backup event")
-                null
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to backup vehicles", e)
-            null
-        }
-    }
+    @Suppress("DEPRECATION")
+    suspend fun backupVehicles(vehicles: List<Vehicle>): String? =
+        profileBackupService.backupVehicles(vehicles)
 
     /**
      * Fetch the user's vehicle backup from Nostr relays.
@@ -1899,64 +1600,8 @@ class NostrService(
      * @deprecated Use [fetchProfileBackup] instead. Vehicles are now part of unified profile backup.
      */
     @Deprecated("Use fetchProfileBackup instead", ReplaceWith("fetchProfileBackup()"))
-    suspend fun fetchVehicleBackup(): VehicleBackupData? {
-        val signer = keyManager.getSigner()
-        val myPubKey = keyManager.getPubKeyHex()
-        if (signer == null || myPubKey == null) {
-            Log.e(TAG, "Cannot fetch vehicle backup: Not logged in")
-            return null
-        }
-
-        return withContext(Dispatchers.IO) {
-            // Wait for relay connection (up to 15 seconds)
-            var waitedMs = 0L
-            while (!relayManager.isConnected() && waitedMs < 15000) {
-                Log.d(TAG, "fetchVehicleBackup: Waiting for relay... (${waitedMs}ms)")
-                delay(500)
-                waitedMs += 500
-            }
-
-            if (!relayManager.isConnected()) {
-                Log.e(TAG, "fetchVehicleBackup: No relays connected - cannot restore")
-                return@withContext null
-            }
-
-            Log.d(TAG, "Fetching vehicle backup from ${relayManager.connectedCount()} relays for ${myPubKey.take(16)}...")
-
-            try {
-                var rawEvent: com.vitorpamplona.quartz.nip01Core.core.Event? = null
-                val eoseVehicle = CompletableDeferred<String>()
-                val subscriptionId = relayManager.subscribe(
-                    kinds = listOf(RideshareEventKinds.VEHICLE_BACKUP),
-                    authors = listOf(myPubKey),
-                    tags = mapOf("d" to listOf(VehicleBackupEvent.D_TAG)),
-                    limit = 1,
-                    onEose = { relayUrl -> eoseVehicle.complete(relayUrl) }
-                ) { event, relayUrl ->
-                    Log.d(TAG, "Received vehicle backup event ${event.id} from $relayUrl")
-                    rawEvent = event
-                }
-
-                // Wait for EOSE or timeout
-                if (withTimeoutOrNull(8000L) { eoseVehicle.await() } != null) delay(200)
-                relayManager.closeSubscription(subscriptionId)
-
-                // Decrypt outside callback
-                val result = rawEvent?.let { event ->
-                    VehicleBackupEvent.parseAndDecrypt(signer, event)?.also { data ->
-                        Log.d(TAG, "Decrypted vehicle backup: ${data.vehicles.size} vehicles")
-                    }
-                }
-                if (result == null) {
-                    Log.d(TAG, "No vehicle backup found on relays")
-                }
-                result
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to fetch vehicle backup", e)
-                null
-            }
-        }
-    }
+    @Suppress("DEPRECATION")
+    suspend fun fetchVehicleBackup(): VehicleBackupData? = profileBackupService.fetchVehicleBackup()
 
     // ==================== Saved Location Backup (DEPRECATED) ====================
 
@@ -1968,41 +1613,9 @@ class NostrService(
      * @deprecated Use [publishProfileBackup] instead. Saved locations are now part of unified profile backup.
      */
     @Deprecated("Use publishProfileBackup instead", ReplaceWith("publishProfileBackup(emptyList(), locations, SettingsBackup())"))
-    suspend fun backupSavedLocations(locations: List<com.ridestr.common.data.SavedLocation>): String? {
-        val signer = keyManager.getSigner()
-        if (signer == null) {
-            Log.e(TAG, "Cannot backup saved locations: Not logged in")
-            return null
-        }
-
-        // Wait for relay connection (up to 15 seconds)
-        var waitedMs = 0L
-        while (!relayManager.isConnected() && waitedMs < 15000) {
-            Log.d(TAG, "backupSavedLocations: Waiting for relay... (${waitedMs}ms)")
-            delay(500)
-            waitedMs += 500
-        }
-
-        if (!relayManager.isConnected()) {
-            Log.e(TAG, "backupSavedLocations: No relays connected - backup NOT saved!")
-            return null
-        }
-
-        return try {
-            val event = SavedLocationBackupEvent.create(signer, locations)
-            if (event != null) {
-                relayManager.publish(event)
-                Log.d(TAG, "Published saved location backup: ${event.id} (${locations.size} locations) to ${relayManager.connectedCount()} relays")
-                event.id
-            } else {
-                Log.e(TAG, "Failed to create saved location backup event")
-                null
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to backup saved locations", e)
-            null
-        }
-    }
+    @Suppress("DEPRECATION")
+    suspend fun backupSavedLocations(locations: List<SavedLocation>): String? =
+        profileBackupService.backupSavedLocations(locations)
 
     /**
      * Fetch the user's saved location backup from Nostr relays.
@@ -2012,519 +1625,95 @@ class NostrService(
      * @deprecated Use [fetchProfileBackup] instead. Saved locations are now part of unified profile backup.
      */
     @Deprecated("Use fetchProfileBackup instead", ReplaceWith("fetchProfileBackup()"))
-    suspend fun fetchSavedLocationBackup(): SavedLocationBackupData? {
-        val signer = keyManager.getSigner()
-        val myPubKey = keyManager.getPubKeyHex()
-        if (signer == null || myPubKey == null) {
-            Log.e(TAG, "Cannot fetch saved location backup: Not logged in")
-            return null
-        }
-
-        return withContext(Dispatchers.IO) {
-            // Wait for relay connection (up to 15 seconds)
-            var waitedMs = 0L
-            while (!relayManager.isConnected() && waitedMs < 15000) {
-                Log.d(TAG, "fetchSavedLocationBackup: Waiting for relay... (${waitedMs}ms)")
-                delay(500)
-                waitedMs += 500
-            }
-
-            if (!relayManager.isConnected()) {
-                Log.e(TAG, "fetchSavedLocationBackup: No relays connected - cannot restore")
-                return@withContext null
-            }
-
-            Log.d(TAG, "Fetching saved location backup from ${relayManager.connectedCount()} relays for ${myPubKey.take(16)}...")
-
-            try {
-                var rawEvent: com.vitorpamplona.quartz.nip01Core.core.Event? = null
-                val eoseLocations = CompletableDeferred<String>()
-                val subscriptionId = relayManager.subscribe(
-                    kinds = listOf(RideshareEventKinds.SAVED_LOCATIONS_BACKUP),
-                    authors = listOf(myPubKey),
-                    tags = mapOf("d" to listOf(SavedLocationBackupEvent.D_TAG)),
-                    limit = 1,
-                    onEose = { relayUrl -> eoseLocations.complete(relayUrl) }
-                ) { event, relayUrl ->
-                    Log.d(TAG, "Received saved location backup event ${event.id} from $relayUrl")
-                    rawEvent = event
-                }
-
-                // Wait for EOSE or timeout
-                if (withTimeoutOrNull(8000L) { eoseLocations.await() } != null) delay(200)
-                relayManager.closeSubscription(subscriptionId)
-
-                // Decrypt outside callback
-                val result = rawEvent?.let { event ->
-                    SavedLocationBackupEvent.parseAndDecrypt(signer, event)?.also { data ->
-                        Log.d(TAG, "Decrypted saved location backup: ${data.locations.size} locations")
-                    }
-                }
-                if (result == null) {
-                    Log.d(TAG, "No saved location backup found on relays")
-                }
-                result
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to fetch saved location backup", e)
-                null
-            }
-        }
-    }
+    @Suppress("DEPRECATION")
+    suspend fun fetchSavedLocationBackup(): SavedLocationBackupData? =
+        profileBackupService.fetchSavedLocationBackup()
 
     // ==================== RoadFlare Operations ====================
 
     /**
      * Publish followed drivers list to Nostr (Kind 30011).
-     * Encrypted to self - only the rider can read their own followed drivers.
-     *
-     * @param drivers List of followed drivers with their RoadFlare keys
-     * @return Event ID if successful, null on failure
      */
-    suspend fun publishFollowedDrivers(drivers: List<FollowedDriver>): String? {
-        val signer = keyManager.getSigner()
-        if (signer == null) {
-            Log.e(TAG, "Cannot publish followed drivers: Not logged in")
-            return null
-        }
-
-        // Wait for relay connection
-        var waitedMs = 0L
-        while (!relayManager.isConnected() && waitedMs < 15000) {
-            delay(500)
-            waitedMs += 500
-        }
-
-        if (!relayManager.isConnected()) {
-            Log.e(TAG, "publishFollowedDrivers: No relays connected")
-            return null
-        }
-
-        return try {
-            val event = FollowedDriversEvent.create(signer, drivers)
-            if (event != null) {
-                relayManager.publish(event)
-                Log.d(TAG, "Published followed drivers: ${event.id} (${drivers.size} drivers)")
-                event.id
-            } else {
-                Log.e(TAG, "Failed to create followed drivers event")
-                null
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to publish followed drivers", e)
-            null
-        }
-    }
+    suspend fun publishFollowedDrivers(drivers: List<FollowedDriver>): String? =
+        roadflareDomainService.publishFollowedDrivers(drivers)
 
     /**
      * Fetch followed drivers list from Nostr (Kind 30011).
-     *
-     * @return Decrypted followed drivers data, or null if not found
      */
-    suspend fun fetchFollowedDrivers(): FollowedDriversData? {
-        val signer = keyManager.getSigner()
-        val myPubKey = keyManager.getPubKeyHex()
-        if (signer == null || myPubKey == null) {
-            Log.e(TAG, "Cannot fetch followed drivers: Not logged in")
-            return null
-        }
-
-        return withContext(Dispatchers.IO) {
-            // Wait for relay connection
-            var waitedMs = 0L
-            while (!relayManager.isConnected() && waitedMs < 15000) {
-                delay(500)
-                waitedMs += 500
-            }
-
-            if (!relayManager.isConnected()) {
-                Log.e(TAG, "fetchFollowedDrivers: No relays connected")
-                return@withContext null
-            }
-
-            Log.d(TAG, "Fetching followed drivers for ${myPubKey.take(16)}...")
-
-            try {
-                var rawEvent: com.vitorpamplona.quartz.nip01Core.core.Event? = null
-                val eoseFollowed = CompletableDeferred<String>()
-                val subscriptionId = relayManager.subscribe(
-                    kinds = listOf(RideshareEventKinds.ROADFLARE_FOLLOWED_DRIVERS),
-                    authors = listOf(myPubKey),
-                    tags = mapOf("d" to listOf(FollowedDriversEvent.D_TAG)),
-                    limit = 1,
-                    onEose = { relayUrl -> eoseFollowed.complete(relayUrl) }
-                ) { event, relayUrl ->
-                    Log.d(TAG, "Received followed drivers event ${event.id} from $relayUrl")
-                    rawEvent = event
-                }
-
-                // Wait for EOSE or timeout
-                if (withTimeoutOrNull(8000L) { eoseFollowed.await() } != null) delay(200)
-                relayManager.closeSubscription(subscriptionId)
-
-                // Decrypt outside callback
-                val result = rawEvent?.let { event ->
-                    FollowedDriversEvent.parseAndDecrypt(signer, event)?.also { data ->
-                        Log.d(TAG, "Decrypted followed drivers: ${data.drivers.size} drivers")
-                    }
-                }
-                if (result == null) {
-                    Log.d(TAG, "No followed drivers found on relays")
-                }
-                result
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to fetch followed drivers", e)
-                null
-            }
-        }
-    }
+    suspend fun fetchFollowedDrivers(): FollowedDriversData? =
+        roadflareDomainService.fetchFollowedDrivers()
 
     /**
      * Publish driver RoadFlare state to Nostr (Kind 30012).
-     * Encrypted to self - contains keypair, followers, muted list.
-     *
-     * @param signer The driver's signer (can be different from keyManager.getSigner in some cases)
-     * @param state The complete RoadFlare state
-     * @return Event ID if successful, null on failure
      */
     suspend fun publishDriverRoadflareState(
         signer: NostrSigner,
         state: DriverRoadflareState
-    ): String? {
-        // Wait for relay connection
-        var waitedMs = 0L
-        while (!relayManager.isConnected() && waitedMs < 15000) {
-            delay(500)
-            waitedMs += 500
-        }
-
-        if (!relayManager.isConnected()) {
-            Log.e(TAG, "publishDriverRoadflareState: No relays connected")
-            return null
-        }
-
-        return try {
-            val event = DriverRoadflareStateEvent.create(signer, state)
-            if (event != null) {
-                relayManager.publish(event)
-                Log.d(TAG, "Published driver RoadFlare state: ${event.id} (key v${state.roadflareKey?.version}, ${state.followers.size} followers)")
-                event.id
-            } else {
-                Log.e(TAG, "Failed to create driver RoadFlare state event")
-                null
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to publish driver RoadFlare state", e)
-            null
-        }
-    }
+    ): String? = roadflareDomainService.publishDriverRoadflareState(signer, state)
 
     /**
      * Fetch driver RoadFlare state from Nostr (Kind 30012).
-     *
-     * @return Decrypted RoadFlare state, or null if not found
      */
-    suspend fun fetchDriverRoadflareState(): DriverRoadflareState? {
-        val signer = keyManager.getSigner()
-        val myPubKey = keyManager.getPubKeyHex()
-        if (signer == null || myPubKey == null) {
-            Log.e(TAG, "Cannot fetch driver RoadFlare state: Not logged in")
-            return null
-        }
-
-        return withContext(Dispatchers.IO) {
-            // Wait for relay connection
-            var waitedMs = 0L
-            while (!relayManager.isConnected() && waitedMs < 15000) {
-                delay(500)
-                waitedMs += 500
-            }
-
-            if (!relayManager.isConnected()) {
-                Log.e(TAG, "fetchDriverRoadflareState: No relays connected")
-                return@withContext null
-            }
-
-            Log.d(TAG, "Fetching driver RoadFlare state for ${myPubKey.take(16)}...")
-
-            try {
-                var rawEvent: com.vitorpamplona.quartz.nip01Core.core.Event? = null
-                val eoseRoadflare = CompletableDeferred<String>()
-                val subscriptionId = relayManager.subscribe(
-                    kinds = listOf(RideshareEventKinds.ROADFLARE_DRIVER_STATE),
-                    authors = listOf(myPubKey),
-                    tags = mapOf("d" to listOf(DriverRoadflareStateEvent.D_TAG)),
-                    limit = 1,
-                    onEose = { relayUrl -> eoseRoadflare.complete(relayUrl) }
-                ) { event, relayUrl ->
-                    Log.d(TAG, "Received driver RoadFlare state event ${event.id} from $relayUrl")
-                    rawEvent = event
-                }
-
-                // Wait for EOSE or timeout
-                if (withTimeoutOrNull(8000L) { eoseRoadflare.await() } != null) delay(200)
-                relayManager.closeSubscription(subscriptionId)
-
-                // Decrypt outside callback
-                val result = rawEvent?.let { event ->
-                    DriverRoadflareStateEvent.parseAndDecrypt(signer, event)?.also { data ->
-                        Log.d(TAG, "Decrypted driver RoadFlare state: key v${data.roadflareKey?.version}, ${data.followers.size} followers")
-                    }
-                }
-                if (result == null) {
-                    Log.d(TAG, "No driver RoadFlare state found on relays")
-                }
-                result
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to fetch driver RoadFlare state", e)
-                null
-            }
-        }
-    }
+    suspend fun fetchDriverRoadflareState(): DriverRoadflareState? =
+        roadflareDomainService.fetchDriverRoadflareState()
 
     /**
      * Fetch a driver's public key_updated_at timestamp from their Kind 30012 event.
-     * This does NOT require decryption - the timestamp is in a public tag.
-     * Used by riders to detect stale RoadFlare keys.
-     *
-     * @param driverPubKey The driver's public key
-     * @return The key_updated_at timestamp, or null if not found
      */
-    suspend fun fetchDriverKeyUpdatedAt(driverPubKey: String): Long? {
-        return withContext(Dispatchers.IO) {
-            if (!relayManager.isConnected()) {
-                Log.e(TAG, "fetchDriverKeyUpdatedAt: No relays connected")
-                return@withContext null
-            }
-
-            Log.d(TAG, "Fetching key_updated_at for driver ${driverPubKey.take(16)}...")
-
-            try {
-                var result: Long? = null
-                val eoseKeyUpdate = CompletableDeferred<String>()
-                val subscriptionId = relayManager.subscribe(
-                    kinds = listOf(RideshareEventKinds.ROADFLARE_DRIVER_STATE),
-                    authors = listOf(driverPubKey),
-                    tags = mapOf("d" to listOf(DriverRoadflareStateEvent.D_TAG)),
-                    limit = 1,
-                    onEose = { relayUrl -> eoseKeyUpdate.complete(relayUrl) }
-                ) { event, relayUrl ->
-                    // Extract public key_updated_at tag without decryption
-                    val keyUpdatedAt = DriverRoadflareStateEvent.getKeyUpdatedAt(event)
-                    if (keyUpdatedAt != null) {
-                        Log.d(TAG, "Found key_updated_at=${keyUpdatedAt} for driver ${driverPubKey.take(16)}")
-                        result = keyUpdatedAt
-                    }
-                }
-
-                // Wait for EOSE or timeout
-                if (withTimeoutOrNull(5000L) { eoseKeyUpdate.await() } != null) delay(200)
-                relayManager.closeSubscription(subscriptionId)
-
-                if (result == null) {
-                    Log.d(TAG, "No key_updated_at found for driver ${driverPubKey.take(16)}")
-                }
-                result
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to fetch driver key_updated_at", e)
-                null
-            }
-        }
-    }
+    suspend fun fetchDriverKeyUpdatedAt(driverPubKey: String): Long? =
+        roadflareDomainService.fetchDriverKeyUpdatedAt(driverPubKey)
 
     /**
      * Publish RoadFlare location broadcast (Kind 30014).
-     * Encrypted to the driver's RoadFlare public key - only followers with the
-     * shared private key can decrypt.
-     *
-     * @param signer The driver's identity signer
-     * @param roadflarePubKey The driver's RoadFlare public key (encryption target)
-     * @param location The location data to broadcast
-     * @param keyVersion Current key version for rotation tracking
-     * @return Event ID if successful, null on failure
      */
     suspend fun publishRoadflareLocation(
         signer: NostrSigner,
         roadflarePubKey: String,
         location: RoadflareLocation,
         keyVersion: Int
-    ): String? {
-        if (!relayManager.isConnected()) {
-            Log.w(TAG, "publishRoadflareLocation: No relays connected")
-            return null
-        }
-
-        return try {
-            val event = RoadflareLocationEvent.create(signer, roadflarePubKey, location, keyVersion)
-            if (event != null) {
-                relayManager.publish(event)
-                Log.d(TAG, "Published RoadFlare location: ${location.status}, key v$keyVersion")
-                event.id
-            } else {
-                Log.e(TAG, "Failed to create RoadFlare location event")
-                null
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to publish RoadFlare location", e)
-            null
-        }
-    }
+    ): String? = roadflareDomainService.publishRoadflareLocation(signer, roadflarePubKey, location, keyVersion)
 
     /**
      * Subscribe to RoadFlare location broadcasts from specific drivers (Kind 30014).
-     *
-     * @param driverPubkeys List of driver identity pubkeys to subscribe to
-     * @param onLocation Callback for received location events (raw event, caller decrypts)
-     * @return Subscription ID for later closing
      */
     fun subscribeToRoadflareLocations(
         driverPubkeys: List<String>,
         onLocation: (event: com.vitorpamplona.quartz.nip01Core.core.Event, relayUrl: String) -> Unit
-    ): String {
-        Log.d(TAG, "Subscribing to RoadFlare locations from ${driverPubkeys.size} drivers")
-        return relayManager.subscribe(
-            kinds = listOf(RideshareEventKinds.ROADFLARE_LOCATION),
-            authors = driverPubkeys,
-            tags = mapOf("d" to listOf(RoadflareLocationEvent.D_TAG)),
-            limit = driverPubkeys.size  // One per driver (replaceable event)
-        ) { event, relayUrl ->
-            onLocation(event, relayUrl)
-        }
-    }
+    ): String = roadflareDomainService.subscribeToRoadflareLocations(driverPubkeys, onLocation)
 
     /**
      * Publish RoadFlare key share to a follower (Kind 3186).
-     * Encrypted to the follower's identity pubkey.
-     * Uses short expiration (5 minutes) to reduce relay storage.
-     *
-     * @param signer The driver's identity signer
-     * @param followerPubKey The follower's Nostr pubkey
-     * @param roadflareKey The RoadFlare key to share
-     * @param keyUpdatedAt Timestamp when the key was last updated/rotated
-     * @return Event ID if successful, null on failure
      */
     suspend fun publishRoadflareKeyShare(
         signer: NostrSigner,
         followerPubKey: String,
         roadflareKey: RoadflareKey,
         keyUpdatedAt: Long
-    ): String? {
-        // Wait for relay connection
-        var waitedMs = 0L
-        while (!relayManager.isConnected() && waitedMs < 15000) {
-            delay(500)
-            waitedMs += 500
-        }
-
-        if (!relayManager.isConnected()) {
-            Log.e(TAG, "publishRoadflareKeyShare: No relays connected")
-            return null
-        }
-
-        return try {
-            val event = RoadflareKeyShareEvent.create(signer, followerPubKey, roadflareKey, keyUpdatedAt)
-            if (event != null) {
-                Log.d(TAG, "Publishing Kind 3186 to ${followerPubKey.take(8)}: eventId=${event.id.take(8)}, relays=${relayManager.connectedCount()}")
-                relayManager.publish(event)
-                Log.d(TAG, "Published Kind 3186 to ${followerPubKey.take(8)}: eventId=${event.id.take(8)}, v${roadflareKey.version} (expires in 5 min)")
-                event.id
-            } else {
-                Log.e(TAG, "Failed to create Kind 3186 event for ${followerPubKey.take(8)}")
-                null
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to publish Kind 3186 to ${followerPubKey.take(8)}", e)
-            null
-        }
-    }
+    ): String? = roadflareDomainService.publishRoadflareKeyShare(signer, followerPubKey, roadflareKey, keyUpdatedAt)
 
     /**
      * Subscribe to RoadFlare key shares sent to us (Kind 3186).
-     *
-     * @param onKeyShare Callback for received key share events
-     * @return Subscription ID for later closing
      */
     fun subscribeToRoadflareKeyShares(
         onKeyShare: (event: com.vitorpamplona.quartz.nip01Core.core.Event, relayUrl: String) -> Unit
-    ): String {
-        val myPubKey = keyManager.getPubKeyHex() ?: return ""
-        Log.d(TAG, "Subscribing to RoadFlare key shares for ${myPubKey.take(16)}...")
-        return relayManager.subscribe(
-            kinds = listOf(RideshareEventKinds.ROADFLARE_KEY_SHARE),
-            tags = mapOf("p" to listOf(myPubKey))
-        ) { event, relayUrl ->
-            onKeyShare(event, relayUrl)
-        }
-    }
+    ): String = roadflareDomainService.subscribeToRoadflareKeyShares(onKeyShare)
 
     /**
      * Publish RoadFlare key acknowledgement (Kind 3188).
-     * Sent by rider after receiving and storing the key from driver.
-     * Uses short expiration (5 minutes) to reduce relay storage.
-     *
-     * @param driverPubKey The driver's pubkey (encryption target)
-     * @param keyVersion The key version that was received
-     * @param keyUpdatedAt The key update timestamp that was received
-     * @param status The ack status: "received" (normal) or "stale" (request key refresh)
-     * @return Event ID if successful, null on failure
      */
     suspend fun publishRoadflareKeyAck(
         driverPubKey: String,
         keyVersion: Int,
         keyUpdatedAt: Long,
         status: String = "received"
-    ): String? {
-        val signer = keyManager.getSigner() ?: run {
-            Log.e(TAG, "publishRoadflareKeyAck: No signer available")
-            return null
-        }
-
-        // Wait for relay connection
-        var waitedMs = 0L
-        while (!relayManager.isConnected() && waitedMs < 15000) {
-            delay(500)
-            waitedMs += 500
-        }
-
-        if (!relayManager.isConnected()) {
-            Log.e(TAG, "publishRoadflareKeyAck: No relays connected")
-            return null
-        }
-
-        return try {
-            val event = RoadflareKeyAckEvent.create(signer, driverPubKey, keyVersion, keyUpdatedAt, status)
-            if (event != null) {
-                relayManager.publish(event)
-                Log.d(TAG, "Published RoadFlare key ack v$keyVersion status=$status to ${driverPubKey.take(8)}... (expires in 5 min)")
-                event.id
-            } else {
-                Log.e(TAG, "Failed to create RoadFlare key ack event")
-                null
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to publish RoadFlare key ack", e)
-            null
-        }
-    }
+    ): String? = roadflareDomainService.publishRoadflareKeyAck(driverPubKey, keyVersion, keyUpdatedAt, status)
 
     /**
      * Subscribe to RoadFlare key acknowledgements sent to us (Kind 3188).
-     * Used by drivers to confirm followers have received the key.
-     *
-     * @param onKeyAck Callback for received key ack events
-     * @return Subscription ID for later closing
      */
     fun subscribeToRoadflareKeyAcks(
         onKeyAck: (event: com.vitorpamplona.quartz.nip01Core.core.Event, relayUrl: String) -> Unit
-    ): String {
-        val myPubKey = keyManager.getPubKeyHex() ?: return ""
-        Log.d(TAG, "Subscribing to RoadFlare key acks for ${myPubKey.take(16)}...")
-        return relayManager.subscribe(
-            kinds = listOf(RideshareEventKinds.ROADFLARE_KEY_ACK),
-            tags = mapOf("p" to listOf(myPubKey))
-        ) { event, relayUrl ->
-            onKeyAck(event, relayUrl)
-        }
-    }
+    ): String = roadflareDomainService.subscribeToRoadflareKeyAcks(onKeyAck)
 
     /**
      * Close a RoadFlare-related subscription.
@@ -2535,205 +1724,45 @@ class NostrService(
 
     // ==================== RoadFlare Follow Notifications (DEPRECATED) ====================
 
-    /**
-     * Publish a follow notification to a driver (Kind 3187).
-     *
-     * @deprecated Use p-tag query on Kind 30011 instead.
-     * Drivers now discover followers by querying Kind 30011 events that have
-     * their pubkey in p-tags, rather than receiving push notifications.
-     *
-     * @param driverPubKey The driver's pubkey (hex)
-     * @param riderName The rider's display name
-     * @param action "follow" or "unfollow"
-     * @return Event ID on success, null on failure
-     */
     @Deprecated("Use p-tag query on Kind 30011 instead of push notifications")
+    @Suppress("DEPRECATION")
     suspend fun publishRoadflareFollowNotify(
         driverPubKey: String,
         riderName: String,
         action: String = "follow"
-    ): String? {
-        val signer = keyManager.getSigner() ?: run {
-            Log.e(TAG, "publishRoadflareFollowNotify: No signer available")
-            return null
-        }
+    ): String? = roadflareDomainService.publishRoadflareFollowNotify(driverPubKey, riderName, action)
 
-        if (relayManager.connectedCount() == 0) {
-            Log.e(TAG, "publishRoadflareFollowNotify: No relays connected")
-            return null
-        }
-
-        return try {
-            val event = RoadflareFollowNotifyEvent.create(signer, driverPubKey, riderName, action)
-            if (event != null) {
-                relayManager.publish(event)
-                Log.d(TAG, "Published follow notify to ${driverPubKey.take(16)}, action=$action")
-                event.id
-            } else {
-                Log.e(TAG, "Failed to create follow notify event")
-                null
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error publishing follow notify", e)
-            null
-        }
-    }
-
-    /**
-     * Subscribe to RoadFlare follow notifications (Kind 3187).
-     *
-     * @deprecated Use queryRoadflareFollowers() with p-tag query instead.
-     * Drivers now discover followers by querying Kind 30011 events that have
-     * their pubkey in p-tags, rather than receiving push notifications.
-     *
-     * @param onFollowNotify Callback for received notifications
-     * @return Subscription ID for later closing
-     */
     @Deprecated("Use queryRoadflareFollowers() with p-tag query instead")
+    @Suppress("DEPRECATION")
     fun subscribeToRoadflareFollowNotifications(
         onFollowNotify: (event: com.vitorpamplona.quartz.nip01Core.core.Event, relayUrl: String) -> Unit
-    ): String {
-        val myPubKey = keyManager.getPubKeyHex() ?: return ""
-        Log.d(TAG, "Subscribing to RoadFlare follow notifications for ${myPubKey.take(16)}...")
-        return relayManager.subscribe(
-            kinds = listOf(RideshareEventKinds.ROADFLARE_FOLLOW_NOTIFY),
-            tags = mapOf("p" to listOf(myPubKey))
-        ) { event, relayUrl ->
-            onFollowNotify(event, relayUrl)
-        }
-    }
+    ): String = roadflareDomainService.subscribeToRoadflareFollowNotifications(onFollowNotify)
 
     /**
      * Query for riders who follow this driver via Kind 30011 p-tags.
-     *
-     * Since Kind 30011 now uses public p-tags for driver pubkeys, drivers can
-     * query relays to find all riders who have them in their followed list.
-     *
-     * @param driverPubKey The driver's pubkey (hex) to search for
-     * @param onFollower Callback for each follower found (rider pubkey)
-     * @return Subscription ID for later closing
      */
     fun queryRoadflareFollowers(
         driverPubKey: String,
         onFollower: (riderPubKey: String) -> Unit
-    ): String {
-        Log.d(TAG, "Querying for RoadFlare followers of ${driverPubKey.take(16)}...")
-
-        // Query for Kind 30011 events that have this driver in their p-tags
-        return relayManager.subscribe(
-            kinds = listOf(RideshareEventKinds.ROADFLARE_FOLLOWED_DRIVERS),
-            tags = mapOf("p" to listOf(driverPubKey))
-        ) { event, _ ->
-            // The event author (pubKey) is the rider who follows this driver
-            Log.d(TAG, "Found follower: ${event.pubKey.take(16)} follows ${driverPubKey.take(16)}")
-            onFollower(event.pubKey)
-        }
-    }
+    ): String = roadflareDomainService.queryRoadflareFollowers(driverPubKey, onFollower)
 
     /**
      * Result of querying current followers via Kind 30011.
-     * Distinguishes successful query (even if empty) from timeout/failure.
      */
     data class FollowerQueryResult(
         val followers: Set<String>,
-        val success: Boolean  // true if EOSE received, false if timeout
+        val success: Boolean
     )
 
     /**
      * Query for current followers (EOSE-aware, suspending).
-     * Returns a result containing rider pubkeys who currently have this driver in their Kind 30011.
-     * Used for filtering stale followers during sync.
-     *
-     * @param driverPubKey The driver's pubkey (hex) to search for
-     * @param timeoutMs Query timeout in milliseconds
-     * @return FollowerQueryResult with followers set and success flag (true if EOSE received)
      */
     suspend fun queryCurrentFollowerPubkeys(
         driverPubKey: String,
         timeoutMs: Long = 3000L
-    ): FollowerQueryResult = withContext(Dispatchers.IO) {
-        val followers = mutableSetOf<String>()
-        val eoseFollowers = CompletableDeferred<String>()
-
-        val subscriptionId = relayManager.subscribe(
-            kinds = listOf(RideshareEventKinds.ROADFLARE_FOLLOWED_DRIVERS),
-            tags = mapOf("p" to listOf(driverPubKey)),
-            onEose = { relayUrl -> eoseFollowers.complete(relayUrl) }
-        ) { event, _ ->
-            followers.add(event.pubKey)
-        }
-
-        // Wait for EOSE or timeout
-        val eoseReceived = withTimeoutOrNull(timeoutMs) { eoseFollowers.await() } != null
-        if (eoseReceived) {
-            delay(100)  // Brief delay for any trailing events
-        }
-        relayManager.closeSubscription(subscriptionId)
-
-        if (com.ridestr.common.BuildConfig.DEBUG) {
-            Log.d(TAG, "queryCurrentFollowerPubkeys: found ${followers.size} followers, success=$eoseReceived")
-        }
-        return@withContext FollowerQueryResult(followers, eoseReceived)
-    }
-
-    /**
-     * Verify a follower's status by checking their Kind 30011 event.
-     * Returns info about whether:
-     * 1. Driver is still in follower's p-tags (not unfollowed)
-     * 2. Follower has the current key (by comparing keyUpdatedAt timestamps)
-     *
-     * @param followerPubKey The rider's pubkey (hex) to verify
-     * @param driverPubKey The driver's pubkey (hex) to look for in p-tags
-     * @param currentKeyUpdatedAt The driver's current key timestamp
-     * @return FollowerVerification result, or null if event not found
-     */
-    suspend fun verifyFollowerStatus(
-        followerPubKey: String,
-        driverPubKey: String,
-        currentKeyUpdatedAt: Long?
-    ): FollowerVerification? = withContext(Dispatchers.IO) {
-        val signer = keyManager.getSigner() ?: return@withContext null
-
-        var foundEvent: com.vitorpamplona.quartz.nip01Core.core.Event? = null
-        val eoseVerify = CompletableDeferred<String>()
-        val subscriptionId = relayManager.subscribe(
-            kinds = listOf(RideshareEventKinds.ROADFLARE_FOLLOWED_DRIVERS),
-            authors = listOf(followerPubKey),
-            onEose = { relayUrl -> eoseVerify.complete(relayUrl) }
-        ) { event, _ ->
-            // Replaceable event (d-tag) - relays should return only one, keep newest
-            if (foundEvent == null || event.createdAt > foundEvent!!.createdAt) {
-                foundEvent = event
-            }
-        }
-
-        if (withTimeoutOrNull(3000L) { eoseVerify.await() } != null) delay(200)
-        relayManager.closeSubscription(subscriptionId)
-
-        val event = foundEvent ?: return@withContext FollowerVerification(
-            stillFollowing = false,
-            hasCurrentKey = false,
-            followerKeyUpdatedAt = null
-        )
-
-        val hasDriverInPTags = event.tags.any { tag: Array<String> ->
-            tag.getOrNull(0) == "p" && tag.getOrNull(1) == driverPubKey
-        }
-
-        if (!hasDriverInPTags) {
-            Log.d(TAG, "Follower ${followerPubKey.take(16)} unfollowed (driver not in p-tags)")
-            return@withContext FollowerVerification(
-                stillFollowing = false,
-                hasCurrentKey = false,
-                followerKeyUpdatedAt = null
-            )
-        }
-
-        return@withContext FollowerVerification(
-            stillFollowing = true,
-            hasCurrentKey = null,
-            followerKeyUpdatedAt = null
-        )
+    ): FollowerQueryResult {
+        val result = roadflareDomainService.queryCurrentFollowerPubkeys(driverPubKey, timeoutMs)
+        return FollowerQueryResult(result.followers, result.success)
     }
 
     /**
@@ -2741,66 +1770,37 @@ class NostrService(
      */
     data class FollowerVerification(
         val stillFollowing: Boolean,
-        val hasCurrentKey: Boolean?, // null if unknown (can't decrypt their event)
+        val hasCurrentKey: Boolean?,
         val followerKeyUpdatedAt: Long?
     )
+
+    /**
+     * Verify a follower's status by checking their Kind 30011 event.
+     */
+    suspend fun verifyFollowerStatus(
+        followerPubKey: String,
+        driverPubKey: String,
+        currentKeyUpdatedAt: Long?
+    ): FollowerVerification? {
+        val result = roadflareDomainService.verifyFollowerStatus(followerPubKey, driverPubKey, currentKeyUpdatedAt)
+        return result?.let { FollowerVerification(it.stillFollowing, it.hasCurrentKey, it.followerKeyUpdatedAt) }
+    }
 
     // ==================== RoadFlare Event Cleanup ====================
 
     /**
      * Fetch all Kind 3187 (follow notify) events sent by the current user.
-     * Used for cleanup - these events can be deleted since we now use p-tags.
-     *
-     * @return List of event IDs that can be deleted
      */
-    suspend fun fetchOwnFollowNotifyEvents(): List<String> = withContext(Dispatchers.IO) {
-        val myPubKey = keyManager.getPubKeyHex()
-        if (myPubKey == null) {
-            Log.e(TAG, "Cannot fetch follow notify events: Not logged in")
-            return@withContext emptyList()
-        }
-
-        Log.d(TAG, "Fetching own Kind 3187 (follow notify) events...")
-
-        val eventIds = mutableListOf<String>()
-        val eoseNotify = CompletableDeferred<String>()
-        val subscriptionId = relayManager.subscribe(
-            kinds = listOf(RideshareEventKinds.ROADFLARE_FOLLOW_NOTIFY),
-            authors = listOf(myPubKey),
-            onEose = { relayUrl -> eoseNotify.complete(relayUrl) }
-        ) { event, _ ->
-            synchronized(eventIds) {
-                eventIds.add(event.id)
-            }
-        }
-
-        // Wait for EOSE or timeout
-        if (withTimeoutOrNull(3000L) { eoseNotify.await() } != null) delay(200)
-        relayManager.closeSubscription(subscriptionId)
-
-        Log.d(TAG, "Found ${eventIds.size} follow notify events to potentially delete")
-        eventIds
-    }
+    suspend fun fetchOwnFollowNotifyEvents(): List<String> =
+        roadflareDomainService.fetchOwnFollowNotifyEvents()
 
     /**
      * Delete Kind 3187 (follow notify) events.
-     * These are no longer needed since Kind 30011 now uses public p-tags
-     * that drivers can query directly.
-     *
-     * @param eventIds List of event IDs to delete
-     * @return Number of events deleted (eventIds.size if successful, 0 on failure)
      */
-    suspend fun deleteFollowNotifyEvents(eventIds: List<String>): Int {
-        if (eventIds.isEmpty()) return 0
-
-        Log.d(TAG, "Deleting ${eventIds.size} follow notify events...")
-        val deleteEventId = deleteEvents(
-            eventIds = eventIds,
-            reason = "RoadFlare cleanup - follow notifications deprecated",
-            kinds = eventIds.map { RideshareEventKinds.ROADFLARE_FOLLOW_NOTIFY }
-        )
-        return if (deleteEventId != null) eventIds.size else 0
-    }
+    suspend fun deleteFollowNotifyEvents(eventIds: List<String>): Int =
+        roadflareDomainService.deleteFollowNotifyEvents(eventIds) { ids, reason, kinds ->
+            deleteEvents(ids, reason, kinds)
+        }
 
     // ==================== Generic Event Operations for Debug ====================
 

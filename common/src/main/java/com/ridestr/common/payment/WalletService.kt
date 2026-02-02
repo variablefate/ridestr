@@ -47,6 +47,10 @@ class WalletService(
         )
     }
 
+    // region ═══════════════════════════════════════════════════════════════════════
+    // INSTANCE STATE
+    // ═══════════════════════════════════════════════════════════════════════════════
+
     private val _walletStorage = WalletStorage(context)
     private val cashuBackend = CashuBackend(context, walletKeyManager, _walletStorage)
 
@@ -58,8 +62,6 @@ class WalletService(
 
     // Mutex to prevent concurrent sync operations
     private val syncMutex = Mutex()
-
-    // === State ===
 
     private val _balance = MutableStateFlow(WalletBalance(availableSats = 0))
     val balance: StateFlow<WalletBalance> = _balance.asStateFlow()
@@ -79,6 +81,12 @@ class WalletService(
     // Recovery tokens notification - UI can observe this to show recovery banner
     private val _hasRecoveryTokens = MutableStateFlow(false)
     val hasRecoveryTokens: StateFlow<Boolean> = _hasRecoveryTokens.asStateFlow()
+
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // LIFECYCLE & CONNECTION
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     init {
         // Load cached balance
@@ -463,7 +471,12 @@ class WalletService(
         this.nip60Sync = sync
     }
 
-    // === Single Sync Function (The ONE function that handles everything) ===
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // BALANCE & SYNC
+    // NIP-60 IS the wallet. cdk-kotlin is just a helper for mint API calls.
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Sync wallet to a consistent state. This is THE sync function.
@@ -921,7 +934,25 @@ class WalletService(
         cashuBackend.storeRecoveredProofs(proofs, mintUrl)
     }
 
-    // === Pre-ride wallet verification ===
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // HTLC PAYMENT FLOWS - CRITICAL
+    //
+    // INVARIANT: lockForRide() sequence (DO NOT REORDER):
+    //   1. fetchProofs(forceRefresh=true)
+    //   2. selectProofsForSpending()
+    //   3. verifyProofStatesBySecret() - catch stale proofs
+    //   4. createHtlcTokenFromProofs()
+    //   5. publishProofs(remaining) - NIP-60 update
+    //   6. IF publish fails → saveRecoveryTokenFallback()
+    //
+    // INVARIANT: claimHtlcPayment() sequence:
+    //   1. claimHtlcTokenWithProofs()
+    //   2. publishProofs(claimed) - NIP-60 update
+    //   3. IF publish fails → saveRecoveryTokenFallback()
+    //   4. Mark HTLC as claimed
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Verify wallet state before requesting a ride.
@@ -1909,7 +1940,11 @@ class WalletService(
         val message: String
     )
 
-    // === Deposit/Withdraw Operations ===
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // DEPOSITS (NUT-04)
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Request a deposit by generating a Lightning invoice.
@@ -2167,6 +2202,12 @@ class WalletService(
         return eventId
     }
 
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // WITHDRAWALS (NUT-05)
+    // ═══════════════════════════════════════════════════════════════════════════════
+
     /**
      * Get a melt quote for withdrawing funds.
      *
@@ -2418,7 +2459,11 @@ class WalletService(
         return Result.failure(Exception("Payment not confirmed"))
     }
 
-    // === Cross-Mint Bridge Payment ===
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // CROSS-MINT BRIDGE PAYMENTS
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Bridge payment to an external mint via Lightning.
@@ -2680,7 +2725,11 @@ class WalletService(
         return Result.success(invoice)
     }
 
-    // === NIP-60 Wallet Sync ===
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // NIP-60 WALLET SYNC & RECOVERY
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Check if a NIP-60 wallet exists for this user.
@@ -3245,7 +3294,11 @@ class WalletService(
         }
     }
 
-    // === Internal ===
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // BALANCE & TRANSACTIONS
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     private fun addTransaction(tx: PaymentTransaction) {
         val updated = listOf(tx) + _transactions.value.take(99)  // Keep last 100
@@ -3311,6 +3364,12 @@ class WalletService(
             return false
         }
     }
+
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // DEPOSIT MANAGEMENT
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Recover pending deposits that were paid but not minted.
@@ -3656,6 +3715,12 @@ class WalletService(
         }
     }
 
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // RECOVERY TOKENS
+    // ═══════════════════════════════════════════════════════════════════════════════
+
     /**
      * Get count of saved recovery tokens.
      * Used by UI to show if there are tokens to recover.
@@ -3835,7 +3900,11 @@ class WalletService(
         return count
     }
 
-    // === Pending Bridge Payment Methods ===
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // BRIDGE PAYMENT TRACKING
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Get count of in-progress bridge payments.
@@ -3907,6 +3976,12 @@ class WalletService(
         }
         return cashuBackend.getMintQuoteAtMint(amountSats, mintUrl)
     }
+
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // DIAGNOSTICS
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Fetch and update wallet diagnostics.
@@ -4224,6 +4299,8 @@ class WalletService(
         walletStorage.savePendingDeposit(deposit)
         Log.d(TAG, "Added pending deposit for recovery: $quoteId, $amount sats")
     }
+
+    // endregion
 }
 
 /**

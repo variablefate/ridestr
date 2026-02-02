@@ -164,6 +164,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     private var driverRideStateSubscriptionId: String? = null
     // Monitor selected driver's availability while waiting for acceptance
     private var selectedDriverAvailabilitySubId: String? = null
+    // Track last seen timestamp for selected driver availability (reject out-of-order events)
+    private var selectedDriverLastAvailabilityTimestamp: Long = 0L
     private var staleDriverCleanupJob: Job? = null
     private var chatRefreshJob: PeriodicRefreshJob? = null
     private var acceptanceTimeoutJob: Job? = null
@@ -172,6 +174,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     private var currentSubscriptionGeohash: String? = null
     // First-acceptance-wins flag for broadcast mode
     private var hasAcceptedDriver: Boolean = false
+    // Track when we last received an event per driver (receivedAt, not createdAt)
+    // Used for accurate staleness detection - network latency can make fresh events appear stale
+    private val driverLastReceivedAt = mutableMapOf<String, Long>()
 
     // ALL events I publish during a ride (for NIP-09 deletion on completion/cancellation)
     private val myRideEventIds = mutableListOf<String>()
@@ -778,7 +783,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         // If geohash changed significantly, resubscribe to get local drivers
         if (newGeohash != currentSubscriptionGeohash) {
             Log.d(TAG, "Pickup location geohash changed: $currentSubscriptionGeohash -> $newGeohash")
-            resubscribeToDrivers()
+            resubscribeToDrivers(clearExisting = true)  // Region changed - clear old drivers
         }
 
         calculateRouteIfReady()
@@ -786,22 +791,31 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * Resubscribe to drivers with updated location filter.
+     * @param clearExisting True if changing regions (geohash changed), false for same-region refresh.
+     *                      Only clear driver list when changing regions - same-region refreshes should
+     *                      preserve the existing driver list to avoid "bounce" effect.
      */
-    private fun resubscribeToDrivers() {
+    private fun resubscribeToDrivers(clearExisting: Boolean = false) {
         // Close existing subscription
         driverSubscriptionId?.let { nostrService.closeSubscription(it) }
 
-        // Clear current drivers since we're changing regions
-        _uiState.value = _uiState.value.copy(
-            availableDrivers = emptyList(),
-            selectedDriver = null,
-            driverProfiles = emptyMap(),
-            nearbyDriverCount = 0  // Reset counter - will be updated by new subscription callbacks
-        )
+        if (clearExisting) {
+            // Only clear when changing regions - drivers from old region are invalid
+            _uiState.value = _uiState.value.copy(
+                availableDrivers = emptyList(),
+                selectedDriver = null,
+                driverProfiles = emptyMap(),
+                nearbyDriverCount = 0  // Reset counter - will be updated by new subscription callbacks
+            )
 
-        // Close profile subscriptions
-        profileSubscriptionIds.values.forEach { nostrService.closeSubscription(it) }
-        profileSubscriptionIds.clear()
+            // Close profile subscriptions
+            profileSubscriptionIds.values.forEach { nostrService.closeSubscription(it) }
+            profileSubscriptionIds.clear()
+
+            // Clear receivedAt tracking (Fix 2 map cleanup)
+            driverLastReceivedAt.clear()
+        }
+        // When clearExisting=false, new subscription will merge/update drivers via callback
 
         // Subscribe with new location
         subscribeToDrivers()
@@ -916,7 +930,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         // If geohash changed significantly, resubscribe to get local drivers
         if (newGeohash != currentSubscriptionGeohash) {
             Log.d(TAG, "Pickup location geohash changed: $currentSubscriptionGeohash -> $newGeohash")
-            resubscribeToDrivers()
+            resubscribeToDrivers(clearExisting = true)  // Region changed - clear old drivers
         }
 
         calculateRouteIfReady()
@@ -1904,8 +1918,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 statusMessage = "Offer cancelled"
             )
 
-            // Resubscribe to get fresh driver list
-            resubscribeToDrivers()
+            // Resubscribe to get fresh driver list - same region, preserve existing
+            resubscribeToDrivers(clearExisting = false)
 
             // Clear persisted ride state (in case any was saved)
             clearSavedRideState()
@@ -2257,8 +2271,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 statusMessage = "Request cancelled"
             )
 
-            // Resubscribe to get fresh driver list
-            resubscribeToDrivers()
+            // Resubscribe to get fresh driver list - same region, preserve existing
+            resubscribeToDrivers(clearExisting = false)
 
             // Clear persisted ride state
             clearSavedRideState()
@@ -2583,8 +2597,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 statusMessage = "Ready to book a ride"
             )
 
-            // Resubscribe to get fresh driver list (clears stale data from previous ride)
-            resubscribeToDrivers()
+            // Resubscribe to get fresh driver list - same region, preserve existing
+            resubscribeToDrivers(clearExisting = false)
 
             // Clear persisted ride state
             clearSavedRideState()
@@ -2636,7 +2650,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             expandedSearch = !_uiState.value.expandedSearch
         )
         Log.d(TAG, "Expanded search: ${_uiState.value.expandedSearch}")
-        resubscribeToDrivers()
+        // Same region, just wider search - preserve existing drivers
+        resubscribeToDrivers(clearExisting = false)
     }
 
     private fun subscribeToDrivers() {
@@ -2659,6 +2674,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 if (existingIndex >= 0) {
                     Log.d(TAG, "Removing offline driver: ${driver.driverPubKey.take(8)}...")
                     currentDrivers.removeAt(existingIndex)
+                    driverLastReceivedAt.remove(driver.driverPubKey)  // Cleanup tracking
                     // Clean up profile subscription
                     unsubscribeFromDriverProfile(driver.driverPubKey)
                     // Clear selection if this driver was selected
@@ -2678,6 +2694,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     // Remove if they were already in the list (e.g., updated their methods)
                     if (existingIndex >= 0) {
                         currentDrivers.removeAt(existingIndex)
+                        driverLastReceivedAt.remove(driver.driverPubKey)  // Cleanup tracking
                         unsubscribeFromDriverProfile(driver.driverPubKey)
                     }
                     return@subscribeToDrivers
@@ -2693,6 +2710,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     // Subscribe to their profile to get name
                     subscribeToDriverProfile(driver.driverPubKey)
                 }
+                // Track when we received this event (not when it was created)
+                driverLastReceivedAt[driver.driverPubKey] = System.currentTimeMillis() / 1000
             }
 
             // Validate selectedDriver is still in the updated list
@@ -2751,18 +2770,31 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * Remove drivers whose last event is older than STALE_DRIVER_TIMEOUT_MS.
+     * Uses driverLastReceivedAt (when we received the event) instead of createdAt
+     * (when the event was published) for accurate staleness detection.
      */
     private fun cleanupStaleDrivers() {
+        // Don't cleanup during active ride stages - prevents false removals
+        // During rides, the UI shows ride progress instead of driver list anyway
+        val stage = _uiState.value.rideStage
+        if (stage != RideStage.IDLE) {
+            return  // Silent skip - cleanup will resume when back to IDLE
+        }
+
         val now = System.currentTimeMillis() / 1000 // Convert to seconds (Nostr uses seconds)
         val staleThreshold = now - (STALE_DRIVER_TIMEOUT_MS / 1000)
 
         val currentDrivers = _uiState.value.availableDrivers
         val staleDrivers = mutableListOf<String>()
         val freshDrivers = currentDrivers.filter { driver ->
-            val isFresh = driver.createdAt >= staleThreshold
+            // Use receivedAt (when we got the event) for freshness, not createdAt (when published)
+            // Network latency can make fresh events appear stale if we use createdAt
+            val lastReceived = driverLastReceivedAt[driver.driverPubKey] ?: driver.createdAt
+            val isFresh = lastReceived >= staleThreshold
             if (!isFresh) {
-                Log.d(TAG, "Removing stale driver: ${driver.driverPubKey.take(8)}... (last seen ${now - driver.createdAt}s ago)")
+                Log.d(TAG, "Removing stale driver: ${driver.driverPubKey.take(8)}... (last received ${now - lastReceived}s ago)")
                 staleDrivers.add(driver.driverPubKey)
+                driverLastReceivedAt.remove(driver.driverPubKey)  // Cleanup tracking
             }
             isFresh
         }
@@ -2821,12 +2853,19 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      * If driver goes offline (takes another ride, loses connection), notify rider.
      */
     private fun subscribeToSelectedDriverAvailability(driverPubKey: String) {
-        // Close any existing subscription
-        selectedDriverAvailabilitySubId?.let { nostrService.closeSubscription(it) }
+        // Close any existing subscription AND reset timestamp
+        closeDriverAvailabilitySubscription()
 
         Log.d(TAG, "Monitoring availability for selected driver ${driverPubKey.take(8)}")
 
         selectedDriverAvailabilitySubId = nostrService.subscribeToDriverAvailability(driverPubKey) { availability ->
+            // Reject out-of-order events - late OFFLINE events shouldn't override newer ONLINE
+            if (availability.createdAt < selectedDriverLastAvailabilityTimestamp) {
+                Log.d(TAG, "Ignoring out-of-order availability event (${availability.createdAt} < $selectedDriverLastAvailabilityTimestamp)")
+                return@subscribeToDriverAvailability
+            }
+            selectedDriverLastAvailabilityTimestamp = availability.createdAt
+
             val currentStage = _uiState.value.rideStage
 
             // Only care about this if we're waiting for acceptance OR in early ride stages
@@ -2859,12 +2898,15 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * Close the driver availability monitoring subscription.
+     * Also resets the timestamp guard to prevent stale events from affecting future subscriptions.
      */
     private fun closeDriverAvailabilitySubscription() {
         selectedDriverAvailabilitySubId?.let {
             nostrService.closeSubscription(it)
             selectedDriverAvailabilitySubId = null
         }
+        // Reset timestamp when subscription closes - new subscription should accept fresh events
+        selectedDriverLastAvailabilityTimestamp = 0L
     }
 
     /**
@@ -2924,41 +2966,39 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
             // HTLC Escrow Locking - only for SAME_MINT path
             // For CROSS_MINT, payment happens via Lightning bridge at pickup
+            // Correlation ID: Use acceptanceEventId for pre-confirmation logging
+            val rideCorrelationId = acceptance.eventId.take(8)
+
             val escrowToken = if (paymentPath == PaymentPath.SAME_MINT) {
-                Log.d(TAG, "=== ATTEMPTING ESCROW LOCK (SAME_MINT) ===")
-                if (BuildConfig.DEBUG) Log.d(TAG, "fareAmount=$fareAmount, paymentHash=${paymentHash?.take(16)}...")
-                Log.d(TAG, "driverP2pkKey (${driverP2pkKey.length} chars)=${driverP2pkKey.take(16)}...")
-                Log.d(TAG, "walletService available: ${walletService != null}")
+                Log.d(TAG, "[RIDE $rideCorrelationId] Locking HTLC: fareAmount=$fareAmount, paymentHash=${paymentHash?.take(16)}...")
+                Log.d(TAG, "[RIDE $rideCorrelationId] driverP2pkKey (${driverP2pkKey.length} chars)=${driverP2pkKey.take(16)}...")
 
                 if (paymentHash != null && fareAmount > 0) {
                     try {
-                        walletService?.lockForRide(
+                        val result = walletService?.lockForRide(
                             amountSats = fareAmount,
                             paymentHash = paymentHash,
                             driverPubKey = driverP2pkKey,
                             expirySeconds = 900L,  // 15 minutes
                             preimage = _uiState.value.activePreimage  // Store for future-proof refunds
-                        )?.htlcToken
+                        )
+                        Log.d(TAG, "[RIDE $rideCorrelationId] Lock result: ${if (result != null) "SUCCESS (token: ${result.htlcToken.length} chars)" else "FAILED"}")
+                        result?.htlcToken
                     } catch (e: Exception) {
-                        Log.e(TAG, "Exception during lockForRide: ${e.message}", e)
+                        Log.e(TAG, "[RIDE $rideCorrelationId] Exception during lockForRide: ${e.message}", e)
                         null
                     }
                 } else {
-                    Log.w(TAG, "Cannot lock escrow: paymentHash=$paymentHash, fareAmount=$fareAmount")
+                    Log.w(TAG, "[RIDE $rideCorrelationId] Cannot lock escrow: paymentHash=$paymentHash, fareAmount=$fareAmount")
                     null
                 }
             } else {
-                Log.d(TAG, "=== SKIPPING ESCROW LOCK (${paymentPath.name}) ===")
-                Log.d(TAG, "Payment will be handled via ${if (paymentPath == PaymentPath.CROSS_MINT) "Lightning bridge" else paymentPath.name}")
+                Log.d(TAG, "[RIDE $rideCorrelationId] Skipping escrow lock (${paymentPath.name}) - payment via ${if (paymentPath == PaymentPath.CROSS_MINT) "Lightning bridge" else paymentPath.name}")
                 null  // No escrow token for cross-mint - payment happens at pickup
             }
 
-            if (escrowToken != null) {
-                Log.d(TAG, "=== ESCROW LOCK SUCCESS ===")
-                Log.d(TAG, "Token length: ${escrowToken.length}")
-            } else if (paymentPath == PaymentPath.SAME_MINT) {
-                Log.e(TAG, "=== ESCROW LOCK FAILED ===")
-                Log.e(TAG, "lockForRide returned null - ride will proceed WITHOUT payment security")
+            if (escrowToken == null && paymentPath == PaymentPath.SAME_MINT) {
+                Log.e(TAG, "[RIDE $rideCorrelationId] ESCROW LOCK FAILED - ride will proceed WITHOUT payment security")
             }
 
             // Pass paymentHash in confirmation (moved from offer for correct HTLC timing)
@@ -3372,8 +3412,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     // Clean up events
                     cleanupRideEventsInBackground("pin brute force security")
 
-                    // Resubscribe to get fresh driver list
-                    resubscribeToDrivers()
+                    // Resubscribe to get fresh driver list - same region, preserve existing
+                    resubscribeToDrivers(clearExisting = false)
 
                     // Clear persisted ride state
                     clearSavedRideState()
@@ -3530,7 +3570,6 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         chatRefreshJob = PeriodicRefreshJob(
             scope = viewModelScope,
             intervalMs = CHAT_REFRESH_INTERVAL_MS,
-            tag = TAG,
             onTick = {
                 Log.d(TAG, "Refreshing chat and driver state subscriptions for ${confirmationEventId.take(8)}")
                 subscribeToChatMessages(confirmationEventId)
@@ -3955,8 +3994,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     error = errorMessage
                 )
 
-                // Resubscribe to get fresh driver list (only if still IDLE)
-                resubscribeToDrivers()
+                // Resubscribe to get fresh driver list - same region, preserve existing
+                resubscribeToDrivers(clearExisting = false)
             } else {
                 Log.d(TAG, "Skipping state cleanup and resubscribe - new ride already started (stage=${currentState.rideStage})")
             }
