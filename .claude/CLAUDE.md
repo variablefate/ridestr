@@ -23,6 +23,7 @@ See [docs/README.md](../docs/README.md) for full documentation.
 | Security Hardening | ✅ COMPLETE (backup exclusions, pubkey validation, WebSocket concurrency, signature verification, encryption fallback warning) |
 | RoadFlare Status Detection | ✅ COMPLETE (auto-sync, out-of-order rejection, staleness filter, key refresh) |
 | Driver Availability Stability | ✅ COMPLETE (selective clearing, receivedAt tracking, timestamp guards, since filter) |
+| NostrService Domain Decomposition | ✅ COMPLETE (Phase 5: 3 domain services + CashuTokenCodec) |
 
 ## Project Structure
 - `rider-app/` - Rider Android app (RiderViewModel.kt is main state)
@@ -160,6 +161,7 @@ PENDING → APPROVED → KEY_SENT → ACTIVE
 
 | Component | File | Method |
 |-----------|------|--------|
+| RoadFlare domain service | `RoadflareDomainService.kt` | All RoadFlare Nostr methods (Phase 5) |
 | Follower management | `RoadflareKeyManager.kt` | `approveFollower()`, `handleMuteFollower()`, `rotateKey()` |
 | Location broadcast | `RoadflareLocationBroadcaster.kt` | `startBroadcasting()`, `setOnRide()` |
 | Cross-device sync | `DriverViewModel.kt:3801` | `ensureRoadflareStateSynced()` |
@@ -202,7 +204,10 @@ Example: Phantom cancellation bug was in DRIVER app (origination) not RIDER app 
 - `DriverViewModel.kt:1025` - `acceptOffer()` - MUST clear history
 - `DriverViewModel.kt:2798` - `acceptBroadcastRequest()` - MUST clear history
 - `RiderViewModel.kt:354` - `clearRiderStateHistory()` definition
-- `NostrService.kt` - All event publishing/subscription logic
+- `NostrService.kt` - Facade that delegates to domain services (backward compatible)
+- `NostrCryptoHelper.kt` - NIP-44 encryption utilities
+- `ProfileBackupService.kt` - Profile and history backup (Kind 30174, 30177)
+- `RoadflareDomainService.kt` - RoadFlare events (Kind 30011, 30012, 30014, 3186, 3188)
 
 ### State Machine Architecture (Phase 1 - Validation Only)
 
@@ -238,13 +243,21 @@ When rider sends a direct offer to a specific driver, the rider app monitors tha
 - `common/.../sync/RideHistorySyncAdapter.kt` - Ride history sync (order=2)
 
 ### Payment Architecture
-- `common/.../payment/cashu/CashuBackend.kt` - Mint operations, HTLC, P2PK signing, NUT-09 restore
-- `common/.../payment/WalletService.kt` - Orchestration layer, `recoverFromSeed()` for NUT-13 recovery
+- `common/.../payment/cashu/CashuBackend.kt` - Mint operations, HTLC, P2PK signing, NUT-09 restore (with region comments)
+- `common/.../payment/cashu/CashuTokenCodec.kt` - Stateless token encoding/decoding utilities (Phase 5 extraction)
+- `common/.../payment/WalletService.kt` - Orchestration layer, `recoverFromSeed()` for NUT-13 recovery (with region comments)
 - `common/.../payment/cashu/Nip60WalletSync.kt` - NIP-60 sync (includes counter backup)
 - `common/.../payment/WalletKeyManager.kt` - Wallet keys with Schnorr signing
 - `common/.../payment/WalletStorage.kt` - Local persistence + NUT-13 counters
 - `common/.../payment/PaymentCrypto.kt` - Preimage/hash generation
 - `common/.../payment/cashu/CashuCrypto.kt` - secp256k1 crypto, NUT-13 deterministic derivation
+
+### NostrService Domain Decomposition (Phase 5)
+NostrService was split into focused domain services while maintaining backward compatibility via delegation:
+- `common/.../nostr/NostrService.kt` - Facade that delegates to domain services (keeps all method signatures)
+- `common/.../nostr/NostrCryptoHelper.kt` - NIP-44 encryption/decryption utilities (~150 lines)
+- `common/.../nostr/ProfileBackupService.kt` - Profile, history, backup events (~500 lines)
+- `common/.../nostr/RoadflareDomainService.kt` - RoadFlare events (Kind 30011, 30012, 30014, 3186, 3188) (~600 lines)
 
 ### Payment Integration (Complete - Wired)
 - `RiderViewModel.kt:1823` - `lockForRide()` in `autoConfirmRide()` (AFTER acceptance)
@@ -428,6 +441,12 @@ if (stateMap != null) {
 7. **Duplicate Confirmation Race Condition** (January 2026): When acceptance arrives, `autoConfirmRide()` launches async. If user taps manual confirm button during async window, TWO Kind 3175 events sent → driver stores first, rider stores second → different `confirmationEventId` → all subsequent events filtered as "different ride". **Fix**: Set `isConfirmingRide = true` BEFORE coroutine launch + add guards in `confirmRide()`.
 
 8. **Unblinding Key Lookup (CDK Pattern)**: When unblinding signatures from mint, use `responseAmount` from the mint's BlindSignature response to look up the public key, NOT `pms.amount` from our PreMintSecret. The mint returns `{amount, id, C_}` for each signature - use that `amount` for `keyset.keys[responseAmount]`. If mint reorders responses or assigns different amounts, using our premint amount would select wrong key → invalid unblinded proof.
+
+9. **Correlation ID Logging (February 2026)**: Payment operations now log with ride correlation IDs for traceability:
+   - RiderViewModel: `[RIDE xxxxxxxx] Locking HTLC: fareAmount=X, paymentHash=Y...`
+   - DriverViewModel: `[RIDE xxxxxxxx] Claiming HTLC: paymentHash=X...`
+   - Uses `acceptanceEventId.take(8)` (rider) or `confirmationEventId.take(8)` (driver)
+   - Enables tracing a ride's payment flow through logs from offer to completion
 
 ## Relay & Mint Performance Optimizations
 

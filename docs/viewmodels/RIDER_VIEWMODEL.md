@@ -305,6 +305,9 @@ broadcastRideRequest() OR sendRideOffer()
     -> subscribeToAcceptance()
     -> [on acceptance] handleAcceptance()
         -> autoConfirmRide()
+            -> [correlation logging: RIDE xxxxxxxx] Locking HTLC
+            -> walletService.lockForRide()
+            -> [correlation logging: RIDE xxxxxxxx] Lock result
             -> publishRideConfirmation()
             -> generatePickupPin()
             -> subscribeToDriverRideState()

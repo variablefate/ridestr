@@ -1,8 +1,14 @@
 # Ridestr Module Connections
 
-**Last Updated**: 2026-02-02
+**Last Updated**: 2026-02-02 (Phase 5 Domain Decomposition)
 
 This document provides a comprehensive view of how all modules connect in the Ridestr codebase. Use this as a reference when making changes to understand what might be affected.
+
+**Phase 5 Changes (February 2026):**
+- NostrService split into domain services (facade pattern for backward compatibility)
+- CashuTokenCodec extracted from CashuBackend (stateless utilities)
+- Region comments added to CashuBackend and WalletService with HTLC invariants
+- Correlation ID logging for payment tracing (`[RIDE xxxxxxxx]` prefix)
 
 ---
 
@@ -23,13 +29,22 @@ graph TB
     end
 
     subgraph "Common Module"
-        NS[NostrService]
+        subgraph "Nostr Layer"
+            NS[NostrService Facade]
+            NCH[NostrCryptoHelper]
+            PBS[ProfileBackupService]
+            RDS[RoadflareDomainService]
+            RM[RelayManager]
+            KM[KeyManager]
+        end
+
         WS[WalletService]
         PSM[ProfileSyncManager]
         RCM[RemoteConfigManager]
 
         subgraph "Payment"
             CB[CashuBackend]
+            CTC[CashuTokenCodec]
             N60[Nip60WalletSync]
         end
 
@@ -37,11 +52,6 @@ graph TB
             RHR[RideHistoryRepository]
             VR[VehicleRepository]
             SLR[SavedLocationRepository]
-        end
-
-        subgraph "Nostr"
-            RM[RelayManager]
-            KM[KeyManager]
         end
     end
 
@@ -55,12 +65,16 @@ graph TB
     DVM --> NS
     DVM --> WS
 
+    NS --> NCH
+    NS --> PBS
+    NS --> RDS
     NS --> RM
     NS --> KM
     RM --> RELAYS
 
     WS --> CB
     WS --> N60
+    CB --> CTC
     CB --> MINT
     N60 --> NS
 
@@ -447,12 +461,14 @@ sequenceDiagram
 ### Payment System
 
 ```
-Payment System
-├── WalletService (orchestration layer)
+Payment System (Phase 5 Reorganization)
+├── WalletService (orchestration layer - with region comments)
 │   ├── Depends on: CashuBackend (mint operations)
 │   ├── Depends on: WalletStorage (local persistence, pending ops)
 │   ├── Depends on: Nip60WalletSync (cross-device sync)
 │   ├── Depends on: WalletKeyManager (wallet identity)
+│   ├── Regions: INSTANCE STATE, LIFECYCLE, BALANCE & SYNC, HTLC PAYMENT FLOWS (with invariants),
+│   │           DEPOSITS, WITHDRAWALS, CROSS-MINT BRIDGE, NIP-60 SYNC, DIAGNOSTICS, RECOVERY
 │   ├── Key method: syncWallet() - THE sync function (NIP-60 is source of truth)
 │   ├── Key method: ensureWalletReady(amount) - pre-ride NUT-07 verification + stale proof cleanup
 │   ├── Key method: recoverPendingOperations() - recover blinded ops on connect
@@ -460,15 +476,27 @@ Payment System
 │   ├── CRITICAL: pendingOpId must be cleared AFTER NIP-60 publish (or RecoveryToken fallback)
 │   └── Used by: RiderViewModel, DriverViewModel, WalletDetailScreen, WalletSettingsScreen
 │
-├── CashuBackend (NUT-04/05/14/17 implementation)
+├── CashuBackend (NUT-04/05/14/17 implementation - with region comments)
 │   ├── Depends on: cdk-kotlin library
 │   ├── Depends on: WalletStorage (pending blinded operations)
 │   ├── Depends on: CashuWebSocket (NUT-17 real-time updates)
+│   ├── Depends on: CashuTokenCodec (token encoding/decoding)
 │   ├── Connects to: Cashu Mint (HTTP REST + WebSocket)
+│   ├── Regions: INSTANCE STATE, LIFECYCLE, MINT API QUOTES (NUT-04/05), PROOF VERIFICATION (NUT-07),
+│   │           HTLC ESCROW (NUT-14) with invariants, TOKEN ENCODING, MINTING, MELTING,
+│   │           KEYSET MANAGEMENT, RECOVERY (NUT-09), UTILITIES
 │   ├── NUT-17: waitForMeltQuoteState(), waitForMintQuoteState() - WebSocket with polling fallback
 │   ├── CRITICAL: All blinded ops save premints BEFORE request, return pendingOpId
 │   ├── Caller clears pendingOpId after persisting proofs (NIP-60 or RecoveryToken)
 │   └── Used by: WalletService
+│
+├── CashuTokenCodec (~200 lines, stateless utilities)
+│   ├── Extracted from CashuBackend for better organization
+│   ├── HtlcProof data class (amount, id, secret, C)
+│   ├── Token encoding: encodeHtlcProofsAsToken(), encodeProofsAsToken()
+│   ├── Token decoding: parseHtlcToken()
+│   ├── HTLC secret parsing: extractPaymentHashFromSecret(), extractLocktimeFromSecret(), extractRefundKeysFromSecret()
+│   └── Used by: CashuBackend
 │
 ├── CashuWebSocket (NUT-17 WebSocket subscriptions)
 │   ├── Depends on: OkHttp WebSocket
@@ -496,22 +524,51 @@ Payment System
 ### Nostr Layer
 
 ```
-Nostr Layer
-├── NostrService (central event hub)
+Nostr Layer (Phase 5 Domain Decomposition)
+├── NostrService (facade - delegates to domain services)
 │   ├── Depends on: RelayManager (WebSocket connections)
 │   ├── Depends on: KeyManager (event signing)
+│   ├── Depends on: NostrCryptoHelper (encryption)
+│   ├── Depends on: ProfileBackupService (profile/history backup)
+│   ├── Depends on: RoadflareDomainService (RoadFlare events)
 │   ├── Used by: RiderViewModel, DriverViewModel
 │   ├── Used by: All SyncAdapters
 │   └── Used by: Nip60WalletSync
+│   Note: Facade keeps all existing method signatures for backward compatibility
+│
+├── NostrCryptoHelper (~150 lines)
+│   ├── Depends on: KeyManager (signing)
+│   ├── Methods: encryptForUser(), decryptFromUser()
+│   ├── Methods: encryptLocationForRiderState(), decryptLocationFromRiderState()
+│   ├── Methods: encryptPinForDriverState(), decryptPinFromDriverState()
+│   └── Used by: NostrService (delegation)
+│
+├── ProfileBackupService (~500 lines)
+│   ├── Depends on: RelayManager, KeyManager
+│   ├── State: userDisplayName StateFlow
+│   ├── Profile: publishProfile(), subscribeToProfile(), subscribeToOwnProfile()
+│   ├── History: publishRideHistoryBackup(), fetchRideHistory(), deleteRideHistoryBackup()
+│   ├── Unified: publishProfileBackup(), fetchProfileBackup() (Kind 30177)
+│   ├── Legacy: backupVehicles(), backupSavedLocations() (Kind 30175/30176)
+│   └── Used by: NostrService (delegation)
+│
+├── RoadflareDomainService (~600 lines)
+│   ├── Depends on: RelayManager, KeyManager, NostrCryptoHelper
+│   ├── Followed: publishFollowedDrivers(), fetchFollowedDrivers() (Kind 30011)
+│   ├── State: publishDriverRoadflareState(), fetchDriverRoadflareState() (Kind 30012)
+│   ├── Location: publishRoadflareLocation(), subscribeToRoadflareLocations() (Kind 30014)
+│   ├── Keys: publishRoadflareKeyShare(), subscribeToRoadflareKeyShares() (Kind 3186)
+│   ├── Ack: publishRoadflareKeyAck(), subscribeToRoadflareKeyAcks() (Kind 3188)
+│   └── Used by: NostrService (delegation)
 │
 ├── RelayManager (connection pool)
 │   ├── Connects to: Nostr Relays (WebSocket)
-│   ├── Used by: NostrService
+│   ├── Used by: NostrService and all domain services
 │   └── Used by: ProfileSyncManager
 │
 ├── KeyManager (Nostr identity)
 │   ├── Depends on: SecureKeyStorage
-│   ├── Used by: NostrService
+│   ├── Used by: NostrService and all domain services
 │   ├── Used by: ProfileSyncManager (shared singleton)
 │   └── Used by: Nip60WalletSync
 │
@@ -841,9 +898,13 @@ private var connectionGeneration = 0L  // Increments on connect()
 |-----------|------|
 | **Rider ViewModel** | `rider-app/src/main/java/com/ridestr/rider/viewmodels/RiderViewModel.kt` |
 | **Driver ViewModel** | `drivestr/src/main/java/com/drivestr/app/viewmodels/DriverViewModel.kt` |
-| **NostrService** | `common/src/main/java/com/ridestr/common/nostr/NostrService.kt` |
+| **NostrService (facade)** | `common/src/main/java/com/ridestr/common/nostr/NostrService.kt` |
+| **NostrCryptoHelper** | `common/src/main/java/com/ridestr/common/nostr/NostrCryptoHelper.kt` |
+| **ProfileBackupService** | `common/src/main/java/com/ridestr/common/nostr/ProfileBackupService.kt` |
+| **RoadflareDomainService** | `common/src/main/java/com/ridestr/common/nostr/RoadflareDomainService.kt` |
 | **WalletService** | `common/src/main/java/com/ridestr/common/payment/WalletService.kt` |
 | **CashuBackend** | `common/src/main/java/com/ridestr/common/payment/cashu/CashuBackend.kt` |
+| **CashuTokenCodec** | `common/src/main/java/com/ridestr/common/payment/cashu/CashuTokenCodec.kt` |
 | **ProfileSyncManager** | `common/src/main/java/com/ridestr/common/sync/ProfileSyncManager.kt` |
 | **KeyManager** | `common/src/main/java/com/ridestr/common/nostr/keys/KeyManager.kt` |
 | **RelayManager** | `common/src/main/java/com/ridestr/common/nostr/relay/RelayManager.kt` |

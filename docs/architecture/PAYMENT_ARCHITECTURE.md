@@ -1,7 +1,7 @@
 # Ridestr Payment Architecture
 
-**Last Updated**: 2026-01-17
-**Status**: ✅ COMPLETE - Wallet, HTLC, P2PK Signing, Integration Wired
+**Last Updated**: 2026-02-02
+**Status**: ✅ COMPLETE - Wallet, HTLC, P2PK Signing, Integration Wired, Phase 5 Reorganization
 
 ---
 
@@ -36,16 +36,38 @@ The Ridestr wallet uses **Cashu ecash** for trustless ride payments. The impleme
 ```
 common/src/main/java/com/ridestr/common/payment/
 ├── cashu/
-│   ├── CashuBackend.kt      # Core mint operations (cdk-kotlin + HTTP)
+│   ├── CashuBackend.kt      # Core mint operations (cdk-kotlin + HTTP) - with region comments
 │   ├── CashuCrypto.kt       # Cryptographic primitives (secp256k1, blind signatures)
 │   ├── CashuProof.kt        # Proof data class
+│   ├── CashuTokenCodec.kt   # Token encoding/decoding utilities (Phase 5 extraction)
 │   └── Nip60WalletSync.kt   # NIP-60 Nostr sync (Kind 7375, 7376, 17375)
 ├── PaymentCrypto.kt         # Preimage/hash generation for HTLC
 ├── PaymentModels.kt         # Data classes (EscrowDetails, WalletBalance, etc.)
 ├── WalletKeyManager.kt      # Wallet keypair + mnemonic storage
-├── WalletService.kt         # Orchestration layer (public API)
+├── WalletService.kt         # Orchestration layer (public API) - with region comments
 └── WalletStorage.kt         # Local persistence (EncryptedSharedPreferences)
 ```
+
+### Phase 5 Reorganization (February 2026)
+
+**CashuTokenCodec** - Stateless utilities extracted from CashuBackend (~200 lines):
+- `HtlcProof` data class
+- `encodeHtlcProofsAsToken()` - Encode HTLC proofs as cashuA token
+- `encodeProofsAsToken()` - Encode plain proofs as cashuA token
+- `parseHtlcToken()` - Decode cashuA/cashuB tokens
+- `extractPaymentHashFromSecret()` - Extract hash from NUT-10 HTLC secret
+- `extractLocktimeFromSecret()` - Extract locktime from NUT-14 secret
+- `extractRefundKeysFromSecret()` - Extract refund keys from NUT-14 secret
+
+**Region Comments** - Both CashuBackend and WalletService now have organized sections:
+- INSTANCE STATE, LIFECYCLE & CONNECTION
+- HTLC ESCROW / HTLC PAYMENT FLOWS (with critical invariants documented)
+- MINTING, MELTING, RECOVERY, DIAGNOSTICS, etc.
+
+**Correlation ID Logging** - Payment operations now log with ride correlation IDs:
+- RiderViewModel: `[RIDE xxxxxxxx] Locking HTLC...`
+- DriverViewModel: `[RIDE xxxxxxxx] Claiming HTLC...`
+- Uses existing identifiers: `acceptanceEventId` (rider), `confirmationEventId` (driver)
 
 ---
 
@@ -62,6 +84,19 @@ common/src/main/java/com/ridestr/common/payment/
 - Melting tokens (NUT-05) via `wallet.melt()`
 - HTLC creation and claiming (NUT-14) via HTTP `/v1/swap`
 - Proof state verification (NUT-07) via HTTP `/v1/checkstate`
+- Delegates token encoding/decoding to CashuTokenCodec
+
+**Region Organization** (Phase 5):
+- INSTANCE STATE - WebSocket, wallet, connection state
+- LIFECYCLE & CONNECTION - connect(), disconnect(), ensureConnected()
+- MINT API - QUOTES (NUT-04/05) - getMintQuote(), getMeltQuote()
+- PROOF VERIFICATION (NUT-07) - verifyProofStatesBySecret()
+- HTLC ESCROW (NUT-14) - **with critical invariants documented**
+- TOKEN ENCODING & RECEIPT - delegates to CashuTokenCodec
+- MINTING (NUT-04) - mintTokens()
+- MELTING (NUT-05) - meltTokens()
+- KEYSET MANAGEMENT & DEPOSIT RECOVERY
+- RECOVERY (NUT-09) - restoreProofs()
 
 **Key Functions**:
 
@@ -76,6 +111,26 @@ common/src/main/java/com/ridestr/common/payment/
 | `createHtlcTokenFromProofs()` | Create HTLC escrow | ✅ |
 | `claimHtlcToken(token, preimage)` | Claim HTLC | ✅ |
 | `verifyProofStatesBySecret()` | NUT-07 proof verification | ✅ |
+
+### Layer 1.5: CashuTokenCodec (Stateless utilities)
+
+**File**: `CashuTokenCodec.kt` (extracted in Phase 5)
+
+**Responsibilities**:
+- Pure functions for Cashu token encoding/decoding
+- HTLC secret parsing (NUT-10/14)
+- No instance state - all methods are stateless
+
+**Key Functions**:
+
+| Function | Purpose |
+|----------|---------|
+| `encodeHtlcProofsAsToken()` | Encode HTLC proofs as cashuA token |
+| `encodeProofsAsToken()` | Encode plain proofs as cashuA token |
+| `parseHtlcToken()` | Decode cashuA/cashuB tokens |
+| `extractPaymentHashFromSecret()` | Extract hash from NUT-10 secret |
+| `extractLocktimeFromSecret()` | Extract locktime from NUT-14 secret |
+| `extractRefundKeysFromSecret()` | Extract refund keys from NUT-14 secret |
 
 ### Layer 2: WalletService (Orchestration)
 

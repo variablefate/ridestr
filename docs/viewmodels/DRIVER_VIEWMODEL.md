@@ -1,7 +1,7 @@
 # DriverViewModel Reference
 
 **File**: `drivestr/src/main/java/com/drivestr/app/viewmodels/DriverViewModel.kt`
-**Last Updated**: 2026-01-27
+**Last Updated**: 2026-02-02
 
 This document provides a complete reference of all functions, state fields, and subscriptions in DriverViewModel.
 
@@ -327,6 +327,9 @@ submitPinForVerification(pin)
 completeRide()
     -> addStatusAction(COMPLETED)
     -> publishDriverRideState()
+    -> [correlation logging: RIDE xxxxxxxx] Claiming HTLC
+    -> walletService.claimHtlcPayment()
+    -> [correlation logging: RIDE xxxxxxxx] Claim SUCCESS/FAILED
     -> saveRideToHistory()
     -> _uiState.value = ... (RIDE_COMPLETED)
 ```
