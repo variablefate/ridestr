@@ -22,6 +22,7 @@ See [docs/README.md](../docs/README.md) for full documentation.
 | NIP-60 Cross-App Safety | ✅ COMPLETE (cross-mint proof preservation, metadata protection) |
 | Security Hardening | ✅ COMPLETE (backup exclusions, pubkey validation, WebSocket concurrency, signature verification, encryption fallback warning) |
 | RoadFlare Status Detection | ✅ COMPLETE (auto-sync, out-of-order rejection, staleness filter, key refresh) |
+| Driver Availability Stability | ✅ COMPLETE (selective clearing, receivedAt tracking, timestamp guards, since filter) |
 
 ## Project Structure
 - `rider-app/` - Rider Android app (RiderViewModel.kt is main state)
@@ -596,6 +597,62 @@ NostrService.publishRoadflareKeyAck(driverPubKey, keyVersion, keyUpdatedAt, stat
 // 2. Verify follower authorized (approved + not muted)
 // 3. Re-send key via roadflareKeyManager.sendKeyToFollower()
 ```
+
+## Driver Availability State Bouncing Fix (February 2026)
+
+### Problem Summary
+Driver status bounced between offline/online in the rider app when:
+1. Switching menus/tabs caused state to reset
+2. Accepting rides then immediately seeing "driver not available" dialog
+
+### Root Causes Fixed
+
+| Cause | Fix | File |
+|-------|-----|------|
+| Aggressive driver list clearing on ALL resubscribes | Added `clearExisting` parameter - only clear on geohash changes | `RiderViewModel.kt:798` |
+| Stale cleanup used `createdAt` (publish time) not receive time | Added `driverLastReceivedAt` map for accurate staleness | `RiderViewModel.kt:179` |
+| Out-of-order availability events | Added `selectedDriverLastAvailabilityTimestamp` guard | `RiderViewModel.kt:168` |
+| Very old events from relay history | Added 10-min `since` filter to subscription | `NostrService.kt:1275` |
+| Stale cleanup during active ride | Pause cleanup when not in IDLE stage | `RiderViewModel.kt:2777-2781` |
+
+### Key Changes
+
+**1. `resubscribeToDrivers(clearExisting: Boolean = false)`**
+- Only clears driver list when `clearExisting = true` (geohash/region changed)
+- Same-region refreshes (toggle expanded search, cancel ride, etc.) preserve existing drivers
+- Call sites: 2 with `true` (geohash changes), 6 with `false` (same region)
+
+**2. `driverLastReceivedAt` Map**
+- Tracks when events were actually received vs when published
+- Updated at all driver mutation points (add, update, remove)
+- Used in `cleanupStaleDrivers()` for accurate freshness detection
+
+**3. Timestamp Guard for Selected Driver**
+```kotlin
+if (availability.createdAt < selectedDriverLastAvailabilityTimestamp) {
+    Log.d(TAG, "Ignoring out-of-order availability event")
+    return@subscribeToDriverAvailability
+}
+selectedDriverLastAvailabilityTimestamp = availability.createdAt
+```
+
+**4. Stale Cleanup Paused During Rides**
+```kotlin
+if (stage != RideStage.IDLE) {
+    return  // Silent skip - cleanup will resume when back to IDLE
+}
+```
+
+### Key Files
+
+| File | Changes |
+|------|---------|
+| `RiderViewModel.kt:798` | `resubscribeToDrivers(clearExisting)` parameter |
+| `RiderViewModel.kt:179` | `driverLastReceivedAt` map declaration |
+| `RiderViewModel.kt:168` | `selectedDriverLastAvailabilityTimestamp` declaration |
+| `RiderViewModel.kt:2776-2781` | Ride stage check in `cleanupStaleDrivers()` |
+| `RiderViewModel.kt:2862-2867` | Out-of-order event rejection |
+| `NostrService.kt:1275` | 10-min `since` filter in `subscribeToDriverAvailability()` |
 
 ## Shared UI Components (January 2026 Refactoring)
 

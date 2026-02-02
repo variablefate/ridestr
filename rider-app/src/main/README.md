@@ -108,6 +108,23 @@ When rider sends a direct offer to a specific driver, the rider app monitors tha
 
 This prevents riders from waiting indefinitely when their selected driver takes another ride or goes offline.
 
+### Driver Availability State Stability (February 2026)
+
+Fixes for driver status bouncing between offline/online:
+
+| Fix | Description | Location |
+|-----|-------------|----------|
+| Selective clearing | `resubscribeToDrivers(clearExisting)` - only clears on geohash changes | Line ~798 |
+| ReceivedAt tracking | `driverLastReceivedAt` map for accurate staleness vs publish time | Line ~179 |
+| Out-of-order guard | `selectedDriverLastAvailabilityTimestamp` rejects old events | Line ~168 |
+| Since filter | 10-min filter in NostrService subscription | NostrService:1275 |
+| Ride stage check | Pause stale cleanup during active rides | Line ~2777 |
+
+**Key methods:**
+- `resubscribeToDrivers(clearExisting: Boolean)` - Pass `true` only for geohash changes
+- `cleanupStaleDrivers()` - Uses `driverLastReceivedAt` for freshness, skips during active rides
+- `closeDriverAvailabilitySubscription()` - Resets timestamp guard on close
+
 ---
 
 ## Connections Table

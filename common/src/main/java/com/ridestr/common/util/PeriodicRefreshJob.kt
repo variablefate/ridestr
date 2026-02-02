@@ -1,6 +1,5 @@
 package com.ridestr.common.util
 
-import android.util.Log
 import kotlinx.coroutines.*
 
 /**
@@ -19,7 +18,6 @@ import kotlinx.coroutines.*
  * chatRefreshJob = PeriodicRefreshJob(
  *     scope = viewModelScope,
  *     intervalMs = 15_000L,
- *     tag = TAG,
  *     onTick = {
  *         subscribeToChatMessages(confirmationEventId)
  *     }
@@ -29,13 +27,11 @@ import kotlinx.coroutines.*
  * @param scope The CoroutineScope for the job (typically viewModelScope)
  * @param intervalMs Interval between refresh ticks in milliseconds
  * @param onTick Suspend function called on each refresh tick
- * @param tag Logging tag for debug output
  */
 class PeriodicRefreshJob(
     private val scope: CoroutineScope,
     private val intervalMs: Long,
-    private val onTick: suspend () -> Unit,
-    private val tag: String
+    private val onTick: suspend () -> Unit
 ) {
     private var job: Job? = null
 
@@ -55,7 +51,6 @@ class PeriodicRefreshJob(
                 // Kotlin coroutine cancellation is cooperative - without this check,
                 // a cancelled job could execute one more iteration after waking up.
                 ensureActive()
-                Log.d(tag, "Periodic refresh tick")
                 onTick()
             }
         }
