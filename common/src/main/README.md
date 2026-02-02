@@ -12,8 +12,9 @@ The `common` module contains all shared code used by both rider and driver apps:
 
 | File | Purpose | Key Methods |
 |------|---------|-------------|
-| `WalletService.kt` | Orchestration layer (⚠️ safe deletion pattern required - see cashu-wallet skill) | `syncWallet()`, `ensureWalletReady()`, `requestDeposit()`, `checkDepositStatus()`, `getMeltQuote()`, `executeWithdraw()`, `lockForRide()`, `claimHtlcPayment()`, `mintTokens()`, `claimUnclaimedDeposits()`, `changeMintUrl()`, `recoverPendingOperations()`, `bridgePayment()`, `recoverFromSeed()` |
-| `cashu/CashuBackend.kt` | Mint operations (NUT-04/05/14/17), NUT-13 deterministic secrets, WebSocket state updates | `getMintQuote()`, `mintTokens()`, `getMeltQuote()`, `meltWithProofs()`, `createHtlcTokenFromProofs()`, `claimHtlcTokenWithProofs()`, `refundExpiredHtlc()`, `restoreProofs()`, `getActiveKeysetIds()`, `waitForMeltQuoteState()`, `waitForMintQuoteState()` |
+| `WalletService.kt` | Orchestration layer with region organization (⚠️ safe deletion pattern required - see cashu-wallet skill) | `syncWallet()`, `ensureWalletReady()`, `requestDeposit()`, `checkDepositStatus()`, `getMeltQuote()`, `executeWithdraw()`, `lockForRide()`, `claimHtlcPayment()`, `mintTokens()`, `claimUnclaimedDeposits()`, `changeMintUrl()`, `recoverPendingOperations()`, `bridgePayment()`, `recoverFromSeed()` |
+| `cashu/CashuBackend.kt` | Mint operations with region organization (NUT-04/05/14/17), NUT-13 deterministic secrets, WebSocket state updates | `getMintQuote()`, `mintTokens()`, `getMeltQuote()`, `meltWithProofs()`, `createHtlcTokenFromProofs()`, `claimHtlcTokenWithProofs()`, `refundExpiredHtlc()`, `restoreProofs()`, `getActiveKeysetIds()`, `waitForMeltQuoteState()`, `waitForMintQuoteState()` |
+| `cashu/CashuTokenCodec.kt` | Stateless Cashu token encoding/decoding utilities | `encodeHtlcProofsAsToken()`, `encodeProofsAsToken()`, `parseHtlcToken()`, `extractPaymentHashFromSecret()`, `extractLocktimeFromSecret()`, `extractRefundKeysFromSecret()` |
 | `cashu/CashuWebSocket.kt` | NUT-17 WebSocket connection for real-time mint state updates | `connect()`, `disconnect()`, `subscribe()`, `unsubscribe()`, `isConnected()` |
 | `cashu/CashuWebSocketModels.kt` | NUT-17 JSON-RPC 2.0 data classes | `WsRequest`, `WsResponse`, `WsNotification`, `MintQuotePayload`, `MeltQuotePayload`, `SubscriptionKind` |
 | `cashu/CashuCrypto.kt` | Cryptographic operations (NUT-00/13) | `hashToCurve()`, `blindMessage()`, `unblindSignature()`, `mnemonicToSeed()`, `deriveSecrets()`, `derivePreMintSecret()` |
@@ -27,7 +28,10 @@ The `common` module contains all shared code used by both rider and driver apps:
 
 | File | Purpose | Key Methods |
 |------|---------|-------------|
-| `NostrService.kt` | Event publishing/subscription (EOSE-aware timeouts, no runBlocking) | `broadcastAvailability()`, `publishDriverRideState()`, `publishRiderRideState()`, `subscribeToOffers()`, `subscribeToDriverAvailability()`, `publishRideHistoryBackup()` |
+| `NostrService.kt` | Event publishing/subscription facade (delegates to domain services) | `broadcastAvailability()`, `publishDriverRideState()`, `publishRiderRideState()`, `subscribeToOffers()`, `subscribeToDriverAvailability()`, `publishRideHistoryBackup()` |
+| `NostrCryptoHelper.kt` | NIP-44 encryption utilities | `encryptForUser()`, `decryptFromUser()`, `encryptLocationForRiderState()`, `decryptLocationFromRiderState()`, `encryptPinForDriverState()`, `decryptPinFromDriverState()` |
+| `ProfileBackupService.kt` | Profile & backup operations (Kind 0, 30174, 30177) | `publishProfile()`, `subscribeToProfile()`, `publishRideHistoryBackup()`, `fetchRideHistory()`, `publishProfileBackup()`, `fetchProfileBackup()` |
+| `RoadflareDomainService.kt` | RoadFlare operations (Kind 30011, 30012, 30014, 3186, 3187, 3188) | `publishFollowedDrivers()`, `fetchFollowedDrivers()`, `publishRoadflareLocation()`, `subscribeToRoadflareLocations()`, `publishRoadflareKeyShare()` |
 | `relay/RelayManager.kt` | WebSocket connection pool, EOSE-aware subscriptions | `connectAll()`, `publish()`, `subscribe(onEose=...)`, `closeSubscription()` |
 | `relay/RelayConnection.kt` | Single relay connection | WebSocket lifecycle management |
 | `relay/RelayConfig.kt` | Configuration constants | Default relays, timeouts |
@@ -188,6 +192,10 @@ Reusable composables extracted from both apps' SettingsScreen files.
 | `WalletService` | `WalletStorage` | Persistence | `walletStorage.savePendingDeposit()` |
 | `NostrService` | `RelayManager` | Event publishing | `relayManager.publish(event)` |
 | `NostrService` | `KeyManager` | Event signing | `keyManager.getSigner()` |
+| `NostrService` | `NostrCryptoHelper` | NIP-44 encryption | `cryptoHelper.encryptForUser()` |
+| `NostrService` | `ProfileBackupService` | Profile & backup operations | `profileBackupService.publishProfile()` |
+| `NostrService` | `RoadflareDomainService` | RoadFlare operations | `roadflareDomainService.publishRoadflareLocation()` |
+| `CashuBackend` | `CashuTokenCodec` | Token encoding/decoding | `CashuTokenCodec.encodeHtlcProofsAsToken()` |
 | `CashuBackend` | Cashu Mint (HTTP) | Token operations | `POST /v1/mint/quote` |
 | `Nip60WalletSync` | `NostrService` | Proof publishing | Kind 7375 events |
 | `ProfileSyncManager` | `KeyManager` | Shared identity | `keyManager.refreshFromStorage()` |
