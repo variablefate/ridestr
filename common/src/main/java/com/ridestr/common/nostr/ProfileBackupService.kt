@@ -144,15 +144,8 @@ class ProfileBackupService(
             return null
         }
 
-        // Wait for relay connection (up to 15 seconds)
-        var waitedMs = 0L
-        while (!relayManager.isConnected() && waitedMs < 15000) {
-            Log.d(TAG, "publishRideHistoryBackup: Waiting for relay... (${waitedMs}ms)")
-            delay(500)
-            waitedMs += 500
-        }
-
-        if (!relayManager.isConnected()) {
+        // Wait for relay connection
+        if (!relayManager.awaitConnected(tag = "publishRideHistoryBackup")) {
             Log.e(TAG, "publishRideHistoryBackup: No relays connected - backup NOT saved!")
             return null
         }
@@ -188,15 +181,8 @@ class ProfileBackupService(
         }
 
         return withContext(Dispatchers.IO) {
-            // Wait for relay connection (up to 15 seconds)
-            var waitedMs = 0L
-            while (!relayManager.isConnected() && waitedMs < 15000) {
-                Log.d(TAG, "fetchRideHistory: Waiting for relay... (${waitedMs}ms)")
-                delay(500)
-                waitedMs += 500
-            }
-
-            if (!relayManager.isConnected()) {
+            // Wait for relay connection
+            if (!relayManager.awaitConnected(tag = "fetchRideHistory")) {
                 Log.e(TAG, "fetchRideHistory: No relays connected - cannot restore")
                 return@withContext null
             }
@@ -284,15 +270,8 @@ class ProfileBackupService(
             return null
         }
 
-        // Wait for relay connection (up to 15 seconds)
-        var waitedMs = 0L
-        while (!relayManager.isConnected() && waitedMs < 15000) {
-            Log.d(TAG, "publishProfileBackup: Waiting for relay... (${waitedMs}ms)")
-            delay(500)
-            waitedMs += 500
-        }
-
-        if (!relayManager.isConnected()) {
+        // Wait for relay connection
+        if (!relayManager.awaitConnected(tag = "publishProfileBackup")) {
             Log.e(TAG, "publishProfileBackup: No relays connected - backup NOT saved!")
             return null
         }
@@ -328,15 +307,8 @@ class ProfileBackupService(
         }
 
         return withContext(Dispatchers.IO) {
-            // Wait for relay connection (up to 15 seconds)
-            var waitedMs = 0L
-            while (!relayManager.isConnected() && waitedMs < 15000) {
-                Log.d(TAG, "fetchProfileBackup: Waiting for relay... (${waitedMs}ms)")
-                delay(500)
-                waitedMs += 500
-            }
-
-            if (!relayManager.isConnected()) {
+            // Wait for relay connection
+            if (!relayManager.awaitConnected(tag = "fetchProfileBackup")) {
                 Log.e(TAG, "fetchProfileBackup: No relays connected - cannot restore")
                 return@withContext null
             }
@@ -395,15 +367,8 @@ class ProfileBackupService(
             return null
         }
 
-        // Wait for relay connection (up to 15 seconds)
-        var waitedMs = 0L
-        while (!relayManager.isConnected() && waitedMs < 15000) {
-            Log.d(TAG, "backupVehicles: Waiting for relay... (${waitedMs}ms)")
-            delay(500)
-            waitedMs += 500
-        }
-
-        if (!relayManager.isConnected()) {
+        // Wait for relay connection
+        if (!relayManager.awaitConnected(tag = "backupVehicles")) {
             Log.e(TAG, "backupVehicles: No relays connected - backup NOT saved!")
             return null
         }
@@ -441,15 +406,8 @@ class ProfileBackupService(
         }
 
         return withContext(Dispatchers.IO) {
-            // Wait for relay connection (up to 15 seconds)
-            var waitedMs = 0L
-            while (!relayManager.isConnected() && waitedMs < 15000) {
-                Log.d(TAG, "fetchVehicleBackup: Waiting for relay... (${waitedMs}ms)")
-                delay(500)
-                waitedMs += 500
-            }
-
-            if (!relayManager.isConnected()) {
+            // Wait for relay connection
+            if (!relayManager.awaitConnected(tag = "fetchVehicleBackup")) {
                 Log.e(TAG, "fetchVehicleBackup: No relays connected - cannot restore")
                 return@withContext null
             }
@@ -508,15 +466,8 @@ class ProfileBackupService(
             return null
         }
 
-        // Wait for relay connection (up to 15 seconds)
-        var waitedMs = 0L
-        while (!relayManager.isConnected() && waitedMs < 15000) {
-            Log.d(TAG, "backupSavedLocations: Waiting for relay... (${waitedMs}ms)")
-            delay(500)
-            waitedMs += 500
-        }
-
-        if (!relayManager.isConnected()) {
+        // Wait for relay connection
+        if (!relayManager.awaitConnected(tag = "backupSavedLocations")) {
             Log.e(TAG, "backupSavedLocations: No relays connected - backup NOT saved!")
             return null
         }
@@ -554,15 +505,8 @@ class ProfileBackupService(
         }
 
         return withContext(Dispatchers.IO) {
-            // Wait for relay connection (up to 15 seconds)
-            var waitedMs = 0L
-            while (!relayManager.isConnected() && waitedMs < 15000) {
-                Log.d(TAG, "fetchSavedLocationBackup: Waiting for relay... (${waitedMs}ms)")
-                delay(500)
-                waitedMs += 500
-            }
-
-            if (!relayManager.isConnected()) {
+            // Wait for relay connection
+            if (!relayManager.awaitConnected(tag = "fetchSavedLocationBackup")) {
                 Log.e(TAG, "fetchSavedLocationBackup: No relays connected - cannot restore")
                 return@withContext null
             }

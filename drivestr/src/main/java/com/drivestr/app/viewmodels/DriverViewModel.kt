@@ -3112,7 +3112,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         Log.d(TAG, "Requesting deletion of ${publishedAvailabilityEventIds.size} availability events")
         val deletionEventId = nostrService.deleteEvents(
             publishedAvailabilityEventIds.toList(),
-            "driver went offline"
+            "driver went offline",
+            listOf(RideshareEventKinds.DRIVER_AVAILABILITY)
         )
 
         if (deletionEventId != null) {

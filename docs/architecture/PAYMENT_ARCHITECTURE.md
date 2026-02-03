@@ -322,11 +322,12 @@ fun signSchnorr(messageHash: ByteArray): String? {
 }
 ```
 
-**signP2pkProof()** (`CashuBackend.kt:630`):
+**signP2pkProof()** (`CashuBackend.kt`):
 ```kotlin
 private fun signP2pkProof(secret: String, proofC: String): String? {
+    // NUT-11: Sign SHA256(secret) only - proofC kept for logging
     val messageHash = MessageDigest.getInstance("SHA-256")
-        .digest((secret + proofC).toByteArray())
+        .digest(secret.toByteArray())
     return walletKeyManager.getOrCreateWalletKeypair().signSchnorr(messageHash)
 }
 ```

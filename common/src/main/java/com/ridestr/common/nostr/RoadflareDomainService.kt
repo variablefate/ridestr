@@ -6,6 +6,7 @@ import com.ridestr.common.nostr.keys.KeyManager
 import com.ridestr.common.nostr.relay.RelayManager
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -55,14 +56,7 @@ class RoadflareDomainService(
         }
 
         // Wait for relay connection
-        var waitedMs = 0L
-        while (!relayManager.isConnected() && waitedMs < 15000) {
-            delay(500)
-            waitedMs += 500
-        }
-
-        if (!relayManager.isConnected()) {
-            Log.e(TAG, "publishFollowedDrivers: No relays connected")
+        if (!relayManager.awaitConnected(tag = "publishFollowedDrivers")) {
             return null
         }
 
@@ -97,21 +91,15 @@ class RoadflareDomainService(
 
         return withContext(Dispatchers.IO) {
             // Wait for relay connection
-            var waitedMs = 0L
-            while (!relayManager.isConnected() && waitedMs < 15000) {
-                delay(500)
-                waitedMs += 500
-            }
-
-            if (!relayManager.isConnected()) {
-                Log.e(TAG, "fetchFollowedDrivers: No relays connected")
+            if (!relayManager.awaitConnected(tag = "fetchFollowedDrivers")) {
                 return@withContext null
             }
 
             Log.d(TAG, "Fetching followed drivers for ${myPubKey.take(16)}...")
 
             try {
-                var rawEvent: Event? = null
+                // AtomicReference for thread-safe event storage (relay callbacks may run on different thread)
+                val eventRef = AtomicReference<Event?>(null)
                 val eoseFollowed = CompletableDeferred<String>()
                 val subscriptionId = relayManager.subscribe(
                     kinds = listOf(RideshareEventKinds.ROADFLARE_FOLLOWED_DRIVERS),
@@ -121,7 +109,7 @@ class RoadflareDomainService(
                     onEose = { relayUrl -> eoseFollowed.complete(relayUrl) }
                 ) { event, relayUrl ->
                     Log.d(TAG, "Received followed drivers event ${event.id} from $relayUrl")
-                    rawEvent = event
+                    eventRef.set(event)  // Thread-safe assignment, last event wins (timestamps resolve ordering)
                 }
 
                 // Wait for EOSE or timeout
@@ -129,7 +117,7 @@ class RoadflareDomainService(
                 relayManager.closeSubscription(subscriptionId)
 
                 // Decrypt outside callback
-                val result = rawEvent?.let { event ->
+                val result = eventRef.get()?.let { event ->
                     FollowedDriversEvent.parseAndDecrypt(signer, event)?.also { data ->
                         Log.d(TAG, "Decrypted followed drivers: ${data.drivers.size} drivers")
                     }
@@ -160,14 +148,7 @@ class RoadflareDomainService(
         state: DriverRoadflareState
     ): String? {
         // Wait for relay connection
-        var waitedMs = 0L
-        while (!relayManager.isConnected() && waitedMs < 15000) {
-            delay(500)
-            waitedMs += 500
-        }
-
-        if (!relayManager.isConnected()) {
-            Log.e(TAG, "publishDriverRoadflareState: No relays connected")
+        if (!relayManager.awaitConnected(tag = "publishDriverRoadflareState")) {
             return null
         }
 
@@ -202,21 +183,15 @@ class RoadflareDomainService(
 
         return withContext(Dispatchers.IO) {
             // Wait for relay connection
-            var waitedMs = 0L
-            while (!relayManager.isConnected() && waitedMs < 15000) {
-                delay(500)
-                waitedMs += 500
-            }
-
-            if (!relayManager.isConnected()) {
-                Log.e(TAG, "fetchDriverRoadflareState: No relays connected")
+            if (!relayManager.awaitConnected(tag = "fetchDriverRoadflareState")) {
                 return@withContext null
             }
 
             Log.d(TAG, "Fetching driver RoadFlare state for ${myPubKey.take(16)}...")
 
             try {
-                var rawEvent: Event? = null
+                // AtomicReference for thread-safe event storage (relay callbacks may run on different thread)
+                val eventRef = AtomicReference<Event?>(null)
                 val eoseRoadflare = CompletableDeferred<String>()
                 val subscriptionId = relayManager.subscribe(
                     kinds = listOf(RideshareEventKinds.ROADFLARE_DRIVER_STATE),
@@ -226,7 +201,7 @@ class RoadflareDomainService(
                     onEose = { relayUrl -> eoseRoadflare.complete(relayUrl) }
                 ) { event, relayUrl ->
                     Log.d(TAG, "Received driver RoadFlare state event ${event.id} from $relayUrl")
-                    rawEvent = event
+                    eventRef.set(event)  // Thread-safe assignment, last event wins (timestamps resolve ordering)
                 }
 
                 // Wait for EOSE or timeout
@@ -234,7 +209,7 @@ class RoadflareDomainService(
                 relayManager.closeSubscription(subscriptionId)
 
                 // Decrypt outside callback
-                val result = rawEvent?.let { event ->
+                val result = eventRef.get()?.let { event ->
                     DriverRoadflareStateEvent.parseAndDecrypt(signer, event)?.also { data ->
                         Log.d(TAG, "Decrypted driver RoadFlare state: key v${data.roadflareKey?.version}, ${data.followers.size} followers")
                     }
@@ -382,14 +357,7 @@ class RoadflareDomainService(
         keyUpdatedAt: Long
     ): String? {
         // Wait for relay connection
-        var waitedMs = 0L
-        while (!relayManager.isConnected() && waitedMs < 15000) {
-            delay(500)
-            waitedMs += 500
-        }
-
-        if (!relayManager.isConnected()) {
-            Log.e(TAG, "publishRoadflareKeyShare: No relays connected")
+        if (!relayManager.awaitConnected(tag = "publishRoadflareKeyShare")) {
             return null
         }
 
@@ -454,14 +422,7 @@ class RoadflareDomainService(
         }
 
         // Wait for relay connection
-        var waitedMs = 0L
-        while (!relayManager.isConnected() && waitedMs < 15000) {
-            delay(500)
-            waitedMs += 500
-        }
-
-        if (!relayManager.isConnected()) {
-            Log.e(TAG, "publishRoadflareKeyAck: No relays connected")
+        if (!relayManager.awaitConnected(tag = "publishRoadflareKeyAck")) {
             return null
         }
 

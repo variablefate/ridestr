@@ -427,16 +427,8 @@ class NostrService(
             return@withContext emptyMap()
         }
 
-        // Wait for relay connection (up to 15 seconds)
-        var waitedMs = 0L
-        while (!relayManager.isConnected() && waitedMs < 15000) {
-            Log.d(TAG, "countRideshareEventsByKind: Waiting for relay... (${waitedMs}ms)")
-            delay(500)
-            waitedMs += 500
-        }
-
-        if (!relayManager.isConnected()) {
-            Log.e(TAG, "countRideshareEventsByKind: No relays connected")
+        // Wait for relay connection
+        if (!relayManager.awaitConnected(tag = "countRideshareEventsByKind")) {
             return@withContext emptyMap()
         }
 
@@ -1549,7 +1541,7 @@ class NostrService(
      */
     suspend fun deleteRideHistoryBackup(reason: String = "user requested"): Boolean =
         profileBackupService.deleteRideHistoryBackup(
-            deleteEvents = { eventIds, r -> deleteEvents(eventIds, r) },
+            deleteEvents = { eventIds, r -> deleteEvents(eventIds, r, listOf(RideshareEventKinds.RIDE_HISTORY_BACKUP)) },
             reason = reason
         )
 

@@ -58,15 +58,8 @@ class RemoteConfigManager(
      * @return The fetched config, or cached/default if fetch fails
      */
     suspend fun fetchConfig(): AdminConfig = withContext(Dispatchers.IO) {
-        // Wait for relay connection (up to 10 seconds)
-        var waitedMs = 0L
-        while (!relayManager.isConnected() && waitedMs < 10000) {
-            Log.d(TAG, "Waiting for relay connection... (${waitedMs}ms)")
-            delay(500)
-            waitedMs += 500
-        }
-
-        if (!relayManager.isConnected()) {
+        // Wait for relay connection (10 second timeout for config)
+        if (!relayManager.awaitConnected(timeoutMs = 10000L, tag = "fetchConfig")) {
             Log.w(TAG, "No relays connected - using cached/default config")
             return@withContext _config.value
         }

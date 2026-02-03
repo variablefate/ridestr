@@ -205,6 +205,29 @@ class RelayManager(
     }
 
     /**
+     * Suspend until at least one relay is connected.
+     *
+     * @param timeoutMs Maximum time to wait (default 15000ms)
+     * @param tag Optional logging tag (e.g., method name) for context
+     * @return true if connected within timeout, false if timeout exceeded
+     */
+    suspend fun awaitConnected(timeoutMs: Long = 15000L, tag: String? = null): Boolean {
+        var waited = 0L
+        while (!isConnected() && waited < timeoutMs) {
+            if (tag != null) {
+                Log.d(TAG, "$tag: Waiting for relay... (${waited}ms)")
+            }
+            kotlinx.coroutines.delay(500)
+            waited += 500
+        }
+        val connected = isConnected()
+        if (!connected && tag != null) {
+            Log.e(TAG, "$tag: No relays connected after ${timeoutMs}ms")
+        }
+        return connected
+    }
+
+    /**
      * Ensure all relays are connected. Reconnects any disconnected relays,
      * clears stale subscriptions, and resends active subscriptions.
      * Call this when the app returns to foreground.
