@@ -40,6 +40,7 @@ import com.ridestr.common.settings.DisplayCurrency
 import com.ridestr.common.settings.RemoteConfigManager
 import com.ridestr.common.settings.SettingsManager
 import com.ridestr.common.routing.ValhallaRoutingService
+import com.ridestr.common.payment.LockResult
 import com.ridestr.common.payment.PaymentCrypto
 import com.ridestr.common.payment.WalletService
 import com.ridestr.common.state.RideContext
@@ -2975,15 +2976,35 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
                 if (paymentHash != null && fareAmount > 0) {
                     try {
-                        val result = walletService?.lockForRide(
+                        val lockResult = walletService?.lockForRide(
                             amountSats = fareAmount,
                             paymentHash = paymentHash,
                             driverPubKey = driverP2pkKey,
                             expirySeconds = 900L,  // 15 minutes
                             preimage = _uiState.value.activePreimage  // Store for future-proof refunds
                         )
-                        Log.d(TAG, "[RIDE $rideCorrelationId] Lock result: ${if (result != null) "SUCCESS (token: ${result.htlcToken.length} chars)" else "FAILED"}")
-                        result?.htlcToken
+                        when (lockResult) {
+                            is LockResult.Success -> {
+                                Log.d(TAG, "[RIDE $rideCorrelationId] Lock SUCCESS (token: ${lockResult.escrowLock.htlcToken.length} chars)")
+                                lockResult.escrowLock.htlcToken
+                            }
+                            is LockResult.Failure.InsufficientBalance -> {
+                                Log.e(TAG, "[RIDE $rideCorrelationId] Lock FAILED: ${lockResult.message} (need ${lockResult.required}, have ${lockResult.available})")
+                                null
+                            }
+                            is LockResult.Failure.ProofsSpent -> {
+                                Log.e(TAG, "[RIDE $rideCorrelationId] Lock FAILED: ${lockResult.message} (${lockResult.spentCount}/${lockResult.totalSelected} spent)")
+                                null
+                            }
+                            is LockResult.Failure -> {
+                                Log.e(TAG, "[RIDE $rideCorrelationId] Lock FAILED: ${lockResult.message}")
+                                null
+                            }
+                            null -> {
+                                Log.e(TAG, "[RIDE $rideCorrelationId] Lock FAILED: WalletService not available")
+                                null
+                            }
+                        }
                     } catch (e: Exception) {
                         Log.e(TAG, "[RIDE $rideCorrelationId] Exception during lockForRide: ${e.message}", e)
                         null

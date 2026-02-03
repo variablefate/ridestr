@@ -36,7 +36,7 @@ import com.ridestr.common.nostr.events.RiderRideStateEvent
 import com.ridestr.common.nostr.events.RideshareChatData
 import com.ridestr.common.nostr.events.RideshareEventKinds
 import com.ridestr.common.nostr.events.UserProfile
-import com.ridestr.common.payment.ClaimResult
+import com.ridestr.common.payment.HtlcClaimResult
 import com.ridestr.common.payment.PaymentCrypto
 import com.ridestr.common.payment.WalletService
 import com.ridestr.common.routing.RouteResult
@@ -2095,7 +2095,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 // Use claimDepositByQuoteId with retries - it has better error handling
                 // and waits for Lightning settlement
                 val delays = listOf(0L, 2000L, 4000L, 8000L) // Immediate, then 2s, 4s, 8s
-                var claimResult: ClaimResult? = null
+                var claimResult: com.ridestr.common.payment.ClaimResult? = null
 
                 for ((attempt, delay) in delays.withIndex()) {
                     if (delay > 0) {
@@ -2305,18 +2305,33 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             if (state.canSettleEscrow && state.activePreimage != null && state.activeEscrowToken != null) {
                 Log.d(TAG, "[RIDE $rideCorrelationId] Claiming HTLC: paymentHash=${state.activePaymentHash?.take(16)}...")
                 try {
-                    val settlement = walletService?.claimHtlcPayment(
+                    val claimResult = walletService?.claimHtlcPayment(
                         htlcToken = state.activeEscrowToken,
                         preimage = state.activePreimage,
                         paymentHash = state.activePaymentHash
                     )
 
-                    if (settlement != null) {
-                        Log.d(TAG, "[RIDE $rideCorrelationId] Claim SUCCESS: received ${settlement.amountSats} sats")
-                        settlementMessage = " + ${settlement.amountSats} sats received"
-                    } else {
-                        Log.e(TAG, "[RIDE $rideCorrelationId] Claim FAILED: claimHtlcPayment returned null")
-                        settlementMessage = " (payment claim failed)"
+                    settlementMessage = when (claimResult) {
+                        is HtlcClaimResult.Success -> {
+                            Log.d(TAG, "[RIDE $rideCorrelationId] Claim SUCCESS: received ${claimResult.settlement.amountSats} sats")
+                            " + ${claimResult.settlement.amountSats} sats received"
+                        }
+                        is HtlcClaimResult.Failure.PreimageMismatch -> {
+                            Log.e(TAG, "[RIDE $rideCorrelationId] Claim FAILED: preimage mismatch for hash ${claimResult.paymentHash.take(16)}...")
+                            " (preimage mismatch)"
+                        }
+                        is HtlcClaimResult.Failure.NotConnected -> {
+                            Log.e(TAG, "[RIDE $rideCorrelationId] Claim FAILED: wallet not connected")
+                            " (wallet not connected)"
+                        }
+                        is HtlcClaimResult.Failure -> {
+                            Log.e(TAG, "[RIDE $rideCorrelationId] Claim FAILED: ${claimResult.message}")
+                            " (payment claim failed)"
+                        }
+                        null -> {
+                            Log.e(TAG, "[RIDE $rideCorrelationId] Claim FAILED: WalletService not available")
+                            " (wallet unavailable)"
+                        }
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "[RIDE $rideCorrelationId] Claim ERROR: ${e.message}", e)
@@ -2696,19 +2711,24 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             if (state.canSettleEscrow && state.activePreimage != null && state.activeEscrowToken != null) {
                 Log.d(TAG, "[RIDE $rideCorrelationId] Claiming payment after rider cancellation...")
                 try {
-                    val result = walletService?.claimHtlcPayment(
+                    val claimResult = walletService?.claimHtlcPayment(
                         htlcToken = state.activeEscrowToken,
                         preimage = state.activePreimage
                     )
-                    val claimed = result != null
 
-                    if (claimed) {
-                        Log.d(TAG, "[RIDE $rideCorrelationId] Claim after cancellation SUCCESS")
-                        // Save to history with fare earned
-                        saveCancelledRideToHistory(state, offer, claimed = true)
-                    } else {
-                        Log.e(TAG, "[RIDE $rideCorrelationId] Claim after cancellation FAILED")
-                        saveCancelledRideToHistory(state, offer, claimed = false)
+                    when (claimResult) {
+                        is HtlcClaimResult.Success -> {
+                            Log.d(TAG, "[RIDE $rideCorrelationId] Claim after cancellation SUCCESS: ${claimResult.settlement.amountSats} sats")
+                            saveCancelledRideToHistory(state, offer, claimed = true)
+                        }
+                        is HtlcClaimResult.Failure -> {
+                            Log.e(TAG, "[RIDE $rideCorrelationId] Claim after cancellation FAILED: ${claimResult.message}")
+                            saveCancelledRideToHistory(state, offer, claimed = false)
+                        }
+                        null -> {
+                            Log.e(TAG, "[RIDE $rideCorrelationId] Claim after cancellation FAILED: WalletService not available")
+                            saveCancelledRideToHistory(state, offer, claimed = false)
+                        }
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "[RIDE $rideCorrelationId] Claim after cancellation ERROR: ${e.message}", e)

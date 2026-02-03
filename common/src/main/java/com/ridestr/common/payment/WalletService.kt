@@ -1072,7 +1072,7 @@ class WalletService(
      * @param paymentHash SHA256 hash that locks the funds
      * @param driverPubKey Driver's wallet public key for P2PK condition
      * @param expirySeconds Time until escrow expires (default 15 minutes)
-     * @return EscrowLock if successful, null on failure
+     * @return LockResult.Success with EscrowLock if successful, LockResult.Failure variant on error
      */
     suspend fun lockForRide(
         amountSats: Long,
@@ -1080,22 +1080,22 @@ class WalletService(
         driverPubKey: String,
         expirySeconds: Long = 900L,
         preimage: String? = null  // Stored for future-proof refunds if mint requires it
-    ): EscrowLock? {
+    ): LockResult {
         if (!_isConnected.value) {
             Log.e(TAG, "Cannot lock funds - not connected to wallet provider")
-            return null
+            return LockResult.Failure.NotConnected()
         }
 
         val sync = nip60Sync
         if (sync == null) {
             Log.e(TAG, "Cannot lock funds - NIP-60 sync not initialized")
-            return null
+            return LockResult.Failure.NipSyncNotInitialized()
         }
 
         val mintUrl = cashuBackend.getCurrentMintUrl()
         if (mintUrl == null) {
             Log.e(TAG, "Cannot lock funds - mint URL not available")
-            return null
+            return LockResult.Failure.MintUrlNotAvailable()
         }
 
         // CRITICAL: Ensure wallet key is backed up BEFORE creating any HTLC
@@ -1138,8 +1138,9 @@ class WalletService(
         }
 
         if (selection == null) {
-            Log.e(TAG, "Insufficient proofs for escrow: need $amountSats (after auto-sync attempt)")
-            return null
+            val availableBalance = _balance.value.availableSats
+            Log.e(TAG, "Insufficient proofs for escrow: need $amountSats, have $availableBalance (after auto-sync attempt)")
+            return LockResult.Failure.InsufficientBalance(required = amountSats, available = availableBalance)
         }
 
         Log.d(TAG, "Selected ${selection.proofs.size} proofs (${selection.totalAmount} sats, change: ${selection.changeAmount})")
@@ -1187,7 +1188,7 @@ class WalletService(
         while (true) {
             val currentSelection = selection ?: run {
                 Log.e(TAG, "Selection unexpectedly null in cleanup loop")
-                return null
+                return LockResult.Failure.Other("Selection unexpectedly null in cleanup loop")
             }
             val currentProofs = currentSelection.proofs.map { it.toCashuProof() }
             Log.d(TAG, "Verifying ${currentProofs.size} proofs with mint (attempt ${cleanupAttempt + 1})...")
@@ -1195,7 +1196,7 @@ class WalletService(
 
             if (verifyResult == null) {
                 Log.e(TAG, "NUT-07 verification failed - cannot proceed without verification")
-                return null
+                return LockResult.Failure.VerificationFailed()
             }
 
             val (verifiedAmount, spentSecrets) = verifyResult
@@ -1211,7 +1212,10 @@ class WalletService(
             cleanupAttempt++
             if (cleanupAttempt >= maxCleanupAttempts) {
                 Log.e(TAG, "Still ${spentSecrets.size} spent proofs after $maxCleanupAttempts cleanup attempts - giving up")
-                return null
+                return LockResult.Failure.ProofsSpent(
+                    spentCount = spentSecrets.size,
+                    totalSelected = currentProofs.size
+                )
             }
 
             Log.w(TAG, "Found ${spentSecrets.size} SPENT proofs (attempt $cleanupAttempt/$maxCleanupAttempts) - cleaning up")
@@ -1246,8 +1250,9 @@ class WalletService(
             // Re-select proofs for next verification round
             selection = sync.selectProofsForSpending(amountSats, mintUrl)
             if (selection == null) {
-                Log.e(TAG, "Insufficient proofs after cleanup attempt $cleanupAttempt (need $amountSats sats)")
-                return null
+                val availableBalance = _balance.value.availableSats
+                Log.e(TAG, "Insufficient proofs after cleanup attempt $cleanupAttempt (need $amountSats sats, have $availableBalance)")
+                return LockResult.Failure.InsufficientBalance(required = amountSats, available = availableBalance)
             }
             Log.d(TAG, "Re-selected ${selection.proofs.size} proofs (${selection.totalAmount} sats) for next verification")
         }
@@ -1258,7 +1263,7 @@ class WalletService(
         val riderPubKey = walletKeyManager.getWalletPubKeyHex()
         if (riderPubKey == null) {
             Log.e(TAG, "lockForRide: no wallet pubkey available for refund")
-            return null
+            return LockResult.Failure.NoWalletKey()
         }
         val locktime = System.currentTimeMillis() / 1000 + expirySeconds
 
@@ -1274,7 +1279,7 @@ class WalletService(
 
         if (result == null) {
             Log.e(TAG, "Failed to create HTLC token from proofs")
-            return null
+            return LockResult.Failure.SwapFailed()
         }
 
         val htlcToken = result.htlcToken
@@ -1398,7 +1403,7 @@ class WalletService(
 
         Log.d(TAG, "=== FUNDS LOCKED ===")
         Log.d(TAG, "EscrowId: $escrowId, HTLC token created, balance: $newBalance sats")
-        return lock
+        return LockResult.Success(lock)
     }
 
     /**
@@ -1407,23 +1412,23 @@ class WalletService(
      * @param htlcToken The HTLC token containing locked funds
      * @param preimage The 64-char hex preimage that unlocks the HTLC
      * @param paymentHash Optional payment hash to verify preimage (recommended)
-     * @return SettlementResult if successful, null on failure
+     * @return HtlcClaimResult.Success with SettlementResult if successful, HtlcClaimResult.Failure variant on error
      */
     suspend fun claimHtlcPayment(
         htlcToken: String,
         preimage: String,
         paymentHash: String? = null
-    ): SettlementResult? {
+    ): HtlcClaimResult {
         if (!_isConnected.value) {
             Log.e(TAG, "Cannot claim HTLC - not connected to wallet provider")
-            return null
+            return HtlcClaimResult.Failure.NotConnected()
         }
 
         // Verify preimage if payment hash is provided
         if (paymentHash != null) {
             if (!PaymentCrypto.verifyPreimage(preimage, paymentHash)) {
                 Log.e(TAG, "Preimage verification failed - hash mismatch")
-                return null
+                return HtlcClaimResult.Failure.PreimageMismatch(paymentHash)
             }
         }
 
@@ -1437,7 +1442,7 @@ class WalletService(
 
         if (claimResult == null) {
             Log.e(TAG, "Failed to claim HTLC token")
-            return null
+            return HtlcClaimResult.Failure.MintRejected()
         }
 
         val result = SettlementResult(
@@ -1521,7 +1526,7 @@ class WalletService(
         Log.d(TAG, "=== HTLC CLAIMED ===")
         Log.d(TAG, "Received ${claimResult.amountSats} sats, refreshed balance: $newBalance")
 
-        return result
+        return HtlcClaimResult.Success(result)
     }
 
     // === HTLC Refund Operations ===
