@@ -48,7 +48,9 @@ import java.util.concurrent.TimeUnit
 class CashuBackend(
     private val context: Context,
     private val walletKeyManager: WalletKeyManager,
-    private val walletStorage: WalletStorage
+    private val walletStorage: WalletStorage,
+    // Optional: for testing (production uses default OkHttpMintApi)
+    private val mintApi: MintApi? = null
 ) {
     companion object {
         private const val TAG = "CashuBackend"
@@ -74,6 +76,11 @@ class CashuBackend(
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
+
+    // MintApi for HTLC operations - uses injected or default OkHttpMintApi
+    private val effectiveMintApi: MintApi by lazy {
+        mintApi ?: OkHttpMintApi(client)
+    }
 
     private var currentMintUrl: String? = null
     private var mintCapabilities: MintCapabilities? = null
@@ -977,18 +984,18 @@ class CashuBackend(
     suspend fun claimHtlcTokenWithProofs(
         htlcToken: String,
         preimage: String
-    ): HtlcClaimResult? = withContext(Dispatchers.IO) {
+    ): HtlcClaimOutcome = withContext(Dispatchers.IO) {
         val mintUrl = currentMintUrl
 
         if (mintUrl == null) {
             Log.e(TAG, "claimHtlcTokenWithProofs: mint not initialized")
-            return@withContext null
+            return@withContext HtlcClaimOutcome.Failure.Other("Mint not initialized")
         }
 
         // Validate preimage
         if (preimage.length != 64 || !preimage.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' }) {
             Log.e(TAG, "claimHtlcTokenWithProofs: invalid preimage format")
-            return@withContext null
+            return@withContext HtlcClaimOutcome.Failure.Other("Invalid preimage format")
         }
 
         Log.d(TAG, "=== CLAIMING HTLC (with proofs) ===")
@@ -998,7 +1005,7 @@ class CashuBackend(
             val parseResult = parseHtlcToken(htlcToken)
             if (parseResult == null) {
                 Log.e(TAG, "Failed to parse HTLC token - parseHtlcToken returned null")
-                return@withContext null
+                return@withContext HtlcClaimOutcome.Failure.TokenParseFailed
             }
             val (htlcProofs, tokenMintUrl) = parseResult
             val totalAmount = htlcProofs.sumOf { it.amount }
@@ -1008,19 +1015,19 @@ class CashuBackend(
             val expectedHash = extractPaymentHashFromSecret(htlcProofs.first().secret)
             if (expectedHash == null) {
                 Log.e(TAG, "Failed to extract payment_hash from HTLC secret")
-                return@withContext null
+                return@withContext HtlcClaimOutcome.Failure.TokenParseFailed
             }
             val computedHash = PaymentCrypto.computePaymentHash(preimage)
             if (!computedHash.equals(expectedHash, ignoreCase = true)) {
                 Log.e(TAG, "Preimage does not match payment_hash")
-                return@withContext null
+                return@withContext HtlcClaimOutcome.Failure.Other("Preimage does not match payment_hash")
             }
 
             // Get keyset
             val keyset = getActiveKeyset()
             if (keyset == null) {
                 Log.e(TAG, "Failed to get active keyset from mint")
-                return@withContext null
+                return@withContext HtlcClaimOutcome.Failure.Other("Failed to get active keyset")
             }
             Log.d(TAG, "Using keyset: ${keyset.id}")
 
@@ -1030,14 +1037,16 @@ class CashuBackend(
 
             // Build swap request with per-proof witness signatures
             val inputsArray = JSONArray()
-            htlcProofs.forEach { proof ->
+            for (proof in htlcProofs) {
                 // Create P2PK signature for this proof
                 val sig = signP2pkProof(proof.secret, proof.C)
+                if (sig == null) {
+                    Log.e(TAG, "claimHtlcTokenWithProofs: signP2pkProof returned null")
+                    return@withContext HtlcClaimOutcome.Failure.SignatureFailed
+                }
                 val witnessJson = JSONObject().apply {
                     put("preimage", preimage)
-                    put("signatures", JSONArray().apply {
-                        if (sig != null) put(sig)
-                    })
+                    put("signatures", JSONArray().apply { put(sig) })
                 }.toString()
 
                 inputsArray.put(JSONObject().apply {
@@ -1092,23 +1101,24 @@ class CashuBackend(
             walletStorage.savePendingBlindedOp(pendingOp)
             Log.d(TAG, "Saved pending HTLC claim operation: $operationId ($totalAmount sats)")
 
-            // Execute swap
+            // Execute swap via MintApi
             Log.d(TAG, "Executing swap at: $targetMint/v1/swap")
-            val request = Request.Builder()
-                .url("$targetMint/v1/swap")
-                .post(swapRequest.toRequestBody(JSON_MEDIA_TYPE))
-                .build()
-
-            val signatures = client.newCall(request).execute().use { response ->
-                val responseBody = response.body?.string()
-                Log.d(TAG, "Swap response: ${response.code}")
-                if (!response.isSuccessful) {
-                    Log.e(TAG, "Claim swap failed: ${response.code} - $responseBody")
-                    // Keep pending operation for recovery
-                    return@withContext null
+            val swapResult = effectiveMintApi.postSwap(targetMint, swapRequest)
+            val signatures = when (swapResult) {
+                is MintApi.Result.Success -> {
+                    Log.d(TAG, "Swap successful, parsing signatures...")
+                    JSONObject(swapResult.body).getJSONArray("signatures")
                 }
-                Log.d(TAG, "Swap successful, parsing signatures...")
-                JSONObject(responseBody ?: "{}").getJSONArray("signatures")
+                is MintApi.Result.HttpError -> {
+                    Log.e(TAG, "Claim swap failed: ${swapResult.code} - ${swapResult.body}")
+                    // Keep pending operation for recovery
+                    return@withContext HtlcClaimOutcome.Failure.MintRejected
+                }
+                is MintApi.Result.TransportFailure -> {
+                    Log.e(TAG, "Claim swap mint unreachable: ${swapResult.cause}")
+                    // Keep pending operation for recovery
+                    return@withContext HtlcClaimOutcome.Failure.MintUnreachable
+                }
             }
 
             // Unblind signatures - CRITICAL: Use keyset ID from response
@@ -1151,17 +1161,17 @@ class CashuBackend(
                 put("status", "SETTLED")
             }.toString()
 
-            HtlcClaimResult(
+            HtlcClaimOutcome.Success(HtlcClaimResult(
                 settlementProof = settlementProof,
                 receivedProofs = plainProofs,
                 amountSats = totalAmount,
                 mintUrl = targetMint,
                 pendingOpId = operationId
-            )
+            ))
         } catch (e: Exception) {
             Log.e(TAG, "claimHtlcTokenWithProofs failed: ${e.message}", e)
             // Keep pending operation for recovery
-            null
+            HtlcClaimOutcome.Failure.Other(e.message ?: "Unknown error")
         }
     }
 
@@ -1548,6 +1558,44 @@ class CashuBackend(
     )
 
     /**
+     * Typed outcome for HTLC swap (lock) operations.
+     * Wraps HtlcLockResult on success, provides failure variants for error wiring.
+     */
+    sealed class HtlcSwapOutcome {
+        data class Success(val result: HtlcLockResult) : HtlcSwapOutcome()
+        sealed class Failure : HtlcSwapOutcome() {
+            /** Network failure (IOException, timeout, DNS) */
+            object MintUnreachable : Failure()
+            /** Mint returned HTTP error (4xx/5xx) */
+            object SwapRejected : Failure()
+            /** Other failures with message */
+            data class Other(val message: String) : Failure()
+        }
+    }
+
+    /**
+     * Typed outcome for HTLC claim operations.
+     * Wraps HtlcClaimResult on success, provides failure variants for error wiring.
+     *
+     * NOTE: result is CashuBackend.HtlcClaimResult (data class), NOT HtlcResult.HtlcClaimResult (sealed class)
+     */
+    sealed class HtlcClaimOutcome {
+        data class Success(val result: HtlcClaimResult) : HtlcClaimOutcome()
+        sealed class Failure : HtlcClaimOutcome() {
+            /** Token parsing failed (CashuTokenCodec.parseHtlcToken returned null) */
+            object TokenParseFailed : Failure()
+            /** P2PK signature failed (signP2pkProof returned null) */
+            object SignatureFailed : Failure()
+            /** Network failure (IOException, timeout, DNS) */
+            object MintUnreachable : Failure()
+            /** Mint returned HTTP error (4xx/5xx) */
+            object MintRejected : Failure()
+            /** Other failures with message */
+            data class Other(val message: String) : Failure()
+        }
+    }
+
+    /**
      * Create NUT-10 HTLC secret as JSON string.
      * Format: ["HTLC", {"nonce": "...", "data": "payment_hash", "tags": [...]}]
      */
@@ -1686,22 +1734,22 @@ class CashuBackend(
         driverPubKey: String,
         locktime: Long? = null,
         riderPubKey: String? = null
-    ): HtlcLockResult? = withContext(Dispatchers.IO) {
+    ): HtlcSwapOutcome = withContext(Dispatchers.IO) {
         val mintUrl = currentMintUrl
         if (mintUrl == null) {
             Log.e(TAG, "createHtlcTokenFromProofs: currentMintUrl is null!")
-            return@withContext null
+            return@withContext HtlcSwapOutcome.Failure.Other("Mint not initialized")
         }
 
         if (inputProofs.isEmpty()) {
             Log.e(TAG, "createHtlcTokenFromProofs: no input proofs provided")
-            return@withContext null
+            return@withContext HtlcSwapOutcome.Failure.Other("No input proofs provided")
         }
 
         val inputAmount = inputProofs.sumOf { it.amount }
         if (inputAmount < amountSats) {
             Log.e(TAG, "createHtlcTokenFromProofs: insufficient proofs ($inputAmount < $amountSats)")
-            return@withContext null
+            return@withContext HtlcSwapOutcome.Failure.Other("Insufficient proofs ($inputAmount < $amountSats)")
         }
 
         Log.d(TAG, "=== CREATING HTLC FROM NIP-60 PROOFS ===")
@@ -1712,7 +1760,7 @@ class CashuBackend(
             val keyset = getActiveKeyset()
             if (keyset == null) {
                 Log.e(TAG, "createHtlcTokenFromProofs: getActiveKeyset() returned null!")
-                return@withContext null
+                return@withContext HtlcSwapOutcome.Failure.Other("Failed to get active keyset")
             }
 
             // Calculate change
@@ -1783,20 +1831,22 @@ class CashuBackend(
             walletStorage.savePendingBlindedOp(pendingOp)
             Log.d(TAG, "Saved pending HTLC lock operation: $operationId ($inputAmount sats)")
 
-            // Execute swap
-            val request = Request.Builder()
-                .url("$mintUrl/v1/swap")
-                .post(swapRequest.toRequestBody(JSON_MEDIA_TYPE))
-                .build()
-
-            val signatures = client.newCall(request).execute().use { response ->
-                val responseBody = response.body?.string()
-                if (!response.isSuccessful) {
-                    Log.e(TAG, "HTLC swap failed: ${response.code} - $responseBody")
-                    // Keep pending operation for recovery
-                    return@withContext null
+            // Execute swap via MintApi
+            val swapResult = effectiveMintApi.postSwap(mintUrl, swapRequest)
+            val signatures = when (swapResult) {
+                is MintApi.Result.Success -> {
+                    JSONObject(swapResult.body).getJSONArray("signatures")
                 }
-                JSONObject(responseBody ?: "{}").getJSONArray("signatures")
+                is MintApi.Result.HttpError -> {
+                    Log.e(TAG, "HTLC swap failed: ${swapResult.code} - ${swapResult.body}")
+                    // Keep pending operation for recovery
+                    return@withContext HtlcSwapOutcome.Failure.SwapRejected
+                }
+                is MintApi.Result.TransportFailure -> {
+                    Log.e(TAG, "HTLC swap mint unreachable: ${swapResult.cause}")
+                    // Keep pending operation for recovery
+                    return@withContext HtlcSwapOutcome.Failure.MintUnreachable
+                }
             }
 
             // Unblind HTLC proofs - CRITICAL: Use keyset ID and amount from response
@@ -1854,11 +1904,11 @@ class CashuBackend(
             walletStorage.updateBlindedOpStatus(operationId, PendingOperationStatus.COMPLETED)
             Log.d(TAG, "Marked pending HTLC lock operation COMPLETED: $operationId (caller must clear after NIP-60 persist)")
 
-            HtlcLockResult(htlcToken, changeProofs, operationId)
+            HtlcSwapOutcome.Success(HtlcLockResult(htlcToken, changeProofs, operationId))
         } catch (e: Exception) {
             Log.e(TAG, "createHtlcTokenFromProofs failed: ${e.message}", e)
             // Keep pending operation for recovery
-            null
+            HtlcSwapOutcome.Failure.Other(e.message ?: "Unknown error")
         }
     }
 

@@ -3,6 +3,8 @@ package com.ridestr.common.payment
 import android.content.Context
 import android.util.Log
 import com.ridestr.common.payment.cashu.CashuBackend
+import com.ridestr.common.payment.cashu.CashuBackend.HtlcClaimOutcome
+import com.ridestr.common.payment.cashu.CashuBackend.HtlcSwapOutcome
 import com.ridestr.common.payment.cashu.CashuBackend.ProofStateResult
 import com.ridestr.common.payment.cashu.CashuCrypto
 import com.ridestr.common.payment.cashu.CashuProof
@@ -1268,7 +1270,7 @@ class WalletService(
         val locktime = System.currentTimeMillis() / 1000 + expirySeconds
 
         // Step 2: Create HTLC token via mint swap
-        val result = cashuBackend.createHtlcTokenFromProofs(
+        val swapOutcome = cashuBackend.createHtlcTokenFromProofs(
             inputProofs = inputProofs,
             paymentHash = paymentHash,
             amountSats = amountSats,
@@ -1277,14 +1279,25 @@ class WalletService(
             riderPubKey = riderPubKey
         )
 
-        if (result == null) {
-            Log.e(TAG, "Failed to create HTLC token from proofs")
-            return LockResult.Failure.SwapFailed()
+        val htlcResult = when (swapOutcome) {
+            is HtlcSwapOutcome.Success -> swapOutcome.result
+            is HtlcSwapOutcome.Failure.MintUnreachable -> {
+                Log.e(TAG, "Failed to create HTLC token: mint unreachable")
+                return LockResult.Failure.MintUnreachable(mintUrl)
+            }
+            is HtlcSwapOutcome.Failure.SwapRejected -> {
+                Log.e(TAG, "Failed to create HTLC token: swap rejected by mint")
+                return LockResult.Failure.SwapFailed()
+            }
+            is HtlcSwapOutcome.Failure.Other -> {
+                Log.e(TAG, "Failed to create HTLC token: ${swapOutcome.message}")
+                return LockResult.Failure.Other(swapOutcome.message)
+            }
         }
 
-        val htlcToken = result.htlcToken
-        val changeProofs = result.changeProofs
-        val htlcPendingOpId = result.pendingOpId
+        val htlcToken = htlcResult.htlcToken
+        val changeProofs = htlcResult.changeProofs
+        val htlcPendingOpId = htlcResult.pendingOpId
 
         // Step 3: CRITICAL - Republish remaining proofs BEFORE deleting events!
         // One event can contain MANY proofs. If we delete the event, we lose ALL proofs in it.
@@ -1435,14 +1448,33 @@ class WalletService(
         Log.d(TAG, "=== CLAIMING HTLC PAYMENT ===")
 
         // Use the new method that returns proofs for NIP-60 publishing
-        val claimResult = cashuBackend.claimHtlcTokenWithProofs(
+        val claimOutcome = cashuBackend.claimHtlcTokenWithProofs(
             htlcToken = htlcToken,
             preimage = preimage
         )
 
-        if (claimResult == null) {
-            Log.e(TAG, "Failed to claim HTLC token")
-            return HtlcClaimResult.Failure.MintRejected()
+        val claimResult = when (claimOutcome) {
+            is HtlcClaimOutcome.Success -> claimOutcome.result
+            is HtlcClaimOutcome.Failure.TokenParseFailed -> {
+                Log.e(TAG, "Failed to claim HTLC: token parse failed")
+                return HtlcClaimResult.Failure.TokenParseFailed()
+            }
+            is HtlcClaimOutcome.Failure.SignatureFailed -> {
+                Log.e(TAG, "Failed to claim HTLC: signature failed")
+                return HtlcClaimResult.Failure.SignatureFailed()
+            }
+            is HtlcClaimOutcome.Failure.MintUnreachable -> {
+                Log.e(TAG, "Failed to claim HTLC: mint unreachable")
+                return HtlcClaimResult.Failure.MintRejected()
+            }
+            is HtlcClaimOutcome.Failure.MintRejected -> {
+                Log.e(TAG, "Failed to claim HTLC: mint rejected")
+                return HtlcClaimResult.Failure.MintRejected()
+            }
+            is HtlcClaimOutcome.Failure.Other -> {
+                Log.e(TAG, "Failed to claim HTLC: ${claimOutcome.message}")
+                return HtlcClaimResult.Failure.Other(claimOutcome.message)
+            }
         }
 
         val result = SettlementResult(
