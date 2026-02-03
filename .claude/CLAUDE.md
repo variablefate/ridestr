@@ -24,6 +24,7 @@ See [docs/README.md](../docs/README.md) for full documentation.
 | RoadFlare Status Detection | ✅ COMPLETE (auto-sync, out-of-order rejection, staleness filter, key refresh) |
 | Driver Availability Stability | ✅ COMPLETE (selective clearing, receivedAt tracking, timestamp guards, since filter) |
 | NostrService Domain Decomposition | ✅ COMPLETE (Phase 5: 3 domain services + CashuTokenCodec) |
+| Payment Test Harness | ✅ COMPLETE (Phase 6: 83 unit tests with Robolectric) |
 
 ## Project Structure
 - `rider-app/` - Rider Android app (RiderViewModel.kt is main state)
@@ -44,6 +45,7 @@ See [docs/README.md](../docs/README.md) for full documentation.
 | Debug data issue | This file "Dual-Origin" | `.claude/skills/ridestr-protocol/SKILL.md` |
 | Add new sync feature | `docs/guides/ADDING_NOSTR_SYNC.md` | `.claude/skills/add-nostr-sync.md` |
 | Payment debugging | `docs/architecture/PAYMENT_ARCHITECTURE.md` | `.claude/skills/cashu-wallet.md` |
+| Modify payment code | `docs/architecture/PAYMENT_SAFETY.md` | `docs/architecture/COMPATIBILITY_CONTRACTS.md` |
 | Understand ride flow | `docs/architecture/STATE_MACHINES.md` | `.claude/skills/ridestr-protocol/SKILL.md` |
 | Event structure | `docs/protocol/NOSTR_EVENTS.md` | Event source files in `common/.../events/` |
 | Debug RoadFlare issue | This file "RoadFlare Architecture" | `docs/CONNECTIONS.md#roadflare-system` |

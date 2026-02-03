@@ -476,9 +476,50 @@ return (valueField.get(amount) as Long)
 
 ---
 
+## Correlation ID Logging
+
+Payment operations use ride correlation IDs to enable end-to-end tracing through logs.
+
+### Design Decision: Different IDs at Different Stages
+
+| ViewModel | ID Used | Why |
+|-----------|---------|-----|
+| **RiderViewModel** | `acceptanceEventId` | HTLC locked pre-confirmation; `confirmationEventId` doesn't exist yet |
+| **DriverViewModel** | `confirmationEventId` | HTLC claimed post-confirmation |
+
+**This is intentional design, not a bug.** The rider locks the HTLC in `autoConfirmRide()` immediately after receiving acceptance but BEFORE sending the confirmation event. At that point, only `acceptanceEventId` exists.
+
+### Log Format
+
+```
+[RIDE xxxxxxxx] Locking HTLC: fareAmount=100, paymentHash=abcd1234...
+[RIDE xxxxxxxx] Claiming HTLC: paymentHash=abcd1234...
+```
+
+The 8-character prefix is the first 8 characters of the event ID.
+
+### End-to-End Trace
+
+To trace a ride's payment flow:
+
+1. Find rider's `[RIDE xxxxxxxx]` log entry during `autoConfirmRide()` → shows HTLC lock
+2. The `xxxxxxxx` is from `acceptanceEventId`
+3. Find driver's `[RIDE yyyyyyyy]` log entry during `completeRide()` → shows HTLC claim
+4. The `yyyyyyyy` is from `confirmationEventId`
+5. Cross-reference: `acceptanceEventId` is logged in rider's confirmation event creation
+
+### Implementation Locations
+
+- **RiderViewModel:2970** - `[RIDE $rideCorrelationId] Locking HTLC...`
+- **DriverViewModel:2300-2301** - `[RIDE $rideCorrelationId] Claiming HTLC...`
+
+---
+
 ## Related Documentation
 
 - [NOSTR_EVENTS.md](../protocol/NOSTR_EVENTS.md) - Payment-related event fields
 - [STATE_MACHINES.md](STATE_MACHINES.md) - Ride state transitions
 - [RIDER_VIEWMODEL.md](../viewmodels/RIDER_VIEWMODEL.md) - Integration points
 - [DRIVER_VIEWMODEL.md](../viewmodels/DRIVER_VIEWMODEL.md) - Integration points
+- [COMPATIBILITY_CONTRACTS.md](COMPATIBILITY_CONTRACTS.md) - API stability contracts
+- [PAYMENT_SAFETY.md](PAYMENT_SAFETY.md) - Payment modification checklist
