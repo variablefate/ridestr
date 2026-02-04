@@ -68,7 +68,6 @@ import com.ridestr.common.ui.formatFare
 import com.ridestr.common.ui.LocationSearchField
 import com.ridestr.common.ui.ManualCoordinateInput
 import com.ridestr.common.ui.RecentsSection
-import com.ridestr.common.data.CachedDriverLocation
 import com.ridestr.common.data.FollowedDriversRepository
 import com.ridestr.common.nostr.events.FollowedDriver
 import com.ridestr.rider.viewmodels.RideStage
@@ -3548,19 +3547,18 @@ private fun RoadflareDriverSelectionSheet(
                         if (!isExpired && !isOutOfOrder) {
                             lastLocationCreatedAt[event.pubKey] = eventCreatedAt
 
-                            // Check status: remove offline drivers (like regular rides do)
+                            // Update location in shared cache (including OFFLINE status)
+                            // Note: Don't remove on OFFLINE - RoadflareTab needs timestamp for "Last seen" display
+                            followedDriversRepository.updateDriverLocation(
+                                pubkey = event.pubKey,
+                                lat = locationData.location.lat,
+                                lon = locationData.location.lon,
+                                status = locationData.tagStatus,
+                                timestamp = eventCreatedAt,
+                                keyVersion = locationData.keyVersion
+                            )
                             if (locationData.tagStatus == com.ridestr.common.nostr.events.RoadflareLocationEvent.Status.OFFLINE) {
-                                followedDriversRepository.removeDriverLocation(event.pubKey)
-                                android.util.Log.d("RoadflareSelection", "Driver ${event.pubKey.take(8)} went offline - removed from selection")
-                            } else {
-                                followedDriversRepository.updateDriverLocation(
-                                    pubkey = event.pubKey,
-                                    lat = locationData.location.lat,
-                                    lon = locationData.location.lon,
-                                    status = locationData.tagStatus,
-                                    timestamp = eventCreatedAt,
-                                    keyVersion = locationData.keyVersion
-                                )
+                                android.util.Log.d("RoadflareSelection", "Driver ${event.pubKey.take(8)} went offline")
                             }
                         } else {
                             android.util.Log.d("RoadflareSelection", "Rejected stale/out-of-order 30014: expired=$isExpired, outOfOrder=$isOutOfOrder")

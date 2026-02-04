@@ -22,7 +22,6 @@ import androidx.compose.ui.unit.dp
 import com.ridestr.rider.R
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import com.ridestr.common.data.CachedDriverLocation
 import com.ridestr.common.data.FollowedDriversRepository
 import com.ridestr.common.nostr.NostrService
 import com.ridestr.common.nostr.events.FollowedDriver
