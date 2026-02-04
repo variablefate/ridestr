@@ -9,12 +9,13 @@ description: |
   Built on Nostr for censorship-resistant, peer-to-peer ridesharing.
 
   Features:
-  - Broadcast availability to nearby riders
-  - Receive payments via Cashu ecash (NUT-14 HTLC)
+  - RoadFlare personal network - build your rider following
+  - Broadcast availability to nearby riders or go RoadFlare-only
+  - Receive payments via Cashu ecash (trustless HTLC escrow)
   - Real-time navigation to pickup/destination
   - Encrypted chat with riders
-  - NIP-60 wallet backup
-tags: bitcoin nostr rideshare cashu ecash transportation driver
+  - Cross-device wallet sync via NIP-60
+tags: bitcoin nostr rideshare cashu ecash transportation driver roadflare
 license: MIT-No-Shitcoins
 icon: icon.png
 
