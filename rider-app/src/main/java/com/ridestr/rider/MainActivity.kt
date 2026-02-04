@@ -1054,7 +1054,7 @@ fun MainScreen(
                     followedDriversRepository = followedDriversRepository,
                     onAddDriverToFavorites = { driverPubKey ->
                         // 1. Save locally
-                        val newDriver = com.ridestr.common.nostr.events.FollowedDriver(
+                        val newDriver = FollowedDriver(
                             pubkey = driverPubKey,
                             addedAt = System.currentTimeMillis() / 1000,
                             note = ""
