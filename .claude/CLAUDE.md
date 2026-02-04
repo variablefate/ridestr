@@ -24,7 +24,9 @@ See [docs/README.md](../docs/README.md) for full documentation.
 | RoadFlare Status Detection | ✅ COMPLETE (auto-sync, out-of-order rejection, staleness filter, key refresh) |
 | Driver Availability Stability | ✅ COMPLETE (selective clearing, receivedAt tracking, timestamp guards, since filter) |
 | NostrService Domain Decomposition | ✅ COMPLETE (Phase 5: 3 domain services + CashuTokenCodec) |
-| Payment Test Harness | ✅ COMPLETE (Phase 6: 138 unit tests with Robolectric + MockK) |
+| Payment Test Harness | ✅ COMPLETE (Phase 6: 180 unit tests with Robolectric + MockK) |
+| Nip60Store Interface | ✅ COMPLETE (Phase 6: testable abstraction for NIP-60 operations) |
+| Proof-Conservation Tests | ✅ COMPLETE (Phase 6: contract tests for proof safety invariants) |
 
 ## Project Structure
 - `rider-app/` - Rider Android app (RiderViewModel.kt is main state)
@@ -248,11 +250,33 @@ When rider sends a direct offer to a specific driver, the rider app monitors tha
 - `common/.../payment/cashu/CashuBackend.kt` - Mint operations, HTLC, P2PK signing, NUT-09 restore (with region comments)
 - `common/.../payment/cashu/CashuTokenCodec.kt` - Stateless token encoding/decoding utilities (Phase 5 extraction)
 - `common/.../payment/WalletService.kt` - Orchestration layer, `recoverFromSeed()` for NUT-13 recovery (with region comments)
-- `common/.../payment/cashu/Nip60WalletSync.kt` - NIP-60 sync (includes counter backup)
+- `common/.../payment/cashu/Nip60WalletSync.kt` - NIP-60 sync, implements `Nip60Store` interface
+- `common/.../payment/cashu/Nip60Store.kt` - Interface for NIP-60 operations (testability)
 - `common/.../payment/WalletKeyManager.kt` - Wallet keys with Schnorr signing
 - `common/.../payment/WalletStorage.kt` - Local persistence + NUT-13 counters
 - `common/.../payment/PaymentCrypto.kt` - Preimage/hash generation
 - `common/.../payment/cashu/CashuCrypto.kt` - secp256k1 crypto, NUT-13 deterministic derivation
+
+### Payment Test Infrastructure (Phase 6)
+**Test Files (180 tests total):**
+| File | Tests | Coverage |
+|------|-------|----------|
+| `PaymentCryptoTest.kt` | 23 | Preimage/hash generation |
+| `CashuCryptoTest.kt` | 30 | hashToCurve, NUT-13, BIP-39 |
+| `CashuTokenCodecTest.kt` | 30 | Token encoding/decoding |
+| `HtlcResultTest.kt` | 34 | Sealed class exhaustiveness |
+| `CashuBackendErrorTest.kt` | 21 | Error mapping, FakeMintApi |
+| `FakeMintApiTest.kt` | 6 | Mock mint API behavior |
+| `HtlcSwapResultTest.kt` | 10 | Swap outcome mapping |
+| `FakeNip60StoreTest.kt` | 26 | Mock NIP-60 API behavior |
+| `ProofConservationTest.kt` | 10 | Proof safety invariants |
+
+**Test Infrastructure:**
+- `FakeMintApi.kt` - Mock mint HTTP API with queue-based responses
+- `FakeNip60Store.kt` - Mock NIP-60 storage with call log for order verification
+- `MainDispatcherRule.kt` - JUnit rule for Dispatchers.Main override in tests
+
+**Run tests:** Use the build skill with `test` argument or run `run_tests.bat`
 
 ### NostrService Domain Decomposition (Phase 5)
 NostrService was split into focused domain services while maintaining backward compatibility via delegation:

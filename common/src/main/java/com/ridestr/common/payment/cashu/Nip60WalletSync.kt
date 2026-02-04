@@ -43,7 +43,7 @@ class Nip60WalletSync(
     private val keyManager: KeyManager,
     private val walletKeyManager: WalletKeyManager,
     private val walletStorage: com.ridestr.common.payment.WalletStorage? = null
-) {
+) : Nip60Store {
     companion object {
         private const val TAG = "Nip60WalletSync"
 
@@ -103,10 +103,10 @@ class Nip60WalletSync(
      * @param deletedEventIds Event IDs being replaced/consumed by this publish (for `del` array)
      * @return Event ID if successful, null otherwise
      */
-    suspend fun publishProofs(
+    override suspend fun publishProofs(
         proofs: List<CashuProof>,
         mintUrl: String,
-        deletedEventIds: List<String> = emptyList()
+        deletedEventIds: List<String>
     ): String? = withContext(Dispatchers.IO) {
         val signer = keyManager.getSigner()
         val myPubKey = keyManager.getPubKeyHex()
@@ -180,10 +180,10 @@ class Nip60WalletSync(
      * @param proofs Proofs with outdated mint URL
      * @param newMintUrl The correct/new mint URL
      */
-    suspend fun republishProofsWithNewMint(
+    override suspend fun republishProofsWithNewMint(
         proofs: List<Nip60Proof>,
         newMintUrl: String
-    ) = withContext(Dispatchers.IO) {
+    ): Unit = withContext(Dispatchers.IO) {
         if (proofs.isEmpty()) return@withContext
 
         Log.d(TAG, "Republishing ${proofs.size} proofs with new mint URL: $newMintUrl")
@@ -217,7 +217,7 @@ class Nip60WalletSync(
      * @param forceRefresh If true, bypass cache
      * @return List of proofs with their event IDs (only unspent/valid proofs)
      */
-    suspend fun fetchProofs(forceRefresh: Boolean = false): List<Nip60Proof> = withContext(Dispatchers.IO) {
+    override suspend fun fetchProofs(forceRefresh: Boolean): List<Nip60Proof> = withContext(Dispatchers.IO) {
         val signer = keyManager.getSigner()
         val myPubKey = keyManager.getPubKeyHex()
 
@@ -380,7 +380,7 @@ class Nip60WalletSync(
      * Calculate total balance from NIP-60 proofs.
      * This is the SOURCE OF TRUTH for wallet balance.
      */
-    suspend fun getBalance(): WalletBalance {
+    override suspend fun getBalance(): WalletBalance {
         val proofs = fetchProofs()
         val totalSats = proofs.sumOf { it.amount }
 
@@ -399,9 +399,9 @@ class Nip60WalletSync(
      * @param mintUrl Optional mint filter
      * @return Pair of (proofs to spend, change amount) or null if insufficient
      */
-    suspend fun selectProofsForSpending(
+    override suspend fun selectProofsForSpending(
         amountSats: Long,
-        mintUrl: String? = null
+        mintUrl: String?
     ): ProofSelection? {
         val allProofs = fetchProofs()
         val eligibleProofs = if (mintUrl != null) {
@@ -444,7 +444,7 @@ class Nip60WalletSync(
      * @param eventIds Event IDs to delete
      * @return true if deletion events were published
      */
-    suspend fun deleteProofEvents(eventIds: List<String>): Boolean = withContext(Dispatchers.IO) {
+    override suspend fun deleteProofEvents(eventIds: List<String>): Boolean = withContext(Dispatchers.IO) {
         val signer = keyManager.getSigner() ?: return@withContext false
 
         if (eventIds.isEmpty()) return@withContext true
@@ -593,10 +593,10 @@ class Nip60WalletSync(
      * @param forceOverwrite If false, will not overwrite existing metadata from a different mint
      *                       (protects cross-app NIP-60 portability)
      */
-    suspend fun publishWalletMetadata(
+    override suspend fun publishWalletMetadata(
         mintUrl: String,
-        walletName: String = "Ridestr Wallet",
-        forceOverwrite: Boolean = false
+        walletName: String,
+        forceOverwrite: Boolean
     ): Boolean = withContext(Dispatchers.IO) {
         val signer = keyManager.getSigner()
         val myPubKey = keyManager.getPubKeyHex()
@@ -706,7 +706,7 @@ class Nip60WalletSync(
      * Checks for EITHER wallet metadata (Kind 17375) OR proof events (Kind 7375).
      * This ensures we detect existing wallets even if metadata wasn't published.
      */
-    suspend fun hasExistingWallet(): Boolean = withContext(Dispatchers.IO) {
+    override suspend fun hasExistingWallet(): Boolean = withContext(Dispatchers.IO) {
         val myPubKey = keyManager.getPubKeyHex() ?: run {
             Log.e(TAG, "hasExistingWallet: Not logged in (no pubkey)")
             return@withContext false
@@ -781,7 +781,7 @@ class Nip60WalletSync(
      * - NIP-60 standard: [["privkey", "..."], ["mint", "..."], ["mnemonic", "..."]]
      * - Legacy JSON object: {"mints": [...], "wallet_privkey": "...", "mnemonic": "..."}
      */
-    suspend fun restoreFromNostr(): WalletState? = withContext(Dispatchers.IO) {
+    override suspend fun restoreFromNostr(): WalletState? = withContext(Dispatchers.IO) {
         val signer = keyManager.getSigner()
         val myPubKey = keyManager.getPubKeyHex()
 
@@ -988,7 +988,7 @@ class Nip60WalletSync(
      *
      * @return Number of events deleted
      */
-    suspend fun deleteAllProofsFromNostr(): Int = withContext(Dispatchers.IO) {
+    override suspend fun deleteAllProofsFromNostr(): Int = withContext(Dispatchers.IO) {
         val signer = keyManager.getSigner()
         val myPubKey = keyManager.getPubKeyHex()
 
@@ -1087,7 +1087,7 @@ class Nip60WalletSync(
     /**
      * Clear cached proofs (call when switching accounts or after sync).
      */
-    fun clearCache() {
+    override fun clearCache() {
         cachedProofs.clear()
         lastFetchTime = 0
     }

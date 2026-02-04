@@ -10,6 +10,7 @@ import com.ridestr.common.payment.cashu.CashuCrypto
 import com.ridestr.common.payment.cashu.CashuProof
 import com.ridestr.common.payment.cashu.MintCapabilities
 import com.ridestr.common.payment.cashu.MintTokensResult
+import com.ridestr.common.payment.cashu.Nip60Store
 import com.ridestr.common.payment.cashu.Nip60WalletSync
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -60,7 +61,8 @@ class WalletService(
     val walletStorage: WalletStorage get() = _walletStorage
 
     // Lazy init for NIP-60 sync (requires NostrService which may not be available at init)
-    private var nip60Sync: Nip60WalletSync? = null
+    // Uses interface type for testability (can inject FakeNip60Store in tests)
+    private var nip60Sync: Nip60Store? = null
 
     // Mutex to prevent concurrent sync operations
     private val syncMutex = Mutex()
@@ -468,8 +470,9 @@ class WalletService(
 
     /**
      * Set the NIP-60 sync instance (call after NostrService is available).
+     * Accepts the interface type for testability.
      */
-    fun setNip60Sync(sync: Nip60WalletSync) {
+    fun setNip60Sync(sync: Nip60Store) {
         this.nip60Sync = sync
     }
 
@@ -2213,7 +2216,7 @@ class WalletService(
     private suspend fun publishProofsToNip60(
         proofs: List<CashuProof>,
         mintUrl: String,
-        sync: Nip60WalletSync
+        sync: Nip60Store
     ): String? {
         var eventId: String? = null
         var attempts = 0
