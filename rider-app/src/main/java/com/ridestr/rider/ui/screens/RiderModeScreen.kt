@@ -68,6 +68,7 @@ import com.ridestr.common.ui.formatFare
 import com.ridestr.common.ui.LocationSearchField
 import com.ridestr.common.ui.ManualCoordinateInput
 import com.ridestr.common.ui.RecentsSection
+import com.ridestr.common.data.CachedDriverLocation
 import com.ridestr.common.data.FollowedDriversRepository
 import com.ridestr.common.nostr.events.FollowedDriver
 import com.ridestr.rider.viewmodels.RideStage
@@ -685,6 +686,7 @@ private fun IdleContent(
         ) {
             RoadflareDriverSelectionSheet(
                 drivers = roadflareDrivers,
+                followedDriversRepository = followedDriversRepository,
                 pickupLocation = uiState.pickupLocation,
                 routeResult = uiState.routeResult,
                 isSending = uiState.isSendingOffer,
@@ -3474,10 +3476,12 @@ private fun RideCompletedContent(
 /**
  * RoadFlare driver selection sheet.
  * Shows favorite drivers with real-time status and fare calculations.
+ * Uses shared repository cache for names and locations to prevent flickering on sheet reopen.
  */
 @Composable
 private fun RoadflareDriverSelectionSheet(
     drivers: List<FollowedDriver>,
+    followedDriversRepository: FollowedDriversRepository,
     pickupLocation: Location?,
     routeResult: RouteResult?,
     isSending: Boolean,
@@ -3491,14 +3495,9 @@ private fun RoadflareDriverSelectionSheet(
 ) {
     val scope = rememberCoroutineScope()
 
-    // Track driver locations by pubkey (from Kind 30014) with status and timestamp for staleness filtering
-    data class RoadflareDriverState(
-        val location: Location,
-        val status: String,
-        val timestamp: Long
-    )
-    val driverLocations = remember { mutableStateMapOf<String, RoadflareDriverState>() }
-    val driverNames = remember { mutableStateMapOf<String, String>() }
+    // Use repository cache for names and locations (survives sheet close/reopen)
+    val cachedLocations by followedDriversRepository.driverLocations.collectAsState()
+    val driverNames by followedDriversRepository.driverNames.collectAsState()
 
     // Track last createdAt per driver to reject out-of-order events
     val lastLocationCreatedAt = remember { mutableStateMapOf<String, Long>() }
@@ -3510,11 +3509,14 @@ private fun RoadflareDriverSelectionSheet(
         if (nostrService == null) return@DisposableEffect onDispose {}
 
         // Fetch driver profile names (prefer displayName over username)
+        // Guard to avoid duplicate subscriptions when name already cached
         drivers.forEach { driver ->
-            nostrService.subscribeToProfile(driver.pubkey) { profile ->
-                val fullName = profile.displayName ?: profile.name
-                fullName?.let { name ->
-                    driverNames[driver.pubkey] = name.split(" ").firstOrNull() ?: name
+            if (!driverNames.containsKey(driver.pubkey)) {
+                nostrService.subscribeToProfile(driver.pubkey) { profile ->
+                    val fullName = profile.displayName ?: profile.name
+                    fullName?.let { name ->
+                        followedDriversRepository.cacheDriverName(driver.pubkey, name.split(" ").firstOrNull() ?: name)
+                    }
                 }
             }
         }
@@ -3548,16 +3550,16 @@ private fun RoadflareDriverSelectionSheet(
 
                             // Check status: remove offline drivers (like regular rides do)
                             if (locationData.tagStatus == com.ridestr.common.nostr.events.RoadflareLocationEvent.Status.OFFLINE) {
-                                driverLocations.remove(event.pubKey)
+                                followedDriversRepository.removeDriverLocation(event.pubKey)
                                 android.util.Log.d("RoadflareSelection", "Driver ${event.pubKey.take(8)} went offline - removed from selection")
                             } else {
-                                driverLocations[event.pubKey] = RoadflareDriverState(
-                                    location = Location(
-                                        lat = locationData.location.lat,
-                                        lon = locationData.location.lon
-                                    ),
+                                followedDriversRepository.updateDriverLocation(
+                                    pubkey = event.pubKey,
+                                    lat = locationData.location.lat,
+                                    lon = locationData.location.lon,
                                     status = locationData.tagStatus,
-                                    timestamp = eventCreatedAt
+                                    timestamp = eventCreatedAt,
+                                    keyVersion = locationData.keyVersion
                                 )
                             }
                         } else {
@@ -3678,17 +3680,17 @@ private fun RoadflareDriverSelectionSheet(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(drivers, key = { it.pubkey }) { driver ->
-                    val driverState = driverLocations[driver.pubkey]
-                    val driverLocation = driverState?.location  // Extract Location from wrapper
+                    val cachedState = cachedLocations[driver.pubkey]
+                    val driverLocation = cachedState?.let { Location(lat = it.lat, lon = it.lon) }
                     val driverName = driverNames[driver.pubkey] ?: driver.pubkey.take(8) + "..."
                     val hasKey = driver.roadflareKey != null
 
                     // Check if online and fresh (< 5 min old)
                     val staleThresholdSec = 5 * 60  // 5 minutes (matches RoadflareTab)
                     val nowSec = System.currentTimeMillis() / 1000
-                    val isOnline = driverState != null &&
-                        driverState.status == com.ridestr.common.nostr.events.RoadflareLocationEvent.Status.ONLINE &&
-                        (nowSec - driverState.timestamp) < staleThresholdSec
+                    val isOnline = cachedState != null &&
+                        cachedState.status == com.ridestr.common.nostr.events.RoadflareLocationEvent.Status.ONLINE &&
+                        (nowSec - cachedState.timestamp) < staleThresholdSec
 
                     // Calculate fare if we have location
                     val fareSats = if (driverLocation != null && pickupLocation != null) {
@@ -3741,16 +3743,16 @@ private fun RoadflareDriverSelectionSheet(
 
             val eligibleDrivers = drivers.filter { driver ->
                 driver.roadflareKey != null &&
-                driverLocations[driver.pubkey]?.let { state ->
+                cachedLocations[driver.pubkey]?.let { state ->
                     val isOnline = state.status == com.ridestr.common.nostr.events.RoadflareLocationEvent.Status.ONLINE
                     val isFresh = (now - state.timestamp) < staleThreshold
                     isOnline && isFresh
                 } ?: false  // Exclude drivers with no location data
             }
-            // Convert RoadflareDriverState map to Location map for the callback
-            val eligibleLocations = driverLocations.filterKeys { pubkey ->
+            // Convert CachedDriverLocation map to Location map for the callback
+            val eligibleLocations = cachedLocations.filterKeys { pubkey ->
                 eligibleDrivers.any { it.pubkey == pubkey }
-            }.mapValues { it.value.location }
+            }.mapValues { Location(lat = it.value.lat, lon = it.value.lon) }
 
             Button(
                 onClick = {

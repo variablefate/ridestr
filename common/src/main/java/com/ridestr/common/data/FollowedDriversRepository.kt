@@ -13,6 +13,19 @@ import org.json.JSONObject
 private const val TAG = "FollowedDriversRepo"
 
 /**
+ * Cached driver location state (in-memory only, not persisted).
+ * Locations are ephemeral (5-min expiry) so no SharedPrefs needed.
+ * Survives tab switches within the same app session.
+ */
+data class CachedDriverLocation(
+    val lat: Double,
+    val lon: Double,
+    val status: String,
+    val timestamp: Long,
+    val keyVersion: Int = 0
+)
+
+/**
  * Repository for managing rider's followed drivers list for RoadFlare.
  * Stores drivers and their RoadFlare decryption keys in SharedPreferences.
  *
@@ -33,6 +46,35 @@ class FollowedDriversRepository(context: Context) {
      */
     private val _driverNames = MutableStateFlow<Map<String, String>>(loadCachedNames())
     val driverNames: StateFlow<Map<String, String>> = _driverNames.asStateFlow()
+
+    /**
+     * Cached driver location states (in-memory only, not persisted).
+     * Locations are ephemeral (5-min expiry) so no SharedPrefs needed.
+     * Survives tab switches within the same app session.
+     */
+    private val _driverLocations = MutableStateFlow<Map<String, CachedDriverLocation>>(emptyMap())
+    val driverLocations: StateFlow<Map<String, CachedDriverLocation>> = _driverLocations.asStateFlow()
+
+    /**
+     * Update a driver's cached location from a RoadFlare location event.
+     */
+    fun updateDriverLocation(pubkey: String, lat: Double, lon: Double, status: String, timestamp: Long, keyVersion: Int = 0) {
+        _driverLocations.value = _driverLocations.value + (pubkey to CachedDriverLocation(lat, lon, status, timestamp, keyVersion))
+    }
+
+    /**
+     * Remove a driver's cached location (e.g., when they go offline).
+     */
+    fun removeDriverLocation(pubkey: String) {
+        _driverLocations.value = _driverLocations.value - pubkey
+    }
+
+    /**
+     * Clear all cached driver locations (e.g., on refresh).
+     */
+    fun clearDriverLocations() {
+        _driverLocations.value = emptyMap()
+    }
 
     /**
      * Load cached driver names from SharedPreferences.
@@ -137,7 +179,7 @@ class FollowedDriversRepository(context: Context) {
 
     /**
      * Remove a driver from favorites.
-     * Also removes their cached name to prevent orphaned entries.
+     * Also removes their cached name and location to prevent orphaned entries.
      */
     fun removeDriver(pubkey: String) {
         _drivers.value = _drivers.value.filter { it.pubkey != pubkey }
@@ -147,6 +189,8 @@ class FollowedDriversRepository(context: Context) {
             _driverNames.value = _driverNames.value - pubkey
             persistNames()
         }
+        // Remove from location cache (in-memory only, no persist needed)
+        _driverLocations.value = _driverLocations.value - pubkey
     }
 
     /**
@@ -224,7 +268,7 @@ class FollowedDriversRepository(context: Context) {
     }
 
     /**
-     * Clear all followed drivers and cached names (for logout).
+     * Clear all followed drivers and cached names/locations (for logout).
      */
     fun clearAll() {
         prefs.edit()
@@ -233,6 +277,7 @@ class FollowedDriversRepository(context: Context) {
             .apply()
         _drivers.value = emptyList()
         _driverNames.value = emptyMap()
+        _driverLocations.value = emptyMap()
     }
 
     companion object {

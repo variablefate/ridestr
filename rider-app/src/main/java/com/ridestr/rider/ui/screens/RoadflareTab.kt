@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.dp
 import com.ridestr.rider.R
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import com.ridestr.common.data.CachedDriverLocation
 import com.ridestr.common.data.FollowedDriversRepository
 import com.ridestr.common.nostr.NostrService
 import com.ridestr.common.nostr.events.FollowedDriver
@@ -140,12 +141,10 @@ fun RoadflareTab(
     val scope = rememberCoroutineScope()
     val drivers by followedDriversRepository.drivers.collectAsState()
     val driverNames by followedDriversRepository.driverNames.collectAsState()
+    val cachedLocations by followedDriversRepository.driverLocations.collectAsState()
 
     // Payment methods dialog state
     var showPaymentMethodsDialog by remember { mutableStateOf(false) }
-
-    // Track driver locations by pubkey
-    val driverLocations = remember { mutableStateMapOf<String, DriverLocationState>() }
 
     // Track last createdAt per driver to reject out-of-order events (Part C fix)
     val lastLocationCreatedAt = remember { mutableStateMapOf<String, Long>() }
@@ -248,14 +247,14 @@ fun RoadflareTab(
 
                 if (!isExpired && !isOutOfOrder) {
                     lastLocationCreatedAt[driverPubKey] = eventCreatedAt
-                    Log.d(TAG, "Updated driver ${driverPubKey.take(8)} status=${locationData.tagStatus} (was: ${driverLocations[driverPubKey]?.status})")
+                    Log.d(TAG, "Updated driver ${driverPubKey.take(8)} status=${locationData.tagStatus} (was: ${cachedLocations[driverPubKey]?.status})")
 
-                    driverLocations[driverPubKey] = DriverLocationState(
+                    followedDriversRepository.updateDriverLocation(
                         pubkey = driverPubKey,
                         lat = locationData.location.lat,
                         lon = locationData.location.lon,
                         status = locationData.tagStatus,
-                        timestamp = eventCreatedAt,  // Use event.createdAt for ordering consistency
+                        timestamp = eventCreatedAt,
                         keyVersion = locationData.keyVersion
                     )
                 } else {
@@ -375,7 +374,7 @@ fun RoadflareTab(
         scope.launch {
             isRefreshing = true
             // Refresh driver locations by re-subscribing
-            driverLocations.clear()
+            followedDriversRepository.clearDriverLocations()
             // Check for stale keys
             checkStaleKeys()
             delay(500) // Small delay to show refresh indicator
@@ -504,10 +503,21 @@ fun RoadflareTab(
                     }
 
                     items(drivers, key = { it.pubkey }) { driver ->
+                        // Convert CachedDriverLocation to DriverLocationState for display
+                        val locationState = cachedLocations[driver.pubkey]?.let { cached ->
+                            DriverLocationState(
+                                pubkey = driver.pubkey,
+                                lat = cached.lat,
+                                lon = cached.lon,
+                                status = cached.status,
+                                timestamp = cached.timestamp,
+                                keyVersion = cached.keyVersion
+                            )
+                        }
                         DriverCard(
                             driver = driver,
                             driverName = driverNames[driver.pubkey],
-                            locationState = driverLocations[driver.pubkey],
+                            locationState = locationState,
                             riderLocation = riderLocation,
                             hasStaleKey = staleKeyDrivers[driver.pubkey] == true,
                             onClick = { onDriverClick(driver) },
