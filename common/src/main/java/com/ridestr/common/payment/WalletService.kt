@@ -1465,7 +1465,7 @@ class WalletService(
             }
             is HtlcClaimOutcome.Failure.MintUnreachable -> {
                 Log.e(TAG, "Failed to claim HTLC: mint unreachable")
-                return HtlcClaimResult.Failure.MintRejected()
+                return HtlcClaimResult.Failure.MintUnreachable()
             }
             is HtlcClaimOutcome.Failure.MintRejected -> {
                 Log.e(TAG, "Failed to claim HTLC: mint rejected")

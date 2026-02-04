@@ -1,6 +1,6 @@
 # Ridestr Documentation
 
-**Last Updated**: 2026-01-29
+**Last Updated**: 2026-02-03
 
 Ridestr is a decentralized rideshare platform built on Nostr. This documentation provides comprehensive coverage of the protocol, architecture, and implementation.
 

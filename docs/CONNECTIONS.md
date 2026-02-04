@@ -1,6 +1,6 @@
 # Ridestr Module Connections
 
-**Last Updated**: 2026-02-02 (Phase 5 Domain Decomposition)
+**Last Updated**: 2026-02-03 (Phase 6 Test Infrastructure)
 
 This document provides a comprehensive view of how all modules connect in the Ridestr codebase. Use this as a reference when making changes to understand what might be affected.
 
@@ -9,6 +9,12 @@ This document provides a comprehensive view of how all modules connect in the Ri
 - CashuTokenCodec extracted from CashuBackend (stateless utilities)
 - Region comments added to CashuBackend and WalletService with HTLC invariants
 - Correlation ID logging for payment tracing (`[RIDE xxxxxxxx]` prefix)
+
+**Phase 6 Changes (February 2026):**
+- Payment test infrastructure: 138 unit tests with MockK + Robolectric
+- FakeMintApi for queuing mock swap/checkstate responses
+- CashuBackend test state injection (`setTestState()`, `testActiveKeyset`)
+- `MintUnreachable` error variant for distinguishing network failures from HTTP errors
 
 ---
 
@@ -497,6 +503,20 @@ Payment System (Phase 5 Reorganization)
 │   ├── Token decoding: parseHtlcToken()
 │   ├── HTLC secret parsing: extractPaymentHashFromSecret(), extractLocktimeFromSecret(), extractRefundKeysFromSecret()
 │   └── Used by: CashuBackend
+│
+├── Test Infrastructure (Phase 6)
+│   ├── FakeMintApi - Queue mock responses for swap/checkstate
+│   │   ├── queueSwapSuccess(), queueSwapHttpError(), queueSwapTransportFailure()
+│   │   └── queueCheckstateSuccess(), queueCheckstateHttpError()
+│   ├── CashuBackend.setTestState() - Bypass HTTP for unit tests
+│   │   ├── Sets currentMintUrl, testActiveKeyset, walletSeed directly
+│   │   └── @VisibleForTesting annotation for safety
+│   ├── Test Files (138 tests total):
+│   │   ├── HtlcResultTest.kt (34) - Sealed class variants, exhaustiveness
+│   │   ├── CashuBackendErrorTest.kt (32) - Error mapping, FakeMintApi integration
+│   │   ├── FakeMintApiTest.kt (26) - Mock mint API behavior
+│   │   └── HtlcSwapResultTest.kt (46) - Swap outcome mapping
+│   └── Dependencies: MockK, Robolectric, androidx.test.core
 │
 ├── CashuWebSocket (NUT-17 WebSocket subscriptions)
 │   ├── Depends on: OkHttp WebSocket

@@ -24,7 +24,7 @@ See [docs/README.md](../docs/README.md) for full documentation.
 | RoadFlare Status Detection | ✅ COMPLETE (auto-sync, out-of-order rejection, staleness filter, key refresh) |
 | Driver Availability Stability | ✅ COMPLETE (selective clearing, receivedAt tracking, timestamp guards, since filter) |
 | NostrService Domain Decomposition | ✅ COMPLETE (Phase 5: 3 domain services + CashuTokenCodec) |
-| Payment Test Harness | ✅ COMPLETE (Phase 6: 83 unit tests with Robolectric) |
+| Payment Test Harness | ✅ COMPLETE (Phase 6: 138 unit tests with Robolectric + MockK) |
 
 ## Project Structure
 - `rider-app/` - Rider Android app (RiderViewModel.kt is main state)

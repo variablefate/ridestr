@@ -1,7 +1,7 @@
 # Ridestr Payment Architecture
 
-**Last Updated**: 2026-02-02
-**Status**: ✅ COMPLETE - Wallet, HTLC, P2PK Signing, Integration Wired, Phase 5 Reorganization
+**Last Updated**: 2026-02-03
+**Status**: ✅ COMPLETE - Wallet, HTLC, P2PK Signing, Integration Wired, Phase 5 Reorganization, Phase 6 Test Infrastructure
 
 ---
 
@@ -28,6 +28,61 @@ The Ridestr wallet uses **Cashu ecash** for trustless ride payments. The impleme
 | HTLC Create (NUT-14) | ✅ COMPLETE | Uses `/v1/swap` with wallet pubkey |
 | HTLC Claim (NUT-14) | ✅ COMPLETE | P2PK Schnorr signatures per-proof |
 | ViewModel Integration | ✅ COMPLETE | Deferred locking after acceptance |
+| Unit Test Infrastructure | ✅ COMPLETE | 138 tests with MockK + Robolectric (Phase 6) |
+
+---
+
+## Test Infrastructure (Phase 6 - February 2026)
+
+The payment module includes comprehensive unit test coverage using MockK and Robolectric.
+
+### Test Files
+
+| File | Tests | Coverage |
+|------|-------|----------|
+| `HtlcResultTest.kt` | 34 | All HtlcClaimResult/HtlcSwapResult variants, exhaustiveness |
+| `CashuBackendErrorTest.kt` | 32 | Error mapping, FakeMintApi integration |
+| `FakeMintApiTest.kt` | 26 | Mock mint API queuing/responses |
+| `HtlcSwapResultTest.kt` | 46 | Swap outcome mapping, sealed class coverage |
+
+### Running Tests
+
+```bash
+# Run all payment tests
+./gradlew :common:testDebugUnitTest --tests "com.ridestr.common.payment.*"
+
+# Or use the batch file
+run_tests.bat
+```
+
+### Key Test Infrastructure
+
+**FakeMintApi** - Queues mock responses for swap/checkstate:
+- `queueSwapSuccess(signatures)` - Mock successful swap
+- `queueSwapHttpError(code, body)` - Mock HTTP error
+- `queueSwapTransportFailure(message)` - Mock network failure
+
+**CashuBackend.setTestState()** - Bypasses HTTP for unit tests:
+```kotlin
+backend.setTestState(
+    mintUrl = "https://test.mint",
+    keyset = testKeyset,
+    seed = testSeed
+)
+```
+
+**Pre-computed Test Data** - Avoids native library issues:
+```kotlin
+// PaymentCrypto.computePaymentHash() uses secp256k1 which fails in unit tests
+// Pre-compute: SHA256 of 32 zero bytes
+const val TEST_PAYMENT_HASH = "66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925"
+```
+
+### Key Learnings
+
+1. **Native library avoidance**: `PaymentCrypto.computePaymentHash()`, `CashuCrypto.mnemonicToSeed()`, and `WalletKeypair.fromPrivateKey()` use secp256k1 native lib which fails in unit tests
+2. **MockK for final classes**: Kotlin final classes (WalletKeyManager, WalletStorage) require MockK with bytecode manipulation
+3. **Test state injection**: `CashuBackend.setTestState()` + `testActiveKeyset` field bypass all HTTP calls
 
 ---
 

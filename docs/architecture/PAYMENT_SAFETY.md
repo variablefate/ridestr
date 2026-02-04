@@ -1,6 +1,6 @@
 # Payment Safety Checklist
 
-**Last Updated**: 2026-02-02
+**Last Updated**: 2026-02-03
 **Purpose**: Required verification steps before modifying payment code.
 
 ---
@@ -138,10 +138,28 @@ Before changing ANY code in these files:
 
 1. **Unit Tests** (required):
    ```bash
-   ./gradlew :common:testDebugUnitTest
+   # Run all 138 payment tests
+   ./gradlew :common:testDebugUnitTest --tests "com.ridestr.common.payment.*"
+
+   # Or use batch file
+   run_tests.bat
    ```
 
-2. **Manual Flow Test** (required for HTLC changes):
+2. **Test Coverage (Phase 6 Infrastructure)**:
+
+   | Test File | Tests | What It Covers |
+   |-----------|-------|----------------|
+   | `HtlcResultTest.kt` | 34 | All sealed class variants, exhaustiveness |
+   | `CashuBackendErrorTest.kt` | 32 | Error mapping, FakeMintApi integration |
+   | `FakeMintApiTest.kt` | 26 | Mock mint API behavior |
+   | `HtlcSwapResultTest.kt` | 46 | Swap outcome mapping |
+
+   **Key test infrastructure:**
+   - `FakeMintApi` - Queue mock swap/checkstate responses
+   - `CashuBackend.setTestState()` - Bypass HTTP for unit tests
+   - `TEST_PAYMENT_HASH` constant - Pre-computed to avoid native lib issues
+
+3. **Manual Flow Test** (required for HTLC changes):
    - Create ride offer
    - Accept on driver
    - Verify HTLC locked (check rider logs)
@@ -149,13 +167,13 @@ Before changing ANY code in these files:
    - Verify HTLC claimed (check driver logs)
    - Verify balances updated both sides
 
-3. **Failure Recovery Test** (for atomicity changes):
+4. **Failure Recovery Test** (for atomicity changes):
    - Kill app during lockForRide()
    - Restart app
    - Verify pending op recovery works
    - Verify no duplicate proofs
 
-4. **Stale Proof Test** (for NIP-60 changes):
+5. **Stale Proof Test** (for NIP-60 changes):
    - Have another client spend proofs
    - Try to lock HTLC
    - Verify NUT-07 catches stale proofs

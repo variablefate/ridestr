@@ -401,3 +401,43 @@ Protocol events now include payment method fields for multi-mint compatibility:
 - `mint_url` and `payment_methods` in Driver Availability (Kind 30173)
 - `mint_url` and `payment_method` in Ride Offer (Kind 3173) and Acceptance (Kind 3174)
 - `paymentMethods`, `defaultPaymentMethod`, `mintUrl`, `roadflarePaymentMethods` in SettingsBackup (Kind 30177)
+
+### Payment Test Infrastructure (February 2026)
+
+The payment module includes 138 unit tests with full coverage of error paths. Key components:
+
+**Test Support in Production Code:**
+- `CashuBackend.setTestState(mintUrl, keyset, seed)` - Inject test state to bypass HTTP calls
+- `CashuBackend.testActiveKeyset` - Override keyset lookup without HTTP
+- `FakeMintApi` - Queue mock responses for `postSwap()`, `postCheckState()`
+
+**Test Files:**
+| File | Tests | Purpose |
+|------|-------|---------|
+| `HtlcResultTest.kt` | 51 | Sealed class exhaustiveness, all error variants |
+| `CashuBackendErrorTest.kt` | 32 | Integration tests with FakeMintApi + MockK |
+| `FakeMintApiTest.kt` | 18 | Queue behavior verification |
+| `HtlcSwapResultTest.kt` | 15 | Swap outcome exhaustiveness |
+| Other payment tests | 22 | PaymentCrypto, WalletKeyManager, etc. |
+
+**Running Tests:**
+```bash
+# Windows (with batch file)
+run_tests.bat
+
+# Direct Gradle
+./gradlew :common:testDebugUnitTest --tests "com.ridestr.common.payment.*"
+```
+
+**Test Dependencies (build.gradle.kts):**
+```kotlin
+testImplementation("io.mockk:mockk:1.13.8")
+testImplementation("org.robolectric:robolectric:4.11.1")
+testImplementation("androidx.test:core:1.5.0")
+```
+
+**Key Learnings for Test Authors:**
+1. **Avoid native libraries**: `PaymentCrypto.computePaymentHash()` uses secp256k1 - use pre-computed constants
+2. **MockK for final classes**: WalletKeyManager, WalletStorage require MockK, not subclassing
+3. **Test state injection**: Use `setTestState()` to bypass connect/keyset HTTP calls
+4. **Pre-computed hash**: `TEST_PAYMENT_HASH = "66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925"` (SHA256 of 32 zero bytes)

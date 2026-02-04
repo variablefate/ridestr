@@ -1,6 +1,6 @@
 # Compatibility Contracts
 
-**Last Updated**: 2026-02-02
+**Last Updated**: 2026-02-03
 **Purpose**: Document API stability requirements and architectural contracts that must be preserved during refactoring.
 
 ---
@@ -166,14 +166,44 @@ The signature (`event.verify()`) only proves the event was signed by `event.pubk
 **Files That Require Robolectric**:
 - `CashuTokenCodecTest.kt` - Uses `android.util.Base64`
 - `CashuCryptoTest.kt` - Uses `android.util.Log`
+- `CashuBackendErrorTest.kt` - Uses ApplicationProvider context
 
 **Files That Don't Need Robolectric**:
 - `PaymentCryptoTest.kt` - Pure Java crypto only
+- `HtlcResultTest.kt` - Pure sealed class tests
+- `FakeMintApiTest.kt` - Queue behavior tests
 
 **Configuration**:
 ```kotlin
 @RunWith(RobolectricTestRunner::class)
 @Config(manifest = Config.NONE, sdk = [28])
+```
+
+### CashuBackend Test State Injection
+
+**Contract**: Test state injection via `setTestState()` must bypass ALL HTTP calls.
+
+**Fields Set by setTestState()**:
+- `currentMintUrl` - Bypasses `connect()` HTTP to `/v1/info`
+- `testActiveKeyset` - Bypasses `getActiveKeyset()` HTTP to `/v1/keysets`, `/v1/keys`
+- `walletSeed` - Bypasses mnemonic derivation
+
+**Why This Exists**: HTLC methods have early-exit guards that check `currentMintUrl` and `getActiveKeyset()`. Without state injection, tests would need a real or mock mint server.
+
+### FakeMintApi Queue Contract
+
+**Contract**: `FakeMintApi` queues are FIFO - responses are returned in the order they were queued.
+
+**Methods**:
+- `queueSwapSuccess(signatures)` - Queue successful swap response
+- `queueSwapHttpError(code, body)` - Queue HTTP error
+- `queueSwapTransportFailure(message)` - Queue network failure
+- `queueCheckstateSuccess(states)` - Queue checkstate response
+
+**Usage**:
+```kotlin
+fakeMintApi.queueSwapHttpError(400, "Token already spent")
+val result = backend.createHtlcTokenFromProofs(...)  // Returns SwapRejected
 ```
 
 ---

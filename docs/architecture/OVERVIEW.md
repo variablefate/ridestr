@@ -1,7 +1,7 @@
 # Ridestr Architecture Overview
 
-**Version**: 1.1
-**Last Updated**: 2026-01-17
+**Version**: 1.2
+**Last Updated**: 2026-02-03
 
 ---
 
@@ -215,6 +215,20 @@ The Cashu wallet implementation uses:
 - HTLC Create: ✅ COMPLETE
 - HTLC Claim: ✅ COMPLETE (P2PK signing implemented)
 - ViewModel Integration: ✅ COMPLETE
+- Unit Test Infrastructure: ✅ COMPLETE (138 tests with MockK + Robolectric)
+
+### Test Infrastructure (Phase 6)
+
+Payment code has comprehensive unit test coverage:
+
+| Test File | Tests | Coverage |
+|-----------|-------|----------|
+| `HtlcResultTest.kt` | 34 | Sealed class variants, exhaustiveness |
+| `CashuBackendErrorTest.kt` | 32 | Error mapping, FakeMintApi integration |
+| `FakeMintApiTest.kt` | 26 | Mock mint API behavior |
+| `HtlcSwapResultTest.kt` | 46 | Swap outcome mapping |
+
+Run with: `./gradlew :common:testDebugUnitTest --tests "com.ridestr.common.payment.*"`
 
 See: [PAYMENT_ARCHITECTURE.md](PAYMENT_ARCHITECTURE.md) for full details.
 

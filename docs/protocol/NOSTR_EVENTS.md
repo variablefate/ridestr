@@ -1,7 +1,7 @@
 # Ridestr Nostr Event Protocol
 
 **Version**: 1.6
-**Last Updated**: 2026-01-30
+**Last Updated**: 2026-02-03
 
 This document defines all Nostr event kinds used in the Ridestr rideshare application.
 

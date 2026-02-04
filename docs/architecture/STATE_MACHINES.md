@@ -1,7 +1,7 @@
 # Ridestr State Machines
 
 **Version**: 1.1
-**Last Updated**: 2026-01-30
+**Last Updated**: 2026-02-03
 
 This document defines the state machines for both Rider and Driver applications.
 

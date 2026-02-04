@@ -66,6 +66,9 @@ sealed class HtlcClaimResult {
             override val message: String = "Mint rejected claim"
             // code/detail not available from CashuBackend (logged only)
         ) : Failure()
+        data class MintUnreachable(
+            override val message: String = "Cannot reach mint"
+        ) : Failure()
         data class SignatureFailed(override val message: String = "Failed to sign proof") : Failure()
         data class Other(override val message: String) : Failure()
     }

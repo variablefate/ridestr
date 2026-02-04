@@ -29,6 +29,7 @@ import org.cashudevkit.ReceiveOptions as CdkReceiveOptions
 import org.cashudevkit.SendOptions as CdkSendOptions
 import org.cashudevkit.MintQuote as CdkMintQuote
 import org.cashudevkit.MeltQuote as CdkMeltQuote
+import androidx.annotation.VisibleForTesting
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
@@ -87,6 +88,38 @@ class CashuBackend(
 
     // NUT-17: WebSocket for real-time state updates
     private var webSocket: CashuWebSocket? = null
+
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // TEST SUPPORT
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Test-only field to bypass getActiveKeyset() HTTP calls.
+     * WARNING: For unit tests only. Never set in production code.
+     */
+    @VisibleForTesting
+    internal var testActiveKeyset: MintKeyset? = null
+
+    /**
+     * Inject test state to bypass all HTTP calls (connect, getActiveKeyset).
+     * WARNING: For unit tests only. Never call in production code.
+     *
+     * @param mintUrl The mint URL to use (sets currentMintUrl)
+     * @param keyset The keyset to return from getActiveKeyset()
+     * @param seed The wallet seed for deterministic derivation
+     */
+    @VisibleForTesting
+    internal fun setTestState(
+        mintUrl: String,
+        keyset: MintKeyset,
+        seed: ByteArray
+    ) {
+        currentMintUrl = mintUrl
+        testActiveKeyset = keyset
+        walletSeed = seed
+    }
 
     // endregion
 
@@ -2232,82 +2265,83 @@ class CashuBackend(
                 Log.d(TAG, "verifyProofsBalance: First secret: ${yValues.first().first.take(32)}...")
             }
 
-            // Make API call to mint
+            // Make API call to mint via MintApi (enables FakeMintApi injection in tests)
             val requestBody = JSONObject().apply {
                 put("Ys", JSONArray(yValues.map { it.second }))
             }.toString()
 
-            val request = Request.Builder()
-                .url("$targetMint/v1/checkstate")
-                .post(requestBody.toRequestBody(JSON_MEDIA_TYPE))
-                .build()
+            val checkResult = effectiveMintApi.postCheckState(targetMint, requestBody)
 
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    Log.e(TAG, "verifyProofsBalance: Request to $targetMint failed: ${response.code}")
+            val responseBody = when (checkResult) {
+                is MintApi.Result.Success -> checkResult.body
+                is MintApi.Result.HttpError -> {
+                    Log.e(TAG, "verifyProofsBalance: Request to $targetMint failed: ${checkResult.code}")
                     return@withContext null
                 }
-
-                val body = response.body?.string() ?: return@withContext null
-                val json = JSONObject(body)
-                val statesArray = json.getJSONArray("states")
-
-                // Log first Y from mint response for comparison
-                if (statesArray.length() > 0) {
-                    val firstState = statesArray.getJSONObject(0)
-                    Log.d(TAG, "verifyProofsBalance: First mint Y: ${firstState.getString("Y")}")
-                    Log.d(TAG, "verifyProofsBalance: First mint state: ${firstState.getString("state")}")
+                is MintApi.Result.TransportFailure -> {
+                    Log.e(TAG, "verifyProofsBalance: Mint unreachable: ${checkResult.cause}")
+                    return@withContext null
                 }
+            }
 
-                // Map Y back to secrets
-                val yToSecret = yValues.associate { it.second to it.first }
+            val json = JSONObject(responseBody)
+            val statesArray = json.getJSONArray("states")
 
-                val spentSecrets = mutableListOf<String>()
-                val unspentSecrets = mutableListOf<String>()
-                val pendingSecrets = mutableListOf<String>()
-                var matchedCount = 0
+            // Log first Y from mint response for comparison
+            if (statesArray.length() > 0) {
+                val firstState = statesArray.getJSONObject(0)
+                Log.d(TAG, "verifyProofsBalance: First mint Y: ${firstState.getString("Y")}")
+                Log.d(TAG, "verifyProofsBalance: First mint state: ${firstState.getString("state")}")
+            }
 
-                for (i in 0 until statesArray.length()) {
-                    val stateObj = statesArray.getJSONObject(i)
-                    val Y = stateObj.getString("Y")
-                    val state = stateObj.getString("state").uppercase()
+            // Map Y back to secrets
+            val yToSecret = yValues.associate { it.second to it.first }
 
-                    yToSecret[Y]?.let { secret ->
-                        matchedCount++
-                        when (state) {
-                            "SPENT" -> spentSecrets.add(secret)
-                            "UNSPENT" -> unspentSecrets.add(secret)
-                            "PENDING" -> pendingSecrets.add(secret)
-                        }
+            val spentSecrets = mutableListOf<String>()
+            val unspentSecrets = mutableListOf<String>()
+            val pendingSecrets = mutableListOf<String>()
+            var matchedCount = 0
+
+            for (i in 0 until statesArray.length()) {
+                val stateObj = statesArray.getJSONObject(i)
+                val Y = stateObj.getString("Y")
+                val state = stateObj.getString("state").uppercase()
+
+                yToSecret[Y]?.let { secret ->
+                    matchedCount++
+                    when (state) {
+                        "SPENT" -> spentSecrets.add(secret)
+                        "UNSPENT" -> unspentSecrets.add(secret)
+                        "PENDING" -> pendingSecrets.add(secret)
                     }
                 }
-
-                Log.d(TAG, "verifyProofsBalance: matched=$matchedCount/${proofs.size}, UNSPENT=${unspentSecrets.size}, SPENT=${spentSecrets.size}, PENDING=${pendingSecrets.size}")
-
-                // If we couldn't match ANY proofs, our hashToCurve doesn't match the mint's
-                // Return null to indicate verification failure (don't trust the proofs)
-                if (matchedCount == 0 && proofs.isNotEmpty()) {
-                    Log.e(TAG, "verifyProofsBalance: CRITICAL - No Y values matched! hashToCurve mismatch with mint")
-                    return@withContext null
-                }
-
-                // Calculate verified balance (unspent proofs only)
-                val verifiedBalance = proofs
-                    .filter { it.secret in unspentSecrets }
-                    .sumOf { it.amount }
-
-                // Calculate pending balance for logging (DON'T treat as spent - they may become unspent)
-                val pendingBalance = proofs
-                    .filter { it.secret in pendingSecrets }
-                    .sumOf { it.amount }
-
-                if (pendingSecrets.isNotEmpty()) {
-                    Log.w(TAG, "verifyProofsBalance: ${pendingSecrets.size} proofs ($pendingBalance sats) are PENDING - in-progress operation")
-                }
-
-                Log.d(TAG, "verifyProofsBalance: $targetMint verified balance = $verifiedBalance sats, spent=${spentSecrets.size}, pending=${pendingSecrets.size}")
-                verifiedBalance to spentSecrets
             }
+
+            Log.d(TAG, "verifyProofsBalance: matched=$matchedCount/${proofs.size}, UNSPENT=${unspentSecrets.size}, SPENT=${spentSecrets.size}, PENDING=${pendingSecrets.size}")
+
+            // If we couldn't match ANY proofs, our hashToCurve doesn't match the mint's
+            // Return null to indicate verification failure (don't trust the proofs)
+            if (matchedCount == 0 && proofs.isNotEmpty()) {
+                Log.e(TAG, "verifyProofsBalance: CRITICAL - No Y values matched! hashToCurve mismatch with mint")
+                return@withContext null
+            }
+
+            // Calculate verified balance (unspent proofs only)
+            val verifiedBalance = proofs
+                .filter { it.secret in unspentSecrets }
+                .sumOf { it.amount }
+
+            // Calculate pending balance for logging (DON'T treat as spent - they may become unspent)
+            val pendingBalance = proofs
+                .filter { it.secret in pendingSecrets }
+                .sumOf { it.amount }
+
+            if (pendingSecrets.isNotEmpty()) {
+                Log.w(TAG, "verifyProofsBalance: ${pendingSecrets.size} proofs ($pendingBalance sats) are PENDING - in-progress operation")
+            }
+
+            Log.d(TAG, "verifyProofsBalance: $targetMint verified balance = $verifiedBalance sats, spent=${spentSecrets.size}, pending=${pendingSecrets.size}")
+            verifiedBalance to spentSecrets
         } catch (e: Exception) {
             Log.e(TAG, "verifyProofsBalance failed for $targetMint: ${e.message}")
             null
@@ -3485,6 +3519,9 @@ class CashuBackend(
      * NUT-01/02: GET /v1/keysets and /v1/keys/{keyset_id}
      */
     suspend fun getActiveKeyset(): MintKeyset? = withContext(Dispatchers.IO) {
+        // Test support: return injected keyset without HTTP
+        testActiveKeyset?.let { return@withContext it }
+
         val mintUrl = currentMintUrl ?: return@withContext null
 
         try {

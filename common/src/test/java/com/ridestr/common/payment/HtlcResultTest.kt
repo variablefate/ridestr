@@ -197,6 +197,13 @@ class HtlcResultTest {
     }
 
     @Test
+    fun `HtlcClaimResult MintUnreachable has meaningful default message`() {
+        val failure = HtlcClaimResult.Failure.MintUnreachable()
+        assertFalse(failure.message.isBlank())
+        assertEquals("Cannot reach mint", failure.message)
+    }
+
+    @Test
     fun `HtlcClaimResult SignatureFailed has meaningful default message`() {
         val failure = HtlcClaimResult.Failure.SignatureFailed()
         assertFalse(failure.message.isBlank())
@@ -222,6 +229,7 @@ class HtlcResultTest {
             HtlcClaimResult.Failure.PreimageMismatch("hash"),
             HtlcClaimResult.Failure.TokenParseFailed(),
             HtlcClaimResult.Failure.MintRejected(),
+            HtlcClaimResult.Failure.MintUnreachable(),
             HtlcClaimResult.Failure.SignatureFailed(),
             HtlcClaimResult.Failure.Other("msg")
         )
@@ -234,6 +242,7 @@ class HtlcResultTest {
                 is HtlcClaimResult.Failure.PreimageMismatch -> "preimage mismatch"
                 is HtlcClaimResult.Failure.TokenParseFailed -> "token parse failed"
                 is HtlcClaimResult.Failure.MintRejected -> "claim failed"
+                is HtlcClaimResult.Failure.MintUnreachable -> "mint unreachable"
                 is HtlcClaimResult.Failure.SignatureFailed -> "signature failed"
                 is HtlcClaimResult.Failure.Other -> "other"
             }

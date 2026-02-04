@@ -1,10 +1,20 @@
 package com.ridestr.common.payment.cashu
 
+import android.content.Context
+import com.ridestr.common.payment.WalletKeyManager
+import com.ridestr.common.payment.WalletKeypair
+import com.ridestr.common.payment.WalletStorage
 import com.ridestr.common.payment.cashu.CashuBackend.HtlcClaimOutcome
 import com.ridestr.common.payment.cashu.CashuBackend.HtlcSwapOutcome
 import com.ridestr.common.payment.cashu.CashuBackend.HtlcLockResult
 import com.ridestr.common.payment.cashu.CashuBackend.HtlcClaimResult
+import io.mockk.MockKAnnotations
+import io.mockk.every
+import io.mockk.impl.annotations.MockK
+import io.mockk.mockk
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -18,6 +28,7 @@ import org.robolectric.annotation.Config
  * 2. HtlcClaimOutcome sealed class completeness and exhaustiveness
  * 3. FakeMintApi can inject different response types
  * 4. MintApi.Result variants map correctly to outcomes
+ * 5. Full integration tests with real CashuBackend instantiation (Phase 6)
  *
  * The typed outcomes enable:
  * - Proper error propagation to callers (no more lost error context)
@@ -29,7 +40,114 @@ import org.robolectric.annotation.Config
 class CashuBackendErrorTest {
 
     // ==============================
-    // HtlcSwapOutcome Tests
+    // Test Data
+    // ==============================
+
+    companion object {
+        private const val TEST_MINT_URL = "https://mint.test.example"
+
+        // Valid keyset for blinding operations
+        // Note: Placeholder pubkeys are acceptable for error-path tests because
+        // tests fail at FakeMintApi BEFORE any curve validation/unblinding.
+        private val TEST_KEYSET = MintKeyset(
+            id = "009a1f293253e41e",
+            unit = "sat",
+            keys = mapOf(
+                1L to "02a9acc1e48c25eeeb9289b5031cc57da9fe72f3fe2861d264bdc074209b107ba2",
+                2L to "020000000000000000000000000000000000000000000000000000000000000001",
+                4L to "020000000000000000000000000000000000000000000000000000000000000002",
+                8L to "020000000000000000000000000000000000000000000000000000000000000003",
+                16L to "020000000000000000000000000000000000000000000000000000000000000004",
+                32L to "020000000000000000000000000000000000000000000000000000000000000005",
+                64L to "020000000000000000000000000000000000000000000000000000000000000006",
+                128L to "020000000000000000000000000000000000000000000000000000000000000007"
+            )
+        )
+
+        // CRITICAL: Preimage and hash must match or claimHtlcTokenWithProofs returns early
+        // at line 1021-1024 with "Preimage does not match payment_hash"
+        private const val TEST_PREIMAGE = "0000000000000000000000000000000000000000000000000000000000000000"
+        // SHA256 of 32 zero bytes - pre-computed to avoid native library calls at class init
+        private const val TEST_PAYMENT_HASH = "66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925"
+
+        // BIP-39 test mnemonic (do not use in production!)
+        private const val TEST_MNEMONIC = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+    }
+
+    private lateinit var testSeed: ByteArray
+
+    // ==============================
+    // MockK Setup
+    // ==============================
+
+    @MockK(relaxed = true)
+    private lateinit var mockKeyManager: WalletKeyManager
+
+    @MockK(relaxed = true)
+    private lateinit var mockStorage: WalletStorage
+
+    private lateinit var fakeMintApi: FakeMintApi
+    private lateinit var backend: CashuBackend
+
+    @Before
+    fun setup() {
+        MockKAnnotations.init(this)
+        fakeMintApi = FakeMintApi()
+
+        // Pre-computed BIP-39 seed for "abandon ... about" mnemonic
+        // Using hardcoded bytes to avoid native library calls during test setup
+        testSeed = ByteArray(64) { 0x42 }  // Placeholder seed for test
+
+        // Default: return a mocked keypair for most tests (avoids native secp256k1)
+        val mockKeypair = mockk<WalletKeypair> {
+            every { publicKeyHex } returns "02" + "a".repeat(64)
+            every { privateKeyHex } returns "0123456789abcdef".repeat(4)
+            every { signSchnorr(any()) } returns "a".repeat(128)  // Valid 64-byte hex signature
+        }
+        every { mockKeyManager.getOrCreateWalletKeypair() } returns mockKeypair
+
+        val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<Context>()
+        backend = CashuBackend(context, mockKeyManager, mockStorage, fakeMintApi)
+
+        // CRITICAL: Inject test state to bypass ALL HTTP
+        backend.setTestState(TEST_MINT_URL, TEST_KEYSET, testSeed)
+    }
+
+    // ==============================
+    // Helper Functions
+    // ==============================
+
+    /**
+     * Create a valid HTLC token for claim tests.
+     * Uses the matching preimage/hash pair defined in companion object.
+     */
+    private fun createValidHtlcToken(): String {
+        // Create HTLC secret with the MATCHING payment hash
+        val htlcSecret = """["HTLC",{"nonce":"abc123","data":"$TEST_PAYMENT_HASH"}]"""
+
+        // HtlcProof is NESTED inside CashuTokenCodec object
+        val htlcProof = CashuTokenCodec.HtlcProof(
+            amount = 64,
+            id = TEST_KEYSET.id,
+            secret = htlcSecret,
+            C = "02a9acc1e48c25eeeb9289b5031cc57da9fe72f3fe2861d264bdc074209b107ba2"
+        )
+
+        return CashuTokenCodec.encodeHtlcProofsAsToken(listOf(htlcProof), TEST_MINT_URL)
+    }
+
+    /**
+     * Create a minimal test proof for swap tests.
+     */
+    private fun testProof(amount: Long = 64) = CashuProof(
+        amount = amount,
+        id = TEST_KEYSET.id,
+        secret = "test_secret_${System.nanoTime()}",
+        C = "02a9acc1e48c25eeeb9289b5031cc57da9fe72f3fe2861d264bdc074209b107ba2"
+    )
+
+    // ==============================
+    // HtlcSwapOutcome Tests (Unit)
     // ==============================
 
     @Test
@@ -98,7 +216,7 @@ class CashuBackendErrorTest {
     }
 
     // ==============================
-    // HtlcClaimOutcome Tests
+    // HtlcClaimOutcome Tests (Unit)
     // ==============================
 
     @Test
@@ -189,7 +307,7 @@ class CashuBackendErrorTest {
     }
 
     // ==============================
-    // MintApi.Result Tests
+    // MintApi.Result Tests (Unit)
     // ==============================
 
     @Test
@@ -240,7 +358,7 @@ class CashuBackendErrorTest {
     }
 
     // ==============================
-    // FakeMintApi Tests
+    // FakeMintApi Tests (Unit)
     // ==============================
 
     @Test
@@ -249,7 +367,7 @@ class CashuBackendErrorTest {
         val expectedBody = """{"signatures":[{"amount":1,"id":"test","C_":"abc"}]}"""
         fakeMintApi.queueSwapSuccess(expectedBody)
 
-        val result = kotlinx.coroutines.runBlocking {
+        val result = runBlocking {
             fakeMintApi.postSwap("https://mint.example.com", """{"inputs":[],"outputs":[]}""")
         }
 
@@ -263,7 +381,7 @@ class CashuBackendErrorTest {
         val fakeMintApi = FakeMintApi()
         fakeMintApi.queueSwapHttpError(400, "Token already spent")
 
-        val result = kotlinx.coroutines.runBlocking {
+        val result = runBlocking {
             fakeMintApi.postSwap("https://mint.example.com", """{}""")
         }
 
@@ -277,7 +395,7 @@ class CashuBackendErrorTest {
         val fakeMintApi = FakeMintApi()
         fakeMintApi.queueSwapTransportFailure("DNS resolution failed")
 
-        val result = kotlinx.coroutines.runBlocking {
+        val result = runBlocking {
             fakeMintApi.postSwap("https://mint.example.com", """{}""")
         }
 
@@ -290,7 +408,7 @@ class CashuBackendErrorTest {
         val fakeMintApi = FakeMintApi()
         // No response queued
 
-        val result = kotlinx.coroutines.runBlocking {
+        val result = runBlocking {
             fakeMintApi.postSwap("https://mint.example.com", """{}""")
         }
 
@@ -305,7 +423,7 @@ class CashuBackendErrorTest {
         fakeMintApi.queueSwapHttpError(500, "server error")
         fakeMintApi.queueSwapTransportFailure("timeout")
 
-        kotlinx.coroutines.runBlocking {
+        runBlocking {
             val first = fakeMintApi.postSwap("url", "body1")
             assertTrue(first is MintApi.Result.Success)
 
@@ -324,7 +442,7 @@ class CashuBackendErrorTest {
         val fakeMintApi = FakeMintApi()
         fakeMintApi.queueSwapSuccess("{}")
 
-        kotlinx.coroutines.runBlocking {
+        runBlocking {
             fakeMintApi.postSwap("https://mint.example.com/v1/swap", """{"test":"body"}""")
         }
 
@@ -339,7 +457,7 @@ class CashuBackendErrorTest {
         fakeMintApi.queueSwapSuccess("{}")
         fakeMintApi.queueCheckStateSuccess("{}")
 
-        kotlinx.coroutines.runBlocking {
+        runBlocking {
             fakeMintApi.postSwap("url", "body")
         }
 
@@ -360,7 +478,7 @@ class CashuBackendErrorTest {
         fakeMintApi.queueSwapSuccess("""{"swap":"response"}""")
         fakeMintApi.queueCheckStateSuccess("""{"states":[]}""")
 
-        kotlinx.coroutines.runBlocking {
+        runBlocking {
             val swapResult = fakeMintApi.postSwap("url", "swap-body")
             val checkResult = fakeMintApi.postCheckState("url", "check-body")
 
@@ -376,7 +494,7 @@ class CashuBackendErrorTest {
     }
 
     // ==============================
-    // Error Mapping Pattern Tests
+    // Error Mapping Pattern Tests (Unit)
     // ==============================
 
     /**
@@ -428,5 +546,126 @@ class CashuBackendErrorTest {
             is MintApi.Result.TransportFailure -> HtlcClaimOutcome.Failure.MintUnreachable
             is MintApi.Result.Success -> throw IllegalArgumentException("Success is not a failure")
         }
+    }
+
+    // ==============================
+    // Integration Tests (Phase 6)
+    // ==============================
+
+    /**
+     * Test: Invalid token format triggers TokenParseFailed.
+     * This path doesn't require any HTTP calls - fails immediately at parsing.
+     */
+    @Test
+    fun `claimHtlcTokenWithProofs returns TokenParseFailed for invalid token`() = runBlocking {
+        // State already injected in setup() via setTestState() - no HTTP calls needed
+        val outcome = backend.claimHtlcTokenWithProofs("not_a_valid_cashu_token", TEST_PREIMAGE)
+
+        assertTrue(
+            "Expected TokenParseFailed but got: $outcome",
+            outcome is HtlcClaimOutcome.Failure.TokenParseFailed
+        )
+    }
+
+    /**
+     * Test: Transport failure during swap triggers MintUnreachable.
+     */
+    @Test
+    fun `claimHtlcTokenWithProofs returns MintUnreachable on transport failure`() = runBlocking {
+        // Queue transport failure for the swap call
+        fakeMintApi.queueSwapTransportFailure("Connection timeout")
+
+        val validToken = createValidHtlcToken()
+        val outcome = backend.claimHtlcTokenWithProofs(validToken, TEST_PREIMAGE)
+
+        assertTrue(
+            "Expected MintUnreachable but got: $outcome",
+            outcome is HtlcClaimOutcome.Failure.MintUnreachable
+        )
+    }
+
+    /**
+     * Test: HTTP error during swap triggers MintRejected.
+     */
+    @Test
+    fun `claimHtlcTokenWithProofs returns MintRejected on HTTP error`() = runBlocking {
+        // Queue HTTP error for the swap call
+        fakeMintApi.queueSwapHttpError(400, """{"detail": "Invalid witness"}""")
+
+        val validToken = createValidHtlcToken()
+        val outcome = backend.claimHtlcTokenWithProofs(validToken, TEST_PREIMAGE)
+
+        assertTrue(
+            "Expected MintRejected but got: $outcome",
+            outcome is HtlcClaimOutcome.Failure.MintRejected
+        )
+    }
+
+    /**
+     * Test: Signing failure triggers SignatureFailed.
+     * Uses MockK to make signSchnorr() return null.
+     */
+    @Test
+    fun `claimHtlcTokenWithProofs returns SignatureFailed when signing fails`() = runBlocking {
+        // Override the default keypair with a mock that returns null from signSchnorr
+        val mockKeypair = mockk<WalletKeypair> {
+            every { signSchnorr(any()) } returns null
+            every { publicKeyHex } returns "02" + "a".repeat(64)
+        }
+        every { mockKeyManager.getOrCreateWalletKeypair() } returns mockKeypair
+
+        val validToken = createValidHtlcToken()
+        val outcome = backend.claimHtlcTokenWithProofs(validToken, TEST_PREIMAGE)
+
+        assertTrue(
+            "Expected SignatureFailed but got: $outcome",
+            outcome is HtlcClaimOutcome.Failure.SignatureFailed
+        )
+    }
+
+    /**
+     * Test: Transport failure during createHtlcTokenFromProofs triggers MintUnreachable.
+     */
+    @Test
+    fun `createHtlcTokenFromProofs returns MintUnreachable on transport failure`() = runBlocking {
+        fakeMintApi.queueSwapTransportFailure("DNS failure")
+
+        val inputProofs = listOf(testProof(64))
+        val outcome = backend.createHtlcTokenFromProofs(
+            inputProofs = inputProofs,
+            paymentHash = TEST_PAYMENT_HASH,
+            amountSats = 64,
+            driverPubKey = "02" + "b".repeat(64),
+            riderPubKey = "02" + "a".repeat(64),
+            locktime = System.currentTimeMillis() / 1000 + 3600
+        )
+
+        assertTrue(
+            "Expected MintUnreachable but got: $outcome",
+            outcome is HtlcSwapOutcome.Failure.MintUnreachable
+        )
+    }
+
+    /**
+     * Test: HTTP error during createHtlcTokenFromProofs triggers SwapRejected.
+     */
+    @Test
+    fun `createHtlcTokenFromProofs returns SwapRejected on HTTP error`() = runBlocking {
+        fakeMintApi.queueSwapHttpError(400, """{"detail": "Token already spent"}""")
+
+        val inputProofs = listOf(testProof(64))
+        val outcome = backend.createHtlcTokenFromProofs(
+            inputProofs = inputProofs,
+            paymentHash = TEST_PAYMENT_HASH,
+            amountSats = 64,
+            driverPubKey = "02" + "b".repeat(64),
+            riderPubKey = "02" + "a".repeat(64),
+            locktime = System.currentTimeMillis() / 1000 + 3600
+        )
+
+        assertTrue(
+            "Expected SwapRejected but got: $outcome",
+            outcome is HtlcSwapOutcome.Failure.SwapRejected
+        )
     }
 }

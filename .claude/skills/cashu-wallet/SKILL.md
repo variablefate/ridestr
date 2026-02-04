@@ -25,6 +25,44 @@ The Ridestr Cashu wallet provides trustless ride payments via NUT-14 HTLC escrow
 | ViewModel Integration | ✅ Complete (deferred locking) |
 | Recovery Token Fallback | ✅ Complete (January 2026 - SharedPreferences persistence) |
 | Cross-Mint Bridge Failure | ✅ Complete (auto-cancel ride on failure) |
+| Payment Test Harness | ✅ Complete (February 2026 - 138 unit tests) |
+
+---
+
+## Payment Test Infrastructure (February 2026)
+
+The payment module has comprehensive test coverage with 138 unit tests.
+
+### Test Files
+| File | Tests | Purpose |
+|------|-------|---------|
+| `HtlcResultTest.kt` | 51 | Sealed class exhaustiveness, error variant coverage |
+| `CashuBackendErrorTest.kt` | 32 | Integration tests with FakeMintApi + MockK |
+| `FakeMintApiTest.kt` | 18 | FakeMintApi queue behavior |
+| `HtlcSwapResultTest.kt` | 15 | Swap outcome exhaustiveness |
+| Other payment tests | 22 | PaymentCrypto, WalletKeyManager, etc. |
+
+### Test Support in Production Code
+| Component | Purpose |
+|-----------|---------|
+| `CashuBackend.setTestState(mintUrl, keyset, seed)` | Inject test state, bypass HTTP |
+| `CashuBackend.testActiveKeyset` | Override keyset lookup without HTTP |
+| `FakeMintApi` | Queue mock responses for `postSwap()`, `postCheckState()` |
+
+### Running Tests
+```bash
+# Windows batch file
+run_tests.bat
+
+# Direct Gradle
+./gradlew :common:testDebugUnitTest --tests "com.ridestr.common.payment.*"
+```
+
+### Key Learnings for Test Authors
+1. **Avoid native libraries at init time**: `PaymentCrypto.computePaymentHash()` uses secp256k1 - pre-compute hash constants
+2. **MockK for final classes**: WalletKeyManager, WalletStorage require MockK (not subclassing)
+3. **Test state injection**: Use `setTestState()` to bypass connect/keyset HTTP calls
+4. **Pre-computed hash**: `TEST_PAYMENT_HASH = "66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925"`
 
 ---
 
