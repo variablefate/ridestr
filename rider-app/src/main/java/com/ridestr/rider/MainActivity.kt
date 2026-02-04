@@ -1052,6 +1052,25 @@ fun MainScreen(
                     viewModel = riderViewModel,
                     settingsManager = settingsManager,
                     followedDriversRepository = followedDriversRepository,
+                    onAddDriverToFavorites = { driverPubKey ->
+                        // 1. Save locally
+                        val newDriver = com.ridestr.common.nostr.events.FollowedDriver(
+                            pubkey = driverPubKey,
+                            addedAt = System.currentTimeMillis() / 1000,
+                            note = ""
+                        )
+                        followedDriversRepository.addDriver(newDriver)
+
+                        // 2. Backup to Nostr (Kind 30011)
+                        profileSyncManager.backupFollowedDrivers()
+
+                        // 3. Send follow notification (Kind 3187)
+                        nostrService.publishRoadflareFollowNotify(
+                            driverPubKey = driverPubKey,
+                            riderName = riderDisplayName,
+                            action = "follow"
+                        )
+                    },
                     onOpenTiles = onOpenTiles,
                     onOpenWallet = { currentTab = Tab.WALLET },
                     onOpenWalletWithDeposit = onOpenWalletWithDeposit,

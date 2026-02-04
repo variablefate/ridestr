@@ -91,6 +91,7 @@ fun RiderModeScreen(
     viewModel: RiderViewModel,
     settingsManager: SettingsManager,
     followedDriversRepository: FollowedDriversRepository? = null,
+    onAddDriverToFavorites: (suspend (driverPubKey: String) -> Unit)? = null,
     onOpenTiles: () -> Unit,
     onOpenWallet: () -> Unit = {},
     onOpenWalletWithDeposit: (Long) -> Unit = {},  // Opens wallet with pre-filled deposit amount
@@ -98,6 +99,7 @@ fun RiderModeScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val uiState by viewModel.uiState.collectAsState()
     val remoteConfig by viewModel.remoteConfig.collectAsState()
     var showChatSheet by remember { mutableStateOf(false) }
@@ -583,14 +585,10 @@ fun RiderModeScreen(
                     driverName = driverName,
                     isDriverAlreadyFavorite = isAlreadyFavorite,
                     onAddToFavorites = {
-                        if (driverPubKey != null && followedDriversRepository != null) {
-                            // Note: driver names are fetched from Nostr profiles, not stored
-                            val newDriver = FollowedDriver(
-                                pubkey = driverPubKey,
-                                addedAt = System.currentTimeMillis() / 1000,
-                                note = ""
-                            )
-                            followedDriversRepository.addDriver(newDriver)
+                        if (driverPubKey != null && onAddDriverToFavorites != null) {
+                            scope.launch {
+                                onAddDriverToFavorites(driverPubKey)
+                            }
                         }
                     },
                     onNewRide = viewModel::clearRide
