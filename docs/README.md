@@ -21,6 +21,8 @@ Ridestr is a decentralized rideshare platform built on Nostr. This documentation
 | Payment Integration | ✅ COMPLETE | Fully wired, HTLC escrow, NIP-60 sync |
 | RoadFlare Network | ✅ COMPLETE | Personal driver network, three-state mode, location sharing |
 | Security Hardening | ✅ COMPLETE | Backup exclusions, pubkey validation, WebSocket concurrency, signature verification |
+| Payment Test Harness | ✅ COMPLETE | 181 unit tests, FakeMintApi, FakeNip60Store, proof conservation contracts |
+| Nip60Store Interface | ✅ COMPLETE | Testable abstraction for NIP-60 operations |
 
 ---
 

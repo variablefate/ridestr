@@ -28,22 +28,27 @@ The Ridestr wallet uses **Cashu ecash** for trustless ride payments. The impleme
 | HTLC Create (NUT-14) | ✅ COMPLETE | Uses `/v1/swap` with wallet pubkey |
 | HTLC Claim (NUT-14) | ✅ COMPLETE | P2PK Schnorr signatures per-proof |
 | ViewModel Integration | ✅ COMPLETE | Deferred locking after acceptance |
-| Unit Test Infrastructure | ✅ COMPLETE | 138 tests with MockK + Robolectric (Phase 6) |
+| Unit Test Infrastructure | ✅ COMPLETE | 181 tests with MockK + Robolectric (Phase 6) |
+| Nip60Store Interface | ✅ COMPLETE | Testable abstraction for NIP-60 operations |
+| Proof Conservation Tests | ✅ COMPLETE | Contract tests for publish-before-delete invariants |
 
 ---
 
 ## Test Infrastructure (Phase 6 - February 2026)
 
-The payment module includes comprehensive unit test coverage using MockK and Robolectric.
+The payment module includes **181 unit tests** covering all error paths and proof conservation invariants.
 
 ### Test Files
 
 | File | Tests | Coverage |
 |------|-------|----------|
-| `HtlcResultTest.kt` | 34 | All HtlcClaimResult/HtlcSwapResult variants, exhaustiveness |
-| `CashuBackendErrorTest.kt` | 32 | Error mapping, FakeMintApi integration |
-| `FakeMintApiTest.kt` | 26 | Mock mint API queuing/responses |
-| `HtlcSwapResultTest.kt` | 46 | Swap outcome mapping, sealed class coverage |
+| `PaymentCryptoTest.kt` | 23 | Preimage/hash generation |
+| `CashuCryptoTest.kt` | 30 | hashToCurve, NUT-13, BIP-39 |
+| `CashuTokenCodecTest.kt` | 30 | Token encoding/decoding |
+| `HtlcResultTest.kt` | 23 | Sealed class exhaustiveness |
+| `CashuBackendErrorTest.kt` | 32 | Error mapping with FakeMintApi |
+| `FakeNip60StoreTest.kt` | 32 | Mock NIP-60 API behavior |
+| `ProofConservationTest.kt` | 10 | Proof safety invariants |
 
 ### Running Tests
 
@@ -56,6 +61,16 @@ run_tests.bat
 ```
 
 ### Key Test Infrastructure
+
+**Nip60Store Interface** - Testable abstraction for NIP-60 operations:
+- `publishProofs()`, `fetchProofs()`, `selectProofsForSpending()`
+- `deleteProofEvents()`, `publishWalletMetadata()`
+- Implemented by `Nip60WalletSync`, test double is `FakeNip60Store`
+
+**FakeNip60Store** - Mock NIP-60 storage with verification:
+- Tracks call order for publish-before-delete invariants
+- `getCallLog()` - Returns ordered list of operations
+- `verifyPublishBeforeDelete()` - Asserts safe deletion pattern
 
 **FakeMintApi** - Queues mock responses for swap/checkstate:
 - `queueSwapSuccess(signatures)` - Mock successful swap
@@ -71,12 +86,28 @@ backend.setTestState(
 )
 ```
 
+**MainDispatcherRule** - JUnit rule for coroutine tests:
+```kotlin
+@get:Rule
+val mainDispatcherRule = MainDispatcherRule()
+```
+
 **Pre-computed Test Data** - Avoids native library issues:
 ```kotlin
 // PaymentCrypto.computePaymentHash() uses secp256k1 which fails in unit tests
 // Pre-compute: SHA256 of 32 zero bytes
 const val TEST_PAYMENT_HASH = "66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925"
 ```
+
+### Proof Conservation Contract Tests
+
+`ProofConservationTest.kt` verifies critical safety invariants:
+
+1. **Proofs are never lost** - Published proofs remain until explicitly deleted
+2. **Republish before delete** - Remaining proofs in multi-proof events are republished before deleting the event
+3. **Call ordering verification** - Uses `FakeNip60Store.getCallLog()` to verify operations happen in safe order
+
+These tests ensure the payment system follows the safe deletion pattern documented in `cashu-wallet/SKILL.md`.
 
 ### Key Learnings
 

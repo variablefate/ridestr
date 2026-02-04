@@ -138,7 +138,7 @@ Before changing ANY code in these files:
 
 1. **Unit Tests** (required):
    ```bash
-   # Run all 138 payment tests
+   # Run all 181 payment tests
    ./gradlew :common:testDebugUnitTest --tests "com.ridestr.common.payment.*"
 
    # Or use batch file
@@ -149,14 +149,20 @@ Before changing ANY code in these files:
 
    | Test File | Tests | What It Covers |
    |-----------|-------|----------------|
-   | `HtlcResultTest.kt` | 34 | All sealed class variants, exhaustiveness |
-   | `CashuBackendErrorTest.kt` | 32 | Error mapping, FakeMintApi integration |
-   | `FakeMintApiTest.kt` | 26 | Mock mint API behavior |
-   | `HtlcSwapResultTest.kt` | 46 | Swap outcome mapping |
+   | `PaymentCryptoTest.kt` | 23 | Preimage/hash generation |
+   | `CashuCryptoTest.kt` | 30 | hashToCurve, NUT-13, BIP-39 |
+   | `CashuTokenCodecTest.kt` | 30 | Token encoding/decoding |
+   | `HtlcResultTest.kt` | 23 | Sealed class exhaustiveness |
+   | `CashuBackendErrorTest.kt` | 32 | Error mapping with FakeMintApi |
+   | `FakeNip60StoreTest.kt` | 32 | Mock NIP-60 API behavior |
+   | `ProofConservationTest.kt` | 10 | Proof safety invariants |
 
    **Key test infrastructure:**
+   - `Nip60Store` interface - Testable abstraction for NIP-60 operations
+   - `FakeNip60Store` - Mock with call log for verifying publish-before-delete
    - `FakeMintApi` - Queue mock swap/checkstate responses
    - `CashuBackend.setTestState()` - Bypass HTTP for unit tests
+   - `MainDispatcherRule` - JUnit rule for coroutine dispatcher override
    - `TEST_PAYMENT_HASH` constant - Pre-computed to avoid native lib issues
 
 3. **Manual Flow Test** (required for HTLC changes):

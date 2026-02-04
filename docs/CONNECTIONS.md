@@ -11,7 +11,7 @@ This document provides a comprehensive view of how all modules connect in the Ri
 - Correlation ID logging for payment tracing (`[RIDE xxxxxxxx]` prefix)
 
 **Phase 6 Changes (February 2026):**
-- Payment test infrastructure: 138 unit tests with MockK + Robolectric
+- Payment test infrastructure: 181 unit tests with MockK + Robolectric
 - FakeMintApi for queuing mock swap/checkstate responses
 - CashuBackend test state injection (`setTestState()`, `testActiveKeyset`)
 - `MintUnreachable` error variant for distinguishing network failures from HTTP errors
@@ -504,19 +504,35 @@ Payment System (Phase 5 Reorganization)
 │   ├── HTLC secret parsing: extractPaymentHashFromSecret(), extractLocktimeFromSecret(), extractRefundKeysFromSecret()
 │   └── Used by: CashuBackend
 │
-├── Test Infrastructure (Phase 6)
+├── Nip60Store Interface (Phase 6 - Testable Abstraction)
+│   ├── Interface for NIP-60 operations (enables dependency injection)
+│   ├── Methods: publishProofs(), fetchProofs(), selectProofsForSpending()
+│   ├── Methods: deleteProofEvents(), publishWalletMetadata()
+│   ├── Methods: getBalance(), hasExistingWallet(), restoreFromNostr()
+│   ├── Implementation: Nip60WalletSync
+│   └── Test Double: FakeNip60Store (in test sources)
+│
+├── Test Infrastructure (Phase 6 - 181 tests)
 │   ├── FakeMintApi - Queue mock responses for swap/checkstate
 │   │   ├── queueSwapSuccess(), queueSwapHttpError(), queueSwapTransportFailure()
 │   │   └── queueCheckstateSuccess(), queueCheckstateHttpError()
+│   ├── FakeNip60Store - Mock NIP-60 storage with verification
+│   │   ├── Implements Nip60Store interface
+│   │   ├── getCallLog() - Returns ordered list of operations
+│   │   └── verifyPublishBeforeDelete() - Asserts safe deletion pattern
 │   ├── CashuBackend.setTestState() - Bypass HTTP for unit tests
 │   │   ├── Sets currentMintUrl, testActiveKeyset, walletSeed directly
 │   │   └── @VisibleForTesting annotation for safety
-│   ├── Test Files (138 tests total):
-│   │   ├── HtlcResultTest.kt (34) - Sealed class variants, exhaustiveness
-│   │   ├── CashuBackendErrorTest.kt (32) - Error mapping, FakeMintApi integration
-│   │   ├── FakeMintApiTest.kt (26) - Mock mint API behavior
-│   │   └── HtlcSwapResultTest.kt (46) - Swap outcome mapping
-│   └── Dependencies: MockK, Robolectric, androidx.test.core
+│   ├── MainDispatcherRule - JUnit rule for Dispatchers.Main override
+│   ├── Test Files (181 tests total):
+│   │   ├── PaymentCryptoTest.kt (23) - Preimage/hash generation
+│   │   ├── CashuCryptoTest.kt (30) - hashToCurve, NUT-13, BIP-39
+│   │   ├── CashuTokenCodecTest.kt (30) - Token encoding/decoding
+│   │   ├── HtlcResultTest.kt (23) - Sealed class exhaustiveness
+│   │   ├── CashuBackendErrorTest.kt (32) - Error mapping with FakeMintApi
+│   │   ├── FakeNip60StoreTest.kt (32) - Mock NIP-60 API behavior
+│   │   └── ProofConservationTest.kt (10) - Proof safety invariants
+│   └── Dependencies: MockK, Robolectric, androidx.test.core, kotlinx-coroutines-test
 │
 ├── CashuWebSocket (NUT-17 WebSocket subscriptions)
 │   ├── Depends on: OkHttp WebSocket

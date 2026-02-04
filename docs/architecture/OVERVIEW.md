@@ -215,18 +215,29 @@ The Cashu wallet implementation uses:
 - HTLC Create: ✅ COMPLETE
 - HTLC Claim: ✅ COMPLETE (P2PK signing implemented)
 - ViewModel Integration: ✅ COMPLETE
-- Unit Test Infrastructure: ✅ COMPLETE (138 tests with MockK + Robolectric)
+- Unit Test Infrastructure: ✅ COMPLETE (181 tests with MockK + Robolectric)
+- Nip60Store Interface: ✅ COMPLETE (testable abstraction)
+- Proof Conservation Tests: ✅ COMPLETE (contract tests)
 
 ### Test Infrastructure (Phase 6)
 
-Payment code has comprehensive unit test coverage:
+Payment code has comprehensive unit test coverage with 181 tests:
 
 | Test File | Tests | Coverage |
 |-----------|-------|----------|
-| `HtlcResultTest.kt` | 34 | Sealed class variants, exhaustiveness |
-| `CashuBackendErrorTest.kt` | 32 | Error mapping, FakeMintApi integration |
-| `FakeMintApiTest.kt` | 26 | Mock mint API behavior |
-| `HtlcSwapResultTest.kt` | 46 | Swap outcome mapping |
+| `PaymentCryptoTest.kt` | 23 | Preimage/hash generation |
+| `CashuCryptoTest.kt` | 30 | hashToCurve, NUT-13, BIP-39 |
+| `CashuTokenCodecTest.kt` | 30 | Token encoding/decoding |
+| `HtlcResultTest.kt` | 23 | Sealed class exhaustiveness |
+| `CashuBackendErrorTest.kt` | 32 | Error mapping with FakeMintApi |
+| `FakeNip60StoreTest.kt` | 32 | Mock NIP-60 API behavior |
+| `ProofConservationTest.kt` | 10 | Proof safety invariants |
+
+Key infrastructure:
+- `Nip60Store` interface for testable NIP-60 operations
+- `FakeNip60Store` mock with call log for publish-before-delete verification
+- `FakeMintApi` for queuing mock HTTP responses
+- `MainDispatcherRule` for coroutine dispatcher override
 
 Run with: `./gradlew :common:testDebugUnitTest --tests "com.ridestr.common.payment.*"`
 

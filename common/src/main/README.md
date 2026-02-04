@@ -18,7 +18,8 @@ The `common` module contains all shared code used by both rider and driver apps:
 | `cashu/CashuWebSocket.kt` | NUT-17 WebSocket connection for real-time mint state updates | `connect()`, `disconnect()`, `subscribe()`, `unsubscribe()`, `isConnected()` |
 | `cashu/CashuWebSocketModels.kt` | NUT-17 JSON-RPC 2.0 data classes | `WsRequest`, `WsResponse`, `WsNotification`, `MintQuotePayload`, `MeltQuotePayload`, `SubscriptionKind` |
 | `cashu/CashuCrypto.kt` | Cryptographic operations (NUT-00/13) | `hashToCurve()`, `blindMessage()`, `unblindSignature()`, `mnemonicToSeed()`, `deriveSecrets()`, `derivePreMintSecret()` |
-| `cashu/Nip60WalletSync.kt` | Cross-device wallet sync (NIP-60, EOSE-aware queries, cross-app safety) | `publishProofs()`, `fetchProofs()`, `publishWalletMetadata(forceOverwrite)`, `getExistingWalletMetadata()`, `restoreFromNostr()`, `hasExistingWallet()` (counter backup, EOSE early-exit, cross-mint proof preservation) |
+| `cashu/Nip60Store.kt` | Interface for NIP-60 operations (enables testability) | `publishProofs()`, `fetchProofs()`, `selectProofsForSpending()`, `deleteProofEvents()`, `publishWalletMetadata()`, `getBalance()`, `hasExistingWallet()`, `restoreFromNostr()` |
+| `cashu/Nip60WalletSync.kt` | Implementation of Nip60Store (EOSE-aware queries, cross-app safety) | Implements `Nip60Store` interface (counter backup, EOSE early-exit, cross-mint proof preservation) |
 | `WalletKeyManager.kt` | Wallet keypair + signing | `getPrivateKeyBytes()`, `signSchnorr()`, `getWalletPubKeyHex()`, `importPrivateKey()`, `importMnemonic()` |
 | `WalletStorage.kt` | Local persistence + NUT-13 counters | `savePendingDeposit()`, `getPendingDeposits()`, `removePendingDeposit()`, `getCachedBalance()`, `saveMintUrl()`, `savePendingBlindedOp()`, `getRecoverableBlindedOps()`, `savePendingHtlc()`, `getRefundableHtlcs()`, `getCounter()`, `incrementCounter()`, `getAllCounters()` |
 | `PaymentCrypto.kt` | Preimage/hash generation | `generatePreimage()`, `hashPreimage()` |
@@ -404,21 +405,27 @@ Protocol events now include payment method fields for multi-mint compatibility:
 
 ### Payment Test Infrastructure (February 2026)
 
-The payment module includes 138 unit tests with full coverage of error paths. Key components:
+The payment module includes **181 unit tests** covering all error paths and proof conservation invariants.
 
 **Test Support in Production Code:**
 - `CashuBackend.setTestState(mintUrl, keyset, seed)` - Inject test state to bypass HTTP calls
 - `CashuBackend.testActiveKeyset` - Override keyset lookup without HTTP
+- `Nip60Store` interface - Enables dependency injection for NIP-60 operations
+
+**Test Doubles (in test sources):**
 - `FakeMintApi` - Queue mock responses for `postSwap()`, `postCheckState()`
+- `FakeNip60Store` - Mock NIP-60 storage with call log for order verification
 
 **Test Files:**
 | File | Tests | Purpose |
 |------|-------|---------|
-| `HtlcResultTest.kt` | 51 | Sealed class exhaustiveness, all error variants |
-| `CashuBackendErrorTest.kt` | 32 | Integration tests with FakeMintApi + MockK |
-| `FakeMintApiTest.kt` | 18 | Queue behavior verification |
-| `HtlcSwapResultTest.kt` | 15 | Swap outcome exhaustiveness |
-| Other payment tests | 22 | PaymentCrypto, WalletKeyManager, etc. |
+| `PaymentCryptoTest.kt` | 23 | Preimage/hash generation |
+| `CashuCryptoTest.kt` | 30 | hashToCurve, NUT-13, BIP-39 |
+| `CashuTokenCodecTest.kt` | 30 | Token encoding/decoding |
+| `HtlcResultTest.kt` | 23 | Sealed class exhaustiveness |
+| `CashuBackendErrorTest.kt` | 32 | Error mapping with FakeMintApi |
+| `FakeNip60StoreTest.kt` | 32 | Mock NIP-60 API behavior |
+| `ProofConservationTest.kt` | 10 | Proof safety invariants |
 
 **Running Tests:**
 ```bash
@@ -434,10 +441,16 @@ run_tests.bat
 testImplementation("io.mockk:mockk:1.13.8")
 testImplementation("org.robolectric:robolectric:4.11.1")
 testImplementation("androidx.test:core:1.5.0")
+testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3")
 ```
+
+**Test Infrastructure:**
+- `MainDispatcherRule` - JUnit rule for Dispatchers.Main override in tests
+- `FakeNip60Store` tracks call order for verifying publish-before-delete invariants
 
 **Key Learnings for Test Authors:**
 1. **Avoid native libraries**: `PaymentCrypto.computePaymentHash()` uses secp256k1 - use pre-computed constants
 2. **MockK for final classes**: WalletKeyManager, WalletStorage require MockK, not subclassing
 3. **Test state injection**: Use `setTestState()` to bypass connect/keyset HTTP calls
 4. **Pre-computed hash**: `TEST_PAYMENT_HASH = "66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925"` (SHA256 of 32 zero bytes)
+5. **Proof conservation tests**: Use `FakeNip60Store` to verify that remaining proofs are republished BEFORE deleting spent proof events

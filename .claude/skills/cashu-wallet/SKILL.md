@@ -25,29 +25,37 @@ The Ridestr Cashu wallet provides trustless ride payments via NUT-14 HTLC escrow
 | ViewModel Integration | ✅ Complete (deferred locking) |
 | Recovery Token Fallback | ✅ Complete (January 2026 - SharedPreferences persistence) |
 | Cross-Mint Bridge Failure | ✅ Complete (auto-cancel ride on failure) |
-| Payment Test Harness | ✅ Complete (February 2026 - 138 unit tests) |
+| Payment Test Harness | ✅ Complete (February 2026 - 181 unit tests) |
+| Nip60Store Interface | ✅ Complete (February 2026 - testable abstraction) |
+| Proof Conservation Tests | ✅ Complete (February 2026 - contract tests) |
 
 ---
 
 ## Payment Test Infrastructure (February 2026)
 
-The payment module has comprehensive test coverage with 138 unit tests.
+The payment module has comprehensive test coverage with **181 unit tests** covering error paths and proof conservation.
 
 ### Test Files
 | File | Tests | Purpose |
 |------|-------|---------|
-| `HtlcResultTest.kt` | 51 | Sealed class exhaustiveness, error variant coverage |
-| `CashuBackendErrorTest.kt` | 32 | Integration tests with FakeMintApi + MockK |
-| `FakeMintApiTest.kt` | 18 | FakeMintApi queue behavior |
-| `HtlcSwapResultTest.kt` | 15 | Swap outcome exhaustiveness |
-| Other payment tests | 22 | PaymentCrypto, WalletKeyManager, etc. |
+| `PaymentCryptoTest.kt` | 23 | Preimage/hash generation |
+| `CashuCryptoTest.kt` | 30 | hashToCurve, NUT-13, BIP-39 |
+| `CashuTokenCodecTest.kt` | 30 | Token encoding/decoding |
+| `HtlcResultTest.kt` | 23 | Sealed class exhaustiveness |
+| `CashuBackendErrorTest.kt` | 32 | Error mapping with FakeMintApi |
+| `FakeNip60StoreTest.kt` | 32 | Mock NIP-60 API behavior |
+| `ProofConservationTest.kt` | 10 | Proof safety invariants |
+| `MainDispatcherRule.kt` | 1 | Dispatcher rule test |
 
-### Test Support in Production Code
+### Test Support Infrastructure
 | Component | Purpose |
 |-----------|---------|
+| `Nip60Store` interface | Testable abstraction for NIP-60 operations |
+| `FakeNip60Store` | Mock NIP-60 storage with call log verification |
 | `CashuBackend.setTestState(mintUrl, keyset, seed)` | Inject test state, bypass HTTP |
 | `CashuBackend.testActiveKeyset` | Override keyset lookup without HTTP |
 | `FakeMintApi` | Queue mock responses for `postSwap()`, `postCheckState()` |
+| `MainDispatcherRule` | JUnit rule for Dispatchers.Main override |
 
 ### Running Tests
 ```bash
@@ -63,6 +71,17 @@ run_tests.bat
 2. **MockK for final classes**: WalletKeyManager, WalletStorage require MockK (not subclassing)
 3. **Test state injection**: Use `setTestState()` to bypass connect/keyset HTTP calls
 4. **Pre-computed hash**: `TEST_PAYMENT_HASH = "66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925"`
+5. **Proof conservation**: Use `FakeNip60Store.getCallLog()` to verify publish-before-delete invariants
+
+### Proof Conservation Contract Tests
+
+`ProofConservationTest.kt` verifies critical safety invariants:
+
+1. **Proofs are never lost** - Published proofs remain until explicitly deleted
+2. **Republish before delete** - Remaining proofs are republished BEFORE deleting multi-proof events
+3. **Call ordering** - `FakeNip60Store.getCallLog()` verifies operations happen in safe order
+
+These tests ensure the payment system follows the safe deletion pattern (see "NIP-60 Safe Deletion Pattern" below).
 
 ---
 
