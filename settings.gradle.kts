@@ -20,7 +20,8 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "Ridestr"
-include(":app")
+// NOTE: :app module was deprecated and removed (2026-01-29)
+// Use :rider-app for rider functionality, :drivestr for driver functionality
 include(":common")
 include(":drivestr")
 include(":rider-app")

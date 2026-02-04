@@ -5,12 +5,15 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.Location
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -27,7 +30,7 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.google.android.gms.location.LocationServices
 import com.drivestr.app.ui.screens.DriverModeScreen
-import com.drivestr.app.ui.screens.KeyBackupScreen
+import com.ridestr.common.ui.screens.KeyBackupScreen
 import com.drivestr.app.ui.screens.OnboardingScreen
 import com.drivestr.app.ui.screens.ProfileSetupScreen
 import com.drivestr.app.ui.screens.SettingsContent
@@ -35,10 +38,14 @@ import com.drivestr.app.ui.screens.VehiclesScreen
 import com.drivestr.app.ui.screens.VehicleSetupScreen
 import com.drivestr.app.ui.screens.WalletScreen
 import com.drivestr.app.ui.screens.EarningsScreen
+import com.drivestr.app.ui.screens.RoadflareTab
 import com.ridestr.common.data.RideHistoryRepository
 import com.ridestr.common.nostr.events.RideHistoryEntry
 import com.ridestr.common.ui.RideDetailScreen
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import androidx.compose.runtime.rememberCoroutineScope
 import com.ridestr.common.data.VehicleRepository
 import com.ridestr.common.routing.NostrTileDiscoveryService
 import com.ridestr.common.routing.TileDownloadService
@@ -47,6 +54,7 @@ import com.ridestr.common.settings.SettingsManager
 import com.ridestr.common.ui.AccountBottomSheet
 import com.ridestr.common.ui.AccountSafetyScreen
 import com.ridestr.common.ui.DeveloperOptionsScreen
+import com.ridestr.common.ui.EncryptionFallbackWarningDialog
 import com.ridestr.common.ui.RelayManagementScreen
 import com.ridestr.common.ui.WalletSettingsScreen
 import com.ridestr.common.ui.RelaySignalIndicator
@@ -72,6 +80,12 @@ import com.ridestr.common.sync.RestoredProfileData
 import com.ridestr.common.sync.Nip60WalletSyncAdapter
 import com.ridestr.common.sync.RideHistorySyncAdapter
 import com.ridestr.common.sync.ProfileSyncAdapter
+import com.ridestr.common.data.DriverRoadflareRepository
+import com.ridestr.common.sync.DriverRoadflareSyncAdapter
+import com.ridestr.common.roadflare.RoadflareKeyManager
+import com.ridestr.common.nostr.events.RoadflareFollowNotifyEvent
+import com.drivestr.app.service.RoadflareListenerService
+import com.ridestr.common.nostr.events.RoadflareKeyAckEvent
 import com.drivestr.app.service.DriverOnlineService
 import com.ridestr.common.bitcoin.BitcoinPriceService
 
@@ -80,6 +94,7 @@ import com.ridestr.common.bitcoin.BitcoinPriceService
  */
 enum class Tab {
     DRIVE,      // Main driver mode
+    ROADFLARE,  // RoadFlare followers and broadcasting
     WALLET,     // Lightning address, earnings summary & payments
     VEHICLES,   // Vehicle management
     SETTINGS    // Settings & developer options
@@ -124,6 +139,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun DrivestrApp() {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     val onboardingViewModel: OnboardingViewModel = viewModel()
     val uiState by onboardingViewModel.uiState.collectAsState()
 
@@ -150,6 +166,16 @@ fun DrivestrApp() {
 
     // Settings manager (created first to get custom relays)
     val settingsManager = remember { SettingsManager(context) }
+
+    // Notification permission launcher for RoadFlare alerts (Finding 5)
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        android.util.Log.d("MainActivity", "RoadFlare notification permission result: $granted")
+        if (granted) {
+            RoadflareListenerService.start(context)
+        }
+    }
 
     // NostrService for relay connections (uses custom relays from settings)
     val nostrService = remember { NostrService(context, settingsManager.getEffectiveRelays()) }
@@ -195,6 +221,9 @@ fun DrivestrApp() {
         ProfileSyncManager.getInstance(context, settingsManager.getEffectiveRelays())
     }
 
+    // RoadFlare repository (for sync adapter)
+    val driverRoadflareRepo = remember { DriverRoadflareRepository.getInstance(context) }
+
     // Register sync adapters (driver app: includes vehicles, no saved locations)
     LaunchedEffect(Unit) {
         profileSyncManager.registerSyncable(Nip60WalletSyncAdapter(nip60Sync))
@@ -205,6 +234,7 @@ fun DrivestrApp() {
             nostrService = nostrService
         ))
         profileSyncManager.registerSyncable(RideHistorySyncAdapter(rideHistoryRepository, nostrService))
+        profileSyncManager.registerSyncable(DriverRoadflareSyncAdapter(driverRoadflareRepo, nostrService))
     }
 
     // Observable sync state for potential UI feedback
@@ -265,6 +295,169 @@ fun DrivestrApp() {
     LaunchedEffect(Unit) {
         if (currentScreen == Screen.MAIN) {
             nostrService.connect()
+            // Fetch and cache user's display name for RoadFlare QR code
+            nostrService.fetchAndCacheUserDisplayName()
+        }
+    }
+
+    // Start RoadFlare listener service if enabled (with permission check - Finding 5)
+    val roadflareAlertsEnabled by settingsManager.roadflareAlertsEnabled.collectAsState()
+    LaunchedEffect(roadflareAlertsEnabled) {
+        if (roadflareAlertsEnabled) {
+            if (NotificationHelper.hasNotificationPermission(context)) {
+                RoadflareListenerService.start(context)
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                // Request permission - service will start in callback if granted
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            } else {
+                // Pre-Android 13, permission is implicit
+                RoadflareListenerService.start(context)
+            }
+        } else {
+            RoadflareListenerService.stop(context)
+        }
+    }
+
+    // RoadFlare key manager for handling follower key distribution
+    val roadflareKeyManager = remember {
+        RoadflareKeyManager(driverRoadflareRepo, nostrService)
+    }
+
+    // Subscribe to RoadFlare follow notifications (Kind 3187)
+    // When a rider adds this driver to their favorites, we receive a notification
+    // and automatically add them as a follower + send them the RoadFlare key
+    LaunchedEffect(Unit) {
+        // Wait for Nostr connection
+        kotlinx.coroutines.delay(2000)
+
+        val subId = nostrService.subscribeToRoadflareFollowNotifications { event, relayUrl ->
+            // Check if we should ignore notifications (dev setting for testing p-tag queries)
+            if (settingsManager.ignoreFollowNotifications.value) {
+                android.util.Log.d("MainActivity", "Ignoring RoadFlare follow notification (dev setting enabled)")
+                return@subscribeToRoadflareFollowNotifications
+            }
+
+            android.util.Log.d("MainActivity", "Received RoadFlare follow notification from ${event.pubKey.take(16)}")
+
+            // Process the notification
+            val signer = nostrService.keyManager.getSigner()
+            if (signer != null) {
+                kotlinx.coroutines.runBlocking {
+                    try {
+                        // Parse and decrypt the notification
+                        val notification = RoadflareFollowNotifyEvent.parseAndDecrypt(event) { ciphertext, senderPubKey ->
+                            kotlinx.coroutines.runBlocking {
+                                signer.nip44Decrypt(ciphertext, senderPubKey)
+                            }
+                        }
+
+                        if (notification != null) {
+                            when (notification.action) {
+                                "follow" -> {
+                                    // Check if already a follower
+                                    val existingFollowers = driverRoadflareRepo.state.value?.followers ?: emptyList()
+                                    if (existingFollowers.none { it.pubkey == notification.riderPubKey }) {
+                                        android.util.Log.d("MainActivity", "New RoadFlare follow request from: ${notification.riderName} (${notification.riderPubKey.take(16)})")
+
+                                        // Add as pending follower - driver must approve in RoadflareTab
+                                        roadflareKeyManager.handleNewFollower(notification.riderPubKey, notification.riderName)
+
+                                        // Backup updated state to Nostr
+                                        profileSyncManager.backupProfileData()
+                                    }
+                                }
+                                "unfollow" -> {
+                                    // Rider removed this driver from their favorites
+                                    android.util.Log.d("MainActivity", "RoadFlare unfollow from: ${notification.riderName} (${notification.riderPubKey.take(16)})")
+
+                                    // Remove follower from our list (no key rotation needed since they're voluntarily leaving)
+                                    roadflareKeyManager.handleUnfollow(notification.riderPubKey)
+
+                                    // Backup updated state to Nostr
+                                    profileSyncManager.backupProfileData()
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("MainActivity", "Error processing follow notification", e)
+                    }
+                }
+            }
+        }
+
+        android.util.Log.d("MainActivity", "Subscribed to RoadFlare follow notifications: $subId")
+
+        // Subscribe to RoadFlare key acknowledgements (Kind 3188)
+        // When a rider receives and stores our key, they send back an ack
+        // Also handles key refresh requests (status="stale")
+        val ackSubId = nostrService.subscribeToRoadflareKeyAcks { event, relayUrl ->
+            android.util.Log.d("MainActivity", "Received RoadFlare key ack from ${event.pubKey.take(16)}")
+
+            val signer = nostrService.keyManager.getSigner()
+            if (signer != null) {
+                kotlinx.coroutines.runBlocking {
+                    try {
+                        val ackData = RoadflareKeyAckEvent.parseAndDecrypt(signer, event)
+                        if (ackData != null) {
+                            android.util.Log.d("MainActivity", "Key ack: rider=${ackData.riderPubKey.take(16)} version=${ackData.keyVersion} status=${ackData.status}")
+
+                            // Security: Verify authorship - claimed pubkey matches event signer
+                            val pubkeyMatches = ackData.riderPubKey == event.pubKey
+                            if (!pubkeyMatches) {
+                                android.util.Log.w("MainActivity", "Key ack pubkey mismatch - ignoring (claimed=${ackData.riderPubKey.take(8)}, signer=${event.pubKey.take(8)})")
+                            } else {
+                                // Verify authorized follower (approved + not muted)
+                                val follower = driverRoadflareRepo.getFollowers().find { it.pubkey == ackData.riderPubKey }
+                                val isMuted = driverRoadflareRepo.getMutedPubkeys().contains(ackData.riderPubKey)
+                                val isAuthorized = follower != null && follower.approved && !isMuted
+
+                                if (!isAuthorized) {
+                                    android.util.Log.w("MainActivity", "Key ack from unauthorized follower - ignoring")
+                                } else {
+                                    val currentKeyUpdatedAt = driverRoadflareRepo.getKeyUpdatedAt() ?: 0L
+
+                                    // Check if re-send needed: status != "received" OR ack has stale timestamp
+                                    if (ackData.status != "received" || ackData.keyUpdatedAt < currentKeyUpdatedAt) {
+                                        android.util.Log.d("MainActivity", "Re-sending key to ${ackData.riderPubKey.take(8)} (status=${ackData.status}, ackKeyUpdatedAt=${ackData.keyUpdatedAt}, currentKeyUpdatedAt=$currentKeyUpdatedAt)")
+
+                                        val currentKey = driverRoadflareRepo.state.value?.roadflareKey
+                                        if (currentKey != null) {
+                                            val success = roadflareKeyManager.sendKeyToFollower(
+                                                signer = signer,
+                                                followerPubkey = ackData.riderPubKey,
+                                                key = currentKey,
+                                                keyUpdatedAt = currentKeyUpdatedAt
+                                            )
+                                            if (success) {
+                                                android.util.Log.d("MainActivity", "Re-sent key v${currentKey.version} to ${ackData.riderPubKey.take(8)}")
+                                                driverRoadflareRepo.markFollowerKeySent(ackData.riderPubKey, currentKey.version)
+                                            } else {
+                                                android.util.Log.e("MainActivity", "Failed to re-send key to ${ackData.riderPubKey.take(8)}")
+                                            }
+                                        } else {
+                                            android.util.Log.w("MainActivity", "No current key to re-send")
+                                        }
+                                    } else if (ackData.keyVersion == follower.keyVersionSent) {
+                                        android.util.Log.d("MainActivity", "Follower ${ackData.riderPubKey.take(16)} confirmed key v${ackData.keyVersion}")
+                                        // Key version matches - follower has confirmed receipt
+                                    }
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("MainActivity", "Error processing key ack", e)
+                    }
+                }
+            }
+        }
+        android.util.Log.d("MainActivity", "Subscribed to RoadFlare key acks: $ackSubId")
+
+        try {
+            kotlinx.coroutines.awaitCancellation()
+        } finally {
+            subId?.let { nostrService.closeSubscription(it) }
+            ackSubId?.let { nostrService.closeSubscription(it) }
+            android.util.Log.d("MainActivity", "Closed RoadFlare subscriptions: follow=$subId, ack=$ackSubId")
         }
     }
 
@@ -319,6 +512,7 @@ fun DrivestrApp() {
     LaunchedEffect(uiState.isLoggedIn, uiState.isProfileCompleted, uiState.showBackupReminder) {
         if (uiState.isLoggedIn && !uiState.showBackupReminder && currentScreen == Screen.ONBOARDING) {
             nostrService.connect()
+            nostrService.fetchAndCacheUserDisplayName()
 
             // Determine next screen based on completion status
             currentScreen = when {
@@ -557,6 +751,9 @@ fun DrivestrApp() {
                     nostrService = nostrService,
                     vehicleRepository = vehicleRepository,
                     rideHistoryRepository = rideHistoryRepository,
+                    driverRoadflareRepository = driverRoadflareRepo,
+                    roadflareKeyManager = roadflareKeyManager,
+                    profileSyncManager = profileSyncManager,
                     walletService = walletService,
                     onLogout = {
                         // Disconnect from Nostr
@@ -658,11 +855,25 @@ fun DrivestrApp() {
             }
 
             Screen.DEV_OPTIONS -> {
+                val driverViewModel: DriverViewModel = viewModel()
                 DeveloperOptionsScreen(
                     settingsManager = settingsManager,
                     isDriverApp = true,
+                    nostrService = nostrService,
                     onOpenRelaySettings = { currentScreen = Screen.RELAY_SETTINGS },
                     onBack = { currentScreen = Screen.MAIN },
+                    // RoadFlare key debug callbacks
+                    onGetLocalKeyVersion = { driverRoadflareRepo.getKeyVersion() },
+                    onGetLocalKeyUpdatedAt = { driverRoadflareRepo.getKeyUpdatedAt() },
+                    onFetchNostrKeyUpdatedAt = {
+                        val myPubKey = nostrService.keyManager.getPubKeyHex()
+                        if (myPubKey != null) nostrService.fetchDriverKeyUpdatedAt(myPubKey) else null
+                    },
+                    onSyncRoadflareState = { driverViewModel.syncRoadflareState() },
+                    onRotateRoadflareKey = {
+                        val signer = nostrService.getSigner()
+                        if (signer != null) roadflareKeyManager.rotateKey(signer) else false
+                    },
                     modifier = Modifier.padding(innerPadding)
                 )
             }
@@ -768,6 +979,9 @@ fun MainScreen(
     nostrService: NostrService,
     vehicleRepository: VehicleRepository,
     rideHistoryRepository: RideHistoryRepository,
+    driverRoadflareRepository: DriverRoadflareRepository,
+    roadflareKeyManager: com.ridestr.common.roadflare.RoadflareKeyManager,
+    profileSyncManager: ProfileSyncManager,
     walletService: WalletService?,
     onLogout: () -> Unit,
     onOpenProfile: () -> Unit,
@@ -794,8 +1008,22 @@ fun MainScreen(
     // Account bottom sheet state
     var showAccountSheet by remember { mutableStateOf(false) }
 
+    // Encryption fallback warning state
+    var showEncryptionWarning by remember { mutableStateOf(false) }
+
+    // Check for encryption fallback on startup
+    LaunchedEffect(keyManager, walletService) {
+        val anyUnencrypted = keyManager.isUsingUnencryptedStorage()
+            || walletService?.isUsingUnencryptedStorage() == true
+        showEncryptionWarning = anyUnencrypted
+            && !settingsManager.getEncryptionFallbackWarned()
+    }
+
     // Vehicle repository state
     val vehicles by vehicleRepository.vehicles.collectAsState()
+
+    // RoadFlare settings
+    val roadflareAlertsEnabled by settingsManager.roadflareAlertsEnabled.collectAsState()
 
     // Driver ViewModel (persists across tab switches)
     val driverViewModel: DriverViewModel = viewModel()
@@ -813,10 +1041,120 @@ fun MainScreen(
     val btcPriceUsd by driverViewModel.bitcoinPriceService.btcPriceUsd.collectAsState()
 
     // Ensure relay connections when app returns to foreground
-    // Also clear any stacked notification alerts
+    // Also clear any stacked notification alerts and RoadFlare request notifications
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
         driverViewModel.onResume()
         DriverOnlineService.clearAlerts(context)
+        // Cancel RoadFlare request notification when app foregrounds (Finding 4)
+        NotificationHelper.cancelNotification(context, RoadflareListenerService.NOTIFICATION_ID_ROADFLARE_REQUEST)
+    }
+
+    // Extracted refresh logic - used by both UI refresh button and background sync
+    suspend fun refreshRoadflareFollowers(verifiedFollowers: Set<String>? = null) = withContext(Dispatchers.IO) {
+        val driverPubkey = keyManager.getPubKeyHex() ?: return@withContext
+
+        // Guard: skip if not connected
+        if (!nostrService.isConnected()) {
+            android.util.Log.d("RoadflareRefresh", "Skipping refresh - not connected")
+            return@withContext
+        }
+
+        val foundFollowers = if (verifiedFollowers != null) {
+            // Use pre-verified followers from sync, skip redundant query
+            if (BuildConfig.DEBUG) {
+                android.util.Log.d("RoadflareRefresh", "Using ${verifiedFollowers.size} pre-verified followers, skipping query")
+            }
+            verifiedFollowers.toMutableSet()
+        } else {
+            // Manual refresh or no pre-verified data - do full query
+            val followers = mutableSetOf<String>()
+            val subscriptionId = nostrService.queryRoadflareFollowers(driverPubkey) { riderPubKey ->
+                followers.add(riderPubKey)
+            }
+            kotlinx.coroutines.delay(3000)
+            nostrService.closeSubscription(subscriptionId)
+            followers
+        }
+
+        val existingFollowers = driverRoadflareRepository.getFollowers()
+        val existingPubkeys = existingFollowers.map { it.pubkey }.toSet()
+        var stateChanged = false
+
+        // Add new followers
+        for (pubkey in foundFollowers) {
+            if (pubkey !in existingPubkeys) {
+                driverRoadflareRepository.addFollower(
+                    com.ridestr.common.nostr.events.RoadflareFollower(
+                        pubkey = pubkey,
+                        name = "",
+                        addedAt = System.currentTimeMillis() / 1000,
+                        approved = false,
+                        keyVersionSent = 0
+                    )
+                )
+                stateChanged = true
+            }
+        }
+
+        // Verify existing followers not found in p-tag query
+        val followersToVerify = existingFollowers.filter { it.pubkey !in foundFollowers }
+        for (follower in followersToVerify) {
+            val verification = nostrService.verifyFollowerStatus(
+                followerPubKey = follower.pubkey,
+                driverPubKey = driverPubkey,
+                currentKeyUpdatedAt = driverRoadflareRepository.getKeyUpdatedAt()
+            )
+            if (verification != null && !verification.stillFollowing) {
+                driverRoadflareRepository.removeFollower(follower.pubkey)
+                driverRoadflareRepository.unmuteRider(follower.pubkey)  // Also clear from muted list
+                stateChanged = true
+            }
+        }
+
+        // Fetch profiles for followers missing display names
+        val pubkeysNeedingNames = mutableSetOf<String>()
+        for (pubkey in foundFollowers) {
+            if (pubkey !in existingPubkeys) pubkeysNeedingNames.add(pubkey)
+        }
+        for (follower in existingFollowers) {
+            if (follower.name.isBlank()) pubkeysNeedingNames.add(follower.pubkey)
+        }
+        for (pubkey in pubkeysNeedingNames) {
+            nostrService.subscribeToProfile(pubkey) { profile ->
+                val fullName = profile.displayName ?: profile.name
+                val firstName = fullName?.split(" ")?.firstOrNull()
+                if (!firstName.isNullOrBlank()) {
+                    driverRoadflareRepository.updateFollowerName(pubkey, firstName)
+                }
+            }
+        }
+
+        android.util.Log.d("RoadflareRefresh", "Refresh complete: found=${foundFollowers.size}, stateChanged=$stateChanged")
+        if (stateChanged) {
+            profileSyncManager.backupProfileData()
+        }
+    }
+
+    // Combined refresh: sync Kind 30012 state first, then query followers
+    // This enables cross-device approval sync (e.g., approve on Phone A, pull-to-refresh on Phone B)
+    suspend fun refreshRoadflareStateAndFollowers() {
+        // Early exit if offline (avoids 15s wait in fetchDriverRoadflareState)
+        if (!nostrService.isConnected()) {
+            android.util.Log.d("RoadflareRefresh", "Skipping state sync - not connected")
+            return
+        }
+        // Sync driver's own state (cross-device approval sync via union merge)
+        driverViewModel.syncRoadflareState()
+        // Then refresh follower list (Kind 30011 p-tag query)
+        refreshRoadflareFollowers()
+    }
+
+    // Observe sync-triggered refresh from DriverViewModel
+    LaunchedEffect(driverViewModel) {
+        driverViewModel.syncTriggeredRefresh.collect { verifiedFollowers ->
+            android.util.Log.d("MainActivity", "Sync triggered background refresh (${verifiedFollowers?.let { "${it.size} cached" } ?: "full query"})")
+            refreshRoadflareFollowers(verifiedFollowers)
+        }
     }
 
     Scaffold(
@@ -838,6 +1176,7 @@ fun MainScreen(
                     Text(
                         text = when (currentTab) {
                             Tab.DRIVE -> "Driver Mode"
+                            Tab.ROADFLARE -> "RoadFlare"
                             Tab.WALLET -> "Wallet"
                             Tab.VEHICLES -> "Vehicles"
                             Tab.SETTINGS -> "Settings"
@@ -876,6 +1215,12 @@ fun MainScreen(
                     onClick = { currentTab = Tab.DRIVE }
                 )
                 NavigationBarItem(
+                    icon = { Icon(Icons.Default.Flare, contentDescription = null) },
+                    label = { Text("RoadFlare") },
+                    selected = currentTab == Tab.ROADFLARE,
+                    onClick = { currentTab = Tab.ROADFLARE }
+                )
+                NavigationBarItem(
                     icon = { Icon(Icons.Default.AccountBalanceWallet, contentDescription = null) },
                     label = { Text("Wallet") },
                     selected = currentTab == Tab.WALLET,
@@ -904,6 +1249,62 @@ fun MainScreen(
                     settingsManager = settingsManager,
                     vehicleRepository = vehicleRepository,
                     autoOpenNavigation = autoOpenNavigation,
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
+            Tab.ROADFLARE -> {
+                val driverPubkey = keyManager.getPubKeyHex() ?: ""
+                val driverNpub = keyManager.getNpub() ?: ""
+                val scope = rememberCoroutineScope()
+
+                // Get driver's display name from cached profile
+                val driverDisplayName by nostrService.userDisplayName.collectAsState()
+
+                // Check if driver is online for RoadFlare purposes (AVAILABLE or ROADFLARE_ONLY)
+                val isDriverOnline = driverUiState.stage == com.drivestr.app.viewmodels.DriverStage.AVAILABLE ||
+                                     driverUiState.stage == com.drivestr.app.viewmodels.DriverStage.ROADFLARE_ONLY
+
+                RoadflareTab(
+                    driverRoadflareRepository = driverRoadflareRepository,
+                    driverPubkey = driverPubkey,
+                    driverNpub = driverNpub,
+                    driverName = driverDisplayName,
+                    settingsManager = settingsManager,
+                    backgroundAlertsEnabled = roadflareAlertsEnabled,
+                    isDriverOnline = isDriverOnline,
+                    onApproveFollower = { pubkey ->
+                        scope.launch {
+                            val signer = nostrService.keyManager.getSigner()
+                            if (signer != null) {
+                                roadflareKeyManager.approveFollower(signer, pubkey)
+                                profileSyncManager.backupProfileData()
+                            }
+                        }
+                    },
+                    onDeclineFollower = { pubkey ->
+                        roadflareKeyManager.declineFollower(pubkey)
+                        scope.launch {
+                            profileSyncManager.backupProfileData()
+                        }
+                    },
+                    onRemoveFollower = { pubkey ->
+                        // "Remove" mutes under the hood — local ignore + key rotation.
+                        // Recoverable via Settings > Removed Followers.
+                        scope.launch {
+                            val signer = nostrService.keyManager.getSigner()
+                            if (signer != null) {
+                                roadflareKeyManager.handleMuteFollower(
+                                    signer = signer,
+                                    followerPubkey = pubkey,
+                                    reason = "removed by driver"
+                                )
+                                profileSyncManager.backupProfileData()
+                            }
+                        }
+                    },
+                    onRefreshFollowers = {
+                        refreshRoadflareStateAndFollowers()
+                    },
                     modifier = Modifier.padding(innerPadding)
                 )
             }
@@ -939,6 +1340,8 @@ fun MainScreen(
                 )
             }
             Tab.SETTINGS -> {
+                val roadflareState by driverRoadflareRepository.state.collectAsState()
+                val settingsScope = rememberCoroutineScope()
                 SettingsContent(
                     settingsManager = settingsManager,
                     hasMultipleVehicles = vehicles.size > 1,
@@ -946,6 +1349,13 @@ fun MainScreen(
                     onOpenTiles = onOpenTiles,
                     onOpenDevOptions = onOpenDevOptions,
                     onOpenWalletSettings = onOpenWalletSettings,
+                    removedFollowers = roadflareState?.muted ?: emptyList(),
+                    onUnremoveFollower = { pubkey ->
+                        settingsScope.launch {
+                            driverRoadflareRepository.unmuteRider(pubkey)
+                            profileSyncManager.backupProfileData()
+                        }
+                    },
                     onSyncProfile = onSyncProfile,
                     modifier = Modifier.padding(innerPadding)
                 )
@@ -965,6 +1375,16 @@ fun MainScreen(
             onRelaySettings = onOpenRelaySettings,
             onLogout = onLogout,
             onDismiss = { showAccountSheet = false }
+        )
+    }
+
+    // Encryption fallback warning dialog (non-cancelable)
+    if (showEncryptionWarning) {
+        EncryptionFallbackWarningDialog(
+            onDismiss = {
+                settingsManager.setEncryptionFallbackWarned(true)
+                showEncryptionWarning = false
+            }
         )
     }
 }

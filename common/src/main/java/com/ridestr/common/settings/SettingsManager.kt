@@ -63,14 +63,29 @@ class SettingsManager(context: Context) {
         private const val KEY_WALLET_SETUP_SKIPPED = "wallet_setup_skipped"
         private const val KEY_ALWAYS_SHOW_WALLET_DIAGNOSTICS = "always_show_wallet_diagnostics"
 
+        // RoadFlare debug settings
+        private const val KEY_IGNORE_FOLLOW_NOTIFICATIONS = "ignore_follow_notifications"
+
+        // RoadFlare alerts (driver app only)
+        private const val KEY_ROADFLARE_ALERTS_ENABLED = "roadflare_alerts_enabled"
+
         // Payment settings (Issue #13 - multi-mint support)
         private const val KEY_PAYMENT_METHODS = "payment_methods"
         private const val KEY_DEFAULT_PAYMENT_METHOD = "default_payment_method"
         private const val KEY_MINT_URL = "mint_url"
 
+        // RoadFlare alternate payment methods (rider: what they offer, driver: what they accept)
+        private const val KEY_ROADFLARE_PAYMENT_METHODS = "roadflare_payment_methods"
+
         // Favorite Lightning addresses (Issue #14)
         private const val KEY_FAVORITE_LN_ADDRESSES = "favorite_ln_addresses"
         const val MAX_FAVORITE_ADDRESSES = 10
+
+        // Security warning dismissal
+        private const val KEY_ENCRYPTION_FALLBACK_WARNED = "encryption_fallback_warned"
+
+        // Driver online status (for cross-component coordination)
+        private const val KEY_DRIVER_ONLINE_STATUS = "driver_online_status"
 
         // Default manual location: Las Vegas (Fremont St)
         private const val DEFAULT_MANUAL_LAT = 36.1699
@@ -193,6 +208,17 @@ class SettingsManager(context: Context) {
             prefs.edit().putString(KEY_ACTIVE_VEHICLE_ID, vehicleId).apply()
         }
         _activeVehicleId.value = vehicleId
+    }
+
+    /**
+     * Clear activeVehicleId if it doesn't match any of the provided vehicle IDs.
+     * Called after vehicle restore to avoid orphaned references.
+     */
+    fun sanitizeActiveVehicleId(validVehicleIds: Set<String>) {
+        val currentId = _activeVehicleId.value
+        if (currentId != null && currentId !in validVehicleIds) {
+            setActiveVehicleId(null)
+        }
     }
 
     // Currency display setting (default: USD)
@@ -413,6 +439,43 @@ class SettingsManager(context: Context) {
     }
 
     // ===================
+    // ROADFLARE DEBUG SETTINGS
+    // ===================
+
+    // Ignore Kind 3187 follow notifications (for testing p-tag queries)
+    private val _ignoreFollowNotifications = MutableStateFlow(prefs.getBoolean(KEY_IGNORE_FOLLOW_NOTIFICATIONS, false))
+    val ignoreFollowNotifications: StateFlow<Boolean> = _ignoreFollowNotifications.asStateFlow()
+
+    /**
+     * Set whether to ignore Kind 3187 follow notifications.
+     * When enabled, driver app won't process real-time follow notifications,
+     * forcing use of p-tag queries on Kind 30011 for follower discovery.
+     * Useful for testing that the p-tag query mechanism works correctly.
+     */
+    fun setIgnoreFollowNotifications(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_IGNORE_FOLLOW_NOTIFICATIONS, enabled).apply()
+        _ignoreFollowNotifications.value = enabled
+    }
+
+    // ===================
+    // ROADFLARE ALERTS (Driver app only)
+    // ===================
+
+    // RoadFlare alerts enabled - when true, driver receives notifications even when offline
+    private val _roadflareAlertsEnabled = MutableStateFlow(prefs.getBoolean(KEY_ROADFLARE_ALERTS_ENABLED, false))
+    val roadflareAlertsEnabled: StateFlow<Boolean> = _roadflareAlertsEnabled.asStateFlow()
+
+    /**
+     * Set whether RoadFlare alerts are enabled.
+     * When enabled, driver app runs a background service that listens for RoadFlare
+     * requests and shows notifications even when the main app is closed.
+     */
+    fun setRoadflareAlertsEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_ROADFLARE_ALERTS_ENABLED, enabled).apply()
+        _roadflareAlertsEnabled.value = enabled
+    }
+
+    // ===================
     // PAYMENT SETTINGS (Issue #13 - Multi-mint support)
     // ===================
 
@@ -454,6 +517,25 @@ class SettingsManager(context: Context) {
     fun setDefaultPaymentMethod(method: String) {
         prefs.edit().putString(KEY_DEFAULT_PAYMENT_METHOD, method).apply()
         _defaultPaymentMethod.value = method
+    }
+
+    // RoadFlare alternate payment methods (e.g., "zelle", "venmo", "cash")
+    private val _roadflarePaymentMethods = MutableStateFlow(loadRoadflarePaymentMethods())
+    val roadflarePaymentMethods: StateFlow<Set<String>> = _roadflarePaymentMethods.asStateFlow()
+
+    private fun loadRoadflarePaymentMethods(): Set<String> {
+        val stored = prefs.getString(KEY_ROADFLARE_PAYMENT_METHODS, null)
+        return if (stored.isNullOrBlank()) emptySet()
+        else stored.split(",").filter { it.isNotBlank() }.toSet()
+    }
+
+    fun setRoadflarePaymentMethods(methods: Set<String>) {
+        if (methods.isEmpty()) {
+            prefs.edit().remove(KEY_ROADFLARE_PAYMENT_METHODS).apply()
+        } else {
+            prefs.edit().putString(KEY_ROADFLARE_PAYMENT_METHODS, methods.joinToString(",")).apply()
+        }
+        _roadflarePaymentMethods.value = methods
     }
 
     // Current Cashu mint URL (for backup/restore purposes)
@@ -618,7 +700,9 @@ class SettingsManager(context: Context) {
             // Payment settings (Issue #13)
             paymentMethods = _paymentMethods.value,
             defaultPaymentMethod = _defaultPaymentMethod.value,
-            mintUrl = _mintUrl.value
+            mintUrl = _mintUrl.value,
+            // RoadFlare alternate payment methods
+            roadflarePaymentMethods = _roadflarePaymentMethods.value.toList()
         )
     }
 
@@ -646,6 +730,8 @@ class SettingsManager(context: Context) {
         setPaymentMethods(backup.paymentMethods)
         setDefaultPaymentMethod(backup.defaultPaymentMethod)
         setMintUrl(backup.mintUrl)
+        // Restore RoadFlare alternate payment methods
+        setRoadflarePaymentMethods(backup.roadflarePaymentMethods.toSet())
     }
 
     /**
@@ -676,6 +762,7 @@ class SettingsManager(context: Context) {
         _paymentMethods.value = listOf("cashu")
         _defaultPaymentMethod.value = "cashu"
         _mintUrl.value = null
+        _roadflarePaymentMethods.value = emptySet()
         // Favorite LN addresses (Issue #14)
         _favoriteLnAddresses.value = emptyList()
     }
@@ -802,5 +889,45 @@ class SettingsManager(context: Context) {
     fun isFavoriteLnAddress(address: String): Boolean {
         val normalized = address.lowercase().trim()
         return _favoriteLnAddresses.value.any { it.address.lowercase() == normalized }
+    }
+
+    // ===================
+    // SECURITY WARNING DISMISSAL
+    // ===================
+
+    /**
+     * Check if the user has been warned about encryption fallback.
+     * Direct prefs read (not StateFlow) to avoid sync issues on startup.
+     */
+    fun getEncryptionFallbackWarned(): Boolean =
+        prefs.getBoolean(KEY_ENCRYPTION_FALLBACK_WARNED, false)
+
+    /**
+     * Mark that the user has been warned about encryption fallback.
+     */
+    fun setEncryptionFallbackWarned(warned: Boolean) {
+        prefs.edit().putBoolean(KEY_ENCRYPTION_FALLBACK_WARNED, warned).apply()
+    }
+
+    // ===================
+    // DRIVER ONLINE STATUS (for cross-component coordination)
+    // ===================
+
+    // Driver online status - used for RoadflareListenerService dedup
+    private val _driverOnlineStatus = MutableStateFlow<String?>(prefs.getString(KEY_DRIVER_ONLINE_STATUS, null))
+    val driverOnlineStatus: StateFlow<String?> = _driverOnlineStatus.asStateFlow()
+
+    /**
+     * Set driver online status for cross-component coordination.
+     * Used by RoadflareListenerService to avoid duplicate notifications when DriverViewModel is active.
+     * Values: null (offline), "AVAILABLE", "ROADFLARE_ONLY", "IN_RIDE"
+     */
+    fun setDriverOnlineStatus(status: String?) {
+        if (status == null) {
+            prefs.edit().remove(KEY_DRIVER_ONLINE_STATUS).apply()
+        } else {
+            prefs.edit().putString(KEY_DRIVER_ONLINE_STATUS, status).apply()
+        }
+        _driverOnlineStatus.value = status
     }
 }

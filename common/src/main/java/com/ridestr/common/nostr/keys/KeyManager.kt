@@ -167,6 +167,13 @@ class KeyManager(context: Context) {
     }
 
     /**
+     * Check if the underlying storage is using unencrypted fallback.
+     * This happens when EncryptedSharedPreferences fails to initialize
+     * (e.g., on emulators, rooted devices, or devices without hardware-backed keystore).
+     */
+    fun isUsingUnencryptedStorage(): Boolean = storage.isUsingFallback()
+
+    /**
      * Load the key from secure storage.
      */
     private fun loadStoredKey() {

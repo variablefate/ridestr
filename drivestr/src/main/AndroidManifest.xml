@@ -50,6 +50,12 @@
             android:name=".service.DriverOnlineService"
             android:exported="false"
             android:foregroundServiceType="location|dataSync" />
+
+        <!-- Background service to listen for RoadFlare requests when offline -->
+        <service
+            android:name=".service.RoadflareListenerService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
     </application>
 
 </manifest>

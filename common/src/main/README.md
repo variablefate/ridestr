@@ -12,22 +12,27 @@ The `common` module contains all shared code used by both rider and driver apps:
 
 | File | Purpose | Key Methods |
 |------|---------|-------------|
-| `WalletService.kt` | Orchestration layer (⚠️ safe deletion pattern required - see cashu-wallet skill) | `syncWallet()`, `requestDeposit()`, `checkDepositStatus()`, `getMeltQuote()`, `executeWithdraw()`, `lockForRide()`, `claimHtlcPayment()`, `mintTokens()`, `claimUnclaimedDeposits()`, `changeMintUrl()`, `recoverPendingOperations()`, `bridgePayment()`, `recoverFromSeed()` |
-| `cashu/CashuBackend.kt` | Mint operations (NUT-04/05/14/17), NUT-13 deterministic secrets, WebSocket state updates | `getMintQuote()`, `mintTokens()`, `getMeltQuote()`, `meltWithProofs()`, `createHtlcTokenFromProofs()`, `claimHtlcTokenWithProofs()`, `refundExpiredHtlc()`, `restoreProofs()`, `getActiveKeysetIds()`, `waitForMeltQuoteState()`, `waitForMintQuoteState()` |
+| `WalletService.kt` | Orchestration layer with region organization (⚠️ safe deletion pattern required - see cashu-wallet skill) | `syncWallet()`, `ensureWalletReady()`, `requestDeposit()`, `checkDepositStatus()`, `getMeltQuote()`, `executeWithdraw()`, `lockForRide()`, `claimHtlcPayment()`, `mintTokens()`, `claimUnclaimedDeposits()`, `changeMintUrl()`, `recoverPendingOperations()`, `bridgePayment()`, `recoverFromSeed()` |
+| `cashu/CashuBackend.kt` | Mint operations with region organization (NUT-04/05/14/17), NUT-13 deterministic secrets, WebSocket state updates | `getMintQuote()`, `mintTokens()`, `getMeltQuote()`, `meltWithProofs()`, `createHtlcTokenFromProofs()`, `claimHtlcTokenWithProofs()`, `refundExpiredHtlc()`, `restoreProofs()`, `getActiveKeysetIds()`, `waitForMeltQuoteState()`, `waitForMintQuoteState()` |
+| `cashu/CashuTokenCodec.kt` | Stateless Cashu token encoding/decoding utilities | `encodeHtlcProofsAsToken()`, `encodeProofsAsToken()`, `parseHtlcToken()`, `extractPaymentHashFromSecret()`, `extractLocktimeFromSecret()`, `extractRefundKeysFromSecret()` |
 | `cashu/CashuWebSocket.kt` | NUT-17 WebSocket connection for real-time mint state updates | `connect()`, `disconnect()`, `subscribe()`, `unsubscribe()`, `isConnected()` |
 | `cashu/CashuWebSocketModels.kt` | NUT-17 JSON-RPC 2.0 data classes | `WsRequest`, `WsResponse`, `WsNotification`, `MintQuotePayload`, `MeltQuotePayload`, `SubscriptionKind` |
 | `cashu/CashuCrypto.kt` | Cryptographic operations (NUT-00/13) | `hashToCurve()`, `blindMessage()`, `unblindSignature()`, `mnemonicToSeed()`, `deriveSecrets()`, `derivePreMintSecret()` |
-| `cashu/Nip60WalletSync.kt` | Cross-device wallet sync (NIP-60, EOSE-aware queries, cross-app safety) | `publishProofs()`, `fetchProofs()`, `publishWalletMetadata(forceOverwrite)`, `getExistingWalletMetadata()`, `restoreFromNostr()`, `hasExistingWallet()` (counter backup, EOSE early-exit, cross-mint proof preservation) |
+| `cashu/Nip60Store.kt` | Interface for NIP-60 operations (enables testability) | `publishProofs()`, `fetchProofs()`, `selectProofsForSpending()`, `deleteProofEvents()`, `publishWalletMetadata()`, `getBalance()`, `hasExistingWallet()`, `restoreFromNostr()` |
+| `cashu/Nip60WalletSync.kt` | Implementation of Nip60Store (EOSE-aware queries, cross-app safety) | Implements `Nip60Store` interface (counter backup, EOSE early-exit, cross-mint proof preservation) |
 | `WalletKeyManager.kt` | Wallet keypair + signing | `getPrivateKeyBytes()`, `signSchnorr()`, `getWalletPubKeyHex()`, `importPrivateKey()`, `importMnemonic()` |
 | `WalletStorage.kt` | Local persistence + NUT-13 counters | `savePendingDeposit()`, `getPendingDeposits()`, `removePendingDeposit()`, `getCachedBalance()`, `saveMintUrl()`, `savePendingBlindedOp()`, `getRecoverableBlindedOps()`, `savePendingHtlc()`, `getRefundableHtlcs()`, `getCounter()`, `incrementCounter()`, `getAllCounters()` |
 | `PaymentCrypto.kt` | Preimage/hash generation | `generatePreimage()`, `hashPreimage()` |
-| `PaymentModels.kt` | Data classes | `MintQuote`, `MeltQuote`, `PaymentTransaction`, `EscrowLock`, `PendingDeposit`, `ClaimResult`, `WalletBalance`, `PendingHtlc`, `PendingBlindedOperation`, `SeedRecoveryResult` |
+| `PaymentModels.kt` | Data classes | `MintQuote`, `MeltQuote`, `PaymentTransaction`, `EscrowLock`, `PendingDeposit`, `ClaimResult`, `WalletBalance`, `PendingHtlc` (with preimage for refunds), `PendingBlindedOperation`, `SeedRecoveryResult` |
 
 ### Nostr Layer (`java/com/ridestr/common/nostr/`)
 
 | File | Purpose | Key Methods |
 |------|---------|-------------|
-| `NostrService.kt` | Event publishing/subscription | `broadcastAvailability()`, `publishDriverRideState()`, `publishRiderRideState()`, `subscribeToOffers()`, `subscribeToDriverAvailability()`, `publishRideHistoryBackup()` |
+| `NostrService.kt` | Event publishing/subscription facade (delegates to domain services) | `broadcastAvailability()`, `publishDriverRideState()`, `publishRiderRideState()`, `subscribeToOffers()`, `subscribeToDriverAvailability()`, `publishRideHistoryBackup()` |
+| `NostrCryptoHelper.kt` | NIP-44 encryption utilities | `encryptForUser()`, `decryptFromUser()`, `encryptLocationForRiderState()`, `decryptLocationFromRiderState()`, `encryptPinForDriverState()`, `decryptPinFromDriverState()` |
+| `ProfileBackupService.kt` | Profile & backup operations (Kind 0, 30174, 30177) | `publishProfile()`, `subscribeToProfile()`, `publishRideHistoryBackup()`, `fetchRideHistory()`, `publishProfileBackup()`, `fetchProfileBackup()` |
+| `RoadflareDomainService.kt` | RoadFlare operations (Kind 30011, 30012, 30014, 3186, 3187, 3188) | `publishFollowedDrivers()`, `fetchFollowedDrivers()`, `publishRoadflareLocation()`, `subscribeToRoadflareLocations()`, `publishRoadflareKeyShare()` |
 | `relay/RelayManager.kt` | WebSocket connection pool, EOSE-aware subscriptions | `connectAll()`, `publish()`, `subscribe(onEose=...)`, `closeSubscription()` |
 | `relay/RelayConnection.kt` | Single relay connection | WebSocket lifecycle management |
 | `relay/RelayConfig.kt` | Configuration constants | Default relays, timeouts |
@@ -39,9 +44,9 @@ The `common` module contains all shared code used by both rider and driver apps:
 | File | Kind | Purpose |
 |------|------|---------|
 | `DriverAvailabilityEvent.kt` | 30173 | Driver broadcasts availability with geohash |
-| `RideOfferEvent.kt` | 3173 | Rider sends offer to driver (NIP-44 encrypted) |
+| `RideOfferEvent.kt` | 3173 | Rider sends offer to driver (NIP-44 encrypted). `isRoadflare` flag detected from `["t","roadflare"]` tag. |
 | `RideAcceptanceEvent.kt` | 3174 | Driver accepts ride offer (includes `wallet_pubkey`) |
-| `RideConfirmationEvent.kt` | 3175 | Rider confirms with PIN |
+| `RideConfirmationEvent.kt` | 3175 | Rider confirms with paymentHash + escrowToken (moved from offer in Jan 2026) |
 | `DriverRideStateEvent.kt` | 30180 | Driver status updates (history-based) |
 | `RiderRideStateEvent.kt` | 30181 | Rider location/preimage sharing (history-based) |
 | `RideshareChatEvent.kt` | 3178 | In-ride encrypted chat |
@@ -49,7 +54,13 @@ The `common` module contains all shared code used by both rider and driver apps:
 | `RideHistoryEvent.kt` | 30174 | Ride history backup (encrypted to self) |
 | `ProfileBackupEvent.kt` | 30177 | **Unified profile backup** (vehicles, locations, settings) |
 | `AdminConfigEvent.kt` | 30182 | Platform config (fare rates, mints, versions) - from admin pubkey |
-| `RideshareEventKinds.kt` | - | Kind constants, expiration times, `PaymentMethod` enum |
+| `FollowedDriversEvent.kt` | 30011 | Rider's followed drivers list + RoadFlare keys (encrypted to self) |
+| `DriverRoadflareStateEvent.kt` | 30012 | Driver's RoadFlare state (keypair, followers, muted) - encrypted to self |
+| `RoadflareLocationEvent.kt` | 30014 | Driver location broadcast (encrypted to RoadFlare pubkey) |
+| `RoadflareKeyShareEvent.kt` | 3186 | RoadFlare private key distribution (driver → follower, 5-min expiry) |
+| `RoadflareKeyAckEvent.kt` | 3188 | RoadFlare key acknowledgement (follower → driver, 5-min expiry) |
+| `RoadflareFollowNotifyEvent.kt` | 3187 | RoadFlare follow notification (rider → driver, real-time UX) |
+| `RideshareEventKinds.kt` | - | Kind constants, expiration times, `PaymentMethod` enum (incl. RoadFlare alternate methods) |
 
 ### Sync System (`java/com/ridestr/common/sync/`)
 
@@ -61,6 +72,8 @@ The `common` module contains all shared code used by both rider and driver apps:
 | `Nip60WalletSyncAdapter.kt` | Wallet sync | **0** (highest priority) |
 | `ProfileSyncAdapter.kt` | **Unified profile sync** (vehicles, locations, settings) | **1** |
 | `RideHistorySyncAdapter.kt` | History sync | **2** |
+| `FollowedDriversSyncAdapter.kt` | Rider's followed drivers (RoadFlare) | **3** |
+| `DriverRoadflareSyncAdapter.kt` | Driver's RoadFlare state | **3** |
 
 ### State Machine (`java/com/ridestr/common/state/`)
 
@@ -95,6 +108,15 @@ CREATED → ACCEPTED → CONFIRMED → EN_ROUTE → ARRIVED → IN_PROGRESS → 
 | `RideHistoryRepository.kt` | Ride history storage (with grace period protection) | `addRide()`, `syncFromNostr()`, `backupToNostr()`, `clearAllHistoryAndDeleteFromNostr()` |
 | `VehicleRepository.kt` | Driver vehicles | `addVehicle()`, `updateVehicle()`, `setPrimaryVehicle()` |
 | `SavedLocationRepository.kt` | Rider saved locations | `addRecent()`, `pinAsFavorite()`, `restoreFromBackup()` |
+| `FollowedDriversRepository.kt` | Rider's followed drivers (RoadFlare) + persisted name cache | `addDriver()`, `removeDriver()`, `updateDriverKey()`, `getDrivers()`, `cacheDriverName()` (persists to SharedPreferences) |
+| `DriverRoadflareRepository.kt` | Driver's RoadFlare state | `getRoadflareKey()`, `approveFollower()`, `muteRider()`, `updateKeyUpdatedAt()` |
+
+### RoadFlare (`java/com/ridestr/common/roadflare/`)
+
+| File | Purpose | Key Methods |
+|------|---------|-------------|
+| `RoadflareKeyManager.kt` | Nostr keypair lifecycle + key rotation | `approveFollower()`, `handleMuteFollower()`, `rotateKey()`, `ensureFollowersHaveCurrentKey()` |
+| `RoadflareLocationBroadcaster.kt` | Timer-based location broadcast (2 min interval) | `startBroadcasting()`, `stopBroadcasting()`, `setOnRide()`, `broadcastNow()` |
 
 ### Routing (`java/com/ridestr/common/routing/`)
 
@@ -131,6 +153,24 @@ CREATED → ACCEPTED → CONFIRMED → EN_ROUTE → ARRIVED → IN_PROGRESS → 
 | `TileManagementScreen.kt` | Offline map tile management |
 | `TileSetupScreen.kt` | Tile download region setup |
 
+### Shared UI Screens (`java/com/ridestr/common/ui/screens/`)
+
+Extracted from both apps to eliminate duplication. Each app keeps a thin wrapper for ViewModel integration.
+
+| File | Purpose | Params for Customization |
+|------|---------|--------------------------|
+| `KeyBackupScreen.kt` | Key backup display (100% identical between apps) | `npub`, `nsec`, `onBack` |
+| `ProfileSetupContent.kt` | Profile editing form (used by ProfileSetupScreen wrapper) | `roleDescriptionText`, `aboutPlaceholderText` |
+| `OnboardingComponents.kt` | Key setup + backup reminder screens | `headlineText`, `subtitleText` |
+
+### Shared UI Components (`java/com/ridestr/common/ui/components/`)
+
+Reusable composables extracted from both apps' SettingsScreen files.
+
+| File | Components | Notes |
+|------|------------|-------|
+| `SettingsComponents.kt` | `SettingsSwitchRow`, `SettingsNavigationRow`, `SettingsActionRow` | SwitchRow has `enabled: Boolean = true` param with alpha styling |
+
 ### Other Services
 
 | File | Purpose |
@@ -139,7 +179,7 @@ CREATED → ACCEPTED → CONFIRMED → EN_ROUTE → ARRIVED → IN_PROGRESS → 
 | `location/GeocodingService.kt` | Address search/reverse geocoding |
 | `notification/NotificationHelper.kt` | Push notification management |
 | `notification/SoundManager.kt` | Sound effects for ride events |
-| `settings/SettingsManager.kt` | App settings persistence + `syncableSettingsHash` for auto-backup |
+| `settings/SettingsManager.kt` | App settings persistence + `syncableSettingsHash` for auto-backup + `roadflarePaymentMethods` |
 | `settings/RemoteConfigManager.kt` | Platform config from admin pubkey (fare rates, mints) - one-time fetch on startup |
 
 ---
@@ -153,6 +193,10 @@ CREATED → ACCEPTED → CONFIRMED → EN_ROUTE → ARRIVED → IN_PROGRESS → 
 | `WalletService` | `WalletStorage` | Persistence | `walletStorage.savePendingDeposit()` |
 | `NostrService` | `RelayManager` | Event publishing | `relayManager.publish(event)` |
 | `NostrService` | `KeyManager` | Event signing | `keyManager.getSigner()` |
+| `NostrService` | `NostrCryptoHelper` | NIP-44 encryption | `cryptoHelper.encryptForUser()` |
+| `NostrService` | `ProfileBackupService` | Profile & backup operations | `profileBackupService.publishProfile()` |
+| `NostrService` | `RoadflareDomainService` | RoadFlare operations | `roadflareDomainService.publishRoadflareLocation()` |
+| `CashuBackend` | `CashuTokenCodec` | Token encoding/decoding | `CashuTokenCodec.encodeHtlcProofsAsToken()` |
 | `CashuBackend` | Cashu Mint (HTTP) | Token operations | `POST /v1/mint/quote` |
 | `Nip60WalletSync` | `NostrService` | Proof publishing | Kind 7375 events |
 | `ProfileSyncManager` | `KeyManager` | Shared identity | `keyManager.refreshFromStorage()` |
@@ -173,6 +217,12 @@ CREATED → ACCEPTED → CONFIRMED → EN_ROUTE → ARRIVED → IN_PROGRESS → 
 | `RideActions` | `ActionHandler` | Side effect execution | `handler.assignDriver(context, event)` |
 | `RemoteConfigManager` | `RelayManager` | Fetch admin config | `relayManager.subscribe(kind=30182, ...)` |
 | `RemoteConfigManager` | `AdminConfigEvent` | Parse config event | `AdminConfigEvent.parse(event)` |
+| `RoadflareKeyManager` | `DriverRoadflareRepository` | Key + follower state | `repository.getRoadflareKey()` |
+| `RoadflareKeyManager` | `NostrService` | Key share publishing | `nostrService.publishRoadflareKeyShare()` |
+| `RoadflareLocationBroadcaster` | `DriverRoadflareRepository` | State checks | `repository.state.value` |
+| `RoadflareLocationBroadcaster` | `NostrService` | Location broadcast | `nostrService.publishRoadflareLocation()` |
+| `FollowedDriversSyncAdapter` | `FollowedDriversRepository` | Driver list sync | `repo.restoreFromBackup()` |
+| `DriverRoadflareSyncAdapter` | `DriverRoadflareRepository` | RoadFlare state sync | `repo.restoreFromBackup()` |
 
 ---
 
@@ -214,18 +264,31 @@ Driver's **wallet key** (for P2PK) is different from **Nostr key** (for identity
 - Rider uses `acceptance.walletPubKey` for HTLC P2PK condition
 - HTLC locked AFTER acceptance (in `autoConfirmRide()`), not before
 
+### Pre-Ride Wallet Verification
+`ensureWalletReady(requiredAmount)` verifies wallet state before sending ride offers:
+- Refunds any expired HTLCs first (recovers funds from cancelled rides)
+- Fetches all NIP-60 proofs and verifies with mint via NUT-07
+- Cleans spent proofs (republishes unspent remainders, then deletes stale events)
+- Returns true if verified balance >= required amount
+- Called from `RiderViewModel.sendRideOffer()` and `broadcastRideRequest()` before publishing
+
 ### NUT-07 Stale Proof Verification
 Before HTLC swap, proofs are verified with mint to catch stale NIP-60 events:
-- `WalletService.lockForRide()` calls `verifyProofStatesBySecret()` at line 324
-- If any proofs are SPENT → deletes their NIP-60 events → retries selection
+- `WalletService.lockForRide()` verifies proofs via `verifyProofStatesBySecret()` (NUT-07)
+- Loop up to 3 cleanup attempts to handle relay propagation lag
+- Each iteration: republishes unspent remainders from affected events, deletes stale events, re-selects
 - Prevents "Token already spent" (code 11001) errors from stale proofs
 
-### HTLC Refund Flow
-- `WalletService.checkAndRefundExpiredHtlcs()` runs on wallet `connect()` to auto-refund expired HTLCs
+### HTLC Locktime & Refund Flow
+- **Locktime**: 15 minutes (900 seconds) — short enough for fast fund recovery after cancellation
+- **Clock skew buffer**: 120-second safety margin in `isRefundable()` and `refundExpiredHtlc()` to prevent mint rejection when device clock is ahead of mint server
+- `WalletService.refundExpiredHtlcs()` runs on wallet `connect()` to auto-refund expired HTLCs
+- On refund failure: status kept as `LOCKED` (not `FAILED`) so `recalculatePendingSats()` preserves the pending amount and refund is retried on next connect
 - `findHtlcByPaymentHash()` and `markHtlcClaimedByPaymentHash()` track HTLC lifecycle
 - `RiderViewModel.handleRideCompletion()` marks HTLC as claimed to prevent false refund attempts
 - `markHtlcClaimedByPaymentHash()` also clears `pendingSats` from balance (January 2026)
 - `PendingHtlc` stores `htlcToken` for refund even after ride ends - only cleaned up after 7 days
+- **Preimage storage** (January 2026): `PendingHtlc.preimage` stores the real preimage for future-proof refunds. NUT-14 spec says refund path after locktime should work with signature alone, but some mints require the preimage field. Old HTLCs without stored preimage fall back to zeros workaround.
 
 ### Automatic Wallet Refresh (January 2026)
 All major payment operations now trigger automatic wallet refresh to ensure balance consistency:
@@ -335,7 +398,59 @@ When ANY setting changes, the hash changes, triggering auto-backup to Nostr.
 
 ### Multi-Mint Support (Issue #13 - Phase 1)
 Protocol events now include payment method fields for multi-mint compatibility:
-- `PaymentMethod` enum: `CASHU`, `LIGHTNING`, `FIAT_CASH` in `RideshareEventKinds.kt`
+- `PaymentMethod` enum: `CASHU`, `LIGHTNING`, `FIAT_CASH` + RoadFlare alternate methods (`ZELLE`, `PAYPAL`, `CASH_APP`, `VENMO`, `CASH`, `STRIKE`) in `RideshareEventKinds.kt`
 - `mint_url` and `payment_methods` in Driver Availability (Kind 30173)
 - `mint_url` and `payment_method` in Ride Offer (Kind 3173) and Acceptance (Kind 3174)
-- `paymentMethods`, `defaultPaymentMethod`, `mintUrl` in SettingsBackup (Kind 30177)
+- `paymentMethods`, `defaultPaymentMethod`, `mintUrl`, `roadflarePaymentMethods` in SettingsBackup (Kind 30177)
+
+### Payment Test Infrastructure (February 2026)
+
+The payment module includes **181 unit tests** covering all error paths and proof conservation invariants.
+
+**Test Support in Production Code:**
+- `CashuBackend.setTestState(mintUrl, keyset, seed)` - Inject test state to bypass HTTP calls
+- `CashuBackend.testActiveKeyset` - Override keyset lookup without HTTP
+- `Nip60Store` interface - Enables dependency injection for NIP-60 operations
+
+**Test Doubles (in test sources):**
+- `FakeMintApi` - Queue mock responses for `postSwap()`, `postCheckState()`
+- `FakeNip60Store` - Mock NIP-60 storage with call log for order verification
+
+**Test Files:**
+| File | Tests | Purpose |
+|------|-------|---------|
+| `PaymentCryptoTest.kt` | 23 | Preimage/hash generation |
+| `CashuCryptoTest.kt` | 30 | hashToCurve, NUT-13, BIP-39 |
+| `CashuTokenCodecTest.kt` | 30 | Token encoding/decoding |
+| `HtlcResultTest.kt` | 23 | Sealed class exhaustiveness |
+| `CashuBackendErrorTest.kt` | 32 | Error mapping with FakeMintApi |
+| `FakeNip60StoreTest.kt` | 32 | Mock NIP-60 API behavior |
+| `ProofConservationTest.kt` | 10 | Proof safety invariants |
+
+**Running Tests:**
+```bash
+# Windows (with batch file)
+run_tests.bat
+
+# Direct Gradle
+./gradlew :common:testDebugUnitTest --tests "com.ridestr.common.payment.*"
+```
+
+**Test Dependencies (build.gradle.kts):**
+```kotlin
+testImplementation("io.mockk:mockk:1.13.8")
+testImplementation("org.robolectric:robolectric:4.11.1")
+testImplementation("androidx.test:core:1.5.0")
+testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3")
+```
+
+**Test Infrastructure:**
+- `MainDispatcherRule` - JUnit rule for Dispatchers.Main override in tests
+- `FakeNip60Store` tracks call order for verifying publish-before-delete invariants
+
+**Key Learnings for Test Authors:**
+1. **Avoid native libraries**: `PaymentCrypto.computePaymentHash()` uses secp256k1 - use pre-computed constants
+2. **MockK for final classes**: WalletKeyManager, WalletStorage require MockK, not subclassing
+3. **Test state injection**: Use `setTestState()` to bypass connect/keyset HTTP calls
+4. **Pre-computed hash**: `TEST_PAYMENT_HASH = "66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925"` (SHA256 of 32 zero bytes)
+5. **Proof conservation tests**: Use `FakeNip60Store` to verify that remaining proofs are republished BEFORE deleting spent proof events

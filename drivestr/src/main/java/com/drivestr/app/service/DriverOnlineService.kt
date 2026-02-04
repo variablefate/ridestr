@@ -8,15 +8,17 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import com.drivestr.app.MainActivity
+import com.drivestr.app.notification.DriverNotificationTextProvider
+import com.ridestr.common.notification.AlertType
+import com.ridestr.common.notification.NotificationCoordinator
 import com.ridestr.common.notification.NotificationHelper
 import com.ridestr.common.notification.SoundManager
+import com.ridestr.common.settings.SettingsManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import java.io.Serializable
 
 private const val TAG = "DriverOnlineService"
@@ -32,15 +34,7 @@ sealed class DriverStatus : Serializable {
     data class ArrivedAtPickup(val riderName: String?) : DriverStatus()
     data class RideInProgress(val riderName: String?) : DriverStatus()
     object Cancelled : DriverStatus()
-}
-
-/**
- * Stackable alerts that persist until the app comes to foreground.
- * Multiple alerts can be stacked and displayed together in the notification.
- */
-sealed class DriverStackableAlert : Serializable {
-    data class Chat(val preview: String) : DriverStackableAlert()
-    data class NewRideRequest(val fare: String, val distance: String) : DriverStackableAlert()
+    object RoadflareOnly : DriverStatus()
 }
 
 /**
@@ -55,6 +49,7 @@ class DriverOnlineService : Service() {
 
     companion object {
         private const val ACTION_START = "com.drivestr.app.service.START"
+        private const val ACTION_START_ROADFLARE_ONLY = "com.drivestr.app.service.START_ROADFLARE_ONLY"
         private const val ACTION_UPDATE_STATUS = "com.drivestr.app.service.UPDATE_STATUS"
         private const val ACTION_ADD_ALERT = "com.drivestr.app.service.ADD_ALERT"
         private const val ACTION_CLEAR_ALERTS = "com.drivestr.app.service.CLEAR_ALERTS"
@@ -63,12 +58,29 @@ class DriverOnlineService : Service() {
         private const val EXTRA_ALERT = "alert"
 
         /**
-         * Start the foreground service (driver going online).
+         * Start the foreground service (driver going online in AVAILABLE mode).
          */
         fun start(context: Context) {
             Log.d(TAG, "Starting DriverOnlineService")
             val intent = Intent(context, DriverOnlineService::class.java).apply {
                 action = ACTION_START
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        }
+
+        /**
+         * Start the foreground service in ROADFLARE_ONLY mode.
+         * Sets status to ROADFLARE_ONLY immediately, avoiding the race window
+         * where start() sets AVAILABLE then updateStatus() sets ROADFLARE_ONLY.
+         */
+        fun startRoadflareOnly(context: Context) {
+            Log.d(TAG, "Starting DriverOnlineService (roadflare-only)")
+            val intent = Intent(context, DriverOnlineService::class.java).apply {
+                action = ACTION_START_ROADFLARE_ONLY
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
@@ -98,7 +110,7 @@ class DriverOnlineService : Service() {
          * Add a stackable alert (chat message or new ride request).
          * Alerts persist until clearAlerts() is called (when app comes to foreground).
          */
-        fun addAlert(context: Context, alert: DriverStackableAlert) {
+        fun addAlert(context: Context, alert: AlertType) {
             Log.d(TAG, "Adding alert: $alert")
             val intent = Intent(context, DriverOnlineService::class.java).apply {
                 action = ACTION_ADD_ALERT
@@ -139,20 +151,24 @@ class DriverOnlineService : Service() {
         }
     }
 
-    // Current base status (the underlying driver state)
-    private var currentStatus: DriverStatus = DriverStatus.Available(0)
-
-    // Stacked alerts that persist until cleared (when app comes to foreground)
-    private val alertStack = mutableListOf<DriverStackableAlert>()
+    // Notification coordinator handles status text, channel, and alert stacking
+    private val coordinator = NotificationCoordinator(DriverNotificationTextProvider())
 
     // Coroutine scope for any async work
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var newRequestRevertJob: Job? = null
 
+    // Settings for sound/vibration preferences
+    private var settingsManager: SettingsManager? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        settingsManager = SettingsManager(this)
+        // Clear any stale status from previous process death (handles force-kill)
+        // Will be set correctly in onStartCommand
+        settingsManager?.setDriverOnlineStatus(null)
         Log.d(TAG, "Service created")
     }
 
@@ -163,32 +179,57 @@ class DriverOnlineService : Service() {
         when (intent?.action) {
             ACTION_START -> {
                 Log.d(TAG, "Received START action")
-                currentStatus = DriverStatus.Available(0)
-                alertStack.clear()
+                coordinator.updateStatus(DriverStatus.Available(0))
+                coordinator.clearAlerts()
                 newRequestRevertJob?.cancel()
+                // Service is authoritative - set status immediately (closes race window)
+                settingsManager?.setDriverOnlineStatus("AVAILABLE")
+                updateNotification()
+            }
+            ACTION_START_ROADFLARE_ONLY -> {
+                Log.d(TAG, "Received START_ROADFLARE_ONLY action")
+                coordinator.updateStatus(DriverStatus.RoadflareOnly)
+                coordinator.clearAlerts()
+                newRequestRevertJob?.cancel()
+                // Set ROADFLARE_ONLY immediately - avoids race window where start() sets
+                // AVAILABLE then updateStatus() sets ROADFLARE_ONLY (Finding #1 fix)
+                settingsManager?.setDriverOnlineStatus("ROADFLARE_ONLY")
                 updateNotification()
             }
             ACTION_UPDATE_STATUS -> {
                 val status = intent.getSerializableExtra(EXTRA_STATUS) as? DriverStatus
                 if (status != null) {
                     handleStatusUpdate(status)
+                    // Map DriverStatus to settings string (service is authoritative)
+                    val statusString = when (status) {
+                        is DriverStatus.Available -> "AVAILABLE"
+                        is DriverStatus.RoadflareOnly -> "ROADFLARE_ONLY"
+                        is DriverStatus.EnRouteToPickup,
+                        is DriverStatus.ArrivedAtPickup,
+                        is DriverStatus.RideInProgress -> "IN_RIDE"
+                        is DriverStatus.NewRequest -> "AVAILABLE"  // Still available, just got a request
+                        is DriverStatus.Cancelled -> "AVAILABLE"   // Returns to available after cancel
+                    }
+                    settingsManager?.setDriverOnlineStatus(statusString)
                 }
             }
             ACTION_ADD_ALERT -> {
-                val alert = intent.getSerializableExtra(EXTRA_ALERT) as? DriverStackableAlert
+                val alert = intent.getSerializableExtra(EXTRA_ALERT) as? AlertType
                 if (alert != null) {
                     handleAddAlert(alert)
                 }
             }
             ACTION_CLEAR_ALERTS -> {
                 Log.d(TAG, "Clearing alert stack")
-                alertStack.clear()
+                coordinator.clearAlerts()
                 updateNotification()
             }
             ACTION_STOP -> {
                 Log.d(TAG, "Received STOP action")
-                alertStack.clear()
+                coordinator.clearAlerts()
                 newRequestRevertJob?.cancel()
+                // Clear status before stopping (service is authoritative)
+                settingsManager?.setDriverOnlineStatus(null)
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
@@ -208,6 +249,8 @@ class DriverOnlineService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         serviceScope.cancel()
+        // Clear status on service destroy (handles normal stop)
+        settingsManager?.setDriverOnlineStatus(null)
         Log.d(TAG, "Service destroyed")
     }
 
@@ -216,65 +259,72 @@ class DriverOnlineService : Service() {
 
         when (status) {
             is DriverStatus.Available -> {
-                currentStatus = status
+                coordinator.updateStatus(status)
                 newRequestRevertJob?.cancel()
                 updateNotification()
             }
             is DriverStatus.NewRequest -> {
-                // Update the request count in the base status
-                currentStatus = DriverStatus.Available(status.count)
-                // Play ride request sound
-                SoundManager.playRideRequestAlert(this)
-                // Add to alert stack so it persists
-                alertStack.add(DriverStackableAlert.NewRideRequest(status.fare, status.distance))
+                // TWO-LAYER: Set Available as base status, add alert for persistence
+                // This allows "X requests waiting" in base status + stacked alert for notification
+                coordinator.updateStatus(DriverStatus.Available(status.count))
+                coordinator.addAlert(AlertType.NewRideRequest(status.fare, status.distance))
+                // Play ride request sound (respecting user settings)
+                SoundManager.playRideRequestAlert(this, settingsManager)
                 updateNotification()
             }
             is DriverStatus.EnRouteToPickup -> {
-                currentStatus = status
                 // Clear new request alerts when accepting a ride
-                alertStack.removeAll { it is DriverStackableAlert.NewRideRequest }
+                coordinator.clearAlertsOfType(AlertType.NewRideRequest::class.java)
+                coordinator.updateStatus(status)
                 newRequestRevertJob?.cancel()
                 updateNotification()
             }
             is DriverStatus.ArrivedAtPickup -> {
-                currentStatus = status
+                coordinator.updateStatus(status)
                 newRequestRevertJob?.cancel()
                 updateNotification()
             }
             is DriverStatus.RideInProgress -> {
-                currentStatus = status
+                coordinator.updateStatus(status)
                 newRequestRevertJob?.cancel()
                 updateNotification()
             }
             is DriverStatus.Cancelled -> {
-                // Play cancellation sound
-                SoundManager.playCancellationAlert(this)
-                currentStatus = DriverStatus.Available(0)
-                alertStack.clear()
+                // Play cancellation sound (respecting user settings)
+                SoundManager.playCancellationAlert(this, settingsManager)
+                // Clear ALL alerts on cancellation
+                coordinator.clearAlerts()
+                // DON'T reset to Available - keep Cancelled until next action
+                coordinator.updateStatus(status)
+                newRequestRevertJob?.cancel()
+                updateNotification()
+            }
+            is DriverStatus.RoadflareOnly -> {
+                coordinator.updateStatus(status)
                 newRequestRevertJob?.cancel()
                 updateNotification()
             }
         }
     }
 
-    private fun handleAddAlert(alert: DriverStackableAlert) {
+    private fun handleAddAlert(alert: AlertType) {
         Log.d(TAG, "Adding alert to stack: $alert")
 
         when (alert) {
-            is DriverStackableAlert.Chat -> {
-                // Play chat sound
-                SoundManager.playChatMessageAlert(this)
-                // Add to stack (allow multiple chat messages)
-                alertStack.add(alert)
+            is AlertType.Chat -> {
+                // Play chat sound (respecting user settings)
+                SoundManager.playChatMessageAlert(this, settingsManager)
             }
-            is DriverStackableAlert.NewRideRequest -> {
-                // Play ride request sound
-                SoundManager.playRideRequestAlert(this)
-                // Add to stack
-                alertStack.add(alert)
+            is AlertType.NewRideRequest -> {
+                // Play ride request sound (respecting user settings)
+                SoundManager.playRideRequestAlert(this, settingsManager)
+            }
+            else -> {
+                // Other alert types (rider-specific) - just add without sound
             }
         }
 
+        coordinator.addAlert(alert)
         updateNotification()
     }
 
@@ -288,92 +338,27 @@ class DriverOnlineService : Service() {
     }
 
     private fun buildNotification(): android.app.Notification {
-        val (title, content) = getNotificationText()
+        // Use coordinator for notification data, fall back if status not yet set
+        val data = coordinator.buildNotificationData()
 
-        // Use high priority when there are alerts or important status changes
-        val isHighPriority = alertStack.isNotEmpty() || when (currentStatus) {
-            is DriverStatus.NewRequest,
-            is DriverStatus.Cancelled -> true
-            else -> false
-        }
-
-        return NotificationHelper.buildDriverStatusNotification(
-            context = this,
-            contentIntent = createContentIntent(),
-            title = title,
-            content = content,
-            isHighPriority = isHighPriority
-        )
-    }
-
-    private fun getNotificationText(): Pair<String, String> {
-        // If we have stacked alerts, show them
-        if (alertStack.isNotEmpty()) {
-            // Sort alerts: Chat messages first (most visible at top), then other alerts
-            val sortedAlerts = alertStack.sortedBy { alert ->
-                when (alert) {
-                    is DriverStackableAlert.Chat -> 0  // Chat at top
-                    is DriverStackableAlert.NewRideRequest -> 1
-                }
-            }
-
-            // Title is based on most important alert type present
-            val hasChat = sortedAlerts.any { it is DriverStackableAlert.Chat }
-            val hasRequest = sortedAlerts.any { it is DriverStackableAlert.NewRideRequest }
-            val title = when {
-                hasChat && hasRequest -> "New request + Message"
-                hasRequest -> "New ride request!"
-                hasChat -> "Message from Rider"
-                else -> "Alert"
-            }
-
-            // Content shows all stacked alerts (chat first)
-            val content = sortedAlerts.joinToString("\n") { alert ->
-                when (alert) {
-                    is DriverStackableAlert.Chat -> {
-                        "Message: ${alert.preview.take(40)}"
-                    }
-                    is DriverStackableAlert.NewRideRequest -> {
-                        "${alert.fare} - ${alert.distance}"
-                    }
-                }
-            }
-
-            return title to content
-        }
-
-        // No alerts - show base status
-        return getBaseStatusText(currentStatus)
-    }
-
-    private fun getBaseStatusText(status: DriverStatus): Pair<String, String> {
-        return when (status) {
-            is DriverStatus.Available -> {
-                val count = status.requestCount
-                val content = if (count > 0) {
-                    "$count ride request${if (count > 1) "s" else ""} waiting"
-                } else {
-                    "Waiting for ride requests"
-                }
-                "You are online" to content
-            }
-            is DriverStatus.NewRequest -> {
-                "New ride request!" to "${status.fare} - ${status.distance}"
-            }
-            is DriverStatus.EnRouteToPickup -> {
-                val name = status.riderName ?: "rider"
-                "En route to pickup" to "Picking up $name"
-            }
-            is DriverStatus.ArrivedAtPickup -> {
-                val name = status.riderName ?: "rider"
-                "Arrived at pickup" to "Waiting for $name"
-            }
-            is DriverStatus.RideInProgress -> {
-                "Ride in progress" to "Heading to destination"
-            }
-            is DriverStatus.Cancelled -> {
-                "Ride cancelled" to "The rider cancelled"
-            }
+        return if (data != null) {
+            NotificationHelper.buildDriverStatusNotification(
+                context = this,
+                contentIntent = createContentIntent(),
+                title = data.title,
+                content = data.content,
+                isHighPriority = data.isHighPriority,
+                channel = data.channel
+            )
+        } else {
+            // Fallback for service startup before first status update
+            NotificationHelper.buildDriverStatusNotification(
+                context = this,
+                contentIntent = createContentIntent(),
+                title = "Starting...",
+                content = "",
+                isHighPriority = false
+            )
         }
     }
 

@@ -58,15 +58,8 @@ class RemoteConfigManager(
      * @return The fetched config, or cached/default if fetch fails
      */
     suspend fun fetchConfig(): AdminConfig = withContext(Dispatchers.IO) {
-        // Wait for relay connection (up to 10 seconds)
-        var waitedMs = 0L
-        while (!relayManager.isConnected() && waitedMs < 10000) {
-            Log.d(TAG, "Waiting for relay connection... (${waitedMs}ms)")
-            delay(500)
-            waitedMs += 500
-        }
-
-        if (!relayManager.isConnected()) {
+        // Wait for relay connection (10 second timeout for config)
+        if (!relayManager.awaitConnected(timeoutMs = 10000L, tag = "fetchConfig")) {
             Log.w(TAG, "No relays connected - using cached/default config")
             return@withContext _config.value
         }
@@ -156,6 +149,8 @@ class RemoteConfigManager(
                 val config = AdminConfig(
                     fareRateUsdPerMile = json.optDouble("fare_rate", AdminConfig.DEFAULT_FARE_RATE),
                     minimumFareUsd = json.optDouble("minimum_fare", AdminConfig.DEFAULT_MINIMUM_FARE),
+                    roadflareFareRateUsdPerMile = json.optDouble("roadflare_fare_rate", AdminConfig.DEFAULT_ROADFLARE_FARE_RATE),
+                    roadflareMinimumFareUsd = json.optDouble("roadflare_minimum_fare", AdminConfig.DEFAULT_ROADFLARE_MINIMUM_FARE),
                     recommendedMints = mints.ifEmpty { AdminConfig.DEFAULT_MINTS },
                     createdAt = json.optLong("created_at", 0)
                 )
@@ -187,6 +182,8 @@ class RemoteConfigManager(
             val json = JSONObject().apply {
                 put("fare_rate", config.fareRateUsdPerMile)
                 put("minimum_fare", config.minimumFareUsd)
+                put("roadflare_fare_rate", config.roadflareFareRateUsdPerMile)
+                put("roadflare_minimum_fare", config.roadflareMinimumFareUsd)
                 put("mints", mintsArray)
                 put("created_at", config.createdAt)
             }

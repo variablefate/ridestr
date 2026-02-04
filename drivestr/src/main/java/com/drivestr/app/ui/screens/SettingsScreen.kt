@@ -13,11 +13,18 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.drivestr.app.viewmodels.DriverStage
 import com.ridestr.common.settings.DisplayCurrency
 import com.ridestr.common.settings.DistanceUnit
 import com.ridestr.common.settings.SettingsManager
+import com.ridestr.common.ui.components.SettingsActionRow
+import com.ridestr.common.ui.components.SettingsNavigationRow
+import com.ridestr.common.ui.components.SettingsSwitchRow
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlinx.coroutines.launch
 
 /**
@@ -72,6 +79,8 @@ fun SettingsContent(
     onOpenTiles: () -> Unit,
     onOpenDevOptions: () -> Unit,
     onOpenWalletSettings: () -> Unit = {},
+    removedFollowers: List<com.ridestr.common.nostr.events.MutedRider> = emptyList(),
+    onUnremoveFollower: (String) -> Unit = {},
     onSyncProfile: (suspend () -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
@@ -81,6 +90,9 @@ fun SettingsContent(
     val notificationSoundEnabled by settingsManager.notificationSoundEnabled.collectAsState()
     val notificationVibrationEnabled by settingsManager.notificationVibrationEnabled.collectAsState()
     val alwaysAskVehicle by settingsManager.alwaysAskVehicle.collectAsState()
+    val roadflareAlertsEnabled by settingsManager.roadflareAlertsEnabled.collectAsState()
+
+    val context = LocalContext.current
 
     // Sync state
     var isSyncing by remember { mutableStateOf(false) }
@@ -166,6 +178,31 @@ fun SettingsContent(
                 onCheckedChange = { settingsManager.setNotificationVibrationEnabled(it) }
             )
 
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+            // RoadFlare Section
+            Text(
+                text = "RoadFlare",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(vertical = 8.dp)
+            )
+
+            // RoadFlare Background Alerts
+            SettingsSwitchRow(
+                title = "Background Alerts",
+                description = if (roadflareAlertsEnabled)
+                    "Receive RoadFlare notifications even when app is closed (paused when Unavailable)"
+                else
+                    "Only receive RoadFlare requests when app is open",
+                checked = roadflareAlertsEnabled,
+                onCheckedChange = { enabled ->
+                    // Only update the setting - MainActivity's LaunchedEffect handles
+                    // service lifecycle with permission gating (Finding 5, Finding 14)
+                    settingsManager.setRoadflareAlertsEnabled(enabled)
+                }
+            )
+
             // Vehicle Section - Only show if user has multiple vehicles
             if (hasMultipleVehicles) {
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
@@ -220,6 +257,52 @@ fun SettingsContent(
                 onClick = onOpenDevOptions
             )
 
+            // Removed Followers Section
+            if (removedFollowers.isNotEmpty()) {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+                Text(
+                    text = "Removed Followers",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(vertical = 8.dp)
+                )
+
+                Text(
+                    text = "These riders can no longer see your location. Restoring a follower will make them appear as pending (needing a fresh key exchange).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+
+                val dateFormat = remember { SimpleDateFormat("MMM d, yyyy", Locale.getDefault()) }
+                removedFollowers.forEach { removed ->
+                    val displayName = "${removed.pubkey.take(8)}...${removed.pubkey.takeLast(4)}"
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = displayName,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Text(
+                                text = "Removed ${dateFormat.format(Date(removed.mutedAt * 1000))}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        TextButton(onClick = { onUnremoveFollower(removed.pubkey) }) {
+                            Text("Restore")
+                        }
+                    }
+                }
+            }
+
             // Profile Sync Section (last item)
             if (onSyncProfile != null) {
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
@@ -253,162 +336,5 @@ fun SettingsContent(
                     }
                 )
             }
-    }
-}
-
-@Composable
-private fun SettingsSwitchRow(
-    title: String,
-    description: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
-    modifier: Modifier = Modifier,
-    checkedLabel: String? = null,
-    uncheckedLabel: String? = null,
-    enabled: Boolean = true
-) {
-    val contentAlpha = if (enabled) 1f else 0.5f
-
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(vertical = 8.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = contentAlpha)
-            )
-            Text(
-                text = description,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = contentAlpha)
-            )
-        }
-        Spacer(modifier = Modifier.width(16.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            if (uncheckedLabel != null) {
-                Text(
-                    text = uncheckedLabel,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = (if (!checked) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.onSurfaceVariant).copy(alpha = contentAlpha)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-            }
-            Switch(
-                checked = checked,
-                onCheckedChange = onCheckedChange,
-                enabled = enabled
-            )
-            if (checkedLabel != null) {
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = checkedLabel,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = (if (checked) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.onSurfaceVariant).copy(alpha = contentAlpha)
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun SettingsNavigationRow(
-    title: String,
-    description: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(vertical = 12.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.weight(1f)
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(24.dp)
-            )
-            Spacer(modifier = Modifier.width(16.dp))
-            Column {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.titleMedium
-                )
-                Text(
-                    text = description,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
-        Icon(
-            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-            contentDescription = "Navigate",
-            tint = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-    }
-}
-
-@Composable
-private fun SettingsActionRow(
-    title: String,
-    description: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    isLoading: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .clickable(enabled = !isLoading, onClick = onClick)
-            .padding(vertical = 12.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.weight(1f)
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(24.dp)
-            )
-            Spacer(modifier = Modifier.width(16.dp))
-            Column {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.titleMedium
-                )
-                Text(
-                    text = description,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
-        if (isLoading) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(24.dp),
-                strokeWidth = 2.dp
-            )
-        }
     }
 }

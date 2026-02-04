@@ -9,11 +9,12 @@ import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
  * Each implementation handles its own event format and NIP-44 encryption.
  * All data is encrypted to self (user's own pubkey) for privacy.
  *
- * Implementations:
+ * Known implementations:
  * - Nip60WalletSyncAdapter (order=0, kind=7375/17375)
- * - RideHistorySyncAdapter (order=1, kind=30174)
- * - VehicleSyncAdapter (order=2, kind=30175)
- * - SavedLocationSyncAdapter (order=3, kind=30176)
+ * - ProfileSyncAdapter (order=1, kind=30177) - unified vehicles, locations, settings
+ * - RideHistorySyncAdapter (order=2, kind=30174)
+ * - DriverRoadflareSyncAdapter (order=3, kind=30012) - driver app only
+ * - FollowedDriversSyncAdapter (order=4, kind=30011) - rider app only
  */
 interface SyncableProfileData {
     /**
@@ -154,5 +155,14 @@ sealed class SyncMetadata {
         val vehicleCount: Int = 0,
         val savedLocationCount: Int = 0,
         val settingsRestored: Boolean = false
+    ) : SyncMetadata()
+
+    /** RoadFlare followed drivers sync result (rider app) */
+    data class FollowedDrivers(val count: Int) : SyncMetadata()
+
+    /** RoadFlare driver state sync result (driver app) */
+    data class DriverRoadflare(
+        val hasKey: Boolean,
+        val followerCount: Int
     ) : SyncMetadata()
 }

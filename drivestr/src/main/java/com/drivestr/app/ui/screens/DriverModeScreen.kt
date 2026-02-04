@@ -245,7 +245,7 @@ fun DriverModeScreen(
     // Watch for location refresh requests (e.g., when app returns to foreground)
     val locationRefreshRequested by viewModel.locationRefreshRequested.collectAsState()
     LaunchedEffect(locationRefreshRequested, useManualDriverLocation) {
-        if (locationRefreshRequested && uiState.stage == DriverStage.AVAILABLE) {
+        if (locationRefreshRequested && (uiState.stage == DriverStage.AVAILABLE || uiState.stage == DriverStage.ROADFLARE_ONLY)) {
             Log.d(TAG, "Location refresh requested (e.g., app returned to foreground)")
             viewModel.acknowledgeLocationRefresh()
 
@@ -527,7 +527,37 @@ fun DriverModeScreen(
                                 viewModel.goOnline(location, vehicle)
                             }
                         }
+                    },
+                    onGoRoadflareOnly = {
+                        requestNotificationPermissionIfNeeded()
+                        withCurrentLocation { location ->
+                            val vehicle = vehicleRepository.getActiveVehicle(activeVehicleId)
+                            viewModel.goRoadflareOnly(location, vehicle)
+                        }
                     }
+                )
+            }
+
+            DriverStage.ROADFLARE_ONLY -> {
+                RoadflareOnlyContent(
+                    uiState = uiState,
+                    onGoFullyOnline = {
+                        withCurrentLocation { location ->
+                            val shouldShowPicker = alwaysAskVehicle && vehicles.size > 1
+                            if (shouldShowPicker) {
+                                pendingLocationForGoOnline = location
+                                showVehiclePickerDialog = true
+                            } else {
+                                val vehicle = vehicleRepository.getActiveVehicle(activeVehicleId)
+                                viewModel.goOnline(location, vehicle)
+                            }
+                        }
+                    },
+                    onGoOffline = { viewModel.goOffline() },
+                    onAcceptOffer = { viewModel.acceptOffer(it) },
+                    onDeclineOffer = { viewModel.declineOffer(it) },
+                    settingsManager = settingsManager,
+                    priceService = viewModel.bitcoinPriceService
                 )
             }
 
@@ -613,7 +643,8 @@ private fun OfflineContent(
     statusMessage: String,
     isFetchingLocation: Boolean,
     locationError: String?,
-    onGoOnline: () -> Unit
+    onGoOnline: () -> Unit,
+    onGoRoadflareOnly: () -> Unit = {}
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -681,7 +712,146 @@ private fun OfflineContent(
                 } else {
                     Icon(Icons.Default.Power, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Go Online")
+                    Text("Go Online - All Rides")
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            OutlinedButton(
+                onClick = onGoRoadflareOnly,
+                enabled = !isFetchingLocation,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Default.People, contentDescription = null)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Go Online - RoadFlare Only")
+            }
+        }
+    }
+}
+
+@Composable
+private fun RoadflareOnlyContent(
+    uiState: DriverUiState,
+    onGoFullyOnline: () -> Unit,
+    onGoOffline: () -> Unit,
+    onAcceptOffer: (RideOfferData) -> Unit,
+    onDeclineOffer: (RideOfferData) -> Unit,
+    settingsManager: SettingsManager,
+    priceService: com.ridestr.common.bitcoin.BitcoinPriceService
+) {
+    val displayCurrency by settingsManager.displayCurrency.collectAsState()
+    val distanceUnit by settingsManager.distanceUnit.collectAsState()
+    val btcPriceUsd by priceService.btcPriceUsd.collectAsState()
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        // Status card
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
+            )
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.People,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(32.dp)
+                )
+                Spacer(modifier = Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "RoadFlare Only",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "Broadcasting to followers, receiving RoadFlare requests",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
+        // Action buttons
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Button(
+                onClick = onGoFullyOnline,
+                modifier = Modifier.weight(1f)
+            ) {
+                Icon(Icons.Default.Power, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("Go Fully Online")
+            }
+            OutlinedButton(
+                onClick = onGoOffline,
+                modifier = Modifier.weight(1f)
+            ) {
+                Icon(Icons.Default.PowerOff, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("Go Offline")
+            }
+        }
+
+        // Pending RoadFlare offers
+        if (uiState.pendingOffers.isNotEmpty()) {
+            Text(
+                text = "RoadFlare Requests",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(top = 8.dp)
+            )
+            uiState.pendingOffers.forEach { offer ->
+                RideOfferCard(
+                    offer = offer,
+                    pickupRoute = uiState.directOfferPickupRoutes[offer.eventId],
+                    rideRoute = uiState.directOfferRideRoutes[offer.eventId],
+                    isProcessing = uiState.isProcessingOffer,
+                    onAccept = { onAcceptOffer(offer) },
+                    onDecline = { onDeclineOffer(offer) },
+                    settingsManager = settingsManager,
+                    priceService = priceService
+                )
+            }
+        } else {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                )
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(24.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Sensors,
+                        contentDescription = null,
+                        modifier = Modifier.size(40.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Waiting for RoadFlare requests...",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center
+                    )
                 }
             }
         }
@@ -1281,7 +1451,7 @@ private fun ArrivedAtPickupContent(
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.primaryContainer
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
         )
     ) {
         Column(
@@ -1302,7 +1472,8 @@ private fun ArrivedAtPickupContent(
             Text(
                 text = "ARRIVED AT PICKUP",
                 style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
             Spacer(modifier = Modifier.height(8.dp))
@@ -1773,10 +1944,19 @@ private fun RideOfferCard(
                         )
                     }
                     Text(
-                        text = "Direct Request",
+                        text = if (offer.isRoadflare) "RoadFlare" else "Direct Request",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary
+                        color = if (offer.isRoadflare) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary
                     )
+                    // Show non-bitcoin payment method for RoadFlare offers
+                    if (offer.isRoadflare && offer.paymentMethod != "cashu") {
+                        val methodDisplay = com.ridestr.common.nostr.events.PaymentMethod.fromString(offer.paymentMethod)?.displayName ?: offer.paymentMethod
+                        Text(
+                            text = "Payment: $methodDisplay",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.tertiary
+                        )
+                    }
                 }
                 Text(
                     text = relativeTime,
@@ -2007,6 +2187,13 @@ private fun BroadcastRideRequestCard(
                             settingsManager = settingsManager,
                             priceService = priceService,
                             style = MaterialTheme.typography.headlineSmall
+                        )
+                    }
+                    if (request.isRoadflare) {
+                        Text(
+                            text = "RoadFlare",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.tertiary
                         )
                     }
                 }

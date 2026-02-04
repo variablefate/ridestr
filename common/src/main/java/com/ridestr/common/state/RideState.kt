@@ -161,6 +161,7 @@ enum class RideState {
  */
 fun RideState.Companion.fromDriverStage(stageName: String): RideState = when (stageName) {
     "OFFLINE" -> RideState.CANCELLED  // No active ride when offline
+    "ROADFLARE_ONLY" -> RideState.CREATED  // Waiting for RoadFlare offers = pre-created state
     "AVAILABLE" -> RideState.CREATED  // Waiting for offers = pre-created state
     "RIDE_ACCEPTED" -> RideState.ACCEPTED
     "EN_ROUTE_TO_PICKUP" -> RideState.EN_ROUTE

@@ -1,7 +1,7 @@
 # Ridestr Payment Architecture
 
-**Last Updated**: 2026-01-17
-**Status**: ✅ COMPLETE - Wallet, HTLC, P2PK Signing, Integration Wired
+**Last Updated**: 2026-02-03
+**Status**: ✅ COMPLETE - Wallet, HTLC, P2PK Signing, Integration Wired, Phase 5 Reorganization, Phase 6 Test Infrastructure
 
 ---
 
@@ -28,6 +28,92 @@ The Ridestr wallet uses **Cashu ecash** for trustless ride payments. The impleme
 | HTLC Create (NUT-14) | ✅ COMPLETE | Uses `/v1/swap` with wallet pubkey |
 | HTLC Claim (NUT-14) | ✅ COMPLETE | P2PK Schnorr signatures per-proof |
 | ViewModel Integration | ✅ COMPLETE | Deferred locking after acceptance |
+| Unit Test Infrastructure | ✅ COMPLETE | 181 tests with MockK + Robolectric (Phase 6) |
+| Nip60Store Interface | ✅ COMPLETE | Testable abstraction for NIP-60 operations |
+| Proof Conservation Tests | ✅ COMPLETE | Contract tests for publish-before-delete invariants |
+
+---
+
+## Test Infrastructure (Phase 6 - February 2026)
+
+The payment module includes **181 unit tests** covering all error paths and proof conservation invariants.
+
+### Test Files
+
+| File | Tests | Coverage |
+|------|-------|----------|
+| `PaymentCryptoTest.kt` | 23 | Preimage/hash generation |
+| `CashuCryptoTest.kt` | 30 | hashToCurve, NUT-13, BIP-39 |
+| `CashuTokenCodecTest.kt` | 30 | Token encoding/decoding |
+| `HtlcResultTest.kt` | 23 | Sealed class exhaustiveness |
+| `CashuBackendErrorTest.kt` | 32 | Error mapping with FakeMintApi |
+| `FakeNip60StoreTest.kt` | 32 | Mock NIP-60 API behavior |
+| `ProofConservationTest.kt` | 10 | Proof safety invariants |
+
+### Running Tests
+
+```bash
+# Run all payment tests
+./gradlew :common:testDebugUnitTest --tests "com.ridestr.common.payment.*"
+
+# Or use the batch file
+run_tests.bat
+```
+
+### Key Test Infrastructure
+
+**Nip60Store Interface** - Testable abstraction for NIP-60 operations:
+- `publishProofs()`, `fetchProofs()`, `selectProofsForSpending()`
+- `deleteProofEvents()`, `publishWalletMetadata()`
+- Implemented by `Nip60WalletSync`, test double is `FakeNip60Store`
+
+**FakeNip60Store** - Mock NIP-60 storage with verification:
+- Tracks call order for publish-before-delete invariants
+- `getCallLog()` - Returns ordered list of operations
+- `verifyPublishBeforeDelete()` - Asserts safe deletion pattern
+
+**FakeMintApi** - Queues mock responses for swap/checkstate:
+- `queueSwapSuccess(signatures)` - Mock successful swap
+- `queueSwapHttpError(code, body)` - Mock HTTP error
+- `queueSwapTransportFailure(message)` - Mock network failure
+
+**CashuBackend.setTestState()** - Bypasses HTTP for unit tests:
+```kotlin
+backend.setTestState(
+    mintUrl = "https://test.mint",
+    keyset = testKeyset,
+    seed = testSeed
+)
+```
+
+**MainDispatcherRule** - JUnit rule for coroutine tests:
+```kotlin
+@get:Rule
+val mainDispatcherRule = MainDispatcherRule()
+```
+
+**Pre-computed Test Data** - Avoids native library issues:
+```kotlin
+// PaymentCrypto.computePaymentHash() uses secp256k1 which fails in unit tests
+// Pre-compute: SHA256 of 32 zero bytes
+const val TEST_PAYMENT_HASH = "66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925"
+```
+
+### Proof Conservation Contract Tests
+
+`ProofConservationTest.kt` verifies critical safety invariants:
+
+1. **Proofs are never lost** - Published proofs remain until explicitly deleted
+2. **Republish before delete** - Remaining proofs in multi-proof events are republished before deleting the event
+3. **Call ordering verification** - Uses `FakeNip60Store.getCallLog()` to verify operations happen in safe order
+
+These tests ensure the payment system follows the safe deletion pattern documented in `cashu-wallet/SKILL.md`.
+
+### Key Learnings
+
+1. **Native library avoidance**: `PaymentCrypto.computePaymentHash()`, `CashuCrypto.mnemonicToSeed()`, and `WalletKeypair.fromPrivateKey()` use secp256k1 native lib which fails in unit tests
+2. **MockK for final classes**: Kotlin final classes (WalletKeyManager, WalletStorage) require MockK with bytecode manipulation
+3. **Test state injection**: `CashuBackend.setTestState()` + `testActiveKeyset` field bypass all HTTP calls
 
 ---
 
@@ -36,16 +122,38 @@ The Ridestr wallet uses **Cashu ecash** for trustless ride payments. The impleme
 ```
 common/src/main/java/com/ridestr/common/payment/
 ├── cashu/
-│   ├── CashuBackend.kt      # Core mint operations (cdk-kotlin + HTTP)
+│   ├── CashuBackend.kt      # Core mint operations (cdk-kotlin + HTTP) - with region comments
 │   ├── CashuCrypto.kt       # Cryptographic primitives (secp256k1, blind signatures)
 │   ├── CashuProof.kt        # Proof data class
+│   ├── CashuTokenCodec.kt   # Token encoding/decoding utilities (Phase 5 extraction)
 │   └── Nip60WalletSync.kt   # NIP-60 Nostr sync (Kind 7375, 7376, 17375)
 ├── PaymentCrypto.kt         # Preimage/hash generation for HTLC
 ├── PaymentModels.kt         # Data classes (EscrowDetails, WalletBalance, etc.)
 ├── WalletKeyManager.kt      # Wallet keypair + mnemonic storage
-├── WalletService.kt         # Orchestration layer (public API)
+├── WalletService.kt         # Orchestration layer (public API) - with region comments
 └── WalletStorage.kt         # Local persistence (EncryptedSharedPreferences)
 ```
+
+### Phase 5 Reorganization (February 2026)
+
+**CashuTokenCodec** - Stateless utilities extracted from CashuBackend (~200 lines):
+- `HtlcProof` data class
+- `encodeHtlcProofsAsToken()` - Encode HTLC proofs as cashuA token
+- `encodeProofsAsToken()` - Encode plain proofs as cashuA token
+- `parseHtlcToken()` - Decode cashuA/cashuB tokens
+- `extractPaymentHashFromSecret()` - Extract hash from NUT-10 HTLC secret
+- `extractLocktimeFromSecret()` - Extract locktime from NUT-14 secret
+- `extractRefundKeysFromSecret()` - Extract refund keys from NUT-14 secret
+
+**Region Comments** - Both CashuBackend and WalletService now have organized sections:
+- INSTANCE STATE, LIFECYCLE & CONNECTION
+- HTLC ESCROW / HTLC PAYMENT FLOWS (with critical invariants documented)
+- MINTING, MELTING, RECOVERY, DIAGNOSTICS, etc.
+
+**Correlation ID Logging** - Payment operations now log with ride correlation IDs:
+- RiderViewModel: `[RIDE xxxxxxxx] Locking HTLC...`
+- DriverViewModel: `[RIDE xxxxxxxx] Claiming HTLC...`
+- Uses existing identifiers: `acceptanceEventId` (rider), `confirmationEventId` (driver)
 
 ---
 
@@ -62,6 +170,19 @@ common/src/main/java/com/ridestr/common/payment/
 - Melting tokens (NUT-05) via `wallet.melt()`
 - HTLC creation and claiming (NUT-14) via HTTP `/v1/swap`
 - Proof state verification (NUT-07) via HTTP `/v1/checkstate`
+- Delegates token encoding/decoding to CashuTokenCodec
+
+**Region Organization** (Phase 5):
+- INSTANCE STATE - WebSocket, wallet, connection state
+- LIFECYCLE & CONNECTION - connect(), disconnect(), ensureConnected()
+- MINT API - QUOTES (NUT-04/05) - getMintQuote(), getMeltQuote()
+- PROOF VERIFICATION (NUT-07) - verifyProofStatesBySecret()
+- HTLC ESCROW (NUT-14) - **with critical invariants documented**
+- TOKEN ENCODING & RECEIPT - delegates to CashuTokenCodec
+- MINTING (NUT-04) - mintTokens()
+- MELTING (NUT-05) - meltTokens()
+- KEYSET MANAGEMENT & DEPOSIT RECOVERY
+- RECOVERY (NUT-09) - restoreProofs()
 
 **Key Functions**:
 
@@ -76,6 +197,26 @@ common/src/main/java/com/ridestr/common/payment/
 | `createHtlcTokenFromProofs()` | Create HTLC escrow | ✅ |
 | `claimHtlcToken(token, preimage)` | Claim HTLC | ✅ |
 | `verifyProofStatesBySecret()` | NUT-07 proof verification | ✅ |
+
+### Layer 1.5: CashuTokenCodec (Stateless utilities)
+
+**File**: `CashuTokenCodec.kt` (extracted in Phase 5)
+
+**Responsibilities**:
+- Pure functions for Cashu token encoding/decoding
+- HTLC secret parsing (NUT-10/14)
+- No instance state - all methods are stateless
+
+**Key Functions**:
+
+| Function | Purpose |
+|----------|---------|
+| `encodeHtlcProofsAsToken()` | Encode HTLC proofs as cashuA token |
+| `encodeProofsAsToken()` | Encode plain proofs as cashuA token |
+| `parseHtlcToken()` | Decode cashuA/cashuB tokens |
+| `extractPaymentHashFromSecret()` | Extract hash from NUT-10 secret |
+| `extractLocktimeFromSecret()` | Extract locktime from NUT-14 secret |
+| `extractRefundKeysFromSecret()` | Extract refund keys from NUT-14 secret |
 
 ### Layer 2: WalletService (Orchestration)
 
@@ -267,11 +408,12 @@ fun signSchnorr(messageHash: ByteArray): String? {
 }
 ```
 
-**signP2pkProof()** (`CashuBackend.kt:630`):
+**signP2pkProof()** (`CashuBackend.kt`):
 ```kotlin
 private fun signP2pkProof(secret: String, proofC: String): String? {
+    // NUT-11: Sign SHA256(secret) only - proofC kept for logging
     val messageHash = MessageDigest.getInstance("SHA-256")
-        .digest((secret + proofC).toByteArray())
+        .digest(secret.toByteArray())
     return walletKeyManager.getOrCreateWalletKeypair().signSchnorr(messageHash)
 }
 ```
@@ -421,9 +563,50 @@ return (valueField.get(amount) as Long)
 
 ---
 
+## Correlation ID Logging
+
+Payment operations use ride correlation IDs to enable end-to-end tracing through logs.
+
+### Design Decision: Different IDs at Different Stages
+
+| ViewModel | ID Used | Why |
+|-----------|---------|-----|
+| **RiderViewModel** | `acceptanceEventId` | HTLC locked pre-confirmation; `confirmationEventId` doesn't exist yet |
+| **DriverViewModel** | `confirmationEventId` | HTLC claimed post-confirmation |
+
+**This is intentional design, not a bug.** The rider locks the HTLC in `autoConfirmRide()` immediately after receiving acceptance but BEFORE sending the confirmation event. At that point, only `acceptanceEventId` exists.
+
+### Log Format
+
+```
+[RIDE xxxxxxxx] Locking HTLC: fareAmount=100, paymentHash=abcd1234...
+[RIDE xxxxxxxx] Claiming HTLC: paymentHash=abcd1234...
+```
+
+The 8-character prefix is the first 8 characters of the event ID.
+
+### End-to-End Trace
+
+To trace a ride's payment flow:
+
+1. Find rider's `[RIDE xxxxxxxx]` log entry during `autoConfirmRide()` → shows HTLC lock
+2. The `xxxxxxxx` is from `acceptanceEventId`
+3. Find driver's `[RIDE yyyyyyyy]` log entry during `completeRide()` → shows HTLC claim
+4. The `yyyyyyyy` is from `confirmationEventId`
+5. Cross-reference: `acceptanceEventId` is logged in rider's confirmation event creation
+
+### Implementation Locations
+
+- **RiderViewModel:2970** - `[RIDE $rideCorrelationId] Locking HTLC...`
+- **DriverViewModel:2300-2301** - `[RIDE $rideCorrelationId] Claiming HTLC...`
+
+---
+
 ## Related Documentation
 
 - [NOSTR_EVENTS.md](../protocol/NOSTR_EVENTS.md) - Payment-related event fields
 - [STATE_MACHINES.md](STATE_MACHINES.md) - Ride state transitions
 - [RIDER_VIEWMODEL.md](../viewmodels/RIDER_VIEWMODEL.md) - Integration points
 - [DRIVER_VIEWMODEL.md](../viewmodels/DRIVER_VIEWMODEL.md) - Integration points
+- [COMPATIBILITY_CONTRACTS.md](COMPATIBILITY_CONTRACTS.md) - API stability contracts
+- [PAYMENT_SAFETY.md](PAYMENT_SAFETY.md) - Payment modification checklist

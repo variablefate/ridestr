@@ -8,6 +8,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import java.util.concurrent.ConcurrentHashMap
@@ -204,6 +205,29 @@ class RelayManager(
     }
 
     /**
+     * Suspend until at least one relay is connected.
+     *
+     * @param timeoutMs Maximum time to wait (default 15000ms)
+     * @param tag Optional logging tag (e.g., method name) for context
+     * @return true if connected within timeout, false if timeout exceeded
+     */
+    suspend fun awaitConnected(timeoutMs: Long = 15000L, tag: String? = null): Boolean {
+        var waited = 0L
+        while (!isConnected() && waited < timeoutMs) {
+            if (tag != null) {
+                Log.d(TAG, "$tag: Waiting for relay... (${waited}ms)")
+            }
+            kotlinx.coroutines.delay(500)
+            waited += 500
+        }
+        val connected = isConnected()
+        if (!connected && tag != null) {
+            Log.e(TAG, "$tag: No relays connected after ${timeoutMs}ms")
+        }
+        return connected
+    }
+
+    /**
      * Ensure all relays are connected. Reconnects any disconnected relays,
      * clears stale subscriptions, and resends active subscriptions.
      * Call this when the app returns to foreground.
@@ -327,19 +351,15 @@ class RelayManager(
     private fun handleEvent(event: Event, subscriptionId: String, relayUrl: String) {
         Log.d(TAG, "Received event ${event.id} (kind ${event.kind}) from $relayUrl")
 
-        // Add to events list for debug UI
-        scope.launch(Dispatchers.Main) {
-            val current = _events.value.toMutableList()
-            current.add(0, event to relayUrl)
-            if (current.size > 100) {
-                _events.value = current.take(100)
-            } else {
-                _events.value = current
-            }
+        // Add to events list for debug UI (atomic update)
+        _events.update { currentList ->
+            (listOf(event to relayUrl) + currentList).take(100)
         }
 
-        // Dispatch to subscription callback
-        subscriptions[subscriptionId]?.onEvent?.invoke(event, relayUrl)
+        // Dispatch to subscription callback (snapshot to avoid race with closeSubscription)
+        subscriptions[subscriptionId]?.let { subscription ->
+            subscription.onEvent.invoke(event, relayUrl)
+        }
     }
 
     private fun handleEose(subscriptionId: String, relayUrl: String) {
@@ -359,14 +379,9 @@ class RelayManager(
     private fun handleNotice(message: String, relayUrl: String) {
         Log.d(TAG, "Notice from $relayUrl: $message")
 
-        scope.launch(Dispatchers.Main) {
-            val current = _notices.value.toMutableList()
-            current.add(0, message to relayUrl)
-            if (current.size > 50) {
-                _notices.value = current.take(50)
-            } else {
-                _notices.value = current
-            }
+        // Atomic update
+        _notices.update { currentList ->
+            (listOf(message to relayUrl) + currentList).take(50)
         }
     }
 

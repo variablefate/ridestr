@@ -477,12 +477,43 @@ fun WalletSettingsScreen(
                                 val mins = expiresIn / 60
                                 if (mins > 60) "${mins / 60}h ${mins % 60}m" else "${mins}m"
                             } else "EXPIRED"
-                            Text(
-                                text = "• ${htlc.amountSats} sats - $expiryText",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = if (expiresIn <= 0) MaterialTheme.colorScheme.error
-                                else MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+
+                            // Check if HTLC has been locked for >30 minutes (eligible for acknowledge)
+                            val lockedDurationMs = System.currentTimeMillis() - htlc.createdAt
+                            val thirtyMinutesMs = 30 * 60 * 1000L
+                            val canAcknowledge = htlc.isRefundable() && lockedDurationMs > thirtyMinutesMs
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "• ${htlc.amountSats} sats - $expiryText",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (expiresIn <= 0) MaterialTheme.colorScheme.error
+                                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                if (canAcknowledge) {
+                                    TextButton(
+                                        onClick = {
+                                            scope.launch {
+                                                walletService.acknowledgeIrrecoverableHtlc(htlc.escrowId)
+                                                pendingHtlcs = walletService.getPendingHtlcs()
+                                                refundableHtlcs = walletService.getRefundableHtlcs()
+                                            }
+                                        },
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                                    ) {
+                                        Text(
+                                            "Clear",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.error
+                                        )
+                                    }
+                                }
+                            }
                         }
                         if (pendingHtlcs.size > 5) {
                             Text(
@@ -539,7 +570,9 @@ fun WalletSettingsScreen(
                                         } else if (results.isEmpty()) {
                                             "No expired HTLCs to refund"
                                         } else {
-                                            "Failed to refund ${results.size} HTLCs"
+                                            // Show first failure reason for better diagnostics
+                                            val firstFailure = results.firstOrNull { !it.success }
+                                            firstFailure?.failureReason ?: "Failed to refund ${results.size} HTLCs"
                                         }
                                         // Refresh lists
                                         pendingHtlcs = walletService.getPendingHtlcs()
@@ -566,7 +599,7 @@ fun WalletSettingsScreen(
                     }
 
                     Text(
-                        text = "HTLCs can only be refunded after their locktime expires (2 hours).",
+                        text = "HTLCs can only be refunded after their locktime expires (15 min + 2 min buffer).",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 8.dp)

@@ -68,9 +68,19 @@ object RideAcceptanceEvent {
 
     /**
      * Parse a ride acceptance event.
+     * @param event The event to parse
+     * @param expectedDriverPubKey Optional: If provided, validates that event.pubKey matches.
+     *                             Use for direct offers where a specific driver is expected.
      */
-    fun parse(event: Event): RideAcceptanceData? {
+    fun parse(event: Event, expectedDriverPubKey: String? = null): RideAcceptanceData? {
         if (event.kind != RideshareEventKinds.RIDE_ACCEPTANCE) return null
+
+        // Validate sender if expected pubkey provided (security: prevents spoofed acceptances)
+        if (expectedDriverPubKey != null && event.pubKey != expectedDriverPubKey) {
+            android.util.Log.w("RideAcceptanceEvent",
+                "Rejecting acceptance from unexpected pubkey: ${event.pubKey.take(16)} (expected ${expectedDriverPubKey.take(16)})")
+            return null
+        }
 
         return try {
             val json = JSONObject(event.content)

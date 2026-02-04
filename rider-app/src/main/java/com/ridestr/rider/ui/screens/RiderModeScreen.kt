@@ -45,7 +45,10 @@ import com.google.android.gms.tasks.CancellationTokenSource
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
+import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
+import com.ridestr.common.nostr.events.AdminConfig
 import com.ridestr.common.nostr.events.DriverAvailabilityData
+import com.ridestr.common.nostr.events.PaymentMethod
 import com.ridestr.common.nostr.events.Location
 import com.ridestr.common.nostr.events.RideshareChatData
 import com.ridestr.common.nostr.events.UserProfile
@@ -65,6 +68,8 @@ import com.ridestr.common.ui.formatFare
 import com.ridestr.common.ui.LocationSearchField
 import com.ridestr.common.ui.ManualCoordinateInput
 import com.ridestr.common.ui.RecentsSection
+import com.ridestr.common.data.FollowedDriversRepository
+import com.ridestr.common.nostr.events.FollowedDriver
 import com.ridestr.rider.viewmodels.RideStage
 import com.ridestr.rider.viewmodels.RiderUiState
 import com.ridestr.rider.viewmodels.RiderViewModel
@@ -85,6 +90,7 @@ private enum class WaitingMode {
 fun RiderModeScreen(
     viewModel: RiderViewModel,
     settingsManager: SettingsManager,
+    followedDriversRepository: FollowedDriversRepository? = null,
     onOpenTiles: () -> Unit,
     onOpenWallet: () -> Unit = {},
     onOpenWalletWithDeposit: (Long) -> Unit = {},  // Opens wallet with pre-filled deposit amount
@@ -93,6 +99,7 @@ fun RiderModeScreen(
 ) {
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsState()
+    val remoteConfig by viewModel.remoteConfig.collectAsState()
     var showChatSheet by remember { mutableStateOf(false) }
 
     // Driver selection sheet state - lifted to RiderModeScreen level
@@ -164,6 +171,10 @@ fun RiderModeScreen(
 
     // Insufficient funds dialog
     if (uiState.showInsufficientFundsDialog) {
+        val roadflarePaymentMethods = settingsManager.roadflarePaymentMethods.collectAsState()
+        val hasAlternateMethods = uiState.insufficientFundsIsRoadflare &&
+            roadflarePaymentMethods.value.isNotEmpty()
+
         AlertDialog(
             onDismissRequest = { viewModel.dismissInsufficientFundsDialog() },
             icon = {
@@ -173,33 +184,133 @@ fun RiderModeScreen(
                     tint = MaterialTheme.colorScheme.primary
                 )
             },
-            title = { Text("Insufficient Funds") },
+            title = { Text(if (uiState.insufficientFundsIsRoadflare) "Insufficient Bitcoin Funds" else "Insufficient Funds") },
             text = {
                 Column {
                     Text(
-                        "You need ${"%,d".format(uiState.insufficientFundsAmount)} more sats to request this ride."
+                        "You need ${"%,d".format(uiState.insufficientFundsAmount)} more sats to request this ride. This includes a small buffer for potential mint fees."
                     )
-                    Spacer(modifier = Modifier.height(8.dp))
+                    if (uiState.insufficientFundsIsRoadflare) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            if (hasAlternateMethods)
+                                "Since this is a RoadFlare ride, you can continue with an alternate payment method."
+                            else
+                                "Since this is a RoadFlare ride, you can set up alternative payment methods to proceed without bitcoin.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (uiState.insufficientFundsIsRoadflare) {
+                        if (hasAlternateMethods) {
+                            Button(
+                                onClick = {
+                                    val method = roadflarePaymentMethods.value.first()
+                                    viewModel.sendRoadflareOfferWithAlternatePayment(method)
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("Use Alternative Payment")
+                            }
+                        } else {
+                            Button(
+                                onClick = {
+                                    viewModel.dismissInsufficientFundsDialog()
+                                    viewModel.showAlternatePaymentSetup()
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("Set Alternative Payment")
+                            }
+                        }
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            val depositAmount = uiState.depositAmountNeeded
+                            viewModel.dismissInsufficientFundsDialog()
+                            onOpenWalletWithDeposit(depositAmount)
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Deposit ${"%,d".format(uiState.depositAmountNeeded)} sats")
+                    }
+                    TextButton(
+                        onClick = { viewModel.dismissInsufficientFundsDialog() },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Cancel")
+                    }
+                }
+            },
+            dismissButton = {}
+        )
+    }
+
+    // Alternate payment setup dialog for RoadFlare
+    if (uiState.showAlternatePaymentSetupDialog) {
+        val currentMethods = settingsManager.roadflarePaymentMethods.collectAsState()
+
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissAlternatePaymentSetup() },
+            icon = {
+                Icon(
+                    Icons.Default.Payment,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            },
+            title = { Text("Alternative Payment Methods") },
+            text = {
+                Column {
                     Text(
-                        "This includes a small buffer for potential mint fees.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        "Select payment methods you can use for RoadFlare rides when you don't have enough bitcoin.",
+                        style = MaterialTheme.typography.bodyMedium
                     )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    PaymentMethod.ROADFLARE_ALTERNATE_METHODS.forEach { method ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp)
+                        ) {
+                            Checkbox(
+                                checked = method.value in currentMethods.value,
+                                onCheckedChange = { checked ->
+                                    val updated = if (checked) {
+                                        currentMethods.value + method.value
+                                    } else {
+                                        currentMethods.value - method.value
+                                    }
+                                    settingsManager.setRoadflarePaymentMethods(updated)
+                                }
+                            )
+                            Text(
+                                text = method.displayName,
+                                style = MaterialTheme.typography.bodyLarge,
+                                modifier = Modifier.padding(start = 8.dp)
+                            )
+                        }
+                    }
                 }
             },
             confirmButton = {
                 Button(
-                    onClick = {
-                        val depositAmount = uiState.depositAmountNeeded
-                        viewModel.dismissInsufficientFundsDialog()
-                        onOpenWalletWithDeposit(depositAmount)
-                    }
+                    onClick = { viewModel.dismissAlternatePaymentSetup() },
+                    enabled = currentMethods.value.isNotEmpty()
                 ) {
-                    Text("Deposit ${"%,d".format(uiState.depositAmountNeeded)} sats")
+                    Text("Done")
                 }
             },
             dismissButton = {
-                TextButton(onClick = { viewModel.dismissInsufficientFundsDialog() }) {
+                TextButton(onClick = { viewModel.dismissAlternatePaymentSetup() }) {
                     Text("Cancel")
                 }
             }
@@ -374,7 +485,6 @@ fun RiderModeScreen(
                         // Then broadcast the ride request
                         viewModel.broadcastRideRequest()
                     },
-                    onToggleExpandedSearch = viewModel::toggleExpandedSearch,
                     settingsManager = settingsManager,
                     priceService = viewModel.bitcoinPriceService,
                     favorites = viewModel.getFavorites(),
@@ -384,7 +494,13 @@ fun RiderModeScreen(
                     onUnpinFavorite = viewModel::unpinFavorite,
                     onDeleteSavedLocation = viewModel::removeSavedLocation,
                     onSwapAddresses = viewModel::swapAddresses,
-                    onRefreshSavedLocations = onRefreshSavedLocations
+                    onRefreshSavedLocations = onRefreshSavedLocations,
+                    // RoadFlare parameters
+                    followedDriversRepository = followedDriversRepository,
+                    nostrService = viewModel.getNostrService(),
+                    roadflareRatePerMile = remoteConfig.roadflareFareRateUsdPerMile,
+                    onSendRoadflareOffer = viewModel::sendRoadflareOffer,
+                    onSendRoadflareToAll = viewModel::sendRoadflareToAll
                 )
             }
             RideStage.BROADCASTING_REQUEST -> {
@@ -450,7 +566,33 @@ fun RiderModeScreen(
                 )
             }
             RideStage.COMPLETED -> {
+                // Get driver info for favorite prompt
+                val driverPubKey = uiState.acceptance?.driverPubKey
+                val driverProfile = driverPubKey?.let { uiState.driverProfiles[it] }
+                val driverName = driverProfile?.bestName()?.split(" ")?.firstOrNull()
+
+                // Check if driver is already in favorites
+                val followedDrivers by followedDriversRepository?.drivers?.collectAsState()
+                    ?: remember { mutableStateOf(emptyList<FollowedDriver>()) }
+                val isAlreadyFavorite = driverPubKey?.let { pubkey ->
+                    followedDrivers.any { it.pubkey == pubkey }
+                } ?: true // Treat as favorite if no pubkey (don't show prompt)
+
                 RideCompletedContent(
+                    driverPubKey = driverPubKey,
+                    driverName = driverName,
+                    isDriverAlreadyFavorite = isAlreadyFavorite,
+                    onAddToFavorites = {
+                        if (driverPubKey != null && followedDriversRepository != null) {
+                            // Note: driver names are fetched from Nostr profiles, not stored
+                            val newDriver = FollowedDriver(
+                                pubkey = driverPubKey,
+                                addedAt = System.currentTimeMillis() / 1000,
+                                note = ""
+                            )
+                            followedDriversRepository.addDriver(newDriver)
+                        }
+                    },
                     onNewRide = viewModel::clearRide
                 )
             }
@@ -483,7 +625,6 @@ private fun IdleContent(
     onClearDriver: () -> Unit,
     onSendOffer: () -> Unit,
     onBroadcastRequest: () -> Unit,
-    onToggleExpandedSearch: () -> Unit,
     settingsManager: SettingsManager,
     priceService: BitcoinPriceService,
     favorites: List<SavedLocation>,
@@ -493,14 +634,26 @@ private fun IdleContent(
     onUnpinFavorite: (String) -> Unit,
     onDeleteSavedLocation: (String) -> Unit,
     onSwapAddresses: () -> Unit,
-    onRefreshSavedLocations: (suspend () -> Unit)? = null
+    onRefreshSavedLocations: (suspend () -> Unit)? = null,
+    // RoadFlare parameters
+    followedDriversRepository: FollowedDriversRepository? = null,
+    nostrService: com.ridestr.common.nostr.NostrService? = null,
+    roadflareRatePerMile: Double = AdminConfig.DEFAULT_ROADFLARE_FARE_RATE,
+    onSendRoadflareOffer: (String, Location?) -> Unit = { _, _ -> },
+    onSendRoadflareToAll: (List<FollowedDriver>, Map<String, Location>) -> Unit = { _, _ -> }
 ) {
     // Track whether driver selection sheet is shown
     var showDriverSelectionSheet by remember { mutableStateOf(false) }
+    // Track whether RoadFlare driver selection sheet is shown
+    var showRoadflareSheet by remember { mutableStateOf(false) }
     // Track whether advanced broadcast option is expanded (in the sheet)
     var showBroadcastOption by remember { mutableStateOf(false) }
     // Privacy warning dialog state
     var showPrivacyWarningDialog by remember { mutableStateOf(false) }
+
+    // RoadFlare driver data
+    val roadflareDrivers by followedDriversRepository?.drivers?.collectAsState() ?: remember { mutableStateOf(emptyList()) }
+    val hasRoadflareDrivers = roadflareDrivers.isNotEmpty()
 
     // Driver Selection Bottom Sheet
     if (showDriverSelectionSheet) {
@@ -516,12 +669,40 @@ private fun IdleContent(
                     showDriverSelectionSheet = false
                 },
                 onClearDriver = onClearDriver,
-                onExpandSearch = onToggleExpandedSearch,
+                onExpandSearch = { }, // Wide area search is now always on by default
                 onBroadcastRequest = { showPrivacyWarningDialog = true },
                 showBroadcastOption = showBroadcastOption,
                 onToggleBroadcastOption = { showBroadcastOption = !showBroadcastOption },
                 settingsManager = settingsManager,
                 priceService = priceService
+            )
+        }
+    }
+
+    // RoadFlare driver selection sheet
+    if (showRoadflareSheet && followedDriversRepository != null) {
+        ModalBottomSheet(
+            onDismissRequest = { showRoadflareSheet = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ) {
+            RoadflareDriverSelectionSheet(
+                drivers = roadflareDrivers,
+                pickupLocation = uiState.pickupLocation,
+                routeResult = uiState.routeResult,
+                isSending = uiState.isSendingOffer,
+                nostrService = nostrService,
+                settingsManager = settingsManager,
+                priceService = priceService,
+                roadflareRatePerMile = roadflareRatePerMile,
+                onSelectDriver = { driverPubKey, driverLocation ->
+                    onSendRoadflareOffer(driverPubKey, driverLocation)
+                    showRoadflareSheet = false
+                },
+                onSendToAll = { drivers, locations ->
+                    onSendRoadflareToAll(drivers, locations)
+                    showRoadflareSheet = false
+                },
+                onDismiss = { showRoadflareSheet = false }
             )
         }
     }
@@ -594,9 +775,9 @@ private fun IdleContent(
                     onStopUsingCurrentLocation = onStopUsingCurrentLocation,
                     onClearPickup = onClearPickup,
                     onClearDest = onClearDest,
-                    expandedSearch = uiState.expandedSearch,
                     nearbyDriverCount = uiState.nearbyDriverCount,
-                    onToggleExpandedSearch = onToggleExpandedSearch,
+                    onOpenRoadflare = { showRoadflareSheet = true },
+                    hasRoadflareDrivers = hasRoadflareDrivers,
                     settingsManager = settingsManager,
                     priceService = priceService,
                     onRequestRide = { showDriverSelectionSheet = true },
@@ -649,9 +830,9 @@ private fun GeocodingLocationInputCard(
     onStopUsingCurrentLocation: () -> Unit,
     onClearPickup: () -> Unit,
     onClearDest: () -> Unit,
-    expandedSearch: Boolean,
     nearbyDriverCount: Int,
-    onToggleExpandedSearch: () -> Unit,
+    onOpenRoadflare: () -> Unit,
+    hasRoadflareDrivers: Boolean,
     settingsManager: SettingsManager,
     priceService: BitcoinPriceService,
     onRequestRide: () -> Unit,
@@ -1110,7 +1291,7 @@ private fun GeocodingLocationInputCard(
 
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    // Nearby drivers and search area toggle
+                    // Nearby drivers count and RoadFlare button
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -1132,26 +1313,24 @@ private fun GeocodingLocationInputCard(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        FilterChip(
-                            selected = expandedSearch,
-                            onClick = onToggleExpandedSearch,
-                            label = {
-                                Text(
-                                    if (expandedSearch) "Wide Area" else "Expand Search",
-                                    style = MaterialTheme.typography.labelSmall
-                                )
-                            },
-                            leadingIcon = {
+                        // RoadFlare button - request from favorite drivers
+                        if (hasRoadflareDrivers) {
+                            FilledTonalButton(
+                                onClick = onOpenRoadflare,
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                            ) {
                                 Icon(
-                                    imageVector = if (expandedSearch)
-                                        Icons.Default.ZoomOutMap
-                                    else
-                                        Icons.Default.ZoomIn,
+                                    Icons.Default.Flare,
                                     contentDescription = null,
-                                    modifier = Modifier.size(14.dp)
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    "RoadFlare",
+                                    style = MaterialTheme.typography.labelMedium
                                 )
                             }
-                        )
+                        }
                     }
 
                     Spacer(modifier = Modifier.height(12.dp))
@@ -2891,7 +3070,7 @@ private fun DriverArrivedContent(
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.primaryContainer
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
         )
     ) {
         Column(
@@ -2921,7 +3100,8 @@ private fun DriverArrivedContent(
             Text(
                 text = "Your driver has arrived!",
                 style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
             Spacer(modifier = Modifier.height(8.dp))
@@ -2932,7 +3112,7 @@ private fun DriverArrivedContent(
                 Text(
                     text = "Look for the $carInfo",
                     style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center
                 )
             }
@@ -2943,7 +3123,7 @@ private fun DriverArrivedContent(
                 Text(
                     text = "Driver: $name",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 
@@ -3179,8 +3359,14 @@ private fun RideInProgressContent(
 
 @Composable
 private fun RideCompletedContent(
+    driverPubKey: String?,
+    driverName: String?,
+    isDriverAlreadyFavorite: Boolean,
+    onAddToFavorites: () -> Unit,
     onNewRide: () -> Unit
 ) {
+    var showAddedConfirmation by remember { mutableStateOf(false) }
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -3208,6 +3394,72 @@ private fun RideCompletedContent(
                 fontWeight = FontWeight.Bold
             )
 
+            // Show "Add to Favorites" prompt if driver isn't already a favorite
+            if (driverPubKey != null && !isDriverAlreadyFavorite && !showAddedConfirmation) {
+                Spacer(modifier = Modifier.height(16.dp))
+
+                OutlinedCard(
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = "Did you enjoy your ride?",
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                        Text(
+                            text = "Add ${driverName ?: "this driver"} to your RoadFlare network",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        OutlinedButton(
+                            onClick = {
+                                onAddToFavorites()
+                                showAddedConfirmation = true
+                            }
+                        ) {
+                            Icon(
+                                Icons.Default.PersonAdd,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Add to Favorites")
+                        }
+                    }
+                }
+            }
+
+            // Show confirmation after adding
+            if (showAddedConfirmation) {
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    Icon(
+                        Icons.Default.Check,
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "${driverName ?: "Driver"} added to favorites!",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+
             Spacer(modifier = Modifier.height(24.dp))
 
             Button(onClick = onNewRide) {
@@ -3215,4 +3467,463 @@ private fun RideCompletedContent(
             }
         }
     }
+}
+
+/**
+ * RoadFlare driver selection sheet.
+ * Shows favorite drivers with real-time status and fare calculations.
+ */
+@Composable
+private fun RoadflareDriverSelectionSheet(
+    drivers: List<FollowedDriver>,
+    pickupLocation: Location?,
+    routeResult: RouteResult?,
+    isSending: Boolean,
+    nostrService: com.ridestr.common.nostr.NostrService?,
+    settingsManager: SettingsManager,
+    priceService: BitcoinPriceService,
+    roadflareRatePerMile: Double = AdminConfig.DEFAULT_ROADFLARE_FARE_RATE,
+    onSelectDriver: (String, Location?) -> Unit,
+    onSendToAll: (List<FollowedDriver>, Map<String, Location>) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val scope = rememberCoroutineScope()
+
+    // Track driver locations by pubkey (from Kind 30014) with status and timestamp for staleness filtering
+    data class RoadflareDriverState(
+        val location: Location,
+        val status: String,
+        val timestamp: Long
+    )
+    val driverLocations = remember { mutableStateMapOf<String, RoadflareDriverState>() }
+    val driverNames = remember { mutableStateMapOf<String, String>() }
+
+    // Track last createdAt per driver to reject out-of-order events
+    val lastLocationCreatedAt = remember { mutableStateMapOf<String, Long>() }
+
+    // Subscribe to driver locations
+    var locationSubId by remember { mutableStateOf<String?>(null) }
+
+    DisposableEffect(drivers, nostrService) {
+        if (nostrService == null) return@DisposableEffect onDispose {}
+
+        // Fetch driver profile names (prefer displayName over username)
+        drivers.forEach { driver ->
+            nostrService.subscribeToProfile(driver.pubkey) { profile ->
+                val fullName = profile.displayName ?: profile.name
+                fullName?.let { name ->
+                    driverNames[driver.pubkey] = name.split(" ").firstOrNull() ?: name
+                }
+            }
+        }
+
+        // Subscribe to driver locations - need drivers with keys
+        val driversWithKeys = drivers.filter { it.roadflareKey != null }
+        if (driversWithKeys.isNotEmpty()) {
+            locationSubId = nostrService.subscribeToRoadflareLocations(
+                driverPubkeys = driversWithKeys.map { it.pubkey }
+            ) { event, relayUrl ->
+                // Find the driver and decrypt their location
+                val driver = driversWithKeys.find { it.pubkey == event.pubKey }
+                if (driver?.roadflareKey != null) {
+                    val locationData = decryptRoadflareLocation(
+                        roadflarePrivKey = driver.roadflareKey!!.privateKey,
+                        driverPubKey = event.pubKey,
+                        event = event
+                    )
+                    if (locationData != null) {
+                        val eventCreatedAt = event.createdAt
+
+                        // Check if event has expired (NIP-40 expiration tag)
+                        val isExpired = com.ridestr.common.nostr.events.RoadflareLocationEvent.isExpired(event)
+
+                        // Check if this is older than what we already have (out-of-order)
+                        val lastSeen = lastLocationCreatedAt[event.pubKey] ?: 0L
+                        val isOutOfOrder = eventCreatedAt < lastSeen
+
+                        if (!isExpired && !isOutOfOrder) {
+                            lastLocationCreatedAt[event.pubKey] = eventCreatedAt
+
+                            // Check status: remove offline drivers (like regular rides do)
+                            if (locationData.tagStatus == com.ridestr.common.nostr.events.RoadflareLocationEvent.Status.OFFLINE) {
+                                driverLocations.remove(event.pubKey)
+                                android.util.Log.d("RoadflareSelection", "Driver ${event.pubKey.take(8)} went offline - removed from selection")
+                            } else {
+                                driverLocations[event.pubKey] = RoadflareDriverState(
+                                    location = Location(
+                                        lat = locationData.location.lat,
+                                        lon = locationData.location.lon
+                                    ),
+                                    status = locationData.tagStatus,
+                                    timestamp = eventCreatedAt
+                                )
+                            }
+                        } else {
+                            android.util.Log.d("RoadflareSelection", "Rejected stale/out-of-order 30014: expired=$isExpired, outOfOrder=$isOutOfOrder")
+                        }
+                    }
+                }
+            }
+        }
+
+        onDispose {
+            locationSubId?.let { nostrService.closeSubscription(it) }
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .padding(bottom = 32.dp)
+    ) {
+        // Header
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.Flare,
+                    contentDescription = null,
+                    modifier = Modifier.size(24.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "RoadFlare",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            // Privacy indicator
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .background(
+                        MaterialTheme.colorScheme.primaryContainer,
+                        RoundedCornerShape(8.dp)
+                    )
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+            ) {
+                Icon(
+                    Icons.Default.Lock,
+                    contentDescription = null,
+                    modifier = Modifier.size(14.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = "Private",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text(
+            text = "Request a ride from your favorite drivers",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        if (drivers.isEmpty()) {
+            // No drivers
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(32.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Icon(
+                    Icons.Default.PersonAdd,
+                    contentDescription = null,
+                    modifier = Modifier.size(48.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = "No favorite drivers yet",
+                    style = MaterialTheme.typography.bodyLarge,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Add drivers from the RoadFlare tab to request rides directly",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
+            }
+        } else {
+            // Driver list
+            Text(
+                text = "Tap a driver to send request",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 350.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(drivers, key = { it.pubkey }) { driver ->
+                    val driverState = driverLocations[driver.pubkey]
+                    val driverLocation = driverState?.location  // Extract Location from wrapper
+                    val driverName = driverNames[driver.pubkey] ?: driver.pubkey.take(8) + "..."
+                    val hasKey = driver.roadflareKey != null
+
+                    // Check if online and fresh (< 5 min old)
+                    val staleThresholdSec = 5 * 60  // 5 minutes (matches RoadflareTab)
+                    val nowSec = System.currentTimeMillis() / 1000
+                    val isOnline = driverState != null &&
+                        driverState.status == com.ridestr.common.nostr.events.RoadflareLocationEvent.Status.ONLINE &&
+                        (nowSec - driverState.timestamp) < staleThresholdSec
+
+                    // Calculate fare if we have location
+                    val fareSats = if (driverLocation != null && pickupLocation != null) {
+                        calculateRoadflareFareSats(pickupLocation, driverLocation, routeResult, roadflareRatePerMile)
+                    } else null
+
+                    val fare = if (fareSats != null) {
+                        formatFare(fareSats, settingsManager, priceService)
+                    } else null
+
+                    RoadflareDriverCard(
+                        driverName = driverName,
+                        driverPubKey = driver.pubkey,
+                        isOnline = isOnline,
+                        hasKey = hasKey,
+                        fare = fare,
+                        note = driver.note,
+                        enabled = hasKey && !isSending,
+                        onClick = {
+                            onSelectDriver(driver.pubkey, driverLocation)
+                        }
+                    )
+                }
+            }
+
+            // Show sending indicator
+            if (isSending) {
+                Spacer(modifier = Modifier.height(16.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Sending request...", style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+            HorizontalDivider()
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Send to all button - only include online drivers with fresh timestamps (< 5 min)
+            val now = System.currentTimeMillis() / 1000
+            val staleThreshold = 5 * 60  // 5 minutes (matches RoadflareTab)
+
+            val eligibleDrivers = drivers.filter { driver ->
+                driver.roadflareKey != null &&
+                driverLocations[driver.pubkey]?.let { state ->
+                    val isOnline = state.status == com.ridestr.common.nostr.events.RoadflareLocationEvent.Status.ONLINE
+                    val isFresh = (now - state.timestamp) < staleThreshold
+                    isOnline && isFresh
+                } ?: false  // Exclude drivers with no location data
+            }
+            // Convert RoadflareDriverState map to Location map for the callback
+            val eligibleLocations = driverLocations.filterKeys { pubkey ->
+                eligibleDrivers.any { it.pubkey == pubkey }
+            }.mapValues { it.value.location }
+
+            Button(
+                onClick = {
+                    onSendToAll(eligibleDrivers, eligibleLocations)
+                },
+                enabled = eligibleDrivers.isNotEmpty() && !isSending,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(
+                    Icons.Default.Campaign,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Send to All Favorites (${eligibleDrivers.size})")
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = "Sends your request to all favorite drivers at once",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+    }
+}
+
+/**
+ * Card for a RoadFlare driver in the selection sheet.
+ */
+@Composable
+private fun RoadflareDriverCard(
+    driverName: String,
+    driverPubKey: String,
+    isOnline: Boolean,
+    hasKey: Boolean,
+    fare: String?,
+    note: String?,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = enabled, onClick = onClick),
+        colors = CardDefaults.cardColors(
+            containerColor = if (enabled)
+                MaterialTheme.colorScheme.surfaceVariant
+            else
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
+                // Status indicator
+                Box(
+                    modifier = Modifier
+                        .size(12.dp)
+                        .background(
+                            color = when {
+                                !hasKey -> MaterialTheme.colorScheme.outline
+                                isOnline -> MaterialTheme.colorScheme.primary
+                                else -> MaterialTheme.colorScheme.outline
+                            },
+                            shape = RoundedCornerShape(6.dp)
+                        )
+                )
+                Spacer(modifier = Modifier.width(12.dp))
+
+                Column {
+                    Text(
+                        text = driverName,
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.Medium,
+                        color = if (enabled)
+                            MaterialTheme.colorScheme.onSurface
+                        else
+                            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                    )
+                    Text(
+                        text = when {
+                            !hasKey -> "Pending approval"
+                            isOnline -> "Available"
+                            else -> "Offline"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = when {
+                            !hasKey -> MaterialTheme.colorScheme.outline
+                            isOnline -> MaterialTheme.colorScheme.primary
+                            else -> MaterialTheme.colorScheme.onSurfaceVariant
+                        }
+                    )
+                    if (!note.isNullOrBlank()) {
+                        Text(
+                            text = note,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+
+            // Fare display
+            if (fare != null && isOnline) {
+                Column(horizontalAlignment = Alignment.End) {
+                    Text(
+                        text = fare,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "est. fare",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            } else if (!hasKey) {
+                Icon(
+                    Icons.Default.HourglassEmpty,
+                    contentDescription = "Pending",
+                    modifier = Modifier.size(24.dp),
+                    tint = MaterialTheme.colorScheme.outline
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Calculate RoadFlare fare in sats.
+ */
+private fun calculateRoadflareFareSats(
+    pickup: Location,
+    driverLocation: Location,
+    routeResult: RouteResult?,
+    ratePerMile: Double = AdminConfig.DEFAULT_ROADFLARE_FARE_RATE
+): Double {
+    val ROADFLARE_RATE_PER_MILE = ratePerMile
+    val METERS_PER_MILE = 1609.34
+
+    // Driver distance to pickup (haversine)
+    val R = 6371000.0
+    val dLat = Math.toRadians(pickup.lat - driverLocation.lat)
+    val dLon = Math.toRadians(pickup.lon - driverLocation.lon)
+    val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(Math.toRadians(driverLocation.lat)) * Math.cos(Math.toRadians(pickup.lat)) *
+            Math.sin(dLon / 2) * Math.sin(dLon / 2)
+    val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+    val driverToPickupMeters = R * c
+    val driverToPickupMiles = driverToPickupMeters / METERS_PER_MILE
+
+    // Ride distance
+    val rideMiles = routeResult?.let { it.distanceKm * 0.621371 } ?: 0.0
+
+    // Total fare with minimum fare enforcement
+    val baseFare = 2.50
+    val minimumFareUsd = 5.0
+    val calculatedFare = baseFare + (driverToPickupMiles * ROADFLARE_RATE_PER_MILE) + (rideMiles * ROADFLARE_RATE_PER_MILE)
+    val totalFareUsd = maxOf(calculatedFare, minimumFareUsd)
+    // Convert USD to sats using live BTC price
+    val sats = BitcoinPriceService.getInstance().usdToSats(totalFareUsd)
+    return sats?.toDouble() ?: (totalFareUsd * 1000.0) // Fallback: ~$100k BTC
 }

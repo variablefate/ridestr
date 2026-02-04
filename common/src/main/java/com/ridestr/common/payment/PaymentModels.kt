@@ -227,6 +227,7 @@ data class PendingHtlc(
     val locktime: Long,
     val riderPubKey: String,
     val paymentHash: String,
+    val preimage: String? = null,  // For refund if mint requires it (NUT-14 future-proofing)
     val rideId: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
     val status: PendingHtlcStatus = PendingHtlcStatus.LOCKED
@@ -250,7 +251,9 @@ enum class PendingHtlcStatus {
     /** Rider refunded the HTLC after locktime expired */
     REFUNDED,
     /** HTLC failed (e.g., swap error) */
-    FAILED
+    FAILED,
+    /** User acknowledged HTLC cannot be recovered (e.g., wallet key mismatch) */
+    IRRECOVERABLE
 }
 
 /**

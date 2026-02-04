@@ -1,7 +1,7 @@
 # Ridestr Nostr Event Protocol
 
-**Version**: 1.4
-**Last Updated**: 2026-01-24
+**Version**: 1.6
+**Last Updated**: 2026-02-03
 
 This document defines all Nostr event kinds used in the Ridestr rideshare application.
 
@@ -42,6 +42,16 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 | Kind | Name | Type | Purpose |
 |------|------|------|---------|
 | [1063](#kind-1063-tile-availability-nip-94) | File Metadata | NIP-94 | Routing tile availability (from official pubkey) |
+
+### RoadFlare Events
+| Kind | Name | Type | Purpose |
+|------|------|------|---------|
+| [30011](#kind-30011-followed-drivers) | Followed Drivers | Parameterized Replaceable | Rider's favorite drivers + their RoadFlare keys (NIP-44 to self) |
+| [30012](#kind-30012-driver-roadflare-state) | Driver RoadFlare State | Parameterized Replaceable | Driver's RoadFlare keypair, followers, muted list (NIP-44 to self). Public `key_updated_at` tag. |
+| [30014](#kind-30014-roadflare-location) | RoadFlare Location | Parameterized Replaceable | Driver's real-time location, 2-min interval, 5-min expiry (NIP-44 to RoadFlare pubkey) |
+| [3186](#kind-3186-roadflare-key-share) | RoadFlare Key Share | Regular | DM sharing RoadFlare private key with follower, 5-min expiry (NIP-44 to follower) |
+| [3187](#kind-3187-roadflare-follow-notify) | Follow Notification | Regular | Real-time follow notification (short expiry); p-tag query is primary discovery |
+| [3188](#kind-3188-roadflare-key-ack) | Key Acknowledgement | Regular | Rider confirms key receipt to driver, 5-min expiry (NIP-44 to driver) |
 
 ---
 
@@ -373,15 +383,15 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
   "pickup_route_min": <duration>,
   "ride_route_km": <distance>,
   "ride_route_min": <duration>,
-  "payment_hash": "<sha256_of_preimage>",
   "destination_geohash": "<geohash_for_settlement>",
   "mint_url": "<rider_cashu_mint_url>",
   "payment_method": "cashu"
 }
 ```
 
+**Note (January 2026)**: `payment_hash` was removed from offers and moved to confirmation (Kind 3175). This ensures HTLC is locked with the correct driver wallet key AFTER acceptance.
+
 **Payment Fields** (implemented):
-- `payment_hash`: SHA256 hash of preimage for HTLC escrow verification
 - `destination_geohash`: Used for settlement location verification
 
 **Multi-Mint Fields** (Issue #13):
@@ -452,14 +462,15 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 **Content** (JSON, encrypted to driver):
 ```json
 {
-  "riderPubKey": "<rider_pubkey>",
-  "driverPubKey": "<driver_pubkey>",
-  "acceptanceEventId": "<acceptance_event_id>",
-  "pickupGeohash": "<geohash_precision_7>",
-  "pin": "<4_digit_pin>",
-  "timestamp": <unix_timestamp>
+  "precise_pickup": { "lat": <lat>, "lon": <lon>, "geohash": "<geohash>" },
+  "payment_hash": "<sha256_of_preimage>",
+  "escrow_token": "<htlc_token_if_same_mint>"
 }
 ```
+
+**Payment Fields** (January 2026 migration):
+- `payment_hash`: SHA256 hash of preimage for HTLC escrow verification (moved from offer)
+- `escrow_token`: HTLC token for same-mint payment (null for cross-mint)
 
 **IMPORTANT**: The confirmation event ID is used as the `d-tag` for all subsequent ride state events (30180, 30181).
 
@@ -684,17 +695,24 @@ Ridestr uses Cashu NUT-14 Hash Time-Locked Contracts (HTLC) for trustless paymen
 
 The driver's `wallet_pubkey` in Kind 3174 acceptance ensures the rider locks funds to the correct key.
 
+### HTLC Preimage Storage (January 2026)
+The preimage is now stored in `PendingHtlc` when calling `lockForRide()`:
+- Enables future-proof refunds if mints enforce hash verification
+- `refundExpiredHtlc()` uses stored preimage when available
+- Falls back to zeros placeholder for old HTLCs (mint compatibility workaround)
+- Preimage stored in same encrypted SharedPreferences as wallet keys
+
 ### Escrow Token Flow
 ```
 RIDER                                    DRIVER
   |                                         |
-  |-- Kind 3173 (payment_hash) ------------>|
+  |-- Kind 3173 (offer, no payment_hash) -->|
   |                                         |
   |<-- Kind 3174 (wallet_pubkey) -----------|
   |                                         |
   |  [lockForRide(wallet_pubkey)]           |
   |                                         |
-  |-- Kind 3175 (confirm) ----------------->|
+  |-- Kind 3175 (payment_hash+escrowToken)->|
   |                                         |
   |<-- Kind 30180 (pin_submit) -------------|
   |                                         |
@@ -707,6 +725,8 @@ RIDER                                    DRIVER
   |                    [claimHtlcPayment()] |
   |                                         |
 ```
+
+**Note**: As of January 2026, `payment_hash` is sent in confirmation (Kind 3175), not offer (Kind 3173). This ensures HTLC is locked with the correct driver wallet key AFTER acceptance.
 
 ---
 
@@ -721,7 +741,7 @@ RIDER                           NOSTR RELAY                         DRIVER
   |                                   |   (Driver publishes availability)
   |                                   |                                |
   |---------- Kind 3173 ------------->|                                |
-  |   (Ride Offer + payment_hash)     |----------- Kind 3173 --------->|
+  |   (Ride Offer, no payment_hash)   |----------- Kind 3173 --------->|
   |                                   |                                |
   |                                   |<---------- Kind 3174 ----------|
   |<--------- Kind 3174 --------------|   (Acceptance + wallet_pubkey) |
@@ -729,7 +749,7 @@ RIDER                           NOSTR RELAY                         DRIVER
   |  [lockForRide(wallet_pubkey)]     |                                |
   |                                   |                                |
   |---------- Kind 3175 ------------->|                                |
-  |   (Confirmation + PIN)            |----------- Kind 3175 --------->|
+  |   (Confirm + payment_hash)        |----------- Kind 3175 --------->|
   |                                   |                                |
   |                                   |<---------- Kind 30180 ---------|
   |<-------- Kind 30180 --------------|   (Driver state: EN_ROUTE)     |
@@ -841,3 +861,299 @@ The following event kinds were deprecated and replaced by Kind 30177 (Unified Pr
 | 30176 | Saved Locations Backup | Kind 30177 |
 
 New implementations should use Kind 30177 for all profile data.
+
+---
+
+## RoadFlare Event Definitions
+
+RoadFlare enables riders to build a personal rideshare network from drivers they've favorited. Drivers broadcast their location encrypted so only followers can decrypt.
+
+### Kind 30011: Followed Drivers
+
+**Purpose**: Rider's personal list of favorite drivers, including their RoadFlare decryption keys.
+
+**Type**: Parameterized Replaceable Event (NIP-33)
+
+**Author**: Rider
+
+**d-tag**: `roadflare-drivers`
+
+**Tags**:
+```
+["d", "roadflare-drivers"]
+["t", "roadflare"]
+```
+
+**Content** (NIP-44 encrypted to self):
+```json
+{
+  "drivers": [
+    {
+      "pubkey": "driver_hex_pubkey",
+      "name": "John",
+      "addedAt": 1234567890,
+      "note": "Toyota Camry, great driver",
+      "roadflareKey": {
+        "privateKey": "hex_private_key",
+        "publicKey": "hex_public_key",
+        "version": 3
+      }
+    }
+  ],
+  "updated_at": 1234567890
+}
+```
+
+**Key Fields**:
+- `roadflareKey`: The shared keypair received from driver via Kind 3186. Allows decryption of driver's location broadcasts (Kind 30014).
+
+---
+
+### Kind 30012: Driver RoadFlare State
+
+**Purpose**: Driver's complete RoadFlare state - keypair, followers, muted list.
+
+**Type**: Parameterized Replaceable Event (NIP-33)
+
+**Author**: Driver
+
+**d-tag**: `roadflare-state`
+
+**Tags**:
+```
+["d", "roadflare-state"]
+["t", "roadflare"]
+["key_version", "3"]  // Quick staleness check without decryption
+```
+
+**Content** (NIP-44 encrypted to self):
+```json
+{
+  "roadflareKey": {
+    "privateKey": "hex_private_key",
+    "publicKey": "hex_public_key",
+    "version": 3,
+    "createdAt": 1234567890
+  },
+  "followers": [
+    {
+      "pubkey": "rider_pubkey",
+      "name": "Alice",
+      "addedAt": 1234567890,
+      "approved": true,
+      "keyVersionSent": 3
+    }
+  ],
+  "muted": [
+    { "pubkey": "rider_pubkey", "mutedAt": 1234567890, "reason": "spam" }
+  ],
+  "lastBroadcastAt": 1234567890,
+  "updated_at": 1234567890
+}
+```
+
+**Follower Approval Flow**:
+- `approved: false` = pending request, driver must approve
+- `approved: true` = approved, key sent, receives location broadcasts
+- Muted followers trigger key rotation (excluded from new key distribution)
+
+---
+
+### Kind 30014: RoadFlare Location
+
+**Purpose**: Driver's real-time location, encrypted to the RoadFlare keypair so all followers can decrypt.
+
+**Type**: Parameterized Replaceable Event (NIP-33)
+
+**Author**: Driver
+
+**d-tag**: `roadflare-location`
+
+**Tags**:
+```
+["d", "roadflare-location"]
+["t", "roadflare-location"]
+["status", "online"]  // online | on_ride | offline
+["key_version", "3"]
+["expiration", "1234567890"]  // 5-minute TTL
+```
+
+**Content** (NIP-44 encrypted to driver's `roadflarePubKey`):
+```json
+{
+  "lat": 40.7128,
+  "lon": -74.0060,
+  "timestamp": 1234567890,
+  "status": "online",
+  "onRide": false
+}
+```
+
+**Encryption Model**:
+- Driver encrypts: `nip44Encrypt(content, roadflarePubKey)`
+- Followers decrypt: `nip44Decrypt(content, driverIdentityPubKey)` using stored `roadflarePrivateKey`
+- ECDH is commutative: `ECDH(driver_priv, roadflare_pub) == ECDH(roadflare_priv, driver_pub)`
+
+**Status Values**:
+| Status | Meaning |
+|--------|---------|
+| `online` | Available for RoadFlare requests |
+| `on_ride` | Currently giving a ride |
+| `offline` | Driver has gone offline |
+
+---
+
+### Kind 3186: RoadFlare Key Share
+
+**Purpose**: Ephemeral DM from driver to follower sharing the RoadFlare private key.
+
+**Type**: Regular Event (with expiration)
+
+**Author**: Driver
+
+**Tags**:
+```
+["p", "follower_pubkey"]
+["t", "roadflare-key"]
+["expiration", "<unix_timestamp>"]  // 5 minutes
+```
+
+**Content** (NIP-44 encrypted to follower's identity pubkey):
+```json
+{
+  "roadflareKey": {
+    "privateKey": "hex_private_key",
+    "publicKey": "hex_public_key",
+    "version": 3,
+    "keyUpdatedAt": 1706300000
+  },
+  "keyUpdatedAt": 1706300000,
+  "driverPubKey": "driver_identity_pubkey"
+}
+```
+
+**When Sent**:
+1. Driver approves a new follower
+2. Key rotation (sent to all remaining non-muted followers)
+
+**Key Fields**:
+- `keyUpdatedAt`: Timestamp when key was last rotated. Used by rider to detect stale keys.
+
+---
+
+### Kind 3187: RoadFlare Follow Notification
+
+**Purpose**: Real-time notification to driver when a rider follows them. Used for immediate UX feedback.
+
+**Type**: Regular Event (with short expiration)
+
+**Design Note**: This event provides real-time notification for immediate driver feedback. The primary discovery mechanism is p-tag query on Kind 30011 (which persists). Kind 3187 is the "belt" to Kind 30011's "suspenders" - both ensure the driver sees new followers promptly.
+
+**Author**: Rider
+
+**Tags**:
+```
+["p", "driver_pubkey"]
+["t", "roadflare-follow"]
+```
+
+**Content** (NIP-44 encrypted to driver):
+```json
+{
+  "action": "follow",  // or "unfollow"
+  "riderName": "Alice",
+  "timestamp": 1234567890
+}
+```
+
+---
+
+### Kind 3188: RoadFlare Key Acknowledgement
+
+**Purpose**: Ephemeral confirmation from rider to driver after receiving and storing the RoadFlare key.
+
+**Type**: Regular Event (with expiration)
+
+**Author**: Rider
+
+**Tags**:
+```
+["p", "driver_pubkey"]
+["t", "roadflare-key-ack"]
+["expiration", "<unix_timestamp>"]  // 5 minutes
+```
+
+**Content** (NIP-44 encrypted to driver):
+```json
+{
+  "keyVersion": 3,
+  "keyUpdatedAt": 1706300000,
+  "status": "received",
+  "riderPubKey": "rider_pubkey"
+}
+```
+
+**Status Values**:
+| Status | Meaning | Driver Action |
+|--------|---------|---------------|
+| `received` | Key successfully stored | None (confirmation) |
+| `stale` | Rider's stored key is outdated | Re-send current key via Kind 3186 |
+
+**When Sent**:
+- `status="received"`: Rider receives Kind 3186 → stores key → acknowledges receipt
+- `status="stale"`: Rider detects outdated key → requests refresh (rate-limited: 1/hour/driver)
+
+**Key Refresh Flow** (January 2026):
+1. Rider subscribes to driver's Kind 30012, compares `key_updated_at` tag vs stored timestamp
+2. If driver's timestamp > stored → key is stale
+3. Rider sends Kind 3188 with `status="stale"` and their stored `keyUpdatedAt`
+4. Driver verifies: pubkey matches claimed `riderPubKey`, follower is approved + not muted
+5. If valid, driver re-sends current key via Kind 3186
+
+---
+
+## RoadFlare Flow Diagram
+
+```
+RIDER                              NOSTR RELAY                           DRIVER
+  |                                      |                                   |
+  |  [Add driver to favorites]           |                                   |
+  |--------- Kind 30011 --------------->|  (Update followed list with p-tag) |
+  |                                      |                                   |
+  |                                      |    [Driver queries p-tags]        |
+  |                                      |    [Sees new follower as pending] |
+  |                                      |                                   |
+  |                                      |    [Driver clicks "Accept"]       |
+  |                                      |<---------- Kind 3186 -------------|
+  |<-------- Kind 3186 -----------------|  (Key share, 5-min expiry)         |
+  |                                      |                                   |
+  |  [Store roadflareKey + keyUpdatedAt] |                                   |
+  |--------- Kind 3188 ---------------->|  (Key acknowledgement)             |
+  |                                      |----------- Kind 3188 ------------>|
+  |                                      |    [Driver confirms key received] |
+  |                                      |<---------- Kind 30012 ------------|
+  |                                      |  (Update state + key_updated_at)  |
+  |                                      |                                   |
+  |  [Subscribe to driver location]      |                                   |
+  |                                      |<---------- Kind 30014 ------------|
+  |<-------- Kind 30014 ----------------|  (Location, 2-min interval)        |
+  |  [Decrypt with roadflareKey]         |                                   |
+  |  [Show real-time driver location]    |                                   |
+  |                                      |                                   |
+  |  [Check driver's key_updated_at]     |                                   |
+  |  [If stale: show "Key Outdated"]     |                                   |
+  |                                      |                                   |
+  |  [Remove driver from favorites]      |                                   |
+  |--------- Kind 30011 --------------->|  (Remove from followed list)       |
+  |                                      |    [Driver queries p-tags]        |
+  |                                      |    [Sees follower removed]        |
+  |                                      |<---------- Kind 30012 ------------|
+```
+
+### Stale Key Detection
+
+Riders detect stale keys by comparing:
+- Stored `RoadflareKey.keyUpdatedAt` (from Kind 3186)
+- Driver's public `key_updated_at` tag (from Kind 30012, no decryption needed)
+
+If driver's timestamp > stored timestamp, the key is stale and the rider shows "Key Outdated" indicator. The driver will see this rider as pending again and can re-send the key.

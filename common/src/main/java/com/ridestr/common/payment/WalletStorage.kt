@@ -41,6 +41,7 @@ class WalletStorage(private val context: Context) {
     }
 
     private val prefs: SharedPreferences
+    private var isUsingUnencryptedFallback = false
 
     init {
         prefs = try {
@@ -57,9 +58,17 @@ class WalletStorage(private val context: Context) {
             )
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create encrypted prefs, falling back to regular prefs", e)
+            isUsingUnencryptedFallback = true
             context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
         }
     }
+
+    /**
+     * Check if storage is using unencrypted fallback.
+     * This happens when EncryptedSharedPreferences fails to initialize
+     * (e.g., on emulators, rooted devices, or devices without hardware-backed keystore).
+     */
+    fun isUsingFallback(): Boolean = isUsingUnencryptedFallback
 
     // === Mint URL ===
 
@@ -372,6 +381,7 @@ class WalletStorage(private val context: Context) {
             put("locktime", htlc.locktime)
             put("rider_pubkey", htlc.riderPubKey)
             put("payment_hash", htlc.paymentHash)
+            htlc.preimage?.let { put("preimage", it) }
             htlc.rideId?.let { put("ride_id", it) }
             put("created_at", htlc.createdAt)
             put("status", htlc.status.name)
@@ -387,6 +397,7 @@ class WalletStorage(private val context: Context) {
                 locktime = json.getLong("locktime"),
                 riderPubKey = json.getString("rider_pubkey"),
                 paymentHash = json.getString("payment_hash"),
+                preimage = json.optString("preimage").takeIf { it.isNotBlank() },
                 rideId = json.optString("ride_id").takeIf { it.isNotBlank() },
                 createdAt = json.optLong("created_at", System.currentTimeMillis()),
                 status = try {

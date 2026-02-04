@@ -26,8 +26,10 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.google.android.gms.location.LocationServices
 import com.ridestr.rider.ui.screens.RiderModeScreen
+import com.ridestr.rider.ui.screens.RoadflareTab
+import com.ridestr.rider.ui.screens.AddDriverScreen
 import com.ridestr.rider.ui.screens.HistoryScreen
-import com.ridestr.rider.ui.screens.KeyBackupScreen
+import com.ridestr.common.ui.screens.KeyBackupScreen
 import com.ridestr.rider.ui.screens.OnboardingScreen
 import com.ridestr.rider.ui.screens.ProfileSetupScreen
 import com.ridestr.rider.ui.screens.SettingsContent
@@ -43,6 +45,7 @@ import com.ridestr.common.settings.SettingsManager
 import com.ridestr.common.ui.AccountBottomSheet
 import com.ridestr.common.ui.AccountSafetyScreen
 import com.ridestr.common.ui.DeveloperOptionsScreen
+import com.ridestr.common.ui.EncryptionFallbackWarningDialog
 import com.ridestr.common.ui.RelayManagementScreen
 import com.ridestr.common.ui.WalletSettingsScreen
 import com.ridestr.common.ui.RelaySignalIndicator
@@ -71,6 +74,10 @@ import com.ridestr.common.ui.ProfileSyncScreen
 import com.ridestr.common.sync.RideHistorySyncAdapter
 import com.ridestr.common.sync.ProfileSyncAdapter
 import com.ridestr.common.data.SavedLocationRepository
+import com.ridestr.common.data.FollowedDriversRepository
+import com.ridestr.common.sync.FollowedDriversSyncAdapter
+import com.ridestr.common.nostr.events.RoadflareKeyShareEvent
+import com.ridestr.common.nostr.events.FollowedDriver
 import com.ridestr.rider.service.RiderActiveService
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
@@ -81,6 +88,7 @@ import com.ridestr.common.bitcoin.BitcoinPriceService
  */
 enum class Tab {
     RIDE,       // Main rider mode
+    ROADFLARE,  // Favorite drivers network
     WALLET,     // Payment info
     HISTORY,    // Ride history
     SETTINGS    // Settings & developer options
@@ -106,7 +114,8 @@ enum class Screen {
     TILES,
     DEV_OPTIONS,
     ACCOUNT_SAFETY,
-    RELAY_SETTINGS
+    RELAY_SETTINGS,
+    ADD_DRIVER      // Add driver to RoadFlare favorites
 }
 
 class MainActivity : ComponentActivity() {
@@ -201,6 +210,7 @@ fun RidestrApp() {
     // Ride history repository (for sync adapter)
     val rideHistoryRepo = remember { RideHistoryRepository.getInstance(context) }
     val savedLocationRepo = remember { SavedLocationRepository.getInstance(context) }
+    val followedDriversRepo = remember { FollowedDriversRepository.getInstance(context) }
 
     // Register sync adapters (rider app: includes saved locations, no vehicles)
     LaunchedEffect(Unit) {
@@ -212,6 +222,78 @@ fun RidestrApp() {
             nostrService = nostrService
         ))
         profileSyncManager.registerSyncable(RideHistorySyncAdapter(rideHistoryRepo, nostrService))
+        profileSyncManager.registerSyncable(FollowedDriversSyncAdapter(followedDriversRepo, nostrService))
+    }
+
+    // Subscribe to RoadFlare key share events (Kind 3186)
+    // When a driver sends us their RoadFlare key, we store it and send back an acknowledgement
+    LaunchedEffect(Unit) {
+        // Wait for Nostr connection
+        kotlinx.coroutines.delay(2000)
+
+        val subId = nostrService.subscribeToRoadflareKeyShares { event, relayUrl ->
+            android.util.Log.d("MainActivity", "Kind 3186 received: from=${event.pubKey.take(8)}, eventId=${event.id.take(8)}, relay=$relayUrl")
+
+            val signer = nostrService.keyManager.getSigner()
+            if (signer == null) {
+                android.util.Log.e("MainActivity", "Kind 3186: No signer available - cannot decrypt")
+                return@subscribeToRoadflareKeyShares
+            }
+
+            kotlinx.coroutines.runBlocking {
+                try {
+                    val keyShareData = RoadflareKeyShareEvent.parseAndDecrypt(signer, event)
+                    if (keyShareData != null) {
+                        android.util.Log.d("MainActivity", "Kind 3186 parsed OK: driver=${keyShareData.driverPubKey.take(8)}, version=${keyShareData.roadflareKey.version}")
+
+                        // Update or add the driver with the new key
+                        val existingDriver = followedDriversRepo.drivers.value.find { it.pubkey == keyShareData.driverPubKey }
+                        if (existingDriver != null) {
+                            // Update existing driver with new key (including keyUpdatedAt)
+                            val updatedKey = keyShareData.roadflareKey.copy(keyUpdatedAt = keyShareData.keyUpdatedAt)
+                            followedDriversRepo.updateDriverKey(keyShareData.driverPubKey, updatedKey)
+                            android.util.Log.d("MainActivity", "Updated key for driver ${keyShareData.driverPubKey.take(16)} to v${keyShareData.roadflareKey.version}")
+                        } else {
+                            // Driver not in our list - they must have added us first
+                            // Add them with the key
+                            val newDriver = FollowedDriver(
+                                pubkey = keyShareData.driverPubKey,
+                                addedAt = System.currentTimeMillis() / 1000,
+                                note = "",
+                                roadflareKey = keyShareData.roadflareKey.copy(keyUpdatedAt = keyShareData.keyUpdatedAt)
+                            )
+                            followedDriversRepo.addDriver(newDriver)
+                            android.util.Log.d("MainActivity", "Added new driver ${keyShareData.driverPubKey.take(16)} with key v${keyShareData.roadflareKey.version}")
+                        }
+
+                        // Send acknowledgement back to driver (Kind 3188)
+                        val ackEventId = nostrService.publishRoadflareKeyAck(
+                            driverPubKey = keyShareData.driverPubKey,
+                            keyVersion = keyShareData.roadflareKey.version,
+                            keyUpdatedAt = keyShareData.keyUpdatedAt
+                        )
+                        if (ackEventId != null) {
+                            android.util.Log.d("MainActivity", "Sent key ack to driver ${keyShareData.driverPubKey.take(16)}")
+                        }
+
+                        // Backup updated state to Nostr
+                        profileSyncManager.backupProfileData()
+                    } else {
+                        android.util.Log.w("MainActivity", "Kind 3186 parse FAILED: from=${event.pubKey.take(8)}, eventId=${event.id.take(8)} (expired or wrong recipient)")
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("MainActivity", "Kind 3186 processing error: from=${event.pubKey.take(8)}", e)
+                }
+            }
+        }
+        android.util.Log.d("MainActivity", "Subscribed to RoadFlare key shares: $subId")
+
+        try {
+            kotlinx.coroutines.awaitCancellation()
+        } finally {
+            subId?.let { nostrService.closeSubscription(it) }
+            android.util.Log.d("MainActivity", "Closed RoadFlare key share subscription: $subId")
+        }
     }
 
     // Observable sync state for potential UI feedback
@@ -318,6 +400,8 @@ fun RidestrApp() {
             nostrService.subscribeToOwnProfile { profile ->
                 userProfile = profile
             }
+            // Also cache display name for RoadFlare notifications
+            nostrService.fetchAndCacheUserDisplayName()
         }
     }
 
@@ -540,7 +624,12 @@ fun RidestrApp() {
                     settingsManager = settingsManager,
                     nostrService = nostrService,
                     userProfile = userProfile,
+                    followedDriversRepository = followedDriversRepo,
+                    profileSyncManager = profileSyncManager,
                     walletService = walletService,
+                    riderLocation = currentLocation?.let {
+                        com.ridestr.common.nostr.events.Location(it.latitude, it.longitude)
+                    },
                     onLogout = {
                         // Disconnect from Nostr
                         nostrService.disconnect()
@@ -598,6 +687,9 @@ fun RidestrApp() {
                     onOpenWalletSettings = {
                         currentScreen = Screen.WALLET_SETTINGS
                     },
+                    onAddDriver = {
+                        currentScreen = Screen.ADD_DRIVER
+                    },
                     onSyncProfile = {
                         profileSyncManager.checkAndSyncRidestrData()
                     },
@@ -650,6 +742,7 @@ fun RidestrApp() {
                 DeveloperOptionsScreen(
                     settingsManager = settingsManager,
                     isDriverApp = false,
+                    nostrService = nostrService,
                     onOpenRelaySettings = { currentScreen = Screen.RELAY_SETTINGS },
                     onBack = { currentScreen = Screen.MAIN },
                     modifier = Modifier.padding(innerPadding)
@@ -680,6 +773,31 @@ fun RidestrApp() {
                     onReconnect = {
                         nostrService.relayManager.disconnectAll()
                         nostrService.relayManager.connectAll()
+                    },
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
+
+            Screen.ADD_DRIVER -> {
+                val scope = rememberCoroutineScope()
+                val riderDisplayName by nostrService.userDisplayName.collectAsState()
+                AddDriverScreen(
+                    followedDriversRepository = followedDriversRepo,
+                    onNavigateBack = { currentScreen = Screen.MAIN },
+                    onDriverAdded = { driver ->
+                        // Publish updated Kind 30011 with new p-tag so driver can discover follower
+                        scope.launch {
+                            profileSyncManager.backupFollowedDrivers()
+                        }
+                    },
+                    onSendFollowNotification = { driverPubKey ->
+                        // Send a short-expiring notification for immediate driver feedback
+                        // (p-tag query is the primary discovery mechanism, this is just for real-time UX)
+                        nostrService.publishRoadflareFollowNotify(
+                            driverPubKey = driverPubKey,
+                            riderName = riderDisplayName,
+                            action = "follow"
+                        )
                     },
                     modifier = Modifier.padding(innerPadding)
                 )
@@ -778,7 +896,10 @@ fun MainScreen(
     settingsManager: SettingsManager,
     nostrService: NostrService,
     userProfile: UserProfile?,
+    followedDriversRepository: FollowedDriversRepository,
+    profileSyncManager: ProfileSyncManager,
     walletService: WalletService?,
+    riderLocation: com.ridestr.common.nostr.events.Location?,
     onLogout: () -> Unit,
     onOpenProfile: () -> Unit,
     onOpenBackup: () -> Unit,
@@ -791,6 +912,7 @@ fun MainScreen(
     onOpenWalletDetail: () -> Unit,
     onOpenWalletWithDeposit: (Long) -> Unit,  // Opens wallet detail with deposit dialog pre-filled
     onOpenWalletSettings: () -> Unit,
+    onAddDriver: () -> Unit,
     onSyncProfile: (suspend () -> Unit)? = null,
     onRefreshSavedLocations: (suspend () -> Unit)? = null,
     modifier: Modifier = Modifier
@@ -802,8 +924,22 @@ fun MainScreen(
     // Current tab state
     var currentTab by remember { mutableStateOf(Tab.RIDE) }
 
+    // Coroutine scope for launching async operations
+    val coroutineScope = rememberCoroutineScope()
+
     // Account bottom sheet state
     var showAccountSheet by remember { mutableStateOf(false) }
+
+    // Encryption fallback warning state
+    var showEncryptionWarning by remember { mutableStateOf(false) }
+
+    // Check for encryption fallback on startup
+    LaunchedEffect(keyManager, walletService) {
+        val anyUnencrypted = keyManager.isUsingUnencryptedStorage()
+            || walletService?.isUsingUnencryptedStorage() == true
+        showEncryptionWarning = anyUnencrypted
+            && !settingsManager.getEncryptionFallbackWarned()
+    }
 
     // Rider ViewModel (persists across tab switches)
     val riderViewModel: RiderViewModel = viewModel()
@@ -817,6 +953,9 @@ fun MainScreen(
 
     // Ride history repository
     val rideHistoryRepository = remember { RideHistoryRepository.getInstance(context) }
+
+    // Rider's display name (from NostrService cache or profile)
+    val riderDisplayName by nostrService.userDisplayName.collectAsState()
 
     // Bitcoin price for fare display
     val btcPriceUsd by riderViewModel.bitcoinPriceService.btcPriceUsd.collectAsState()
@@ -846,7 +985,8 @@ fun MainScreen(
                     // Dynamic title based on current tab
                     Text(
                         text = when (currentTab) {
-                            Tab.RIDE -> "Rider Mode"
+                            Tab.RIDE -> "Request a Ride"
+                            Tab.ROADFLARE -> "RoadFlare"
                             Tab.WALLET -> "Wallet"
                             Tab.HISTORY -> "History"
                             Tab.SETTINGS -> "Settings"
@@ -879,6 +1019,12 @@ fun MainScreen(
                     onClick = { currentTab = Tab.RIDE }
                 )
                 NavigationBarItem(
+                    icon = { Icon(Icons.Default.Flare, contentDescription = null) },
+                    label = { Text("RoadFlare") },
+                    selected = currentTab == Tab.ROADFLARE,
+                    onClick = { currentTab = Tab.ROADFLARE }
+                )
+                NavigationBarItem(
                     icon = { Icon(Icons.Default.AccountBalanceWallet, contentDescription = null) },
                     label = { Text("Wallet") },
                     selected = currentTab == Tab.WALLET,
@@ -905,10 +1051,28 @@ fun MainScreen(
                 RiderModeScreen(
                     viewModel = riderViewModel,
                     settingsManager = settingsManager,
+                    followedDriversRepository = followedDriversRepository,
                     onOpenTiles = onOpenTiles,
                     onOpenWallet = { currentTab = Tab.WALLET },
                     onOpenWalletWithDeposit = onOpenWalletWithDeposit,
                     onRefreshSavedLocations = onRefreshSavedLocations,
+                    modifier = Modifier.padding(innerPadding)
+                )
+            }
+            Tab.ROADFLARE -> {
+                RoadflareTab(
+                    followedDriversRepository = followedDriversRepository,
+                    nostrService = nostrService,
+                    settingsManager = settingsManager,
+                    riderLocation = riderLocation,
+                    onAddDriver = onAddDriver,
+                    onDriverClick = { /* TODO: Show driver details */ },
+                    onDriverRemoved = {
+                        // Publish updated Kind 30011 (even if empty) to update p-tags on relays
+                        coroutineScope.launch {
+                            profileSyncManager.backupFollowedDrivers()
+                        }
+                    },
                     modifier = Modifier.padding(innerPadding)
                 )
             }
@@ -959,6 +1123,16 @@ fun MainScreen(
             onRelaySettings = onOpenRelaySettings,
             onLogout = onLogout,
             onDismiss = { showAccountSheet = false }
+        )
+    }
+
+    // Encryption fallback warning dialog (non-cancelable)
+    if (showEncryptionWarning) {
+        EncryptionFallbackWarningDialog(
+            onDismiss = {
+                settingsManager.setEncryptionFallbackWarned(true)
+                showEncryptionWarning = false
+            }
         )
     }
 }

@@ -1,7 +1,7 @@
 # DriverViewModel Reference
 
 **File**: `drivestr/src/main/java/com/drivestr/app/viewmodels/DriverViewModel.kt`
-**Last Updated**: 2026-01-15
+**Last Updated**: 2026-02-02
 
 This document provides a complete reference of all functions, state fields, and subscriptions in DriverViewModel.
 
@@ -11,7 +11,7 @@ This document provides a complete reference of all functions, state fields, and 
 
 | Metric | Count |
 |--------|-------|
-| Lines of Code | ~2800 |
+| Lines of Code | ~3900 |
 | Public Functions | ~35 |
 | Private Functions | ~40 |
 | State Fields | 35+ |
@@ -25,8 +25,9 @@ This document provides a complete reference of all functions, state fields, and 
 
 | Function | Purpose | Triggers State Change |
 |----------|---------|----------------------|
-| `goOnline()` | Start accepting ride requests | OFFLINE -> AVAILABLE |
-| `goOffline()` | Stop accepting requests | AVAILABLE -> OFFLINE |
+| `goOnline()` | Start accepting all ride requests | OFFLINE/ROADFLARE_ONLY -> AVAILABLE |
+| `goRoadflareOnly()` | Start RoadFlare-only mode | OFFLINE -> ROADFLARE_ONLY |
+| `goOffline()` | Stop accepting requests | AVAILABLE/ROADFLARE_ONLY -> OFFLINE |
 | `toggleOnlineStatus()` | Toggle between online/offline | Depends on current state |
 
 ### Ride Flow Functions
@@ -81,6 +82,7 @@ This document provides a complete reference of all functions, state fields, and 
 | Function | Purpose | Creates Subscription |
 |----------|---------|---------------------|
 | `subscribeToRideOffers()` | Listen for direct ride offers | Kind 3173 (p-tag) |
+| `subscribeToRoadflareOffers()` | Listen for RoadFlare-tagged offers only | Kind 3173 (roadflare tag) |
 | `subscribeToBroadcastRequests()` | Listen for broadcast requests | Kind 3173 (g-tag) |
 | `subscribeToRiderRideState(confId, riderPubKey)` | Listen for rider state updates | Kind 30181 |
 | `subscribeToRideConfirmation(offerEventId)` | Listen for ride confirmation | Kind 3175 |
@@ -94,6 +96,7 @@ This document provides a complete reference of all functions, state fields, and 
 |----------|---------|-----------|
 | `publishAvailability()` | Broadcast driver availability | Kind 30173 |
 | `publishUnavailable()` | Broadcast unavailable status | Kind 30173 |
+| `broadcastRoadflareOfflineStatus()` | Send final OFFLINE RoadFlare location | Kind 30014 |
 | `publishDriverRideState()` | Publish consolidated ride state | Kind 30180 |
 | `publishRideAcceptance(offer)` | Accept and publish acceptance | Kind 3174 |
 
@@ -129,6 +132,15 @@ This document provides a complete reference of all functions, state fields, and 
 | `saveRideState()` | Persist ride state to SharedPreferences |
 | `restoreRideState()` | Restore ride state on app restart |
 | `clearSavedRideState()` | Clear persisted ride state |
+
+### RoadFlare Functions
+
+| Function | Purpose |
+|----------|---------|
+| `goRoadflareOnly()` | Enter RoadFlare-only mode (Kind 30014 location, no Kind 30173) |
+| `subscribeToRoadflareOffers()` | Listen for RoadFlare-tagged Kind 3173 offers |
+| `processIncomingOffer(offer)` | Filter and display incoming RoadFlare/direct offers |
+| `broadcastRoadflareOfflineStatus()` | Send final OFFLINE RoadFlare location (Kind 30014) |
 
 ### Utility Functions
 
@@ -222,6 +234,7 @@ This document provides a complete reference of all functions, state fields, and 
 | Variable | Type | Purpose | Lifetime |
 |----------|------|---------|----------|
 | `rideOfferSubscriptionId` | String? | Direct offers (3173) | While AVAILABLE |
+| `roadflareOfferSubscriptionId` | String? | RoadFlare offers (3173) | While ROADFLARE_ONLY |
 | `broadcastSubscriptionId` | String? | Broadcast requests (3173) | While AVAILABLE |
 | `confirmationSubscriptionId` | String? | Confirmation (3175) | After acceptance |
 | `riderRideStateSubscriptionId` | String? | Rider state (30181) | During active ride |
@@ -314,6 +327,9 @@ submitPinForVerification(pin)
 completeRide()
     -> addStatusAction(COMPLETED)
     -> publishDriverRideState()
+    -> [correlation logging: RIDE xxxxxxxx] Claiming HTLC
+    -> walletService.claimHtlcPayment()
+    -> [correlation logging: RIDE xxxxxxxx] Claim SUCCESS/FAILED
     -> saveRideToHistory()
     -> _uiState.value = ... (RIDE_COMPLETED)
 ```

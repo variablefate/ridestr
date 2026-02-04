@@ -14,7 +14,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import com.ridestr.common.nostr.NostrService
+import com.ridestr.common.nostr.events.RideshareEventKinds
 import com.ridestr.common.settings.SettingsManager
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * Developer Options screen with debug tools and advanced settings.
@@ -25,13 +29,41 @@ import com.ridestr.common.settings.SettingsManager
 fun DeveloperOptionsScreen(
     settingsManager: SettingsManager,
     isDriverApp: Boolean,
+    nostrService: NostrService? = null,
     onOpenRelaySettings: () -> Unit,
     onBack: () -> Unit,
+    // RoadFlare key debug (driver only)
+    onGetLocalKeyVersion: (() -> Int)? = null,
+    onGetLocalKeyUpdatedAt: (() -> Long?)? = null,
+    onFetchNostrKeyUpdatedAt: (suspend () -> Long?)? = null,
+    onSyncRoadflareState: (suspend () -> Boolean)? = null,
+    onRotateRoadflareKey: (suspend () -> Boolean)? = null,
     modifier: Modifier = Modifier
 ) {
     BackHandler(onBack = onBack)
 
+    val scope = rememberCoroutineScope()
     val useGeocodingSearch by settingsManager.useGeocodingSearch.collectAsState()
+
+    // RoadFlare debug settings
+    val ignoreFollowNotifications by settingsManager.ignoreFollowNotifications.collectAsState()
+
+    // RoadFlare event inspector state
+    data class EventTypeState(
+        val kind: Int,
+        val name: String,
+        val count: Int? = null,
+        val isChecking: Boolean = false,
+        val isDeleting: Boolean = false
+    )
+    var eventStates by remember { mutableStateOf(mapOf<Int, EventTypeState>()) }
+    var inspectorMessage by remember { mutableStateOf<String?>(null) }
+
+    // Legacy cleanup state (kept for backwards compat)
+    var followNotifyCount by remember { mutableStateOf<Int?>(null) }
+    var isCheckingFollowNotify by remember { mutableStateOf(false) }
+    var isDeletingFollowNotify by remember { mutableStateOf(false) }
+    var cleanupMessage by remember { mutableStateOf<String?>(null) }
 
     // Driver-specific settings
     val useManualDriverLocation by settingsManager.useManualDriverLocation.collectAsState()
@@ -155,6 +187,389 @@ fun DeveloperOptionsScreen(
                 onClick = onOpenRelaySettings
             )
 
+            // RoadFlare Debug Section
+            if (nostrService != null) {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+                Text(
+                    text = "RoadFlare Debug",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(vertical = 8.dp)
+                )
+
+                // Toggle to ignore follow notifications (for testing p-tag queries)
+                if (isDriverApp) {
+                    SettingsSwitchRow(
+                        title = "Ignore Follow Notifications",
+                        description = if (ignoreFollowNotifications)
+                            "Kind 3187 notifications ignored - using p-tag query only"
+                        else
+                            "Processing Kind 3187 notifications normally",
+                        checked = ignoreFollowNotifications,
+                        onCheckedChange = { settingsManager.setIgnoreFollowNotifications(it) }
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // RoadFlare Key Debug (driver only)
+                    if (onGetLocalKeyVersion != null) {
+                        Text(
+                            text = "RoadFlare Key Debug",
+                            style = MaterialTheme.typography.titleSmall,
+                            modifier = Modifier.padding(vertical = 4.dp)
+                        )
+
+                        var nostrKeyUpdatedAt by remember { mutableStateOf<Long?>(null) }
+                        var nostrFetchAttempted by remember { mutableStateOf(false) }
+                        var isFetchingNostr by remember { mutableStateOf(false) }
+                        var isSyncing by remember { mutableStateOf(false) }
+                        var isRotating by remember { mutableStateOf(false) }
+                        var statusMessage by remember { mutableStateOf<String?>(null) }
+
+                        val localKeyVersion = onGetLocalKeyVersion.invoke()
+                        val localKeyUpdatedAt = onGetLocalKeyUpdatedAt?.invoke()
+
+                        Card(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                            )
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                // Local Key Info
+                                Text("Local Key", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                                Text(
+                                    "Version: ${if (localKeyVersion == 0) "None" else localKeyVersion}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                                Text(
+                                    "Updated: ${localKeyUpdatedAt?.let { formatTimestamp(it) } ?: "N/A"}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontFamily = FontFamily.Monospace
+                                )
+
+                                Spacer(modifier = Modifier.height(12.dp))
+
+                                // Nostr Sync Status
+                                Text("Nostr Sync", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+
+                                val nostrTs = nostrKeyUpdatedAt
+                                val syncStatus = when {
+                                    isFetchingNostr -> "Checking..."
+                                    localKeyVersion == 0 && !nostrFetchAttempted -> "No local key - tap Check"
+                                    localKeyVersion == 0 && nostrTs != null -> "No local key (Nostr has one - Sync!)"
+                                    localKeyVersion == 0 && nostrFetchAttempted -> "No key anywhere"
+                                    !nostrFetchAttempted -> "Tap 'Check' to verify"
+                                    nostrTs == null -> "No key on Nostr"
+                                    localKeyUpdatedAt == nostrTs -> "✓ Matches Nostr"
+                                    localKeyUpdatedAt != null && nostrTs > localKeyUpdatedAt -> "⚠ Nostr has newer key"
+                                    localKeyUpdatedAt != null && nostrTs < localKeyUpdatedAt -> "⚠ Local is newer (needs push)"
+                                    else -> "⚠ Mismatch"
+                                }
+
+                                Text(
+                                    syncStatus,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = when {
+                                        syncStatus.startsWith("✓") -> MaterialTheme.colorScheme.primary
+                                        syncStatus.startsWith("⚠") || syncStatus.contains("Sync!") -> MaterialTheme.colorScheme.error
+                                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                    }
+                                )
+
+                                if (nostrKeyUpdatedAt != null) {
+                                    Text(
+                                        "Nostr timestamp: ${formatTimestamp(nostrKeyUpdatedAt!!)}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.height(12.dp))
+
+                                // Buttons
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    OutlinedButton(
+                                        onClick = {
+                                            isFetchingNostr = true
+                                            scope.launch {
+                                                nostrKeyUpdatedAt = onFetchNostrKeyUpdatedAt?.invoke()
+                                                nostrFetchAttempted = true
+                                                isFetchingNostr = false
+                                            }
+                                        },
+                                        enabled = !isFetchingNostr && !isSyncing && !isRotating,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        if (isFetchingNostr) {
+                                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                        }
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Check", style = MaterialTheme.typography.labelSmall)
+                                    }
+
+                                    Button(
+                                        onClick = {
+                                            isSyncing = true
+                                            scope.launch {
+                                                val synced = onSyncRoadflareState?.invoke() ?: false
+                                                isSyncing = false
+                                                statusMessage = if (synced) "Synced! Tap Check to verify" else "No changes"
+                                                nostrKeyUpdatedAt = null
+                                                nostrFetchAttempted = false
+                                            }
+                                        },
+                                        enabled = !isFetchingNostr && !isSyncing && !isRotating,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        if (isSyncing) {
+                                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
+                                        }
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Sync", style = MaterialTheme.typography.labelSmall)
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(8.dp))
+
+                                Button(
+                                    onClick = {
+                                        isRotating = true
+                                        scope.launch {
+                                            val rotated = onRotateRoadflareKey?.invoke() ?: false
+                                            isRotating = false
+                                            statusMessage = if (rotated) "Rotated! Tap Check to verify" else "Rotation failed"
+                                            nostrKeyUpdatedAt = null
+                                            nostrFetchAttempted = false
+                                        }
+                                    },
+                                    enabled = !isFetchingNostr && !isSyncing && !isRotating,
+                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    if (isRotating) {
+                                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onSecondary)
+                                    }
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Rotate Key (New Version)")
+                                }
+
+                                statusMessage?.let {
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+                }
+
+                Text(
+                    text = "RoadFlare Event Inspector",
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.padding(vertical = 4.dp)
+                )
+
+                Text(
+                    text = "Query and delete RoadFlare events for testing. Events are fetched from connected relays.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+
+                // Event type cards
+                val eventTypes = listOf(
+                    Triple(RideshareEventKinds.ROADFLARE_FOLLOWED_DRIVERS, "30011 - Followed Drivers", "Rider's list of favorite drivers"),
+                    Triple(RideshareEventKinds.ROADFLARE_DRIVER_STATE, "30012 - Driver State", "Driver's RoadFlare keypair + followers"),
+                    Triple(RideshareEventKinds.ROADFLARE_LOCATION, "30014 - Location", "Driver's encrypted location broadcasts"),
+                    Triple(RideshareEventKinds.ROADFLARE_KEY_SHARE, "3186 - Key Share", "Driver → Rider key distribution"),
+                    Triple(RideshareEventKinds.ROADFLARE_FOLLOW_NOTIFY, "3187 - Follow Notify", "Rider → Driver follow notification"),
+                    Triple(RideshareEventKinds.ROADFLARE_KEY_ACK, "3188 - Key Ack", "Rider → Driver key acknowledgement")
+                )
+
+                eventTypes.forEach { (kind, name, description) ->
+                    val state = eventStates[kind]
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                        )
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = name,
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                    Text(
+                                        text = description,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    if (state?.count != null) {
+                                        Text(
+                                            text = "Found: ${state.count} events",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (state.count > 0) MaterialTheme.colorScheme.primary
+                                                    else MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                // Check button
+                                OutlinedButton(
+                                    onClick = {
+                                        eventStates = eventStates + (kind to (state?.copy(isChecking = true) ?: EventTypeState(kind, name, isChecking = true)))
+                                        scope.launch {
+                                            val count = nostrService.countOwnEventsOfKind(kind)
+                                            eventStates = eventStates + (kind to EventTypeState(kind, name, count = count, isChecking = false))
+                                        }
+                                    },
+                                    enabled = state?.isChecking != true && state?.isDeleting != true,
+                                    modifier = Modifier.weight(1f),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                                ) {
+                                    if (state?.isChecking == true) {
+                                        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                                    } else {
+                                        Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    }
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Check", style = MaterialTheme.typography.labelSmall)
+                                }
+
+                                // Delete button
+                                Button(
+                                    onClick = {
+                                        eventStates = eventStates + (kind to (state?.copy(isDeleting = true) ?: EventTypeState(kind, name, isDeleting = true)))
+                                        scope.launch {
+                                            val deleted = nostrService.deleteOwnEventsOfKind(kind)
+                                            inspectorMessage = "Deleted $deleted Kind $kind events"
+                                            eventStates = eventStates + (kind to EventTypeState(kind, name, count = 0, isDeleting = false))
+                                        }
+                                    },
+                                    enabled = state?.isChecking != true && state?.isDeleting != true && (state?.count == null || state.count > 0),
+                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                                    modifier = Modifier.weight(1f),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                                ) {
+                                    if (state?.isDeleting == true) {
+                                        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onError)
+                                    } else {
+                                        Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    }
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Delete", style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Check All / Delete All buttons
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            scope.launch {
+                                eventTypes.forEach { (kind, name, _) ->
+                                    eventStates = eventStates + (kind to EventTypeState(kind, name, isChecking = true))
+                                }
+                                eventTypes.forEach { (kind, name, _) ->
+                                    val count = nostrService.countOwnEventsOfKind(kind)
+                                    eventStates = eventStates + (kind to EventTypeState(kind, name, count = count))
+                                }
+                                inspectorMessage = "Checked all event types"
+                            }
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Default.Checklist, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Check All")
+                    }
+
+                    Button(
+                        onClick = {
+                            scope.launch {
+                                var totalDeleted = 0
+                                eventTypes.forEach { (kind, name, _) ->
+                                    eventStates = eventStates + (kind to EventTypeState(kind, name, isDeleting = true))
+                                    val deleted = nostrService.deleteOwnEventsOfKind(kind)
+                                    totalDeleted += deleted
+                                    eventStates = eventStates + (kind to EventTypeState(kind, name, count = 0))
+                                }
+                                inspectorMessage = "Deleted $totalDeleted total RoadFlare events"
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Default.DeleteForever, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Delete All")
+                    }
+                }
+
+                // Status message
+                inspectorMessage?.let { message ->
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 8.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.CheckCircle,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(text = message, style = MaterialTheme.typography.bodySmall)
+                            Spacer(modifier = Modifier.weight(1f))
+                            IconButton(
+                                onClick = { inspectorMessage = null },
+                                modifier = Modifier.size(24.dp)
+                            ) {
+                                Icon(Icons.Default.Close, contentDescription = "Dismiss", modifier = Modifier.size(16.dp))
+                            }
+                        }
+                    }
+                }
+            }
+
             // Bottom padding for scroll
             Spacer(modifier = Modifier.height(32.dp))
         }
@@ -245,4 +660,10 @@ private fun SettingsNavigationRow(
             )
         }
     }
+}
+
+private fun formatTimestamp(epochSeconds: Long): String {
+    val date = java.util.Date(epochSeconds * 1000)
+    val format = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault())
+    return format.format(date)
 }

@@ -56,6 +56,8 @@ object AdminConfigEvent {
             // Parse fare settings
             val fareRateUsdPerMile = json.optDouble("fare_rate_usd_per_mile", AdminConfig.DEFAULT_FARE_RATE)
             val minimumFareUsd = json.optDouble("minimum_fare_usd", AdminConfig.DEFAULT_MINIMUM_FARE)
+            val roadflareFareRate = json.optDouble("roadflare_fare_rate_usd_per_mile", AdminConfig.DEFAULT_ROADFLARE_FARE_RATE)
+            val roadflareMinimumFare = json.optDouble("roadflare_minimum_fare_usd", AdminConfig.DEFAULT_ROADFLARE_MINIMUM_FARE)
 
             // Parse recommended mints
             val mints = mutableListOf<MintOption>()
@@ -100,12 +102,14 @@ object AdminConfigEvent {
             AdminConfig(
                 fareRateUsdPerMile = fareRateUsdPerMile,
                 minimumFareUsd = minimumFareUsd,
+                roadflareFareRateUsdPerMile = roadflareFareRate,
+                roadflareMinimumFareUsd = roadflareMinimumFare,
                 recommendedMints = mints.ifEmpty { AdminConfig.DEFAULT_MINTS },
                 latestVersion = versionInfo,
                 eventId = event.id,
                 createdAt = event.createdAt
             ).also {
-                Log.d(TAG, "Parsed admin config: fare=$${it.fareRateUsdPerMile}/mi, min=$${it.minimumFareUsd}, ${it.recommendedMints.size} mints")
+                Log.d(TAG, "Parsed admin config: fare=$${it.fareRateUsdPerMile}/mi, roadflare=$${it.roadflareFareRateUsdPerMile}/mi, min=$${it.minimumFareUsd}, ${it.recommendedMints.size} mints")
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to parse admin config event", e)
@@ -120,6 +124,8 @@ object AdminConfigEvent {
 data class AdminConfig(
     val fareRateUsdPerMile: Double = DEFAULT_FARE_RATE,
     val minimumFareUsd: Double = DEFAULT_MINIMUM_FARE,
+    val roadflareFareRateUsdPerMile: Double = DEFAULT_ROADFLARE_FARE_RATE,
+    val roadflareMinimumFareUsd: Double = DEFAULT_ROADFLARE_MINIMUM_FARE,
     val recommendedMints: List<MintOption> = DEFAULT_MINTS,
     val latestVersion: VersionInfo? = null,
     val eventId: String? = null,
@@ -128,6 +134,8 @@ data class AdminConfig(
     companion object {
         const val DEFAULT_FARE_RATE = 1.85
         const val DEFAULT_MINIMUM_FARE = 5.0
+        const val DEFAULT_ROADFLARE_FARE_RATE = 1.20
+        const val DEFAULT_ROADFLARE_MINIMUM_FARE = 5.0
 
         val DEFAULT_MINTS = listOf(
             MintOption(

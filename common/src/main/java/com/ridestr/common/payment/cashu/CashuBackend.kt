@@ -29,6 +29,7 @@ import org.cashudevkit.ReceiveOptions as CdkReceiveOptions
 import org.cashudevkit.SendOptions as CdkSendOptions
 import org.cashudevkit.MintQuote as CdkMintQuote
 import org.cashudevkit.MeltQuote as CdkMeltQuote
+import androidx.annotation.VisibleForTesting
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
@@ -48,7 +49,9 @@ import java.util.concurrent.TimeUnit
 class CashuBackend(
     private val context: Context,
     private val walletKeyManager: WalletKeyManager,
-    private val walletStorage: WalletStorage
+    private val walletStorage: WalletStorage,
+    // Optional: for testing (production uses default OkHttpMintApi)
+    private val mintApi: MintApi? = null
 ) {
     companion object {
         private const val TAG = "CashuBackend"
@@ -57,6 +60,10 @@ class CashuBackend(
         // Required NUTs for escrow functionality
         private val REQUIRED_NUTS = setOf(14, 5, 7)  // HTLC, Melt, Proof state
     }
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // INSTANCE STATE
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     // cdk-kotlin wallet instance for real Cashu operations
     private var cdkWallet: CdkWallet? = null
@@ -71,11 +78,54 @@ class CashuBackend(
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
+    // MintApi for HTLC operations - uses injected or default OkHttpMintApi
+    private val effectiveMintApi: MintApi by lazy {
+        mintApi ?: OkHttpMintApi(client)
+    }
+
     private var currentMintUrl: String? = null
     private var mintCapabilities: MintCapabilities? = null
 
     // NUT-17: WebSocket for real-time state updates
     private var webSocket: CashuWebSocket? = null
+
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // TEST SUPPORT
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Test-only field to bypass getActiveKeyset() HTTP calls.
+     * WARNING: For unit tests only. Never set in production code.
+     */
+    @VisibleForTesting
+    internal var testActiveKeyset: MintKeyset? = null
+
+    /**
+     * Inject test state to bypass all HTTP calls (connect, getActiveKeyset).
+     * WARNING: For unit tests only. Never call in production code.
+     *
+     * @param mintUrl The mint URL to use (sets currentMintUrl)
+     * @param keyset The keyset to return from getActiveKeyset()
+     * @param seed The wallet seed for deterministic derivation
+     */
+    @VisibleForTesting
+    internal fun setTestState(
+        mintUrl: String,
+        keyset: MintKeyset,
+        seed: ByteArray
+    ) {
+        currentMintUrl = mintUrl
+        testActiveKeyset = keyset
+        walletSeed = seed
+    }
+
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // LIFECYCLE & CONNECTION
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Verify mint capabilities via NUT-06 info endpoint.
@@ -335,6 +385,12 @@ class CashuBackend(
      * Check if connected mint supports escrow (NUT-14/5/7).
      */
     fun supportsEscrow(): Boolean = mintCapabilities?.supportsEscrow() == true
+
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // MINT API - QUOTES (NUT-04/05)
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Get a melt quote from the mint (NUT-05).
@@ -663,6 +719,12 @@ class CashuBackend(
         null
     }
 
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // PROOF VERIFICATION (NUT-07)
+    // ═══════════════════════════════════════════════════════════════════════════════
+
     /**
      * Check proof states via NUT-07.
      *
@@ -715,11 +777,25 @@ class CashuBackend(
         }
     }
 
-    // ========================================
-    // NUT-14 HTLC Operations (REAL IMPLEMENTATION)
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // HTLC ESCROW (NUT-14) - CRITICAL PAYMENT CODE
     // Reference: https://github.com/cashubtc/nuts/blob/main/14.md
-    // Note: Primary HTLC creation is now via createHtlcTokenFromProofs() which takes NIP-60 proofs
-    // ========================================
+    //
+    // INVARIANT: createHtlcTokenFromProofs() MUST:
+    //   1. Save PendingBlindedOperation BEFORE mint call
+    //   2. Only delete pending op AFTER successful mint response
+    //   3. On failure, operation stays pending for recovery
+    //
+    // INVARIANT: claimHtlcTokenWithProofs() MUST:
+    //   1. Verify preimage matches hash BEFORE sending to mint
+    //   2. Publish proofs to NIP-60 AFTER successful claim
+    //
+    // INVARIANT: refundExpiredHtlc() MUST:
+    //   1. Verify locktime has passed BEFORE attempting refund
+    //   2. Use stored preimage (not zeros) for future-proof refunds
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Claim an HTLC-locked token using the preimage.
@@ -941,18 +1017,18 @@ class CashuBackend(
     suspend fun claimHtlcTokenWithProofs(
         htlcToken: String,
         preimage: String
-    ): HtlcClaimResult? = withContext(Dispatchers.IO) {
+    ): HtlcClaimOutcome = withContext(Dispatchers.IO) {
         val mintUrl = currentMintUrl
 
         if (mintUrl == null) {
             Log.e(TAG, "claimHtlcTokenWithProofs: mint not initialized")
-            return@withContext null
+            return@withContext HtlcClaimOutcome.Failure.Other("Mint not initialized")
         }
 
         // Validate preimage
         if (preimage.length != 64 || !preimage.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' }) {
             Log.e(TAG, "claimHtlcTokenWithProofs: invalid preimage format")
-            return@withContext null
+            return@withContext HtlcClaimOutcome.Failure.Other("Invalid preimage format")
         }
 
         Log.d(TAG, "=== CLAIMING HTLC (with proofs) ===")
@@ -962,7 +1038,7 @@ class CashuBackend(
             val parseResult = parseHtlcToken(htlcToken)
             if (parseResult == null) {
                 Log.e(TAG, "Failed to parse HTLC token - parseHtlcToken returned null")
-                return@withContext null
+                return@withContext HtlcClaimOutcome.Failure.TokenParseFailed
             }
             val (htlcProofs, tokenMintUrl) = parseResult
             val totalAmount = htlcProofs.sumOf { it.amount }
@@ -972,19 +1048,19 @@ class CashuBackend(
             val expectedHash = extractPaymentHashFromSecret(htlcProofs.first().secret)
             if (expectedHash == null) {
                 Log.e(TAG, "Failed to extract payment_hash from HTLC secret")
-                return@withContext null
+                return@withContext HtlcClaimOutcome.Failure.TokenParseFailed
             }
             val computedHash = PaymentCrypto.computePaymentHash(preimage)
             if (!computedHash.equals(expectedHash, ignoreCase = true)) {
                 Log.e(TAG, "Preimage does not match payment_hash")
-                return@withContext null
+                return@withContext HtlcClaimOutcome.Failure.Other("Preimage does not match payment_hash")
             }
 
             // Get keyset
             val keyset = getActiveKeyset()
             if (keyset == null) {
                 Log.e(TAG, "Failed to get active keyset from mint")
-                return@withContext null
+                return@withContext HtlcClaimOutcome.Failure.Other("Failed to get active keyset")
             }
             Log.d(TAG, "Using keyset: ${keyset.id}")
 
@@ -994,14 +1070,16 @@ class CashuBackend(
 
             // Build swap request with per-proof witness signatures
             val inputsArray = JSONArray()
-            htlcProofs.forEach { proof ->
+            for (proof in htlcProofs) {
                 // Create P2PK signature for this proof
                 val sig = signP2pkProof(proof.secret, proof.C)
+                if (sig == null) {
+                    Log.e(TAG, "claimHtlcTokenWithProofs: signP2pkProof returned null")
+                    return@withContext HtlcClaimOutcome.Failure.SignatureFailed
+                }
                 val witnessJson = JSONObject().apply {
                     put("preimage", preimage)
-                    put("signatures", JSONArray().apply {
-                        if (sig != null) put(sig)
-                    })
+                    put("signatures", JSONArray().apply { put(sig) })
                 }.toString()
 
                 inputsArray.put(JSONObject().apply {
@@ -1056,23 +1134,24 @@ class CashuBackend(
             walletStorage.savePendingBlindedOp(pendingOp)
             Log.d(TAG, "Saved pending HTLC claim operation: $operationId ($totalAmount sats)")
 
-            // Execute swap
+            // Execute swap via MintApi
             Log.d(TAG, "Executing swap at: $targetMint/v1/swap")
-            val request = Request.Builder()
-                .url("$targetMint/v1/swap")
-                .post(swapRequest.toRequestBody(JSON_MEDIA_TYPE))
-                .build()
-
-            val signatures = client.newCall(request).execute().use { response ->
-                val responseBody = response.body?.string()
-                Log.d(TAG, "Swap response: ${response.code}")
-                if (!response.isSuccessful) {
-                    Log.e(TAG, "Claim swap failed: ${response.code} - $responseBody")
-                    // Keep pending operation for recovery
-                    return@withContext null
+            val swapResult = effectiveMintApi.postSwap(targetMint, swapRequest)
+            val signatures = when (swapResult) {
+                is MintApi.Result.Success -> {
+                    Log.d(TAG, "Swap successful, parsing signatures...")
+                    JSONObject(swapResult.body).getJSONArray("signatures")
                 }
-                Log.d(TAG, "Swap successful, parsing signatures...")
-                JSONObject(responseBody ?: "{}").getJSONArray("signatures")
+                is MintApi.Result.HttpError -> {
+                    Log.e(TAG, "Claim swap failed: ${swapResult.code} - ${swapResult.body}")
+                    // Keep pending operation for recovery
+                    return@withContext HtlcClaimOutcome.Failure.MintRejected
+                }
+                is MintApi.Result.TransportFailure -> {
+                    Log.e(TAG, "Claim swap mint unreachable: ${swapResult.cause}")
+                    // Keep pending operation for recovery
+                    return@withContext HtlcClaimOutcome.Failure.MintUnreachable
+                }
             }
 
             // Unblind signatures - CRITICAL: Use keyset ID from response
@@ -1115,17 +1194,17 @@ class CashuBackend(
                 put("status", "SETTLED")
             }.toString()
 
-            HtlcClaimResult(
+            HtlcClaimOutcome.Success(HtlcClaimResult(
                 settlementProof = settlementProof,
                 receivedProofs = plainProofs,
                 amountSats = totalAmount,
                 mintUrl = targetMint,
                 pendingOpId = operationId
-            )
+            ))
         } catch (e: Exception) {
             Log.e(TAG, "claimHtlcTokenWithProofs failed: ${e.message}", e)
             // Keep pending operation for recovery
-            null
+            HtlcClaimOutcome.Failure.Other(e.message ?: "Unknown error")
         }
     }
 
@@ -1137,17 +1216,18 @@ class CashuBackend(
      *
      * @param htlcToken The HTLC Cashu token to refund
      * @param riderPubKey The rider's wallet public key (must match refund tag in secret)
-     * @return HtlcRefundResult with refunded proofs, or null on failure
+     * @return HtlcRefundOutcome with success result or detailed failure info
      */
     suspend fun refundExpiredHtlc(
         htlcToken: String,
-        riderPubKey: String
-    ): HtlcRefundResult? = withContext(Dispatchers.IO) {
-        val mintUrl = currentMintUrl
+        riderPubKey: String,
+        preimage: String? = null  // Use if available, else zeros fallback
+    ): HtlcRefundOutcome = withContext(Dispatchers.IO) {
+        val currentMint = currentMintUrl
 
-        if (mintUrl == null) {
+        if (currentMint == null) {
             Log.e(TAG, "refundExpiredHtlc: mint not initialized")
-            return@withContext null
+            return@withContext HtlcRefundOutcome.Failure.MintNotInitialized
         }
 
         Log.d(TAG, "=== REFUNDING EXPIRED HTLC ===")
@@ -1157,25 +1237,35 @@ class CashuBackend(
             val parseResult = parseHtlcToken(htlcToken)
             if (parseResult == null) {
                 Log.e(TAG, "refundExpiredHtlc: failed to parse HTLC token")
-                return@withContext null
+                return@withContext HtlcRefundOutcome.Failure.TokenParseFailed
             }
 
             val (htlcProofs, tokenMintUrl) = parseResult
             val totalAmount = htlcProofs.sumOf { it.amount }
             Log.d(TAG, "Parsed ${htlcProofs.size} HTLC proofs totaling $totalAmount sats")
 
+            // === DIAGNOSTIC LOGGING ===
+            Log.d(TAG, "=== HTLC REFUND DIAGNOSTICS ===")
+            Log.d(TAG, "Token mint URL: $tokenMintUrl")
+            Log.d(TAG, "Current mint URL: $currentMint")
+            Log.d(TAG, "Mints match: ${tokenMintUrl.trimEnd('/') == currentMint.trimEnd('/')}")
+            Log.d(TAG, "HTLC refund pubkey (stored): ${riderPubKey.take(16)}...")
+            val currentWalletKey = walletKeyManager.getWalletPubKeyHex()
+            Log.d(TAG, "Current wallet pubkey: ${currentWalletKey?.take(16) ?: "NULL"}...")
+            Log.d(TAG, "Keys match: ${riderPubKey == currentWalletKey}")
+
             // Step 2: Verify locktime has expired
             val locktime = extractLocktimeFromSecret(htlcProofs.first().secret)
             if (locktime == null) {
                 Log.e(TAG, "refundExpiredHtlc: no locktime found in HTLC secret")
-                return@withContext null
+                return@withContext HtlcRefundOutcome.Failure.TokenParseFailed
             }
 
             val now = System.currentTimeMillis() / 1000
             val bufferSeconds = 120  // Account for clock skew between device and mint
             if (now <= locktime + bufferSeconds) {
                 Log.e(TAG, "refundExpiredHtlc: locktime not safely expired (now=$now, locktime=$locktime, buffer=${bufferSeconds}s)")
-                return@withContext null
+                return@withContext HtlcRefundOutcome.Failure.LocktimeNotExpired(locktime, now)
             }
             Log.d(TAG, "Locktime safely expired: now=$now > locktime+buffer=${locktime + bufferSeconds}")
 
@@ -1184,15 +1274,53 @@ class CashuBackend(
             if (refundKeys.isEmpty() || !refundKeys.contains(riderPubKey)) {
                 Log.e(TAG, "refundExpiredHtlc: rider pubkey not in refund tags")
                 Log.e(TAG, "Expected one of: ${refundKeys.take(2)}, got: ${riderPubKey.take(16)}...")
-                return@withContext null
+                return@withContext HtlcRefundOutcome.Failure.TokenParseFailed
             }
             Log.d(TAG, "Rider pubkey verified in refund tags")
 
-            // Step 4: Get keyset for creating new plain outputs
-            val keyset = getActiveKeyset()
+            // Step 3b: Verify current wallet key matches stored riderPubKey
+            // This catches the case where user restored wallet with different key
+            if (currentWalletKey != riderPubKey) {
+                Log.e(TAG, "WALLET KEY MISMATCH!")
+                Log.e(TAG, "  HTLC refund tag: ${riderPubKey.take(16)}...")
+                Log.e(TAG, "  Current wallet:  ${currentWalletKey?.take(16) ?: "NULL"}...")
+                Log.e(TAG, "  User likely restored wallet with different key")
+                return@withContext HtlcRefundOutcome.Failure.WalletKeyMismatch(
+                    expectedKey = riderPubKey,
+                    currentKey = currentWalletKey,
+                    tokenMintUrl = tokenMintUrl
+                )
+            }
+
+            // Step 4: Get keyset from TOKEN's mint (not current mint)
+            // This fixes the keyset mismatch bug when user switched mints after creating HTLC
+            val targetMint = tokenMintUrl.trimEnd('/')
+            val keyset = getActiveKeysetFromMint(targetMint)
             if (keyset == null) {
-                Log.e(TAG, "refundExpiredHtlc: failed to get active keyset")
-                return@withContext null
+                Log.e(TAG, "refundExpiredHtlc: failed to get active keyset from $targetMint")
+                return@withContext HtlcRefundOutcome.Failure.KeysetFetchFailed(targetMint)
+            }
+            Log.d(TAG, "Fetched keyset ${keyset.id} from token's mint: $targetMint")
+
+            // Step 4b: Check proof states with NUT-07 (diagnostic - debug builds only)
+            if (com.ridestr.common.BuildConfig.DEBUG) {
+                try {
+                    val secrets = htlcProofs.map { it.secret }
+                    val stateMap = verifyProofStatesBySecretAtMint(secrets, targetMint)
+                    Log.d(TAG, "=== NUT-07 PROOF STATES ===")
+                    stateMap?.forEach { (secret, state) ->
+                        Log.d(TAG, "Proof ${secret.take(20)}...: $state")
+                    }
+                    val spentCount = stateMap?.count { it.value == ProofStateResult.SPENT } ?: 0
+                    val pendingCount = stateMap?.count { it.value == ProofStateResult.PENDING } ?: 0
+                    val unspentCount = stateMap?.count { it.value == ProofStateResult.UNSPENT } ?: 0
+                    Log.d(TAG, "States: $unspentCount unspent, $pendingCount pending, $spentCount spent")
+                    if (spentCount > 0) {
+                        Log.e(TAG, "WARNING: $spentCount proofs already SPENT - refund will fail!")
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "NUT-07 state check failed (non-fatal): ${e.message}")
+                }
             }
 
             // Step 5: Create plain output secrets (NUT-13 deterministic)
@@ -1200,27 +1328,48 @@ class CashuBackend(
             val outputPremints = generatePreMintSecrets(outputAmounts, keyset.id)
 
             // Step 6: Build swap request with refund witness
-            // Refund path: signature only (no preimage needed)
-            val inputsArray = JSONArray()
-            htlcProofs.forEach { proof ->
-                // Create P2PK signature for refund
-                val sig = signP2pkProof(proof.secret, proof.C)
-                val witnessJson = JSONObject().apply {
-                    // No preimage for refund path
-                    put("signatures", JSONArray().apply {
-                        if (sig != null) put(sig)
-                    })
-                }.toString()
+            // Strategy: If we have real preimage, use it. If not, try spec-compliant (no preimage),
+            // then retry with zeros fallback for non-compliant mints.
 
-                inputsArray.put(JSONObject().apply {
-                    put("amount", proof.amount)
-                    put("id", proof.id)
-                    put("secret", proof.secret)
-                    put("C", proof.C)
-                    put("witness", witnessJson)
-                })
+            // Helper to build inputsArray with or without preimage
+            fun buildInputsArray(includePreimage: Boolean, useZeros: Boolean): JSONArray {
+                val inputs = JSONArray()
+                htlcProofs.forEachIndexed { index, proof ->
+                    val sig = signP2pkProof(proof.secret, proof.C)
+                    if (com.ridestr.common.BuildConfig.DEBUG) {
+                        Log.d(TAG, "HTLC proof $index: amount=${proof.amount}, signature created=${sig != null}")
+                    }
+
+                    val witnessJson = JSONObject().apply {
+                        if (includePreimage) {
+                            val preimageValue = if (useZeros) "0".repeat(64) else preimage
+                            if (preimageValue != null) {
+                                put("preimage", preimageValue)
+                            }
+                        }
+                        // Note: preimage field omitted entirely when includePreimage=false
+                        put("signatures", JSONArray().apply {
+                            if (sig != null) put(sig)
+                        })
+                    }.toString()
+
+                    inputs.put(JSONObject().apply {
+                        put("amount", proof.amount)
+                        put("id", proof.id)
+                        put("secret", proof.secret)
+                        put("C", proof.C)
+                        put("witness", witnessJson)
+                    })
+                }
+                return inputs
             }
-            Log.d(TAG, "Created refund witnesses for ${htlcProofs.size} proofs")
+
+            // First attempt: use real preimage if available, otherwise try spec-compliant (omit preimage)
+            val inputsArray = buildInputsArray(
+                includePreimage = preimage != null,
+                useZeros = false
+            )
+            Log.d(TAG, "Created refund witnesses for ${htlcProofs.size} proofs (preimage=${preimage != null})")
 
             val outputsArray = JSONArray()
             outputPremints.forEach { pms ->
@@ -1231,16 +1380,8 @@ class CashuBackend(
                 })
             }
 
-            val swapRequest = JSONObject().apply {
-                put("inputs", inputsArray)
-                put("outputs", outputsArray)
-            }.toString()
-
-            Log.d(TAG, "Sending refund swap with ${htlcProofs.size} HTLC inputs, ${outputPremints.size} outputs")
-
             // CRITICAL: Save pending operation BEFORE sending request
             val operationId = java.util.UUID.randomUUID().toString()
-            val targetMint = tokenMintUrl.trimEnd('/')
             val pendingOp = PendingBlindedOperation(
                 id = operationId,
                 operationType = BlindedOperationType.REFUND_HTLC,
@@ -1264,25 +1405,55 @@ class CashuBackend(
             walletStorage.savePendingBlindedOp(pendingOp)
             Log.d(TAG, "Saved pending HTLC refund operation: $operationId ($totalAmount sats)")
 
-            // Step 7: Execute swap at mint
-            val request = Request.Builder()
-                .url("$targetMint/v1/swap")
-                .post(swapRequest.toRequestBody(JSON_MEDIA_TYPE))
-                .build()
+            // Step 7: Execute swap at mint with retry strategy
+            // If preimage is null, first try spec-compliant (no preimage), then retry with zeros fallback
+            fun executeSwap(inputs: JSONArray): Triple<Boolean, String?, Int> {
+                val swapRequest = JSONObject().apply {
+                    put("inputs", inputs)
+                    put("outputs", outputsArray)
+                }.toString()
 
-            val signatures = client.newCall(request).execute().use { response ->
-                val responseBody = response.body?.string()
-                Log.d(TAG, "Refund swap response: ${response.code}")
+                val request = Request.Builder()
+                    .url("$targetMint/v1/swap")
+                    .post(swapRequest.toRequestBody(JSON_MEDIA_TYPE))
+                    .build()
 
-                if (!response.isSuccessful) {
-                    Log.e(TAG, "Refund swap failed: ${response.code} - $responseBody")
-                    // Keep pending operation for recovery
-                    return@withContext null
+                return client.newCall(request).execute().use { response ->
+                    val responseBody = response.body?.string()
+                    Log.d(TAG, "Refund swap response: ${response.code}")
+                    Triple(response.isSuccessful, responseBody, response.code)
                 }
-
-                val json = JSONObject(responseBody ?: "{}")
-                json.getJSONArray("signatures")
             }
+
+            Log.d(TAG, "Sending refund swap with ${htlcProofs.size} HTLC inputs, ${outputPremints.size} outputs")
+            var (success, responseBody, responseCode) = executeSwap(inputsArray)
+
+            // If failed and we omitted preimage, retry with zeros fallback for non-compliant mints
+            if (!success && preimage == null) {
+                val errorMsg = responseBody?.lowercase() ?: ""
+                val needsPreimage = errorMsg.contains("preimage") || errorMsg.contains("htlc")
+
+                if (needsPreimage) {
+                    Log.d(TAG, "Mint requires preimage, retrying with zeros fallback")
+                    val retryInputs = buildInputsArray(includePreimage = true, useZeros = true)
+                    val retryResult = executeSwap(retryInputs)
+                    success = retryResult.first
+                    responseBody = retryResult.second
+                    responseCode = retryResult.third
+                }
+            }
+
+            if (!success) {
+                Log.e(TAG, "Refund swap failed: $responseBody")
+                // Keep pending operation for recovery
+                return@withContext HtlcRefundOutcome.Failure.MintRejected(
+                    code = responseCode,
+                    body = responseBody,
+                    mintUrl = targetMint
+                )
+            }
+
+            val signaturesResult = JSONObject(responseBody ?: "{}").getJSONArray("signatures")
 
             // Step 8: Unblind signatures to get plain proofs - CRITICAL: Use keyset ID from response
             val plainProofs = mutableListOf<CashuProof>()
@@ -1290,7 +1461,7 @@ class CashuBackend(
             keysetCache[keyset.id] = keyset
 
             for (i in 0 until outputPremints.size) {
-                val sig = signatures.getJSONObject(i)
+                val sig = signaturesResult.getJSONObject(i)
                 val pms = outputPremints[i]
                 val C_ = sig.getString("C_")
                 val responseKeysetId = sig.getString("id")
@@ -1321,16 +1492,16 @@ class CashuBackend(
             walletStorage.updateBlindedOpStatus(operationId, PendingOperationStatus.COMPLETED)
             Log.d(TAG, "Marked pending HTLC refund operation COMPLETED: $operationId (caller must clear after NIP-60 persist)")
 
-            HtlcRefundResult(
+            HtlcRefundOutcome.Success(HtlcRefundResult(
                 refundedProofs = plainProofs,
                 amountSats = totalAmount,
                 mintUrl = targetMint,
                 pendingOpId = operationId
-            )
+            ))
         } catch (e: Exception) {
             Log.e(TAG, "refundExpiredHtlc failed: ${e.message}", e)
             // Keep pending operation for recovery
-            null
+            HtlcRefundOutcome.Failure.Exception(e.message ?: "Unknown error")
         }
     }
 
@@ -1343,6 +1514,34 @@ class CashuBackend(
         val mintUrl: String,
         val pendingOpId: String? = null  // ID of pending op - caller must clear after NIP-60 publish
     )
+
+    /**
+     * Structured outcome for HTLC refund operations.
+     * Provides detailed failure information for diagnostics.
+     */
+    sealed class HtlcRefundOutcome {
+        data class Success(val result: HtlcRefundResult) : HtlcRefundOutcome()
+
+        sealed class Failure : HtlcRefundOutcome() {
+            object MintNotInitialized : Failure()
+            object TokenParseFailed : Failure()
+            data class LocktimeNotExpired(val locktime: Long, val now: Long) : Failure()
+            data class WalletKeyMismatch(
+                val expectedKey: String,
+                val currentKey: String?,
+                val tokenMintUrl: String
+            ) : Failure()
+            data class KeysetFetchFailed(
+                val tokenMintUrl: String
+            ) : Failure()
+            data class MintRejected(
+                val code: Int,
+                val body: String?,
+                val mintUrl: String
+            ) : Failure()
+            data class Exception(val message: String) : Failure()
+        }
+    }
 
     /**
      * Result of creating an HTLC lock (escrow).
@@ -1360,12 +1559,25 @@ class CashuBackend(
     /**
      * HTLC proof structure (proof with NUT-10/14 secret format).
      */
+    /**
+     * Type alias for HtlcProof from CashuTokenCodec.
+     * Kept for backward compatibility with existing code.
+     */
+    @Deprecated("Use CashuTokenCodec.HtlcProof instead", ReplaceWith("CashuTokenCodec.HtlcProof"))
     data class HtlcProof(
         val amount: Long,
         val id: String,
         val secret: String,  // NUT-10 JSON format: ["HTLC", {...}]
         val C: String
-    )
+    ) {
+        /** Convert to CashuTokenCodec.HtlcProof */
+        fun toCodecProof() = CashuTokenCodec.HtlcProof(amount, id, secret, C)
+
+        companion object {
+            /** Create from CashuTokenCodec.HtlcProof */
+            fun fromCodecProof(p: CashuTokenCodec.HtlcProof) = HtlcProof(p.amount, p.id, p.secret, p.C)
+        }
+    }
 
     /**
      * Result of claiming an HTLC token.
@@ -1377,6 +1589,44 @@ class CashuBackend(
         val mintUrl: String,
         val pendingOpId: String? = null  // ID of pending op - caller must clear after NIP-60 publish
     )
+
+    /**
+     * Typed outcome for HTLC swap (lock) operations.
+     * Wraps HtlcLockResult on success, provides failure variants for error wiring.
+     */
+    sealed class HtlcSwapOutcome {
+        data class Success(val result: HtlcLockResult) : HtlcSwapOutcome()
+        sealed class Failure : HtlcSwapOutcome() {
+            /** Network failure (IOException, timeout, DNS) */
+            object MintUnreachable : Failure()
+            /** Mint returned HTTP error (4xx/5xx) */
+            object SwapRejected : Failure()
+            /** Other failures with message */
+            data class Other(val message: String) : Failure()
+        }
+    }
+
+    /**
+     * Typed outcome for HTLC claim operations.
+     * Wraps HtlcClaimResult on success, provides failure variants for error wiring.
+     *
+     * NOTE: result is CashuBackend.HtlcClaimResult (data class), NOT HtlcResult.HtlcClaimResult (sealed class)
+     */
+    sealed class HtlcClaimOutcome {
+        data class Success(val result: HtlcClaimResult) : HtlcClaimOutcome()
+        sealed class Failure : HtlcClaimOutcome() {
+            /** Token parsing failed (CashuTokenCodec.parseHtlcToken returned null) */
+            object TokenParseFailed : Failure()
+            /** P2PK signature failed (signP2pkProof returned null) */
+            object SignatureFailed : Failure()
+            /** Network failure (IOException, timeout, DNS) */
+            object MintUnreachable : Failure()
+            /** Mint returned HTTP error (4xx/5xx) */
+            object MintRejected : Failure()
+            /** Other failures with message */
+            data class Other(val message: String) : Failure()
+        }
+    }
 
     /**
      * Create NUT-10 HTLC secret as JSON string.
@@ -1430,81 +1680,24 @@ class CashuBackend(
 
     /**
      * Extract payment_hash from NUT-10 HTLC secret.
+     * Delegates to CashuTokenCodec.
      */
-    private fun extractPaymentHashFromSecret(secret: String): String? {
-        return try {
-            val arr = JSONArray(secret)
-            if (arr.length() >= 2 && arr.getString(0) == "HTLC") {
-                val obj = arr.getJSONObject(1)
-                obj.getString("data")
-            } else {
-                null
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to extract payment_hash from secret: ${e.message}")
-            null
-        }
-    }
+    private fun extractPaymentHashFromSecret(secret: String): String? =
+        CashuTokenCodec.extractPaymentHashFromSecret(secret)
 
     /**
      * Extract locktime from NUT-10/14 HTLC secret.
-     * Format: ["HTLC", {"nonce": "...", "data": "...", "tags": [["locktime", "12345"], ...]}]
+     * Delegates to CashuTokenCodec.
      */
-    private fun extractLocktimeFromSecret(secret: String): Long? {
-        return try {
-            val arr = JSONArray(secret)
-            if (arr.length() >= 2 && arr.getString(0) == "HTLC") {
-                val obj = arr.getJSONObject(1)
-                val tags = obj.getJSONArray("tags")
-                var locktime: Long? = null
-                for (i in 0 until tags.length()) {
-                    val tag = tags.getJSONArray(i)
-                    if (tag.length() >= 2 && tag.getString(0) == "locktime") {
-                        locktime = tag.getString(1).toLongOrNull()
-                        break
-                    }
-                }
-                locktime
-            } else {
-                null
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to extract locktime from secret: ${e.message}")
-            null
-        }
-    }
+    private fun extractLocktimeFromSecret(secret: String): Long? =
+        CashuTokenCodec.extractLocktimeFromSecret(secret)
 
     /**
      * Extract refund public keys from NUT-10/14 HTLC secret.
-     * Format: ["HTLC", {"nonce": "...", "data": "...", "tags": [["refund", "key1", "key2"], ...]}]
+     * Delegates to CashuTokenCodec.
      */
-    private fun extractRefundKeysFromSecret(secret: String): List<String> {
-        return try {
-            val arr = JSONArray(secret)
-            if (arr.length() >= 2 && arr.getString(0) == "HTLC") {
-                val obj = arr.getJSONObject(1)
-                val tags = obj.getJSONArray("tags")
-                var refundKeys: List<String> = emptyList()
-                for (i in 0 until tags.length()) {
-                    val tag = tags.getJSONArray(i)
-                    if (tag.length() >= 2 && tag.getString(0) == "refund") {
-                        val keys = mutableListOf<String>()
-                        for (j in 1 until tag.length()) {
-                            keys.add(tag.getString(j))
-                        }
-                        refundKeys = keys
-                        break
-                    }
-                }
-                refundKeys
-            } else {
-                emptyList()
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to extract refund keys from secret: ${e.message}")
-            emptyList()
-        }
-    }
+    private fun extractRefundKeysFromSecret(secret: String): List<String> =
+        CashuTokenCodec.extractRefundKeysFromSecret(secret)
 
     /**
      * Compute P2PK signature for a proof.
@@ -1536,73 +1729,22 @@ class CashuBackend(
 
     /**
      * Encode HTLC proofs as a Cashu token (cashuA format).
+     * Delegates to CashuTokenCodec.
      */
     private fun encodeHtlcProofsAsToken(proofs: List<HtlcProof>, mintUrl: String): String {
-        val proofsArray = JSONArray()
-        proofs.forEach { proof ->
-            proofsArray.put(JSONObject().apply {
-                put("amount", proof.amount)
-                put("id", proof.id)
-                put("secret", proof.secret)
-                put("C", proof.C)
-            })
-        }
-
-        val tokenJson = JSONObject().apply {
-            put("token", JSONArray().put(JSONObject().apply {
-                put("mint", mintUrl)
-                put("proofs", proofsArray)
-            }))
-            put("unit", "sat")
-        }
-
-        return "cashuA" + android.util.Base64.encodeToString(
-            tokenJson.toString().toByteArray(),
-            android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP
-        )
+        val codecProofs = proofs.map { it.toCodecProof() }
+        return CashuTokenCodec.encodeHtlcProofsAsToken(codecProofs, mintUrl)
     }
 
     /**
      * Parse a Cashu token to extract HTLC proofs.
+     * Delegates to CashuTokenCodec.
      * @return Pair of (proofs, mintUrl) or null if invalid
      */
     private fun parseHtlcToken(token: String): Pair<List<HtlcProof>, String>? {
-        return try {
-            val base64 = when {
-                token.startsWith("cashuA") -> token.removePrefix("cashuA")
-                token.startsWith("cashuB") -> token.removePrefix("cashuB")
-                else -> {
-                    Log.e(TAG, "Invalid token prefix: ${token.take(10)}")
-                    return null
-                }
-            }
-
-            val jsonStr = String(android.util.Base64.decode(base64, android.util.Base64.URL_SAFE))
-            val json = JSONObject(jsonStr)
-
-            val tokenArray = json.getJSONArray("token")
-            if (tokenArray.length() == 0) return null
-
-            val firstMint = tokenArray.getJSONObject(0)
-            val mintUrl = firstMint.getString("mint")
-            val proofsArray = firstMint.getJSONArray("proofs")
-
-            val proofs = mutableListOf<HtlcProof>()
-            for (i in 0 until proofsArray.length()) {
-                val p = proofsArray.getJSONObject(i)
-                proofs.add(HtlcProof(
-                    amount = p.getLong("amount"),
-                    id = p.getString("id"),
-                    secret = p.getString("secret"),
-                    C = p.getString("C")
-                ))
-            }
-
-            Pair(proofs, mintUrl)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to parse HTLC token: ${e.message}")
-            null
-        }
+        val result = CashuTokenCodec.parseHtlcToken(token) ?: return null
+        val proofs = result.first.map { HtlcProof.fromCodecProof(it) }
+        return Pair(proofs, result.second)
     }
 
     /**
@@ -1625,22 +1767,22 @@ class CashuBackend(
         driverPubKey: String,
         locktime: Long? = null,
         riderPubKey: String? = null
-    ): HtlcLockResult? = withContext(Dispatchers.IO) {
+    ): HtlcSwapOutcome = withContext(Dispatchers.IO) {
         val mintUrl = currentMintUrl
         if (mintUrl == null) {
             Log.e(TAG, "createHtlcTokenFromProofs: currentMintUrl is null!")
-            return@withContext null
+            return@withContext HtlcSwapOutcome.Failure.Other("Mint not initialized")
         }
 
         if (inputProofs.isEmpty()) {
             Log.e(TAG, "createHtlcTokenFromProofs: no input proofs provided")
-            return@withContext null
+            return@withContext HtlcSwapOutcome.Failure.Other("No input proofs provided")
         }
 
         val inputAmount = inputProofs.sumOf { it.amount }
         if (inputAmount < amountSats) {
             Log.e(TAG, "createHtlcTokenFromProofs: insufficient proofs ($inputAmount < $amountSats)")
-            return@withContext null
+            return@withContext HtlcSwapOutcome.Failure.Other("Insufficient proofs ($inputAmount < $amountSats)")
         }
 
         Log.d(TAG, "=== CREATING HTLC FROM NIP-60 PROOFS ===")
@@ -1651,7 +1793,7 @@ class CashuBackend(
             val keyset = getActiveKeyset()
             if (keyset == null) {
                 Log.e(TAG, "createHtlcTokenFromProofs: getActiveKeyset() returned null!")
-                return@withContext null
+                return@withContext HtlcSwapOutcome.Failure.Other("Failed to get active keyset")
             }
 
             // Calculate change
@@ -1722,20 +1864,22 @@ class CashuBackend(
             walletStorage.savePendingBlindedOp(pendingOp)
             Log.d(TAG, "Saved pending HTLC lock operation: $operationId ($inputAmount sats)")
 
-            // Execute swap
-            val request = Request.Builder()
-                .url("$mintUrl/v1/swap")
-                .post(swapRequest.toRequestBody(JSON_MEDIA_TYPE))
-                .build()
-
-            val signatures = client.newCall(request).execute().use { response ->
-                val responseBody = response.body?.string()
-                if (!response.isSuccessful) {
-                    Log.e(TAG, "HTLC swap failed: ${response.code} - $responseBody")
-                    // Keep pending operation for recovery
-                    return@withContext null
+            // Execute swap via MintApi
+            val swapResult = effectiveMintApi.postSwap(mintUrl, swapRequest)
+            val signatures = when (swapResult) {
+                is MintApi.Result.Success -> {
+                    JSONObject(swapResult.body).getJSONArray("signatures")
                 }
-                JSONObject(responseBody ?: "{}").getJSONArray("signatures")
+                is MintApi.Result.HttpError -> {
+                    Log.e(TAG, "HTLC swap failed: ${swapResult.code} - ${swapResult.body}")
+                    // Keep pending operation for recovery
+                    return@withContext HtlcSwapOutcome.Failure.SwapRejected
+                }
+                is MintApi.Result.TransportFailure -> {
+                    Log.e(TAG, "HTLC swap mint unreachable: ${swapResult.cause}")
+                    // Keep pending operation for recovery
+                    return@withContext HtlcSwapOutcome.Failure.MintUnreachable
+                }
             }
 
             // Unblind HTLC proofs - CRITICAL: Use keyset ID and amount from response
@@ -1793,36 +1937,25 @@ class CashuBackend(
             walletStorage.updateBlindedOpStatus(operationId, PendingOperationStatus.COMPLETED)
             Log.d(TAG, "Marked pending HTLC lock operation COMPLETED: $operationId (caller must clear after NIP-60 persist)")
 
-            HtlcLockResult(htlcToken, changeProofs, operationId)
+            HtlcSwapOutcome.Success(HtlcLockResult(htlcToken, changeProofs, operationId))
         } catch (e: Exception) {
             Log.e(TAG, "createHtlcTokenFromProofs failed: ${e.message}", e)
             // Keep pending operation for recovery
-            null
+            HtlcSwapOutcome.Failure.Other(e.message ?: "Unknown error")
         }
     }
+
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // TOKEN ENCODING & RECEIPT
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Encode plain proofs as a Cashu token.
      */
-    private fun encodeProofsAsToken(proofs: List<CashuProof>, mintUrl: String): String {
-        val proofsArray = JSONArray()
-        proofs.forEach { proof ->
-            proofsArray.put(proof.toJson())
-        }
-
-        val tokenJson = JSONObject().apply {
-            put("token", JSONArray().put(JSONObject().apply {
-                put("mint", mintUrl)
-                put("proofs", proofsArray)
-            }))
-            put("unit", "sat")
-        }
-
-        return "cashuA" + android.util.Base64.encodeToString(
-            tokenJson.toString().toByteArray(),
-            android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP
-        )
-    }
+    private fun encodeProofsAsToken(proofs: List<CashuProof>, mintUrl: String): String =
+        CashuTokenCodec.encodeProofsAsToken(proofs, mintUrl)
 
     /**
      * Receive a token by swapping with the mint for fresh proofs.
@@ -1914,10 +2047,12 @@ class CashuBackend(
         )
     }
 
-    // ========================================
-    // NUT-07 Proof State Verification (Extended)
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // PROOF STATE VERIFICATION BY SECRET (NUT-07 Extended)
     // Reference: https://github.com/cashubtc/nuts/blob/main/07.md
-    // ========================================
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Proof state result from NUT-07 check (extended version).
@@ -1976,6 +2111,76 @@ class CashuBackend(
             null
         }
     }
+
+    /**
+     * Verify proof states at a specific mint (NUT-07).
+     * Used for HTLC refunds when token was created at a different mint than current.
+     */
+    suspend fun verifyProofStatesBySecretAtMint(secrets: List<String>, mintUrl: String): Map<String, ProofStateResult>? = withContext(Dispatchers.IO) {
+        if (secrets.isEmpty()) return@withContext emptyMap()
+
+        Log.d(TAG, "Verifying ${secrets.size} proof states at $mintUrl")
+
+        try {
+            // Compute Y values (hash_to_curve of each secret)
+            val yValues = secrets.mapNotNull { secret ->
+                CashuCrypto.hashToCurve(secret)?.let { secret to it }
+            }
+
+            if (yValues.size != secrets.size) {
+                Log.e(TAG, "Failed to compute Y for some secrets")
+                return@withContext null
+            }
+
+            // Build check request
+            val requestJson = JSONObject().apply {
+                put("Ys", JSONArray().apply {
+                    yValues.forEach { put(it.second) }
+                })
+            }.toString()
+
+            val request = Request.Builder()
+                .url("$mintUrl/v1/checkstate")
+                .post(requestJson.toRequestBody(JSON_MEDIA_TYPE))
+                .build()
+
+            val response = client.newCall(request).execute()
+            val responseBody = response.body?.string()
+
+            if (!response.isSuccessful) {
+                Log.e(TAG, "Check state failed at $mintUrl: ${response.code} - $responseBody")
+                return@withContext null
+            }
+
+            val json = JSONObject(responseBody ?: "{}")
+            val statesArray = json.getJSONArray("states")
+
+            // Map results back to secrets
+            val result = mutableMapOf<String, ProofStateResult>()
+            for (i in 0 until minOf(statesArray.length(), yValues.size)) {
+                val stateObj = statesArray.getJSONObject(i)
+                val stateStr = stateObj.getString("state")
+                val originalSecret = yValues[i].first
+                result[originalSecret] = when (stateStr.uppercase()) {
+                    "UNSPENT" -> ProofStateResult.UNSPENT
+                    "PENDING" -> ProofStateResult.PENDING
+                    "SPENT" -> ProofStateResult.SPENT
+                    else -> ProofStateResult.UNSPENT
+                }
+            }
+
+            result
+        } catch (e: Exception) {
+            Log.e(TAG, "verifyProofStatesBySecretAtMint failed: ${e.message}", e)
+            null
+        }
+    }
+
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // BALANCE VERIFICATION
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Get verified balance by checking proof states with the mint (NUT-07).
@@ -2055,96 +2260,99 @@ class CashuBackend(
             }
 
             // Log first few Y values for debugging
-            if (yValues.isNotEmpty()) {
+            if (com.ridestr.common.BuildConfig.DEBUG && yValues.isNotEmpty()) {
                 Log.d(TAG, "verifyProofsBalance: First computed Y: ${yValues.first().second}")
                 Log.d(TAG, "verifyProofsBalance: First secret: ${yValues.first().first.take(32)}...")
             }
 
-            // Make API call to mint
+            // Make API call to mint via MintApi (enables FakeMintApi injection in tests)
             val requestBody = JSONObject().apply {
                 put("Ys", JSONArray(yValues.map { it.second }))
             }.toString()
 
-            val request = Request.Builder()
-                .url("$targetMint/v1/checkstate")
-                .post(requestBody.toRequestBody(JSON_MEDIA_TYPE))
-                .build()
+            val checkResult = effectiveMintApi.postCheckState(targetMint, requestBody)
 
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    Log.e(TAG, "verifyProofsBalance: Request to $targetMint failed: ${response.code}")
+            val responseBody = when (checkResult) {
+                is MintApi.Result.Success -> checkResult.body
+                is MintApi.Result.HttpError -> {
+                    Log.e(TAG, "verifyProofsBalance: Request to $targetMint failed: ${checkResult.code}")
                     return@withContext null
                 }
-
-                val body = response.body?.string() ?: return@withContext null
-                val json = JSONObject(body)
-                val statesArray = json.getJSONArray("states")
-
-                // Log first Y from mint response for comparison
-                if (statesArray.length() > 0) {
-                    val firstState = statesArray.getJSONObject(0)
-                    Log.d(TAG, "verifyProofsBalance: First mint Y: ${firstState.getString("Y")}")
-                    Log.d(TAG, "verifyProofsBalance: First mint state: ${firstState.getString("state")}")
+                is MintApi.Result.TransportFailure -> {
+                    Log.e(TAG, "verifyProofsBalance: Mint unreachable: ${checkResult.cause}")
+                    return@withContext null
                 }
+            }
 
-                // Map Y back to secrets
-                val yToSecret = yValues.associate { it.second to it.first }
+            val json = JSONObject(responseBody)
+            val statesArray = json.getJSONArray("states")
 
-                val spentSecrets = mutableListOf<String>()
-                val unspentSecrets = mutableListOf<String>()
-                val pendingSecrets = mutableListOf<String>()
-                var matchedCount = 0
+            // Log first Y from mint response for comparison
+            if (statesArray.length() > 0) {
+                val firstState = statesArray.getJSONObject(0)
+                Log.d(TAG, "verifyProofsBalance: First mint Y: ${firstState.getString("Y")}")
+                Log.d(TAG, "verifyProofsBalance: First mint state: ${firstState.getString("state")}")
+            }
 
-                for (i in 0 until statesArray.length()) {
-                    val stateObj = statesArray.getJSONObject(i)
-                    val Y = stateObj.getString("Y")
-                    val state = stateObj.getString("state").uppercase()
+            // Map Y back to secrets
+            val yToSecret = yValues.associate { it.second to it.first }
 
-                    yToSecret[Y]?.let { secret ->
-                        matchedCount++
-                        when (state) {
-                            "SPENT" -> spentSecrets.add(secret)
-                            "UNSPENT" -> unspentSecrets.add(secret)
-                            "PENDING" -> pendingSecrets.add(secret)
-                        }
+            val spentSecrets = mutableListOf<String>()
+            val unspentSecrets = mutableListOf<String>()
+            val pendingSecrets = mutableListOf<String>()
+            var matchedCount = 0
+
+            for (i in 0 until statesArray.length()) {
+                val stateObj = statesArray.getJSONObject(i)
+                val Y = stateObj.getString("Y")
+                val state = stateObj.getString("state").uppercase()
+
+                yToSecret[Y]?.let { secret ->
+                    matchedCount++
+                    when (state) {
+                        "SPENT" -> spentSecrets.add(secret)
+                        "UNSPENT" -> unspentSecrets.add(secret)
+                        "PENDING" -> pendingSecrets.add(secret)
                     }
                 }
-
-                Log.d(TAG, "verifyProofsBalance: matched=$matchedCount/${proofs.size}, UNSPENT=${unspentSecrets.size}, SPENT=${spentSecrets.size}, PENDING=${pendingSecrets.size}")
-
-                // If we couldn't match ANY proofs, our hashToCurve doesn't match the mint's
-                // Return null to indicate verification failure (don't trust the proofs)
-                if (matchedCount == 0 && proofs.isNotEmpty()) {
-                    Log.e(TAG, "verifyProofsBalance: CRITICAL - No Y values matched! hashToCurve mismatch with mint")
-                    return@withContext null
-                }
-
-                // Calculate verified balance (unspent proofs only)
-                val verifiedBalance = proofs
-                    .filter { it.secret in unspentSecrets }
-                    .sumOf { it.amount }
-
-                // Calculate pending balance for logging (DON'T treat as spent - they may become unspent)
-                val pendingBalance = proofs
-                    .filter { it.secret in pendingSecrets }
-                    .sumOf { it.amount }
-
-                if (pendingSecrets.isNotEmpty()) {
-                    Log.w(TAG, "verifyProofsBalance: ${pendingSecrets.size} proofs ($pendingBalance sats) are PENDING - in-progress operation")
-                }
-
-                Log.d(TAG, "verifyProofsBalance: $targetMint verified balance = $verifiedBalance sats, spent=${spentSecrets.size}, pending=${pendingSecrets.size}")
-                verifiedBalance to spentSecrets
             }
+
+            Log.d(TAG, "verifyProofsBalance: matched=$matchedCount/${proofs.size}, UNSPENT=${unspentSecrets.size}, SPENT=${spentSecrets.size}, PENDING=${pendingSecrets.size}")
+
+            // If we couldn't match ANY proofs, our hashToCurve doesn't match the mint's
+            // Return null to indicate verification failure (don't trust the proofs)
+            if (matchedCount == 0 && proofs.isNotEmpty()) {
+                Log.e(TAG, "verifyProofsBalance: CRITICAL - No Y values matched! hashToCurve mismatch with mint")
+                return@withContext null
+            }
+
+            // Calculate verified balance (unspent proofs only)
+            val verifiedBalance = proofs
+                .filter { it.secret in unspentSecrets }
+                .sumOf { it.amount }
+
+            // Calculate pending balance for logging (DON'T treat as spent - they may become unspent)
+            val pendingBalance = proofs
+                .filter { it.secret in pendingSecrets }
+                .sumOf { it.amount }
+
+            if (pendingSecrets.isNotEmpty()) {
+                Log.w(TAG, "verifyProofsBalance: ${pendingSecrets.size} proofs ($pendingBalance sats) are PENDING - in-progress operation")
+            }
+
+            Log.d(TAG, "verifyProofsBalance: $targetMint verified balance = $verifiedBalance sats, spent=${spentSecrets.size}, pending=${pendingSecrets.size}")
+            verifiedBalance to spentSecrets
         } catch (e: Exception) {
             Log.e(TAG, "verifyProofsBalance failed for $targetMint: ${e.message}")
             null
         }
     }
 
-    // ========================================
-    // API Discovery for HTLC Implementation
-    // ========================================
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // DEBUG & DIAGNOSTICS
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Debug function to discover cdk-kotlin HTLC API.
@@ -2271,6 +2479,12 @@ class CashuBackend(
         results
     }
 
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // DISCONNECT & CLEANUP
+    // ═══════════════════════════════════════════════════════════════════════════════
+
     /**
      * Disconnect from current mint.
      */
@@ -2293,6 +2507,12 @@ class CashuBackend(
         currentMintUrl = null
         mintCapabilities = null
     }
+
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // LOCAL STORAGE & CDK-KOTLIN DATABASE
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Get the actual balance from cdk-kotlin proofs stored in the database.
@@ -2642,10 +2862,12 @@ class CashuBackend(
         return null
     }
 
-    // ========================================
-    // NUT-04 Mint Operations (Deposits)
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // MINTING (NUT-04) - Lightning Deposits
     // Reference: https://github.com/cashubtc/nuts/blob/main/04.md
-    // ========================================
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Request a mint quote for depositing via Lightning.
@@ -2921,10 +3143,12 @@ class CashuBackend(
         }
     }
 
-    // ========================================
-    // NUT-05 Melt Operations (Withdrawals)
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // MELTING (NUT-05) - Lightning Withdrawals
     // Reference: https://github.com/cashubtc/nuts/blob/main/05.md
-    // ========================================
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Execute melt - burn tokens to pay Lightning invoice.
@@ -3279,9 +3503,11 @@ class CashuBackend(
         }
     }
 
-    // ========================================
-    // Deposit Recovery (for failed mints)
-    // ========================================
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // KEYSET MANAGEMENT (NUT-01/02) & DEPOSIT RECOVERY
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     // Cached keysets from mint
     private var mintKeysets: Map<String, MintKeyset>? = null
@@ -3293,6 +3519,9 @@ class CashuBackend(
      * NUT-01/02: GET /v1/keysets and /v1/keys/{keyset_id}
      */
     suspend fun getActiveKeyset(): MintKeyset? = withContext(Dispatchers.IO) {
+        // Test support: return injected keyset without HTTP
+        testActiveKeyset?.let { return@withContext it }
+
         val mintUrl = currentMintUrl ?: return@withContext null
 
         try {
@@ -3308,14 +3537,32 @@ class CashuBackend(
                 val json = JSONObject(body)
                 val keysets = json.getJSONArray("keysets")
 
-                // Find active keyset for sat unit
+                // Find active keyset for sat unit (two-pass: prefer explicit active=true)
+                var foundKeysetId: String? = null
+
+                // First pass: look for explicitly active=true sat keyset
                 for (i in 0 until keysets.length()) {
                     val ks = keysets.getJSONObject(i)
-                    if (ks.optBoolean("active", true) && ks.optString("unit", "sat") == "sat") {
-                        return@use ks.getString("id")
+                    if (ks.has("active") && ks.getBoolean("active") &&
+                        ks.optString("unit", "sat") == "sat") {
+                        foundKeysetId = ks.getString("id")
+                        break
                     }
                 }
-                null
+
+                // Second pass: if no explicit active, use first sat keyset with warning
+                if (foundKeysetId == null) {
+                    for (i in 0 until keysets.length()) {
+                        val ks = keysets.getJSONObject(i)
+                        if (ks.optString("unit", "sat") == "sat") {
+                            Log.w(TAG, "Mint $mintUrl: no keyset has explicit active=true, using first sat keyset ${ks.optString("id")}")
+                            foundKeysetId = ks.getString("id")
+                            break
+                        }
+                    }
+                }
+
+                foundKeysetId
             } ?: return@withContext null
 
             // Fetch keys for active keyset
@@ -3354,6 +3601,103 @@ class CashuBackend(
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to fetch keyset: ${e.message}", e)
+            null
+        }
+    }
+
+    /**
+     * Fetch active keyset from a specific mint URL.
+     * Used for HTLC refunds when token was created at a different mint than current.
+     * NOTE: Does NOT cache to mintKeysets - use only for one-off operations like refunds.
+     *
+     * @param mintUrl The mint URL to fetch keyset from
+     * @return MintKeyset if successful, null otherwise
+     */
+    suspend fun getActiveKeysetFromMint(mintUrl: String): MintKeyset? = withContext(Dispatchers.IO) {
+        try {
+            // First get list of keysets from the specified mint
+            val keysetsRequest = Request.Builder()
+                .url("$mintUrl/v1/keysets")
+                .get()
+                .build()
+
+            val activeKeysetId = client.newCall(keysetsRequest).execute().use { response ->
+                if (!response.isSuccessful) {
+                    Log.e(TAG, "Failed to fetch keysets from $mintUrl: ${response.code}")
+                    return@withContext null
+                }
+                val body = response.body?.string() ?: return@withContext null
+                val json = JSONObject(body)
+                val keysets = json.getJSONArray("keysets")
+
+                // Find active keyset for sat unit (two-pass: prefer explicit active=true)
+                var foundKeysetId: String? = null
+
+                // First pass: look for explicitly active=true sat keyset
+                for (i in 0 until keysets.length()) {
+                    val ks = keysets.getJSONObject(i)
+                    if (ks.has("active") && ks.getBoolean("active") &&
+                        ks.optString("unit", "sat") == "sat") {
+                        foundKeysetId = ks.getString("id")
+                        break
+                    }
+                }
+
+                // Second pass: if no explicit active, use first sat keyset with warning
+                if (foundKeysetId == null) {
+                    for (i in 0 until keysets.length()) {
+                        val ks = keysets.getJSONObject(i)
+                        if (ks.optString("unit", "sat") == "sat") {
+                            Log.w(TAG, "Mint $mintUrl: no keyset has explicit active=true, using first sat keyset ${ks.optString("id")}")
+                            foundKeysetId = ks.getString("id")
+                            break
+                        }
+                    }
+                }
+
+                foundKeysetId
+            } ?: return@withContext null
+
+            // Fetch keys for active keyset
+            val keysRequest = Request.Builder()
+                .url("$mintUrl/v1/keys/$activeKeysetId")
+                .get()
+                .build()
+
+            client.newCall(keysRequest).execute().use { response ->
+                if (!response.isSuccessful) {
+                    Log.e(TAG, "Failed to fetch keys for $activeKeysetId from $mintUrl: ${response.code}")
+                    return@withContext null
+                }
+                val body = response.body?.string() ?: return@withContext null
+                val json = JSONObject(body)
+                val keysetsArray = json.getJSONArray("keysets")
+                if (keysetsArray.length() == 0) return@withContext null
+
+                val keysetJson = keysetsArray.getJSONObject(0)
+                val keysJson = keysetJson.getJSONObject("keys")
+
+                val keys = mutableMapOf<Long, String>()
+                val keyIterator = keysJson.keys()
+                while (keyIterator.hasNext()) {
+                    val amountStr = keyIterator.next()
+                    val pubkey = keysJson.getString(amountStr)
+                    // Skip amounts that overflow Long (e.g., 2^63 used by some mints)
+                    val amount = amountStr.toLongOrNull()
+                    if (amount != null && amount > 0) {
+                        keys[amount] = pubkey
+                    }
+                }
+
+                Log.d(TAG, "Fetched keyset $activeKeysetId from $mintUrl (${keys.size} denomination keys)")
+                MintKeyset(
+                    id = activeKeysetId,
+                    unit = "sat",
+                    keys = keys
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to fetch keyset from $mintUrl: ${e.message}", e)
             null
         }
     }
@@ -3928,7 +4272,12 @@ class CashuBackend(
         }
     }
 
-    // ==================== NUT-09 RESTORE ====================
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // RECOVERY (NUT-09)
+    // Reference: https://github.com/cashubtc/nuts/blob/main/09.md
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Restore proofs from mint using NUT-09 /v1/restore endpoint.
@@ -4115,14 +4464,31 @@ class CashuBackend(
                 val json = JSONObject(body)
                 val keysetsArray = json.optJSONArray("keysets") ?: return@withContext emptyList()
 
-                val ids = mutableListOf<String>()
+                // Two-pass: prefer explicitly active keysets, fall back to all sat keysets
+                val explicitlyActive = mutableListOf<String>()
+                val satKeysets = mutableListOf<String>()
+
                 for (i in 0 until keysetsArray.length()) {
                     val keyset = keysetsArray.getJSONObject(i)
                     val id = keyset.getString("id")
-                    val active = keyset.optBoolean("active", true)
-                    if (active) {
-                        ids.add(id)
+                    val unit = keyset.optString("unit", "sat")
+
+                    if (unit == "sat") {
+                        satKeysets.add(id)
+                        if (keyset.has("active") && keyset.getBoolean("active")) {
+                            explicitlyActive.add(id)
+                        }
                     }
+                }
+
+                // Prefer explicit, fall back to all sat keysets
+                val ids = if (explicitlyActive.isNotEmpty()) {
+                    explicitlyActive
+                } else {
+                    if (satKeysets.isNotEmpty()) {
+                        Log.w(TAG, "No keyset has explicit active=true, using all sat keysets")
+                    }
+                    satKeysets
                 }
 
                 Log.d(TAG, "Found ${ids.size} active keysets")
@@ -4133,6 +4499,12 @@ class CashuBackend(
             emptyList()
         }
     }
+
+    // endregion
+
+    // region ═══════════════════════════════════════════════════════════════════════
+    // UTILITIES
+    // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
      * Split amount into powers of 2 (Cashu denomination strategy).
@@ -4359,6 +4731,8 @@ class CashuBackend(
         Log.e(TAG, "Could not extract amount from: $amount (class: $className)")
         return 0L
     }
+
+    // endregion
 }
 
 /**

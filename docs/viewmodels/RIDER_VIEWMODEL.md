@@ -1,7 +1,7 @@
 # RiderViewModel Reference
 
 **File**: `rider-app/src/main/java/com/ridestr/rider/viewmodels/RiderViewModel.kt`
-**Last Updated**: 2026-01-15
+**Last Updated**: 2026-02-02
 
 This document provides a complete reference of all functions, state fields, and subscriptions in RiderViewModel.
 
@@ -93,8 +93,8 @@ This document provides a complete reference of all functions, state fields, and 
 | Function | Purpose | Creates Subscription |
 |----------|---------|---------------------|
 | `subscribeToDrivers()` | Subscribe to driver availability in area | Kind 30173 |
-| `resubscribeToDrivers()` | Refresh driver subscription with new geohash | Kind 30173 |
-| `subscribeToAcceptance(offerEventId)` | Listen for ride acceptance | Kind 3174 |
+| `resubscribeToDrivers(clearExisting)` | Refresh driver subscription. `clearExisting=true` clears drivers (geohash change), `false` preserves (same region) | Kind 30173 |
+| `subscribeToAcceptance(offerEventId, expectedDriverPubKey)` | Listen for ride acceptance (direct offers only) | Kind 3174 |
 | `subscribeToDriverRideState(confirmationId, driverPubKey)` | Listen for driver status updates | Kind 30180 |
 | `subscribeToCancellation(confirmationId)` | Listen for driver cancellation | Kind 3179 |
 | `subscribeToChat(confirmationId, driverPubKey)` | Listen for chat messages | Kind 3178 |
@@ -152,6 +152,7 @@ This document provides a complete reference of all functions, state fields, and 
 | `formatFare(sats)` | Format fare for display (USD or SATS) |
 | `startChatRefreshJob()` | Periodic chat subscription refresh |
 | `startStaleDriverCleanup()` | Periodic cleanup of stale drivers |
+| `cleanupStaleDrivers()` | Remove stale drivers (uses `driverLastReceivedAt`, skips during active rides) |
 
 ---
 
@@ -237,6 +238,9 @@ This document provides a complete reference of all functions, state fields, and 
 | `cancellationSubscriptionId` | String? | Cancellation (3179) | During active ride |
 | `chatSubscriptionId` | String? | Chat messages (3178) | During active ride |
 | `profileSubscriptionIds` | Map<String, String> | Profile lookups | Per driver |
+| `selectedDriverAvailabilitySubId` | String? | Selected driver availability (30173) | During offer wait |
+| `selectedDriverLastAvailabilityTimestamp` | Long | Rejects out-of-order availability events | Per subscription |
+| `driverLastReceivedAt` | Map<String, Long> | Tracks when driver events were received (not published) | While in IDLE |
 
 ---
 
@@ -301,6 +305,9 @@ broadcastRideRequest() OR sendRideOffer()
     -> subscribeToAcceptance()
     -> [on acceptance] handleAcceptance()
         -> autoConfirmRide()
+            -> [correlation logging: RIDE xxxxxxxx] Locking HTLC
+            -> walletService.lockForRide()
+            -> [correlation logging: RIDE xxxxxxxx] Lock result
             -> publishRideConfirmation()
             -> generatePickupPin()
             -> subscribeToDriverRideState()

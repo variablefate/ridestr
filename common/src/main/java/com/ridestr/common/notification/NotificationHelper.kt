@@ -1,13 +1,16 @@
 package com.ridestr.common.notification
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
+import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 
 /**
  * Helper class for creating and managing notifications.
@@ -147,21 +150,25 @@ object NotificationHelper {
      * Build a generic driver status notification with custom title and content.
      * Used by the unified notification system for all driver status updates.
      * @param isHighPriority If true, uses high-priority channel for prominent display (e.g., new request, chat)
+     * @param isOngoing If true, notification is persistent and cannot be dismissed (default for foreground service)
+     * @param channel Override channel selection (null uses default logic based on isHighPriority)
      */
     fun buildDriverStatusNotification(
         context: Context,
         contentIntent: PendingIntent,
         title: String,
         content: String,
-        isHighPriority: Boolean = false
+        isHighPriority: Boolean = false,
+        isOngoing: Boolean = true,
+        channel: String? = null
     ): Notification {
-        val channel = if (isHighPriority) CHANNEL_RIDE_REQUEST else CHANNEL_ONLINE_STATUS
+        val selectedChannel = channel ?: if (isHighPriority) CHANNEL_RIDE_REQUEST else CHANNEL_ONLINE_STATUS
         val priority = if (isHighPriority) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_LOW
-        return NotificationCompat.Builder(context, channel)
+        return NotificationCompat.Builder(context, selectedChannel)
             .setSmallIcon(android.R.drawable.ic_menu_compass) // TODO: Use app icon
             .setContentTitle(title)
             .setContentText(content)
-            .setOngoing(true)
+            .setOngoing(isOngoing)
             .setSilent(true)  // Prevent notification sound - SoundManager handles all audio
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setContentIntent(contentIntent)
@@ -173,21 +180,25 @@ object NotificationHelper {
      * Build a generic rider status notification with custom title and content.
      * Used by the unified notification system for all rider status updates.
      * @param isHighPriority If true, uses high-priority channel for prominent display (e.g., driver arrived, chat)
+     * @param isOngoing If true, notification is persistent and cannot be dismissed (default for foreground service)
+     * @param channel Override channel selection (null uses default logic based on isHighPriority)
      */
     fun buildRiderStatusNotification(
         context: Context,
         contentIntent: PendingIntent,
         title: String,
         content: String,
-        isHighPriority: Boolean = false
+        isHighPriority: Boolean = false,
+        isOngoing: Boolean = true,
+        channel: String? = null
     ): Notification {
-        val channel = if (isHighPriority) CHANNEL_RIDE_REQUEST else CHANNEL_ONLINE_STATUS
+        val selectedChannel = channel ?: if (isHighPriority) CHANNEL_RIDE_REQUEST else CHANNEL_ONLINE_STATUS
         val priority = if (isHighPriority) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_LOW
-        return NotificationCompat.Builder(context, channel)
+        return NotificationCompat.Builder(context, selectedChannel)
             .setSmallIcon(android.R.drawable.ic_menu_compass) // TODO: Use app icon
             .setContentTitle(title)
             .setContentText(content)
-            .setOngoing(true)
+            .setOngoing(isOngoing)
             .setSilent(true)  // Prevent notification sound - SoundManager handles all audio
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setContentIntent(contentIntent)
@@ -219,5 +230,20 @@ object NotificationHelper {
      */
     fun cancelAllNotifications(context: Context) {
         NotificationManagerCompat.from(context).cancelAll()
+    }
+
+    /**
+     * Check if notification permission is granted (Android 13+).
+     * Returns true on older Android versions where permission is implicit.
+     */
+    fun hasNotificationPermission(context: Context): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true  // Permission implicit on older versions
+        }
     }
 }

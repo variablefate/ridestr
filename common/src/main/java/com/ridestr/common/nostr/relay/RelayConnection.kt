@@ -2,6 +2,7 @@ package com.ridestr.common.nostr.relay
 
 import android.util.Log
 import com.vitorpamplona.quartz.nip01Core.core.Event
+import com.vitorpamplona.quartz.nip01Core.crypto.verify
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -17,7 +18,11 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.consumeEach
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Manages a single WebSocket connection to a Nostr relay.
@@ -36,9 +41,30 @@ class RelayConnection(
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
+    // Thread-safe state - all mutations synchronized on `this`
     private var socket: WebSocket? = null
-    private var reconnectAttempts = 0
-    private var shouldReconnect = true
+    private var connectionGeneration = 0L  // Incremented on each connect, for message validation
+    private val reconnectAttempts = AtomicInteger(0)
+    private val shouldReconnect = AtomicBoolean(true)
+
+    // Bounded channel for ordered message processing (prevents memory growth under bursty traffic)
+    // Pair contains (generation, message) for stale message filtering
+    private val messageChannel = Channel<Pair<Long, String>>(capacity = 256)
+
+    init {
+        // Single consumer ensures messages are processed in order
+        scope.launch {
+            messageChannel.consumeEach { (generation, text) ->
+                // Revalidate generation before processing (defensive against race in trySend)
+                val currentGen = synchronized(this@RelayConnection) { connectionGeneration }
+                if (generation == currentGen) {
+                    handleMessage(text)
+                } else {
+                    Log.d(TAG, "[$url] Dropping message from stale connection (gen $generation, current $currentGen)")
+                }
+            }
+        }
+    }
 
     private val _state = MutableStateFlow(RelayConnectionState.DISCONNECTED)
     val state: StateFlow<RelayConnectionState> = _state.asStateFlow()
@@ -50,31 +76,42 @@ class RelayConnection(
      * Connect to the relay.
      */
     fun connect() {
-        if (_state.value == RelayConnectionState.CONNECTING ||
-            _state.value == RelayConnectionState.CONNECTED) {
-            return
-        }
-
-        shouldReconnect = true
-        _state.value = RelayConnectionState.CONNECTING
-        Log.d(TAG, "Connecting to $url")
+        shouldReconnect.set(true)
 
         val request = Request.Builder()
             .url(url)
             .build()
 
-        socket = client.newWebSocket(request, RelayWebSocketListener())
+        // Single lock for state + socket coherence
+        synchronized(this) {
+            if (_state.value == RelayConnectionState.CONNECTING ||
+                _state.value == RelayConnectionState.CONNECTED) {
+                return
+            }
+            _state.value = RelayConnectionState.CONNECTING
+            connectionGeneration++  // Invalidate any queued messages from previous connection
+            socket = client.newWebSocket(request, RelayWebSocketListener())
+        }
+
+        Log.d(TAG, "Connecting to $url (generation $connectionGeneration)")
     }
 
     /**
      * Disconnect from the relay.
      */
     fun disconnect() {
-        shouldReconnect = false
-        _state.value = RelayConnectionState.DISCONNECTING
-        socket?.close(1000, "Client disconnect")
-        socket = null
-        _state.value = RelayConnectionState.DISCONNECTED
+        shouldReconnect.set(false)
+
+        val socketToClose: WebSocket?
+        synchronized(this) {
+            _state.value = RelayConnectionState.DISCONNECTING
+            socketToClose = socket
+            socket = null
+            _state.value = RelayConnectionState.DISCONNECTED
+        }
+
+        // Close outside lock to avoid holding lock during network I/O
+        socketToClose?.close(1000, "Client disconnect")
         Log.d(TAG, "Disconnected from $url")
     }
 
@@ -138,7 +175,12 @@ class RelayConnection(
     }
 
     private fun send(message: String): Boolean {
-        return socket?.send(message) ?: false
+        val s = synchronized(this) {
+            // Only send if connected (reduces 'send on closing socket' noise)
+            if (_state.value != RelayConnectionState.CONNECTED) return false
+            socket
+        }
+        return s?.send(message) ?: false
     }
 
     private fun handleMessage(text: String) {
@@ -151,6 +193,13 @@ class RelayConnection(
                     val subscriptionId = json.getString(1)
                     val eventJson = json.getJSONObject(2)
                     val event = Event.fromJson(eventJson.toString())
+
+                    // Verify signature before processing (NIP-01 compliance)
+                    if (!event.verify()) {
+                        Log.w(TAG, "[$url] Rejecting event ${event.id.take(8)} - invalid signature from ${event.pubKey.take(8)}")
+                        return
+                    }
+
                     onEvent(event, subscriptionId, url)
                 }
                 "EOSE" -> {
@@ -184,19 +233,19 @@ class RelayConnection(
     }
 
     private fun scheduleReconnect() {
-        if (!shouldReconnect) return
+        if (!shouldReconnect.get()) return
 
-        reconnectAttempts++
-        val delay = minOf(
-            RelayConfig.RECONNECT_DELAY_MS * reconnectAttempts,
+        val attempts = reconnectAttempts.incrementAndGet()
+        val delayMs = minOf(
+            RelayConfig.RECONNECT_DELAY_MS * attempts,
             60_000L // Max 60 seconds
         )
 
-        Log.d(TAG, "[$url] Scheduling reconnect in ${delay}ms (attempt $reconnectAttempts)")
+        Log.d(TAG, "[$url] Scheduling reconnect in ${delayMs}ms (attempt $attempts)")
 
         scope.launch {
-            delay(delay)
-            if (shouldReconnect && _state.value == RelayConnectionState.DISCONNECTED) {
+            delay(delayMs)
+            if (shouldReconnect.get() && _state.value == RelayConnectionState.DISCONNECTED) {
                 connect()
             }
         }
@@ -222,9 +271,17 @@ class RelayConnection(
 
     private inner class RelayWebSocketListener : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
-            Log.d(TAG, "[$url] Connected")
-            _state.value = RelayConnectionState.CONNECTED
-            reconnectAttempts = 0
+            synchronized(this@RelayConnection) {
+                // Guard: Ignore callbacks from stale sockets after reconnect
+                if (socket !== webSocket) {
+                    Log.d(TAG, "[$url] Ignoring onOpen from stale socket")
+                    return
+                }
+
+                Log.d(TAG, "[$url] Connected (generation $connectionGeneration)")
+                _state.value = RelayConnectionState.CONNECTED
+            }
+            reconnectAttempts.set(0)
 
             // Resubscribe to active subscriptions
             resubscribeAll()
@@ -233,7 +290,18 @@ class RelayConnection(
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
-            handleMessage(text)
+            val generation: Long
+            synchronized(this@RelayConnection) {
+                // Guard: Ignore messages from stale sockets
+                if (socket !== webSocket) return
+                generation = connectionGeneration
+            }
+
+            // Send to bounded channel for ordered processing (non-blocking)
+            val sent = messageChannel.trySend(generation to text)
+            if (!sent.isSuccess) {
+                Log.w(TAG, "[$url] Message channel full, dropping message (generation $generation)")
+            }
         }
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
@@ -241,16 +309,44 @@ class RelayConnection(
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            Log.d(TAG, "[$url] Closed: $code $reason")
-            _state.value = RelayConnectionState.DISCONNECTED
-            socket = null
+            // Early exit if disconnect was intentional (prevents reconnect scheduling)
+            if (!shouldReconnect.get()) {
+                Log.d(TAG, "[$url] Closed after intentional disconnect, not reconnecting")
+                return
+            }
+
+            synchronized(this@RelayConnection) {
+                // Guard: Ignore stale callbacks after rapid disconnect/reconnect
+                if (socket !== webSocket) {
+                    Log.d(TAG, "[$url] Ignoring onClosed from stale socket")
+                    return
+                }
+
+                Log.d(TAG, "[$url] Closed: $code $reason")
+                _state.value = RelayConnectionState.DISCONNECTED
+                socket = null
+            }
             scheduleReconnect()
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            Log.e(TAG, "[$url] Connection failed: ${t.message}")
-            _state.value = RelayConnectionState.DISCONNECTED
-            socket = null
+            // Early exit if disconnect was intentional (prevents reconnect scheduling)
+            if (!shouldReconnect.get()) {
+                Log.d(TAG, "[$url] Failed after intentional disconnect, not reconnecting")
+                return
+            }
+
+            synchronized(this@RelayConnection) {
+                // Guard: Ignore stale callbacks after rapid disconnect/reconnect
+                if (socket !== webSocket) {
+                    Log.d(TAG, "[$url] Ignoring onFailure from stale socket")
+                    return
+                }
+
+                Log.e(TAG, "[$url] Connection failed: ${t.message}")
+                _state.value = RelayConnectionState.DISCONNECTED
+                socket = null
+            }
             scheduleReconnect()
         }
     }
