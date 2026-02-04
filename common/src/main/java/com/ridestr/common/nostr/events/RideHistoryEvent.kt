@@ -153,7 +153,10 @@ data class RideHistoryEntry(
     val lightningAddress: String? = null,       // For tips (stored, not displayed in list)
 
     // Tip tracking
-    val tipSats: Long = 0  // Tip amount if given
+    val tipSats: Long = 0,  // Tip amount if given
+
+    // Which app created this entry ("ridestr" or "drivestr", null for legacy)
+    val appOrigin: String? = null
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("ride_id", rideId)
@@ -180,6 +183,8 @@ data class RideHistoryEntry(
         lightningAddress?.let { put("lightning_address", it) }
         // Tip tracking (only if > 0)
         if (tipSats > 0) put("tip_sats", tipSats)
+        // App origin for multi-app support
+        appOrigin?.let { put("app_origin", it) }
     }
 
     companion object {
@@ -208,7 +213,8 @@ data class RideHistoryEntry(
                     vehicleMake = json.optString("vehicle_make", null),
                     vehicleModel = json.optString("vehicle_model", null),
                     lightningAddress = json.optString("lightning_address", null),
-                    tipSats = json.optLong("tip_sats", 0)
+                    tipSats = json.optLong("tip_sats", 0),
+                    appOrigin = json.optString("app_origin", null).takeIf { it.isNotEmpty() }
                 )
             } catch (e: Exception) {
                 null

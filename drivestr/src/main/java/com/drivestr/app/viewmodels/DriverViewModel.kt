@@ -1212,7 +1212,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                         vehicleMake = vehicle?.make,
                         vehicleModel = vehicle?.model,
                         // Rider profile info
-                        counterpartyFirstName = RideHistoryBuilder.extractCounterpartyFirstName(riderProfile)
+                        counterpartyFirstName = RideHistoryBuilder.extractCounterpartyFirstName(riderProfile),
+                        appOrigin = RideHistoryRepository.APP_ORIGIN_DRIVESTR
                     )
                     rideHistoryRepository.addRide(historyEntry)
                     Log.d(TAG, "Saved completed ride to history: ${historyEntry.rideId}")
@@ -1709,7 +1710,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                         fareSats = 0,  // No fare earned for cancelled ride
                         status = "cancelled",
                         vehicleMake = vehicle?.make,
-                        vehicleModel = vehicle?.model
+                        vehicleModel = vehicle?.model,
+                        appOrigin = RideHistoryRepository.APP_ORIGIN_DRIVESTR
                     )
                     rideHistoryRepository.addRide(historyEntry)
                     Log.d(TAG, "Saved cancelled ride to history: ${historyEntry.rideId}")
@@ -2791,7 +2793,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 fareSats = if (claimed) offer.fareEstimate.toLong() else 0,
                 status = if (claimed) "cancelled_claimed" else "cancelled",
                 vehicleMake = vehicle?.make,
-                vehicleModel = vehicle?.model
+                vehicleModel = vehicle?.model,
+                appOrigin = RideHistoryRepository.APP_ORIGIN_DRIVESTR
             )
             rideHistoryRepository.addRide(historyEntry)
             Log.d(TAG, "Saved cancelled ride to history: ${historyEntry.rideId}, claimed=$claimed")
@@ -3030,7 +3033,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                             vehicleMake = vehicle?.make,
                             vehicleModel = vehicle?.model,
                             // Rider profile info
-                            counterpartyFirstName = RideHistoryBuilder.extractCounterpartyFirstName(riderProfile)
+                            counterpartyFirstName = RideHistoryBuilder.extractCounterpartyFirstName(riderProfile),
+                            appOrigin = RideHistoryRepository.APP_ORIGIN_DRIVESTR
                         )
                         rideHistoryRepository.addRide(historyEntry)
                         Log.d(TAG, "Saved completed ride to history (go offline): ${historyEntry.rideId}")

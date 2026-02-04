@@ -303,6 +303,10 @@ class RideHistoryRepository(context: Context) {
         private const val KEY_RIDES = "rides"
         private const val MAX_RIDES = 500 // Maximum number of rides to store
 
+        // App origin identifiers for multi-app support
+        const val APP_ORIGIN_RIDESTR = "ridestr"
+        const val APP_ORIGIN_DRIVESTR = "drivestr"
+
         @Volatile
         private var INSTANCE: RideHistoryRepository? = null
 

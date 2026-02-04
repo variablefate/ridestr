@@ -41,9 +41,32 @@ fun HistoryScreen(
     onRideClick: (RideHistoryEntry) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    val rides by rideHistoryRepository.rides.collectAsState()
-    val stats by rideHistoryRepository.stats.collectAsState()
+    val allRides by rideHistoryRepository.rides.collectAsState()
     val isLoading by rideHistoryRepository.isLoading.collectAsState()
+
+    // Filter rides to only show this app's rides (with legacy fallback)
+    val rides = remember(allRides) {
+        allRides.filter { entry ->
+            entry.appOrigin == RideHistoryRepository.APP_ORIGIN_RIDESTR ||
+            (entry.appOrigin == null && entry.role == "rider")  // Legacy fallback
+        }
+    }
+
+    // Calculate filtered stats from filtered rides
+    val stats = remember(rides) {
+        RideHistoryStats(
+            totalRidesAsRider = rides.count { it.role == "rider" },
+            totalRidesAsDriver = rides.count { it.role == "driver" },
+            totalDistanceMiles = rides.sumOf { it.distanceMiles },
+            totalDurationMinutes = rides.sumOf { it.durationMinutes },
+            totalFareSatsEarned = rides.filter { it.role == "driver" && it.status == "completed" }
+                .sumOf { it.fareSats },
+            totalFareSatsPaid = rides.filter { it.role == "rider" && it.status == "completed" }
+                .sumOf { it.fareSats },
+            completedRides = rides.count { it.status == "completed" },
+            cancelledRides = rides.count { it.status == "cancelled" }
+        )
+    }
     val displayCurrency by settingsManager.displayCurrency.collectAsState()
     val btcPriceUsd by priceService.btcPriceUsd.collectAsState()
     val coroutineScope = rememberCoroutineScope()

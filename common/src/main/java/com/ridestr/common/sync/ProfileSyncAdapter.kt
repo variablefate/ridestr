@@ -159,19 +159,27 @@ class ProfileSyncAdapter(
         return try {
             Log.d(TAG, "Backing up profile to Nostr...")
 
-            val vehicles = vehicleRepository?.vehicles?.value ?: emptyList()
-            val locations = savedLocationRepository?.savedLocations?.value ?: emptyList()
+            // Fetch existing profile to preserve data from other app (rider/driver)
+            val existingProfile = nostrService.fetchProfileBackup()
+
+            // Use local data if we have the repository, otherwise preserve existing Nostr data
+            val vehicles = vehicleRepository?.vehicles?.value
+                ?: existingProfile?.vehicles
+                ?: emptyList()
+            val savedLocations = savedLocationRepository?.savedLocations?.value
+                ?: existingProfile?.savedLocations
+                ?: emptyList()
             val settings = settingsManager.toBackupData()
 
             // Only publish if there's something to backup
-            if (vehicles.isEmpty() && locations.isEmpty()) {
+            if (vehicles.isEmpty() && savedLocations.isEmpty()) {
                 Log.d(TAG, "No profile data to backup (no vehicles or locations)")
                 return null
             }
 
-            val eventId = nostrService.publishProfileBackup(vehicles, locations, settings)
+            val eventId = nostrService.publishProfileBackup(vehicles, savedLocations, settings)
             if (eventId != null) {
-                Log.d(TAG, "Profile backed up as event $eventId (${vehicles.size} vehicles, ${locations.size} locations)")
+                Log.d(TAG, "Profile backed up as event $eventId (${vehicles.size} vehicles, ${savedLocations.size} locations)")
             } else {
                 Log.w(TAG, "Failed to backup profile")
             }

@@ -2557,7 +2557,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                         // Driver details for ride history
                         counterpartyFirstName = RideHistoryBuilder.extractCounterpartyFirstName(driverProfile),
                         vehicleMake = driver?.carMake,
-                        vehicleModel = driver?.carModel
+                        vehicleModel = driver?.carModel,
+                        appOrigin = RideHistoryRepository.APP_ORIGIN_RIDESTR
                     )
                     rideHistoryRepository.addRide(historyEntry)
                     Log.d(TAG, "Saved rider-cancelled ride to history: ${historyEntry.rideId}")
@@ -3869,7 +3870,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     // Driver details for ride history
                     counterpartyFirstName = RideHistoryBuilder.extractCounterpartyFirstName(driverProfile),
                     vehicleMake = driver?.carMake,
-                    vehicleModel = driver?.carModel
+                    vehicleModel = driver?.carModel,
+                    appOrigin = RideHistoryRepository.APP_ORIGIN_RIDESTR
                 )
                 rideHistoryRepository.addRide(historyEntry)
                 Log.d(TAG, "Saved completed ride to history: ${historyEntry.rideId}")
@@ -3984,7 +3986,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                         // Driver details for ride history
                         counterpartyFirstName = RideHistoryBuilder.extractCounterpartyFirstName(driverProfile),
                         vehicleMake = driver?.carMake,
-                        vehicleModel = driver?.carModel
+                        vehicleModel = driver?.carModel,
+                        appOrigin = RideHistoryRepository.APP_ORIGIN_RIDESTR
                     )
                     rideHistoryRepository.addRide(historyEntry)
                     Log.d(TAG, "Saved cancelled ride to history: ${historyEntry.rideId}")
