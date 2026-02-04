@@ -1009,7 +1009,13 @@ private fun GeocodingLocationInputCard(
                 ) {
                     Checkbox(
                         checked = usingCurrentLocationForPickup,
-                        onCheckedChange = null,  // Let Row handle clicks to avoid touch conflict
+                        onCheckedChange = { checked ->
+                            if (checked) {
+                                requestCurrentLocation()
+                            } else {
+                                onStopUsingCurrentLocation()
+                            }
+                        },
                         modifier = Modifier.size(20.dp)
                     )
                     Spacer(modifier = Modifier.width(4.dp))
@@ -1085,13 +1091,13 @@ private fun GeocodingLocationInputCard(
                 if (pickupLocation != null || destination != null) {
                     IconButton(
                         onClick = onSwapAddresses,
-                        modifier = Modifier.size(28.dp)
+                        modifier = Modifier.size(40.dp)
                     ) {
                         Icon(
                             Icons.Default.SwapVert,
                             contentDescription = "Swap pickup and destination",
                             tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.size(20.dp)
                         )
                     }
                 } else {
