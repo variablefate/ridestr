@@ -49,15 +49,35 @@ Ridestr is a decentralized rideshare platform built on Nostr with Cashu payments
 
 ```
 ridestr/
-├── rider-app/          # Rider Android app (Ridestr)
-├── drivestr/           # Driver Android app (Drivestr)
-├── common/             # Shared code
-│   ├── nostr/          # Nostr events and relay management
-│   ├── payment/        # Cashu wallet and HTLC
-│   ├── sync/           # Profile sync adapters
-│   ├── roadflare/      # RoadFlare key and location management
-│   └── ui/             # Shared UI components
-└── docs/               # This documentation
+├── rider-app/              # Rider Android app (Ridestr)
+│   ├── viewmodels/         # RiderViewModel - ride state machine
+│   ├── ui/screens/         # RiderModeScreen, RoadflareTab, HistoryScreen
+│   └── service/            # RiderActiveService (foreground)
+│
+├── drivestr/               # Driver Android app (Drivestr)
+│   ├── viewmodels/         # DriverViewModel - driver state machine
+│   ├── ui/screens/         # DriverModeScreen, RoadflareTab, EarningsScreen
+│   └── service/            # DriverOnlineService, RoadflareListenerService
+│
+├── common/                 # Shared code (~65% of codebase)
+│   ├── nostr/              # Nostr protocol
+│   │   ├── events/         # 20+ event types (rides, RoadFlare, backup)
+│   │   ├── relay/          # WebSocket connection management
+│   │   └── keys/           # Secure key storage
+│   ├── payment/            # Cashu wallet
+│   │   └── cashu/          # Mint operations, NIP-60 sync
+│   ├── roadflare/          # Personal driver network
+│   ├── routing/            # Valhalla offline routing
+│   ├── sync/               # Profile sync adapters
+│   ├── state/              # Ride state machine
+│   ├── data/               # Repositories
+│   ├── settings/           # User preferences, remote config
+│   ├── notification/       # Alerts and sounds
+│   ├── location/           # Geocoding
+│   ├── bitcoin/            # Price service
+│   └── ui/                 # Shared screens and components
+│
+└── docs/                   # Documentation
 ```
 
 ---
