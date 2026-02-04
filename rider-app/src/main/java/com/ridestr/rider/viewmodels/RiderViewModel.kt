@@ -40,7 +40,9 @@ import com.ridestr.common.settings.DisplayCurrency
 import com.ridestr.common.settings.RemoteConfigManager
 import com.ridestr.common.settings.SettingsManager
 import com.ridestr.common.routing.ValhallaRoutingService
+import com.ridestr.common.payment.BridgePaymentStatus
 import com.ridestr.common.payment.LockResult
+import com.ridestr.common.payment.MeltQuoteState
 import com.ridestr.common.payment.PaymentCrypto
 import com.ridestr.common.payment.WalletService
 import com.ridestr.common.state.RideContext
@@ -171,6 +173,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     private var chatRefreshJob: PeriodicRefreshJob? = null
     private var acceptanceTimeoutJob: Job? = null
     private var broadcastTimeoutJob: Job? = null
+    private var bridgePendingPollJob: Job? = null
     private val profileSubscriptionIds = mutableMapOf<String, String>()
     private var currentSubscriptionGeohash: String? = null
     // First-acceptance-wins flag for broadcast mode
@@ -718,6 +721,25 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     RiderActiveService.updateStatus(context, RiderStatus.RideInProgress(driverName))
                 }
                 else -> { /* No service needed for other stages */ }
+            }
+
+            // Check for pending bridge payments for this ride (app restart recovery)
+            if (confirmationEventId != null) {
+                viewModelScope.launch {
+                    val pendingBridge = walletService?.getInProgressBridgePayments()
+                        ?.find { it.rideId == confirmationEventId }
+
+                    if (pendingBridge != null && pendingBridge.status == BridgePaymentStatus.MELT_EXECUTED) {
+                        Log.d(TAG, "Restoring pending bridge payment UI for ride $confirmationEventId")
+                        _uiState.value = _uiState.value.copy(
+                            bridgeInProgress = true,
+                            infoMessage = "Payment routing... Lightning may take a few minutes."
+                        )
+
+                        // Start polling to resolve the pending state
+                        startBridgePendingPoll(pendingBridge.id, confirmationEventId, acceptance.driverPubKey)
+                    }
+                }
             }
 
         } catch (e: Exception) {
@@ -2507,6 +2529,10 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         // Stop chat refresh job
         stopChatRefreshJob()
 
+        // Cancel any pending bridge payment poll job
+        bridgePendingPollJob?.cancel()
+        bridgePendingPollJob = null
+
         acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
         acceptanceSubscriptionId = null
 
@@ -3476,13 +3502,24 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         Log.d(TAG, "=== EXECUTING CROSS-MINT BRIDGE ===")
         Log.d(TAG, "  rideId=$confirmationEventId")
         Log.d(TAG, "  invoice=${depositInvoice.take(30)}...")
-        _uiState.value = _uiState.value.copy(bridgeInProgress = true)
+        _uiState.value = _uiState.value.copy(bridgeInProgress = true, infoMessage = null)
 
         try {
             val result = walletService?.bridgePayment(depositInvoice, rideId = confirmationEventId)
 
             if (result?.success == true) {
+                // Log warning if cleanup had issues (payment still succeeded)
+                if (result.error != null) {
+                    Log.w(TAG, "Bridge payment succeeded with wallet sync warning: ${result.error}")
+                }
                 Log.d(TAG, "Bridge payment successful: ${result.amountSats} sats + ${result.feesSats} fees")
+
+                // Cancel any pending poll job
+                bridgePendingPollJob?.cancel()
+                bridgePendingPollJob = null
+
+                // Clear info message and error (mutual exclusivity)
+                _uiState.value = _uiState.value.copy(infoMessage = null, error = null)
 
                 // Publish BridgeComplete action to rider ride state
                 val bridgeAction = RiderRideStateEvent.createBridgeCompleteAction(
@@ -3507,16 +3544,56 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     myRideEventIds.add(eventId)
                     _uiState.value = _uiState.value.copy(
                         bridgeInProgress = false,
-                        bridgeComplete = true
+                        bridgeComplete = true,
+                        infoMessage = null,
+                        error = null  // Clear any stale errors on success
                     )
                 } else {
                     Log.e(TAG, "Failed to publish BridgeComplete action")
-                    _uiState.value = _uiState.value.copy(bridgeInProgress = false)
+                    _uiState.value = _uiState.value.copy(bridgeInProgress = false, infoMessage = null, error = null)
                 }
+            } else if (result?.isPending == true) {
+                // Payment is PENDING - may still complete. Do NOT auto-cancel!
+                Log.w(TAG, "Bridge payment PENDING - Lightning still routing. NOT cancelling ride.")
+
+                // Keep spinner showing, but DON'T show info message yet
+                // Wait 8 seconds to see if payment resolves before alarming user
+                _uiState.value = _uiState.value.copy(
+                    bridgeInProgress = true,  // EXPLICIT: Keep spinner showing
+                    error = null  // Clear any previous error
+                )
+
+                // Delayed info message - only show if still pending after 8 seconds
+                val currentRideId = confirmationEventId  // Capture current ride context
+                viewModelScope.launch {
+                    delay(8000L)  // Wait 8 seconds
+                    // Check if still in same ride and bridge still in progress
+                    if (_uiState.value.bridgeInProgress && _uiState.value.confirmationEventId == currentRideId) {
+                        _uiState.value = _uiState.value.copy(
+                            infoMessage = "Payment routing... Lightning may take a few minutes."
+                        )
+                    }
+                    // If ride completed/cancelled during delay, skip showing message
+                }
+
+                // Start polling to resolve pending state
+                val bridgePaymentId = walletService?.getInProgressBridgePayments()
+                    ?.find { it.rideId == currentRideId }?.id
+
+                if (bridgePaymentId != null) {
+                    startBridgePendingPoll(bridgePaymentId, currentRideId, driverPubKey)
+                }
+
+                // DO NOT call clearRide() - payment may still complete!
+                // User can manually cancel if they want, or wait for driver to cancel
             } else {
+                // Actual failure (not pending)
                 Log.e(TAG, "Bridge payment failed: ${result?.error} - auto-cancelling ride")
+                bridgePendingPollJob?.cancel()
+                bridgePendingPollJob = null
                 _uiState.value = _uiState.value.copy(
                     bridgeInProgress = false,
+                    infoMessage = null,  // Clear any info message
                     error = "Payment failed: ${result?.error ?: "Unknown error"}. Ride cancelled."
                 )
                 // Auto-cancel the ride since payment failed
@@ -3524,12 +3601,138 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Exception during bridge payment: ${e.message} - auto-cancelling ride", e)
+            bridgePendingPollJob?.cancel()
+            bridgePendingPollJob = null
             _uiState.value = _uiState.value.copy(
                 bridgeInProgress = false,
+                infoMessage = null,
                 error = "Payment failed: ${e.message}. Ride cancelled."
             )
             // Auto-cancel the ride since payment failed
             clearRide()
+        }
+    }
+
+    /**
+     * Start polling to resolve a pending bridge payment.
+     * Polls the mint every 30s for up to 10 minutes.
+     */
+    private fun startBridgePendingPoll(bridgePaymentId: String, rideId: String, driverPubKey: String) {
+        bridgePendingPollJob?.cancel()
+        bridgePendingPollJob = viewModelScope.launch {
+            val startMs = System.currentTimeMillis()
+            val timeoutMs = 10 * 60_000L  // 10 minutes
+            val pollIntervalMs = 30_000L  // 30 seconds
+
+            while (isActive && System.currentTimeMillis() - startMs < timeoutMs) {
+                delay(pollIntervalMs)
+
+                // Check if ride still active
+                if (_uiState.value.confirmationEventId != rideId) {
+                    Log.d(TAG, "Bridge poll: Ride changed, stopping poll")
+                    return@launch
+                }
+
+                // Get full MeltQuote to access preimage
+                val quote = walletService?.checkBridgeMeltQuote(bridgePaymentId)
+                Log.d(TAG, "Bridge poll: state=${quote?.state}, preimage=${quote?.paymentPreimage?.take(8)} for payment $bridgePaymentId")
+
+                when (quote?.state) {
+                    MeltQuoteState.PAID -> {
+                        Log.d(TAG, "Bridge poll: Payment PAID! Triggering success path")
+                        handleBridgeSuccessFromPoll(bridgePaymentId, quote.paymentPreimage, driverPubKey)
+                        return@launch
+                    }
+                    MeltQuoteState.UNPAID -> {
+                        // Quote expired or failed - update storage status THEN cancel
+                        Log.e(TAG, "Bridge poll: Payment UNPAID/expired - cancelling ride")
+                        walletService?.walletStorage?.updateBridgePaymentStatus(
+                            bridgePaymentId, BridgePaymentStatus.FAILED,
+                            errorMessage = "Lightning route expired"
+                        )
+                        _uiState.value = _uiState.value.copy(
+                            bridgeInProgress = false,
+                            infoMessage = null,
+                            error = "Payment failed: Lightning route expired. Ride cancelled."
+                        )
+                        clearRide()
+                        return@launch
+                    }
+                    MeltQuoteState.PENDING, null -> {
+                        // Still pending or error checking - continue polling
+                    }
+                }
+            }
+
+            // Timeout after 10 minutes - update storage status THEN cancel
+            Log.w(TAG, "Bridge poll: Timeout after 10 minutes")
+            walletService?.walletStorage?.updateBridgePaymentStatus(
+                bridgePaymentId, BridgePaymentStatus.FAILED,
+                errorMessage = "Payment timed out after 10 minutes"
+            )
+            _uiState.value = _uiState.value.copy(
+                bridgeInProgress = false,
+                infoMessage = null,
+                error = "Payment timed out. Please check your wallet balance. Ride cancelled."
+            )
+            clearRide()
+        }
+    }
+
+    /**
+     * Handle successful bridge payment detected via polling.
+     */
+    private suspend fun handleBridgeSuccessFromPoll(bridgePaymentId: String, preimage: String?, driverPubKey: String) {
+        // Get the bridge payment details for logging
+        val payment = walletService?.getBridgePayment(bridgePaymentId)
+        Log.d(TAG, "Bridge payment resolved via poll: ${payment?.amountSats} sats, preimage=${preimage?.take(8)}")
+
+        // Cancel polling job first
+        bridgePendingPollJob?.cancel()
+        bridgePendingPollJob = null
+
+        // Update bridge payment status to COMPLETE with preimage
+        walletService?.walletStorage?.updateBridgePaymentStatus(
+            bridgePaymentId, BridgePaymentStatus.COMPLETE,
+            lightningPreimage = preimage  // CRITICAL: Store preimage from MeltQuote
+        )
+
+        val confirmationId = _uiState.value.confirmationEventId ?: return
+
+        // Publish BridgeComplete action (same as normal success path)
+        val bridgeAction = RiderRideStateEvent.createBridgeCompleteAction(
+            preimage = preimage ?: "",
+            amountSats = payment?.amountSats ?: 0,
+            feesSats = payment?.feeReserveSats ?: 0
+        )
+
+        val eventId = historyMutex.withLock {
+            riderStateHistory.add(bridgeAction)
+            nostrService.publishRiderRideState(
+                confirmationEventId = confirmationId,
+                driverPubKey = driverPubKey,
+                currentPhase = currentRiderPhase,
+                history = riderStateHistory.toList(),
+                lastTransitionId = lastReceivedDriverStateId
+            )
+        }
+
+        if (eventId != null) {
+            Log.d(TAG, "Published BridgeComplete action from poll: $eventId")
+            myRideEventIds.add(eventId)
+            _uiState.value = _uiState.value.copy(
+                bridgeInProgress = false,
+                bridgeComplete = true,
+                infoMessage = null,  // Clear any pending info message
+                error = null  // Clear any stale errors on success
+            )
+        } else {
+            Log.e(TAG, "Failed to publish BridgeComplete action from poll")
+            _uiState.value = _uiState.value.copy(
+                bridgeInProgress = false,
+                infoMessage = null,
+                error = null  // Clear any stale errors on success
+            )
         }
     }
 
@@ -4445,5 +4648,6 @@ data class RiderUiState(
 
     // UI
     val statusMessage: String = "Find available drivers",
-    val error: String? = null
+    val error: String? = null,
+    val infoMessage: String? = null  // Non-error status messages (neutral styling)
 )

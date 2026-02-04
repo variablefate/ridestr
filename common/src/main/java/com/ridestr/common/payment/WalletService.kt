@@ -2613,6 +2613,24 @@ class WalletService(
             }
 
             if (!result.paid) {
+                // Check if payment is still pending (may complete later)
+                if (result.isPending) {
+                    Log.w(TAG, "[BRIDGE $bridgePaymentId] Payment PENDING - may complete later. NOT treating as failure.")
+                    // NOTE: Keep as MELT_EXECUTED (not FAILED) - "pending routing" now maps here.
+                    // This allows recovery to distinguish between actual failures and pending payments.
+                    walletStorage.updateBridgePaymentStatus(
+                        bridgePaymentId, BridgePaymentStatus.MELT_EXECUTED,
+                        errorMessage = "Payment pending - Lightning still routing"
+                    )
+                    // Return pending status - caller should NOT auto-cancel
+                    return BridgeResult(
+                        success = false,  // Not yet successful
+                        error = "Payment pending - Lightning payment still routing. Do not cancel.",
+                        isPending = true  // Signal to caller: don't auto-cancel!
+                    )
+                }
+
+                // Actual failure (not pending)
                 walletStorage.updateBridgePaymentStatus(
                     bridgePaymentId, BridgePaymentStatus.FAILED,
                     errorMessage = "Lightning payment failed - routing error or invoice expired"
@@ -2627,120 +2645,154 @@ class WalletService(
                 lightningPreimage = result.paymentPreimage
             )
 
-            // Step 4: Safe NIP-60 cleanup - republish remaining proofs before deleting
-            val spentSecrets = selection.proofs.map { it.secret }.toSet()
-            val affectedEventIds = selection.proofs.map { it.eventId }.distinct()
+            // ============================================================
+            // PAYMENT CONFIRMED - Driver has the money via Lightning.
+            // From here, ALWAYS return success. Cleanup failures are warnings only.
+            // ============================================================
+            var cleanupWarning: String? = null
 
-            // Fetch all current proofs to find remaining (not spent) proofs in affected events
-            val allProofs = sync.fetchProofs(forceRefresh = true)
-            val remainingProofsToRepublish = allProofs.filter { proof ->
-                proof.eventId in affectedEventIds && proof.secret !in spentSecrets
-            }
+            try {
+                // Step 4: Safe NIP-60 cleanup - republish remaining proofs before deleting
+                val spentSecrets = selection.proofs.map { it.secret }.toSet()
+                val affectedEventIds = selection.proofs.map { it.eventId }.distinct()
 
-            if (remainingProofsToRepublish.isNotEmpty()) {
-                Log.d(TAG, "Republishing ${remainingProofsToRepublish.size} remaining proofs before cleanup")
-                val cashuProofs = remainingProofsToRepublish.map { it.toCashuProof() }
-                var newEventId: String? = null
-                var attempts = 0
-                while (newEventId == null && attempts < 3) {
-                    attempts++
-                    // Include del array to atomically mark old events as consumed
-                    newEventId = sync.publishProofs(cashuProofs, mintUrl, affectedEventIds)
-                    if (newEventId == null && attempts < 3) {
-                        kotlinx.coroutines.delay(2000)
+                // Fetch all current proofs to find remaining (not spent) proofs in affected events
+                val allProofs = sync.fetchProofs(forceRefresh = true)
+                val remainingProofsToRepublish = allProofs.filter { proof ->
+                    proof.eventId in affectedEventIds && proof.secret !in spentSecrets
+                }
+
+                if (remainingProofsToRepublish.isNotEmpty()) {
+                    Log.d(TAG, "Republishing ${remainingProofsToRepublish.size} remaining proofs before cleanup")
+                    val cashuProofs = remainingProofsToRepublish.map { it.toCashuProof() }
+                    var newEventId: String? = null
+                    var attempts = 0
+                    while (newEventId == null && attempts < 3) {
+                        attempts++
+                        // Include del array to atomically mark old events as consumed
+                        newEventId = sync.publishProofs(cashuProofs, mintUrl, affectedEventIds)
+                        if (newEventId == null && attempts < 3) {
+                            kotlinx.coroutines.delay(2000)
+                        }
                     }
-                }
-                if (newEventId != null) {
-                    Log.d(TAG, "Republished remaining proofs to: $newEventId (del: ${affectedEventIds.size} events)")
-                } else {
-                    Log.e(TAG, "CRITICAL: Failed to republish remaining proofs!")
-                    // Save recovery token for manual recovery
-                    saveRecoveryTokenFallback(cashuProofs, mintUrl, "nip60_republish_failed_bridgepayment")
-                }
-            }
-
-            // NIP-09 deletion as backup (del arrays are primary)
-            sync.deleteProofEvents(affectedEventIds)
-
-            // Step 5: Publish change proofs with retry
-            var changePublished = false
-            if (result.change.isNotEmpty()) {
-                val changeAmount = result.change.sumOf { it.amount }
-                var changeEventId: String? = null
-                var publishAttempts = 0
-
-                while (changeEventId == null && publishAttempts < 3) {
-                    publishAttempts++
-                    Log.d(TAG, "[BRIDGE $bridgePaymentId] Publishing change proofs (attempt $publishAttempts/3)")
-                    // Include del array to atomically mark old events as consumed
-                    changeEventId = sync.publishProofs(result.change, mintUrl, affectedEventIds)
-                    if (changeEventId == null && publishAttempts < 3) {
-                        kotlinx.coroutines.delay(2000)
+                    if (newEventId != null) {
+                        Log.d(TAG, "Republished remaining proofs to: $newEventId (del: ${affectedEventIds.size} events)")
+                    } else {
+                        Log.e(TAG, "CRITICAL: Failed to republish remaining proofs!")
+                        // Save recovery token for manual recovery
+                        saveRecoveryTokenFallback(cashuProofs, mintUrl, "nip60_republish_failed_bridgepayment")
                     }
                 }
 
-                if (changeEventId != null) {
-                    Log.d(TAG, "[BRIDGE $bridgePaymentId] Published change: ${result.change.size} proofs ($changeAmount sats)")
-                    changePublished = true
+                // NIP-09 deletion as backup (del arrays are primary)
+                sync.deleteProofEvents(affectedEventIds)
+
+                // Step 5: Publish change proofs with retry
+                var changePublished = false
+                if (result.change.isNotEmpty()) {
+                    val changeAmount = result.change.sumOf { it.amount }
+                    var changeEventId: String? = null
+                    var publishAttempts = 0
+
+                    while (changeEventId == null && publishAttempts < 3) {
+                        publishAttempts++
+                        Log.d(TAG, "[BRIDGE $bridgePaymentId] Publishing change proofs (attempt $publishAttempts/3)")
+                        // Include del array to atomically mark old events as consumed
+                        changeEventId = sync.publishProofs(result.change, mintUrl, affectedEventIds)
+                        if (changeEventId == null && publishAttempts < 3) {
+                            kotlinx.coroutines.delay(2000)
+                        }
+                    }
+
+                    if (changeEventId != null) {
+                        Log.d(TAG, "[BRIDGE $bridgePaymentId] Published change: ${result.change.size} proofs ($changeAmount sats)")
+                        changePublished = true
+                    } else {
+                        Log.e(TAG, "[BRIDGE $bridgePaymentId] CRITICAL: Failed to publish change proofs!")
+                        // Save recovery token for manual recovery
+                        saveRecoveryTokenFallback(result.change, mintUrl, "nip60_change_failed_bridgepayment")
+                        changePublished = true  // Recovery token saved, consider it handled
+                    }
                 } else {
-                    Log.e(TAG, "[BRIDGE $bridgePaymentId] CRITICAL: Failed to publish change proofs!")
-                    // Save recovery token for manual recovery
-                    saveRecoveryTokenFallback(result.change, mintUrl, "nip60_change_failed_bridgepayment")
-                    changePublished = true  // Recovery token saved, consider it handled
+                    changePublished = true  // No change needed
                 }
-            } else {
-                changePublished = true  // No change needed
+
+                // Mark change proofs as received
+                walletStorage.updateBridgePaymentStatus(
+                    bridgePaymentId, BridgePaymentStatus.LIGHTNING_CONFIRMED,
+                    changeProofsReceived = changePublished
+                )
+
+                // NOW safe to clear pending melt operation - proofs are persisted (NIP-60 or RecoveryToken)
+                if (result.pendingOpId != null) {
+                    walletStorage.removePendingBlindedOp(result.pendingOpId)
+                    Log.d(TAG, "[BRIDGE $bridgePaymentId] Cleared pending melt operation: ${result.pendingOpId}")
+                }
+
+                // Refresh balance
+                sync.clearCache()
+                val newProofs = sync.fetchProofs(forceRefresh = true)
+                val newBalance = newProofs.sumOf { it.amount }
+
+                _balance.value = WalletBalance(
+                    availableSats = newBalance,
+                    pendingSats = _balance.value.pendingSats,
+                    lastUpdated = System.currentTimeMillis()
+                )
+                walletStorage.cacheBalance(_balance.value)
+                updateDiagnostics()
+
+                // Mark bridge payment as complete
+                walletStorage.updateBridgePaymentStatus(
+                    bridgePaymentId, BridgePaymentStatus.COMPLETE,
+                    lightningPreimage = result.paymentPreimage
+                )
+                Log.d(TAG, "[BRIDGE $bridgePaymentId] COMPLETE: ${quote.amount} sats + ${quote.feeReserve} sats fees")
+
+                // Record transaction (fees from feeReserve)
+                addTransaction(PaymentTransaction(
+                    id = bridgePaymentId,
+                    type = TransactionType.BRIDGE_PAYMENT,
+                    amountSats = quote.amount,
+                    feeSats = quote.feeReserve,
+                    timestamp = System.currentTimeMillis(),
+                    rideId = rideId,
+                    counterpartyPubKey = null,
+                    status = "Cross-mint bridge to driver"
+                ))
+            } catch (cleanupEx: Exception) {
+                // Cleanup failed but payment succeeded - log and continue
+                Log.e(TAG, "[BRIDGE $bridgePaymentId] Post-payment cleanup failed (payment still succeeded): ${cleanupEx.message}", cleanupEx)
+                cleanupWarning = "Payment succeeded but wallet sync incomplete. Pull to refresh."
+
+                // Ensure change proofs are saved to recovery token
+                if (result.change.isNotEmpty()) {
+                    try {
+                        saveRecoveryTokenFallback(result.change, mintUrl, "cleanup_exception_bridge")
+                        Log.d(TAG, "[BRIDGE $bridgePaymentId] Saved change proofs to recovery token")
+                    } catch (recoveryEx: Exception) {
+                        Log.e(TAG, "[BRIDGE $bridgePaymentId] Failed to save recovery token: ${recoveryEx.message}")
+                    }
+                }
+
+                // Still mark as complete since Lightning payment succeeded
+                try {
+                    walletStorage.updateBridgePaymentStatus(
+                        bridgePaymentId, BridgePaymentStatus.COMPLETE,
+                        lightningPreimage = result.paymentPreimage
+                    )
+                } catch (statusEx: Exception) {
+                    Log.e(TAG, "[BRIDGE $bridgePaymentId] Failed to update status: ${statusEx.message}")
+                }
             }
 
-            // Mark change proofs as received
-            walletStorage.updateBridgePaymentStatus(
-                bridgePaymentId, BridgePaymentStatus.LIGHTNING_CONFIRMED,
-                changeProofsReceived = changePublished
-            )
-
-            // NOW safe to clear pending melt operation - proofs are persisted (NIP-60 or RecoveryToken)
-            if (result.pendingOpId != null) {
-                walletStorage.removePendingBlindedOp(result.pendingOpId)
-                Log.d(TAG, "[BRIDGE $bridgePaymentId] Cleared pending melt operation: ${result.pendingOpId}")
-            }
-
-            // Refresh balance
-            sync.clearCache()
-            val newProofs = sync.fetchProofs(forceRefresh = true)
-            val newBalance = newProofs.sumOf { it.amount }
-
-            _balance.value = WalletBalance(
-                availableSats = newBalance,
-                pendingSats = _balance.value.pendingSats,
-                lastUpdated = System.currentTimeMillis()
-            )
-            walletStorage.cacheBalance(_balance.value)
-            updateDiagnostics()
-
-            // Mark bridge payment as complete
-            walletStorage.updateBridgePaymentStatus(
-                bridgePaymentId, BridgePaymentStatus.COMPLETE,
-                lightningPreimage = result.paymentPreimage
-            )
-            Log.d(TAG, "[BRIDGE $bridgePaymentId] COMPLETE: ${quote.amount} sats + ${quote.feeReserve} sats fees")
-
-            // Record transaction (fees from feeReserve)
-            addTransaction(PaymentTransaction(
-                id = bridgePaymentId,
-                type = TransactionType.BRIDGE_PAYMENT,
-                amountSats = quote.amount,
-                feeSats = quote.feeReserve,
-                timestamp = System.currentTimeMillis(),
-                rideId = rideId,
-                counterpartyPubKey = null,
-                status = "Cross-mint bridge to driver"
-            ))
-
+            // ALWAYS return success since Lightning payment was confirmed
             return BridgeResult(
                 success = true,
                 amountSats = quote.amount,
                 feesSats = quote.feeReserve,
-                preimage = result.paymentPreimage
+                preimage = result.paymentPreimage,
+                error = cleanupWarning  // null if cleanup succeeded, warning message if it failed
             )
         } catch (e: Exception) {
             Log.e(TAG, "[BRIDGE $bridgePaymentId] Exception: ${e.message}", e)
@@ -3988,6 +4040,26 @@ class WalletService(
      */
     fun getBridgePayment(paymentId: String): PendingBridgePayment? {
         return walletStorage.getPendingBridgePayments().find { it.id == paymentId }
+    }
+
+    /**
+     * Check the melt quote for a pending bridge payment.
+     * Returns full MeltQuote to access state AND paymentPreimage.
+     * Used for polling to resolve pending bridge payments.
+     *
+     * @param bridgePaymentId The ID of the bridge payment to check
+     * @return The full MeltQuote, or null if not found/error
+     */
+    suspend fun checkBridgeMeltQuote(bridgePaymentId: String): MeltQuote? {
+        val payment = getBridgePayment(bridgePaymentId) ?: return null
+        val quoteId = payment.meltQuoteId ?: return null
+
+        return try {
+            cashuBackend.checkMeltQuote(quoteId)
+        } catch (e: Exception) {
+            Log.w(TAG, "Error checking bridge melt quote: ${e.message}")
+            null
+        }
     }
 
     /**

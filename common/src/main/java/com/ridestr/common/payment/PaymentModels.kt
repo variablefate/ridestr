@@ -201,7 +201,8 @@ data class BridgeResult(
     val amountSats: Long = 0,
     val feesSats: Long = 0,
     val preimage: String? = null,
-    val error: String? = null
+    val error: String? = null,
+    val isPending: Boolean = false  // True if payment may still complete (don't auto-cancel!)
 )
 
 /**
