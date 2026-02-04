@@ -370,8 +370,9 @@ fun DriverModeScreen(
             val isSuccess = uiState.paymentSuccessReceived
 
             // Auto-dismiss after showing success for 1.5 seconds
+            // Key on sliderResetToken to ensure effect runs once per success event
             if (isSuccess) {
-                LaunchedEffect(Unit) {
+                LaunchedEffect(uiState.sliderResetToken) {
                     delay(1500)
                     viewModel.acknowledgePaymentSuccess()
                 }
