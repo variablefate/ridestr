@@ -1007,13 +1007,11 @@ private fun GeocodingLocationInputCard(
                                 requestCurrentLocation()
                             }
                         }
-                        .padding(vertical = 4.dp)
+                        .padding(vertical = 4.dp, horizontal = 8.dp)
                 ) {
                     Checkbox(
                         checked = usingCurrentLocationForPickup,
-                        onCheckedChange = { checked ->
-                            if (checked) requestCurrentLocation() else onStopUsingCurrentLocation()
-                        },
+                        onCheckedChange = null,  // Let Row handle clicks to avoid touch conflict
                         modifier = Modifier.size(20.dp)
                     )
                     Spacer(modifier = Modifier.width(4.dp))
