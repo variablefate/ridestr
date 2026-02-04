@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.material.icons.Icons
@@ -366,16 +367,33 @@ fun DriverModeScreen(
         // Payment warning dialog (shown when trying to complete ride without payment)
         if (uiState.showPaymentWarningDialog) {
             val isWaiting = uiState.paymentWarningStatus == PaymentStatus.WAITING_FOR_PREIMAGE
+            val isSuccess = uiState.paymentSuccessReceived
+
+            // Auto-dismiss after showing success for 1.5 seconds
+            if (isSuccess) {
+                LaunchedEffect(Unit) {
+                    delay(1500)
+                    viewModel.acknowledgePaymentSuccess()
+                }
+            }
+
             AlertDialog(
-                onDismissRequest = { viewModel.dismissPaymentWarningDialog() },
+                onDismissRequest = {
+                    if (!isWaiting && !isSuccess) viewModel.dismissPaymentWarningDialog()
+                },
                 icon = {
-                    if (isWaiting) {
-                        CircularProgressIndicator(
+                    when {
+                        isSuccess -> Icon(
+                            Icons.Default.CheckCircle,
+                            contentDescription = null,
+                            tint = Color(0xFF4CAF50),  // Green
+                            modifier = Modifier.size(32.dp)
+                        )
+                        isWaiting -> CircularProgressIndicator(
                             modifier = Modifier.size(32.dp),
                             strokeWidth = 3.dp
                         )
-                    } else {
-                        Icon(
+                        else -> Icon(
                             Icons.Default.Warning,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.error,
@@ -383,32 +401,38 @@ fun DriverModeScreen(
                         )
                     }
                 },
-                title = { Text(if (isWaiting) "Waiting for Payment" else "Payment Issue") },
+                title = {
+                    Text(when {
+                        isSuccess -> "Payment Received!"
+                        isWaiting -> "Waiting for Payment"
+                        else -> "Payment Issue"
+                    })
+                },
                 text = {
-                    Text(when (uiState.paymentWarningStatus) {
-                        PaymentStatus.MISSING_PREIMAGE ->
-                            "The rider app failed to share payment authorization. You won't be able to claim payment for this ride."
-                        PaymentStatus.MISSING_ESCROW_TOKEN ->
-                            "The rider app failed to lock payment escrow. You won't be able to claim payment for this ride."
-                        PaymentStatus.WAITING_FOR_PREIMAGE ->
+                    Text(when {
+                        isSuccess -> "Payment has been received successfully. Completing ride..."
+                        uiState.paymentWarningStatus == PaymentStatus.WAITING_FOR_PREIMAGE ->
                             "Waiting for payment authorization from rider. This may take a moment for cross-mint payments."
-                        else ->
-                            "Payment setup incomplete. You may not receive payment for this ride."
+                        uiState.paymentWarningStatus == PaymentStatus.MISSING_PREIMAGE ->
+                            "Payment authorization not received from rider."
+                        uiState.paymentWarningStatus == PaymentStatus.MISSING_ESCROW_TOKEN ->
+                            "Escrow token not received. Payment cannot be claimed."
+                        else -> "There was an issue with the payment."
                     })
                 },
                 confirmButton = {
-                    if (!isWaiting) {
+                    if (!isWaiting && !isSuccess) {
                         TextButton(onClick = { viewModel.confirmCompleteWithoutPayment() }) {
                             Text("Complete Anyway")
                         }
                     }
                 },
                 dismissButton = {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = { viewModel.dismissPaymentWarningDialog() }) {
-                            Text("Go Back")
-                        }
-                        if (!isWaiting) {
+                    if (!isWaiting && !isSuccess) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            TextButton(onClick = { viewModel.dismissPaymentWarningDialog() }) {
+                                Text("Go Back")
+                            }
                             TextButton(onClick = { viewModel.cancelRideDueToPaymentIssue() }) {
                                 Text("Cancel Ride", color = MaterialTheme.colorScheme.error)
                             }
@@ -621,7 +645,8 @@ fun DriverModeScreen(
                     onOpenChat = { showChatSheet = true },
                     chatMessageCount = uiState.chatMessages.size,
                     settingsManager = settingsManager,
-                    priceService = viewModel.bitcoinPriceService
+                    priceService = viewModel.bitcoinPriceService,
+                    sliderResetToken = uiState.sliderResetToken
                 )
             }
 
@@ -1615,7 +1640,8 @@ private fun InRideContent(
     onOpenChat: () -> Unit,
     chatMessageCount: Int,
     settingsManager: SettingsManager,
-    priceService: com.ridestr.common.bitcoin.BitcoinPriceService
+    priceService: com.ridestr.common.bitcoin.BitcoinPriceService,
+    sliderResetToken: Int = 0  // Pass through to SlideToConfirm
 ) {
     val context = LocalContext.current
     val offer = uiState.acceptedOffer ?: return
@@ -1746,7 +1772,8 @@ private fun InRideContent(
             SlideToConfirm(
                 text = "Slide to drop off rider",
                 onConfirm = onComplete,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth(),
+                resetTrigger = sliderResetToken
             )
 
             Spacer(modifier = Modifier.height(8.dp))

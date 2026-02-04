@@ -46,7 +46,8 @@ fun SlideToConfirm(
     backgroundColor: Color = MaterialTheme.colorScheme.primaryContainer,
     thumbColor: Color = MaterialTheme.colorScheme.primary,
     textColor: Color = MaterialTheme.colorScheme.onPrimaryContainer,
-    enabled: Boolean = true
+    enabled: Boolean = true,
+    resetTrigger: Int = 0  // Increment to trigger reset (monotonic counter)
 ) {
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
@@ -63,6 +64,14 @@ fun SlideToConfirm(
 
     // Whether the action has been triggered
     var confirmed by remember { mutableStateOf(false) }
+
+    // Reset slider when resetTrigger increments (but not on initial composition with 0)
+    LaunchedEffect(resetTrigger) {
+        if (resetTrigger > 0) {
+            confirmed = false
+            offsetX.snapTo(0f)
+        }
+    }
 
     // Calculate max drag distance
     val maxDragPx = (trackWidthPx - thumbSizePx).coerceAtLeast(0f)

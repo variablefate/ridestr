@@ -2130,9 +2130,11 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                         // Clear the pending deposit fields
                         pendingDepositQuoteId = null,
                         pendingDepositAmount = null,
-                        // Auto-dismiss payment warning dialog since payment succeeded
-                        showPaymentWarningDialog = false,
-                        paymentWarningStatus = null
+                        // Show success UI - MUST set showPaymentWarningDialog = true for dialog to appear
+                        showPaymentWarningDialog = true,
+                        paymentWarningStatus = null,  // Clear stale status (success UI overrides anyway)
+                        paymentSuccessReceived = true,
+                        sliderResetToken = _uiState.value.sliderResetToken + 1  // Trigger slider reset
                     )
 
                     Log.d(TAG, "Cross-mint payment complete: received ${claimResult.totalSats} sats")
@@ -2280,6 +2282,21 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             showPaymentWarningDialog = false,
             paymentWarningStatus = null
         )
+    }
+
+    /**
+     * Called after payment success UI has been shown to dismiss dialog and auto-complete.
+     * Safe to call completeRideInternal() directly because paymentSuccessReceived is only set
+     * when claimResult?.success == true && claimResult.claimedCount > 0 (actual claim succeeded).
+     */
+    fun acknowledgePaymentSuccess() {
+        _uiState.value = _uiState.value.copy(
+            showPaymentWarningDialog = false,
+            paymentWarningStatus = null,
+            paymentSuccessReceived = false
+        )
+        // Auto-complete the ride now that payment is confirmed
+        completeRideInternal()
     }
 
     /**
@@ -4339,6 +4356,8 @@ data class DriverUiState(
     // Payment warning dialog (shown when trying to complete without valid escrow)
     val showPaymentWarningDialog: Boolean = false,
     val paymentWarningStatus: PaymentStatus? = null,
+    val paymentSuccessReceived: Boolean = false,  // True when bridge payment succeeded (show success UI)
+    val sliderResetToken: Int = 0,  // Increment to trigger slider reset (monotonic counter)
 
     // Rider cancelled claim dialog (shown when rider cancels after PIN verification)
     val showRiderCancelledClaimDialog: Boolean = false,
