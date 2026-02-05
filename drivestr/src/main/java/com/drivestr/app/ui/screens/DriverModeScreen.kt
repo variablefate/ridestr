@@ -367,34 +367,19 @@ fun DriverModeScreen(
         // Payment warning dialog (shown when trying to complete ride without payment)
         if (uiState.showPaymentWarningDialog) {
             val isWaiting = uiState.paymentWarningStatus == PaymentStatus.WAITING_FOR_PREIMAGE
-            val isSuccess = uiState.paymentSuccessReceived
-
-            // Auto-dismiss after showing success for 1.5 seconds
-            // Key on sliderResetToken to ensure effect runs once per success event
-            if (isSuccess) {
-                LaunchedEffect(uiState.sliderResetToken) {
-                    delay(1500)
-                    viewModel.acknowledgePaymentSuccess()
-                }
-            }
 
             AlertDialog(
                 onDismissRequest = {
-                    if (!isWaiting && !isSuccess) viewModel.dismissPaymentWarningDialog()
+                    if (!isWaiting) viewModel.dismissPaymentWarningDialog()
                 },
                 icon = {
-                    when {
-                        isSuccess -> Icon(
-                            Icons.Default.CheckCircle,
-                            contentDescription = null,
-                            tint = Color(0xFF4CAF50),  // Green
-                            modifier = Modifier.size(32.dp)
-                        )
-                        isWaiting -> CircularProgressIndicator(
+                    if (isWaiting) {
+                        CircularProgressIndicator(
                             modifier = Modifier.size(32.dp),
                             strokeWidth = 3.dp
                         )
-                        else -> Icon(
+                    } else {
+                        Icon(
                             Icons.Default.Warning,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.error,
@@ -403,17 +388,12 @@ fun DriverModeScreen(
                     }
                 },
                 title = {
-                    Text(when {
-                        isSuccess -> "Payment Received!"
-                        isWaiting -> "Waiting for Payment"
-                        else -> "Payment Issue"
-                    })
+                    Text(if (isWaiting) "Waiting for Payment" else "Payment Issue")
                 },
                 text = {
                     Text(when {
-                        isSuccess -> "Payment has been received successfully. Completing ride..."
                         uiState.paymentWarningStatus == PaymentStatus.WAITING_FOR_PREIMAGE ->
-                            "Waiting for payment authorization from rider. This may take a moment for cross-mint payments."
+                            "Waiting for payment to complete. This may take a moment for cross-mint bridge payments."
                         uiState.paymentWarningStatus == PaymentStatus.MISSING_PREIMAGE ->
                             "Payment authorization not received from rider."
                         uiState.paymentWarningStatus == PaymentStatus.MISSING_ESCROW_TOKEN ->
@@ -422,14 +402,14 @@ fun DriverModeScreen(
                     })
                 },
                 confirmButton = {
-                    if (!isWaiting && !isSuccess) {
+                    if (!isWaiting) {
                         TextButton(onClick = { viewModel.confirmCompleteWithoutPayment() }) {
                             Text("Complete Anyway")
                         }
                     }
                 },
                 dismissButton = {
-                    if (!isWaiting && !isSuccess) {
+                    if (!isWaiting) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             TextButton(onClick = { viewModel.dismissPaymentWarningDialog() }) {
                                 Text("Go Back")

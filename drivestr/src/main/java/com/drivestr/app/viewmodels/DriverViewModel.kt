@@ -2040,7 +2040,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
                     // EARLY WARNING: If payment was expected but can't be claimed, warn driver immediately
                     // This ensures driver finds out RIGHT after PIN verification, not at dropoff
-                    if (state.activePaymentHash != null) {
+                    // Skip for CROSS_MINT - escrow token is expected to be null (uses Lightning bridge instead)
+                    if (state.activePaymentHash != null && state.paymentPath == PaymentPath.SAME_MINT) {
                         Log.w(TAG, "Payment issue detected - showing warning dialog immediately")
                         _uiState.value = _uiState.value.copy(
                             showPaymentWarningDialog = true,
@@ -2129,14 +2130,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                         activePreimage = bridgeComplete.preimage,
                         canSettleEscrow = false,
                         crossMintPaymentComplete = true,
-                        // Clear the pending deposit fields
                         pendingDepositQuoteId = null,
-                        pendingDepositAmount = null,
-                        // Show success UI - MUST set showPaymentWarningDialog = true for dialog to appear
-                        showPaymentWarningDialog = true,
-                        paymentWarningStatus = null,  // Clear stale status (success UI overrides anyway)
-                        paymentSuccessReceived = true,
-                        sliderResetToken = _uiState.value.sliderResetToken + 1  // Trigger slider reset
+                        pendingDepositAmount = null
                     )
 
                     Log.d(TAG, "Cross-mint payment complete: received ${claimResult.totalSats} sats")
@@ -2282,23 +2277,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     fun dismissPaymentWarningDialog() {
         _uiState.value = _uiState.value.copy(
             showPaymentWarningDialog = false,
-            paymentWarningStatus = null
-        )
-    }
-
-    /**
-     * Called after payment success UI has been shown to dismiss dialog and auto-complete.
-     * Safe to call completeRideInternal() directly because paymentSuccessReceived is only set
-     * when claimResult?.success == true && claimResult.claimedCount > 0 (actual claim succeeded).
-     */
-    fun acknowledgePaymentSuccess() {
-        _uiState.value = _uiState.value.copy(
-            showPaymentWarningDialog = false,
             paymentWarningStatus = null,
-            paymentSuccessReceived = false
+            sliderResetToken = _uiState.value.sliderResetToken + 1  // Reset slider position
         )
-        // Auto-complete the ride now that payment is confirmed
-        completeRideInternal()
     }
 
     /**
@@ -4360,7 +4341,6 @@ data class DriverUiState(
     // Payment warning dialog (shown when trying to complete without valid escrow)
     val showPaymentWarningDialog: Boolean = false,
     val paymentWarningStatus: PaymentStatus? = null,
-    val paymentSuccessReceived: Boolean = false,  // True when bridge payment succeeded (show success UI)
     val sliderResetToken: Int = 0,  // Increment to trigger slider reset (monotonic counter)
 
     // Rider cancelled claim dialog (shown when rider cancels after PIN verification)
