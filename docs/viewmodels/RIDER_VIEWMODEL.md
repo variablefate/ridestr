@@ -98,7 +98,8 @@ This document provides a complete reference of all functions, state fields, and 
 | `subscribeToDriverRideState(confirmationId, driverPubKey)` | Listen for driver status updates | Kind 30180 |
 | `subscribeToCancellation(confirmationId)` | Listen for driver cancellation | Kind 3179 |
 | `subscribeToChat(confirmationId, driverPubKey)` | Listen for chat messages | Kind 3178 |
-| `closeAllRideSubscriptions()` | Close all ride-related subscriptions | N/A |
+| `closeAllRideSubscriptions()` | Close 4 ride subs (base function — used by `confirmRide()` only, keeps availability sub open for Issue #22) | N/A |
+| `closeAllRideSubscriptionsAndJobs()` | Superset: closes all subs + availability sub + cancels all jobs. Used by all ride-ending paths. | N/A |
 
 ### State Handlers
 
@@ -127,6 +128,13 @@ This document provides a complete reference of all functions, state fields, and 
 | `revealPrecisePickup(confId)` | Share precise pickup when driver <1 mile |
 | `revealDestination(confId, driverPubKey)` | Share destination after PIN verified |
 | `checkAndRevealPrecisePickup(confId, driverLocation)` | Check distance and reveal if close |
+
+### State Reset (Phase 1 Consolidation)
+
+| Function | Purpose |
+|----------|---------|
+| `resetRideUiState(stage, statusMessage, error?)` | Single authoritative reset for ALL ride-related UI fields. Called at every ride boundary. |
+| `closeAllRideSubscriptionsAndJobs()` | Close all ride subs + availability sub + cancel all jobs (superset) |
 
 ### Cleanup Functions
 
@@ -327,9 +335,9 @@ broadcastRideRequest() OR sendRideOffer()
 ### Cancellation Flow
 ```
 [Driver cancels OR handleDriverCancellation()]
-    -> closeAllRideSubscriptions()
+    -> closeAllRideSubscriptionsAndJobs()
     -> clearRiderStateHistory()
+    -> resetRideUiState(IDLE)
     -> cleanupRideEventsInBackground()
-    -> _uiState.value = ... (IDLE)
     -> resubscribeToDrivers()
 ```

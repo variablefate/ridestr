@@ -207,8 +207,14 @@ Screen.RIDE_DETAIL → (from history) → Full ride details
 - `subscribeToDriverRideState()` - Watch driver's Kind 30180 events
 - `subscribeToAcceptances()` - Watch for Kind 3174 responses
 - `subscribeToSelectedDriverAvailability()` - Watch selected driver's Kind 30173 (Issue #22)
-- `closeAllRideSubscriptions()` - Clean up on ride end
+- `closeAllRideSubscriptions()` - Close 4 ride subs (used by `confirmRide()` only — keeps availability sub open for Issue #22)
+- `closeAllRideSubscriptionsAndJobs()` - Superset: closes all subs + availability sub + cancels all jobs. Used by all ride-ending paths.
 - `closeDriverAvailabilitySubscription()` - Clean up driver monitoring on acceptance/cancel
+
+### State Reset (Phase 1 Consolidation)
+- `resetRideUiState(stage, statusMessage, error?)` - Single authoritative reset for ALL ride fields. Called at every ride boundary.
+- All 6 ride-ending paths use this function: `clearRide()`, `handleDriverCancellation()`, `handleRideCompletion()` (partial), PIN brute force, `cancelOffer()`, `cancelBroadcastRequest()`
+- Fields NOT reset (persist across rides): `availableDrivers`, `pickupLocation`, `destination`, `routeResult`, `fareEstimate`, `myPubKey`, dialog state
 
 ### Confirmation Flow Protection (January 2026)
 Race condition fix prevents duplicate confirmation events:

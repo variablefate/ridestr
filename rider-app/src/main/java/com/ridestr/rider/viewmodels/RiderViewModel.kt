@@ -456,6 +456,135 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         Log.d(TAG, "Cleared rider state history and event deduplication sets")
     }
 
+    /**
+     * Reset ALL ride-related UI state fields to defaults.
+     * Called at every ride boundary (completion, cancellation, new ride start).
+     *
+     * This is the SINGLE authoritative reset function. Do NOT scatter
+     * field resets across multiple .copy() calls — add fields here instead.
+     *
+     * Fields NOT reset (persist across rides):
+     * - availableDrivers, driverProfiles, nearbyDriverCount (driver list)
+     * - pickupLocation, destination, routeResult, fareEstimate, fareEstimateWithFees (route)
+     * - expandedSearch, isCalculatingRoute, isRoutingReady (search/routing)
+     * - myPubKey (identity)
+     * - showInsufficientFundsDialog and related (dialog state managed separately)
+     * - showAlternatePaymentSetupDialog (dialog lifecycle, dismissed via dismissAlternatePaymentSetup())
+     */
+    private fun resetRideUiState(
+        stage: RideStage,
+        statusMessage: String,
+        error: String? = null
+    ) {
+        _uiState.value = _uiState.value.copy(
+            // Stage & status
+            rideStage = stage,
+            statusMessage = statusMessage,
+            error = error,
+
+            // Ride identification
+            pendingOfferEventId = null,
+            acceptance = null,
+            confirmationEventId = null,
+            selectedDriver = null,
+
+            // Offer state
+            isSendingOffer = false,
+            isConfirmingRide = false,
+
+            // Broadcast timeout state
+            broadcastStartTimeMs = null,
+            broadcastTimedOut = false,
+            totalBoostSats = 0.0,
+
+            // Direct offer timeout state
+            acceptanceTimeoutStartMs = null,
+            directOfferBoostSats = 0.0,
+            directOfferTimedOut = false,
+
+            // PIN verification
+            pickupPin = null,
+            pinAttempts = 0,
+            pinVerified = false,
+
+            // Chat
+            chatMessages = emptyList(),
+            isSendingMessage = false,
+
+            // Progressive location reveal
+            precisePickupShared = false,
+            preciseDestinationShared = false,
+            driverLocation = null,
+
+            // Driver state
+            lastDriverStatus = null,
+
+            // HTLC Escrow
+            activePreimage = null,
+            activePaymentHash = null,
+            escrowToken = null,
+            preimageShared = false,
+
+            // Multi-mint payment
+            paymentPath = PaymentPath.NO_PAYMENT,
+            driverMintUrl = null,
+            driverDepositInvoice = null,
+            bridgeInProgress = false,
+            bridgeComplete = false,
+
+            // Driver availability dialog
+            showDriverUnavailableDialog = false,
+
+            // Cancel warning dialog
+            showCancelWarningDialog = false,
+
+            // RoadFlare target tracking
+            roadflareTargetDriverPubKey = null,
+            roadflareTargetDriverLocation = null
+        )
+    }
+
+    /**
+     * Close ALL ride-related subscriptions and stop ALL ride-related jobs.
+     * Called at ride boundaries (completion, cancellation, new ride start)
+     * to ensure no stale callbacks fire.
+     *
+     * This is the SUPERSET of closeAllRideSubscriptions(). It additionally
+     * closes the driver availability subscription and cancels all jobs.
+     *
+     * Use closeAllRideSubscriptions() for MID-RIDE transitions (e.g., confirmRide)
+     * where availability monitoring must stay active.
+     * Use this function for RIDE-ENDING paths where everything must stop.
+     *
+     * Does NOT close: driverSubscriptionId (driver list), profileSubscriptionIds (profiles).
+     * Those are managed by the driver discovery lifecycle, not ride lifecycle.
+     */
+    private fun closeAllRideSubscriptionsAndJobs() {
+        // Close the base ride subscriptions (cancellation, driverRideState, chat, acceptance)
+        closeAllRideSubscriptions()
+
+        // ADDITIONALLY close driver availability monitoring (not closed by base function)
+        selectedDriverAvailabilitySubId?.let { nostrService.closeSubscription(it) }
+        selectedDriverAvailabilitySubId = null
+        selectedDriverLastAvailabilityTimestamp = 0L
+
+        // Jobs
+        stopChatRefreshJob()
+        acceptanceTimeoutJob?.cancel()
+        acceptanceTimeoutJob = null
+        broadcastTimeoutJob?.cancel()
+        broadcastTimeoutJob = null
+        bridgePendingPollJob?.cancel()
+        bridgePendingPollJob = null
+
+        // RoadFlare batch state — prevent stale offers to drivers from finished ride
+        roadflareBatchJob?.cancel()
+        roadflareBatchJob = null
+        contactedDrivers.clear()
+
+        Log.d(TAG, "Closed all ride subscriptions and jobs")
+    }
+
     init {
         // Connect to relays and subscribe to drivers
         nostrService.connect()
@@ -1923,30 +2052,17 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         // Cancel the acceptance timeout
         cancelAcceptanceTimeout()
 
-        acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
-        acceptanceSubscriptionId = null
-        // Stop monitoring driver availability
-        closeDriverAvailabilitySubscription()
+        closeAllRideSubscriptionsAndJobs()
 
-        viewModelScope.launch {
-            // Clean up all our ride events (NIP-09) - AWAIT before state reset
-            cleanupRideEventsInBackground("offer cancelled")
+        cleanupRideEventsInBackground("offer cancelled")
 
-            // THEN update state after deletion completes
-            _uiState.value = _uiState.value.copy(
-                pendingOfferEventId = null,
-                rideStage = RideStage.IDLE,
-                acceptanceTimeoutStartMs = null,
-                directOfferBoostSats = 0.0,
-                statusMessage = "Offer cancelled"
-            )
+        resetRideUiState(
+            stage = RideStage.IDLE,
+            statusMessage = "Offer cancelled"
+        )
 
-            // Resubscribe to get fresh driver list - same region, preserve existing
-            resubscribeToDrivers(clearExisting = false)
-
-            // Clear persisted ride state (in case any was saved)
-            clearSavedRideState()
-        }
+        resubscribeToDrivers(clearExisting = false)
+        clearSavedRideState()
     }
 
     /**
@@ -2274,32 +2390,19 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         // Cancel the timeout
         cancelBroadcastTimeout()
 
-        // Close acceptance subscription
-        acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
-        acceptanceSubscriptionId = null
+        closeAllRideSubscriptionsAndJobs()
 
-        // Stop foreground service
         RiderActiveService.stop(getApplication())
 
-        viewModelScope.launch {
-            // Clean up all our ride events (NIP-09) - AWAIT before state reset
-            cleanupRideEventsInBackground("request cancelled")
+        cleanupRideEventsInBackground("request cancelled")
 
-            // THEN update state after deletion completes
-            _uiState.value = _uiState.value.copy(
-                pendingOfferEventId = null,
-                rideStage = RideStage.IDLE,
-                broadcastStartTimeMs = null,
-                totalBoostSats = 0.0,
-                statusMessage = "Request cancelled"
-            )
+        resetRideUiState(
+            stage = RideStage.IDLE,
+            statusMessage = "Request cancelled"
+        )
 
-            // Resubscribe to get fresh driver list - same region, preserve existing
-            resubscribeToDrivers(clearExisting = false)
-
-            // Clear persisted ride state
-            clearSavedRideState()
-        }
+        resubscribeToDrivers(clearExisting = false)
+        clearSavedRideState()
     }
 
     /**
@@ -2526,29 +2629,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             Log.w(TAG, "    at ${frame.className}.${frame.methodName}(${frame.fileName}:${frame.lineNumber})")
         }
 
-        // Stop chat refresh job
-        stopChatRefreshJob()
-
-        // Cancel any pending bridge payment poll job
-        bridgePendingPollJob?.cancel()
-        bridgePendingPollJob = null
-
-        acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
-        acceptanceSubscriptionId = null
-
-        driverRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
-        driverRideStateSubscriptionId = null
-
-        chatSubscriptionId?.let { nostrService.closeSubscription(it) }
-        chatSubscriptionId = null
-
-        cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
-        cancellationSubscriptionId = null
-
-        // Clear rider state history
+        // Synchronous cleanup
+        closeAllRideSubscriptionsAndJobs()
         clearRiderStateHistory()
-
-        // Stop foreground service
         RiderActiveService.stop(getApplication())
 
         // Capture state values before launching coroutine
@@ -2607,21 +2690,12 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 cancellationEventId?.let { myRideEventIds.add(it) }
             }
 
-            // Clean up all our ride events (NIP-09) - AWAIT before state reset
+            // Clean up all our ride events (NIP-09)
             cleanupRideEventsInBackground("ride cancelled")
 
-            // THEN update state after deletion completes
-            _uiState.value = _uiState.value.copy(
-                selectedDriver = null,
-                pendingOfferEventId = null,
-                acceptance = null,
-                confirmationEventId = null,
-                pickupPin = null,
-                pinAttempts = 0,
-                pinVerified = false,
-                chatMessages = emptyList(),
-                isSendingMessage = false,
-                rideStage = RideStage.IDLE,
+            // Reset ALL ride state
+            resetRideUiState(
+                stage = RideStage.IDLE,
                 statusMessage = "Ready to book a ride"
             )
 
@@ -3426,44 +3500,18 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     // Brute force protection - cancel the ride
                     Log.e(TAG, "Max PIN attempts reached! Cancelling ride for security.")
 
-                    // CRITICAL: Stop chat refresh job to prevent phantom events from affecting future rides
-                    stopChatRefreshJob()
-
-                    // Close ALL active subscriptions (prevents old events affecting new rides)
-                    acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
-                    acceptanceSubscriptionId = null
-                    driverRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
-                    driverRideStateSubscriptionId = null
-                    chatSubscriptionId?.let { nostrService.closeSubscription(it) }
-                    chatSubscriptionId = null
-                    cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
-                    cancellationSubscriptionId = null
-
-                    // Clear rider state history
+                    closeAllRideSubscriptionsAndJobs()
                     clearRiderStateHistory()
-
-                    // Stop foreground service
                     RiderActiveService.stop(getApplication())
 
-                    _uiState.value = state.copy(
-                        pinAttempts = newAttempts,
-                        rideStage = RideStage.IDLE,
-                        acceptance = null,
-                        confirmationEventId = null,
-                        pickupPin = null,
-                        pinVerified = false,
-                        chatMessages = emptyList(),
+                    resetRideUiState(
+                        stage = RideStage.IDLE,
                         statusMessage = "Ride cancelled - too many wrong PIN attempts",
                         error = "Security alert: Driver entered wrong PIN $MAX_PIN_ATTEMPTS times. Ride cancelled."
                     )
 
-                    // Clean up events
                     cleanupRideEventsInBackground("pin brute force security")
-
-                    // Resubscribe to get fresh driver list - same region, preserve existing
                     resubscribeToDrivers(clearExisting = false)
-
-                    // Clear persisted ride state
                     clearSavedRideState()
                 } else {
                     _uiState.value = state.copy(
@@ -4003,24 +4051,10 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      * Handle ride completion from driver.
      */
     private fun handleRideCompletion(statusData: DriverRideStateData) {
-        // Stop refresh jobs
-        stopChatRefreshJob()
-
-        // Close active subscriptions
-        driverRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
-        driverRideStateSubscriptionId = null
-        chatSubscriptionId?.let { nostrService.closeSubscription(it) }
-        chatSubscriptionId = null
-        cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
-        cancellationSubscriptionId = null
-
-        // Clear rider state history
+        // Close subscriptions and jobs
+        closeAllRideSubscriptionsAndJobs()
         clearRiderStateHistory()
-
-        // Stop foreground service (this also clears the notification)
         RiderActiveService.stop(getApplication())
-
-        // Clear persisted ride state
         clearSavedRideState()
 
         // Capture fare info before launching coroutine
@@ -4107,53 +4141,29 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         Log.w(TAG, "  Current rideStage: ${_uiState.value.rideStage}")
         Log.w(TAG, "  driverRideStateSubscriptionId: $driverRideStateSubscriptionId")
 
-        // Stop refresh jobs
-        stopChatRefreshJob()
-
-        // Close active subscriptions
-        acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
-        acceptanceSubscriptionId = null
-        driverRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
-        driverRideStateSubscriptionId = null
-        chatSubscriptionId?.let { nostrService.closeSubscription(it) }
-        chatSubscriptionId = null
-        cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
-        cancellationSubscriptionId = null
-        // Also close availability subscription (may still be open if cancelled before EN_ROUTE_PICKUP)
-        closeDriverAvailabilitySubscription()
-
-        // Clear rider state history
+        // Synchronous cleanup
+        closeAllRideSubscriptionsAndJobs()
         clearRiderStateHistory()
-
-        // Notify service of cancellation (plays sound) then stop
         val context = getApplication<Application>()
         RiderActiveService.updateStatus(context, RiderStatus.Cancelled)
         RiderActiveService.stop(context)
-
-        // Clear persisted ride state
         clearSavedRideState()
 
-        // Capture reason before launching coroutine
-        val errorMessage = reason ?: "Driver cancelled the ride"
-
-        // Capture state for ride history before launching coroutine
+        // Capture state for ride history BEFORE reset
         val state = _uiState.value
         val driver = state.selectedDriver
         val driverProfile = driver?.let { state.driverProfiles[it.driverPubKey] }
 
-        // CRITICAL: Reset ride-related fields SYNCHRONOUSLY before launching coroutine
+        // CRITICAL: Reset ALL ride state SYNCHRONOUSLY
         // This prevents phantom cancellations where delayed events from ride #1
-        // could pass validation and affect ride #2. The validation checks
-        // driverState.confirmationEventId != currentState.confirmationEventId,
-        // so setting it to null immediately ensures any stale events are rejected.
-        // Also clear selectedDriver and acceptance to prevent stale UI state.
-        _uiState.value = _uiState.value.copy(
-            confirmationEventId = null,
-            rideStage = RideStage.IDLE,
-            selectedDriver = null,
-            acceptance = null
+        // could pass validation and affect ride #2.
+        val errorMessage = if (reason != null) "Driver cancelled: $reason" else null
+        resetRideUiState(
+            stage = RideStage.IDLE,
+            statusMessage = reason ?: "Driver cancelled the ride",
+            error = errorMessage
         )
-        Log.w(TAG, "  >>> State reset: confirmationEventId=null, rideStage=IDLE, selectedDriver=null, acceptance=null <<<")
+        Log.w(TAG, "  >>> State reset: all ride fields cleared via resetRideUiState() <<<")
 
         viewModelScope.launch {
             // Refresh wallet balance from NIP-60 (ensures consistency after cancellation)
@@ -4205,26 +4215,12 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             // Clean up all our ride events (NIP-09)
             cleanupRideEventsInBackground("driver cancelled")
 
-            // Only update remaining state and resubscribe if we're still in IDLE (no new ride started)
-            // The critical fields (confirmationEventId, rideStage, selectedDriver, acceptance)
-            // were already reset synchronously. This updates the remaining UI state.
+            // Only resubscribe if still in IDLE (no new ride started)
             val currentState = _uiState.value
             if (currentState.rideStage == RideStage.IDLE && currentState.confirmationEventId == null) {
-                _uiState.value = currentState.copy(
-                    pendingOfferEventId = null,
-                    pickupPin = null,
-                    pinAttempts = 0,
-                    pinVerified = false,
-                    chatMessages = emptyList(),
-                    isSendingMessage = false,
-                    statusMessage = "Driver cancelled the ride",
-                    error = errorMessage
-                )
-
-                // Resubscribe to get fresh driver list - same region, preserve existing
                 resubscribeToDrivers(clearExisting = false)
             } else {
-                Log.d(TAG, "Skipping state cleanup and resubscribe - new ride already started (stage=${currentState.rideStage})")
+                Log.d(TAG, "Skipping resubscribe - new ride already started (stage=${currentState.rideStage})")
             }
         }
     }

@@ -88,7 +88,7 @@ This document provides a complete reference of all functions, state fields, and 
 | `subscribeToRideConfirmation(offerEventId)` | Listen for ride confirmation | Kind 3175 |
 | `subscribeToCancellation(confId)` | Listen for rider cancellation | Kind 3179 |
 | `subscribeToChat(confId, riderPubKey)` | Listen for chat messages | Kind 3178 |
-| `closeAllRideSubscriptions()` | Close all ride-related subscriptions | N/A |
+| `closeAllRideSubscriptionsAndJobs()` | Close 4 ride subs + cancel 3 jobs (chat, confirmation timeout, PIN timeout). Does NOT close offer/broadcast/deletion subs. | N/A |
 
 ### State Publishing
 
@@ -117,6 +117,13 @@ This document provides a complete reference of all functions, state fields, and 
 | `transitionToEnRoute()` | Auto-transition to EN_ROUTE after confirmation |
 | `addStatusAction(status, location)` | Add status to history and publish |
 | `addPinSubmitAction(pin)` | Add PIN submission to history |
+
+### State Reset (Phase 1 Consolidation)
+
+| Function | Purpose |
+|----------|---------|
+| `resetRideUiState(stage, statusMessage, error?)` | Single authoritative reset for ALL ride-related UI fields. Called at every ride boundary. |
+| `closeAllRideSubscriptionsAndJobs()` | Close 4 ride subs + cancel 3 jobs (superset for ride-ending paths) |
 
 ### Cleanup Functions
 
@@ -290,7 +297,7 @@ goOnline()
 ### Ride Acceptance Flow
 ```
 acceptBroadcastRequest() OR acceptOffer()
-    -> closeAllRideSubscriptions()
+    -> clearDriverStateHistory()
     -> publishRideAcceptance()
     -> subscribeToRideConfirmation()
     -> [on confirmation] handleConfirmation()
@@ -337,11 +344,10 @@ completeRide()
 ### Cancellation Flow
 ```
 [Rider cancels OR cancelRide()]
-    -> closeAllRideSubscriptions()
+    -> closeAllRideSubscriptionsAndJobs()
     -> clearDriverStateHistory()
+    -> resetRideUiState(OFFLINE)
     -> cleanupRideEventsInBackground()
-    -> publishUnavailable()
-    -> _uiState.value = ... (OFFLINE)
 ```
 
 ---

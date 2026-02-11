@@ -368,6 +368,112 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         lastReceivedRiderStateId = null  // Reset chain for new ride
     }
 
+    /**
+     * Reset ALL ride-related UI state fields to defaults.
+     * Called at every ride boundary (completion, cancellation, timeout).
+     *
+     * This is the SINGLE authoritative reset function. Do NOT scatter
+     * field resets across multiple .copy() calls — add fields here instead.
+     *
+     * Fields NOT reset (persist across rides):
+     * - currentLocation (GPS), activeVehicle (selected car)
+     * - expandedSearch (search preference)
+     * - myPubKey (identity)
+     * - pickupRoutes, directOfferPickupRoutes, directOfferRideRoutes (cached routes)
+     * - showWalletNotSetupWarning and related (dialog state managed separately)
+     * - sliderResetToken (monotonic counter, never reset)
+     * - confirmationWaitDurationMs (constant 30s)
+     */
+    private fun resetRideUiState(
+        stage: DriverStage,
+        statusMessage: String,
+        error: String? = null
+    ) {
+        _uiState.value = _uiState.value.copy(
+            // Stage & status
+            stage = stage,
+            statusMessage = statusMessage,
+            error = error,
+
+            // Active ride
+            acceptedOffer = null,
+            acceptedBroadcastRequest = null,
+            acceptanceEventId = null,
+            confirmationEventId = null,
+            precisePickupLocation = null,
+            preciseDestinationLocation = null,
+            isProcessingOffer = false,
+
+            // PIN verification
+            pinAttempts = 0,
+            isAwaitingPinVerification = false,
+            pinVerificationTimedOut = false,
+            lastPinSubmissionEventId = null,
+
+            // Confirmation wait
+            confirmationWaitStartMs = null,
+
+            // Chat
+            chatMessages = emptyList(),
+            isSendingMessage = false,
+
+            // Guards
+            isCancelling = false,
+
+            // HTLC Escrow
+            activePaymentHash = null,
+            activePreimage = null,
+            activeEscrowToken = null,
+            canSettleEscrow = false,
+
+            // Multi-mint payment
+            paymentPath = PaymentPath.NO_PAYMENT,
+            riderMintUrl = null,
+            crossMintPaymentComplete = false,
+            pendingDepositQuoteId = null,
+            pendingDepositAmount = null,
+
+            // Payment warning dialog
+            showPaymentWarningDialog = false,
+            paymentWarningStatus = null,
+
+            // Rider cancelled claim dialog
+            showRiderCancelledClaimDialog = false,
+            riderCancelledFareAmount = null,
+
+            // Pending offers (clear stale offers when ending a ride)
+            pendingOffers = emptyList(),
+            pendingBroadcastRequests = emptyList()
+        )
+    }
+
+    /**
+     * Close all subscriptions active during a ride and stop ride-related jobs.
+     * Does NOT close: offer subscriptions, broadcast request subscriptions,
+     * deletion subscription, request acceptance subscriptions (those are
+     * managed by the availability/offer lifecycle).
+     */
+    private fun closeAllRideSubscriptionsAndJobs() {
+        // Ride subscriptions
+        confirmationSubscriptionId?.let { nostrService.closeSubscription(it) }
+        confirmationSubscriptionId = null
+        riderRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
+        riderRideStateSubscriptionId = null
+        chatSubscriptionId?.let { nostrService.closeSubscription(it) }
+        chatSubscriptionId = null
+        cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
+        cancellationSubscriptionId = null
+
+        // Jobs
+        stopChatRefreshJob()
+        confirmationTimeoutJob?.cancel()
+        confirmationTimeoutJob = null
+        pinVerificationTimeoutJob?.cancel()
+        pinVerificationTimeoutJob = null
+
+        Log.d(TAG, "Closed all ride subscriptions and jobs")
+    }
+
     /** Track an event for cleanup with diagnostic logging */
     private fun trackEventForCleanup(eventId: String, eventType: String) {
         myRideEventIds.add(eventId)
@@ -1042,37 +1148,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Set cancelling flag IMMEDIATELY (synchronous) to prevent race conditions
         _uiState.value = state.copy(isCancelling = true)
 
-        // Stop chat refresh job
-        stopChatRefreshJob()
-
-        // Cancel timeout jobs synchronously to prevent race conditions
-        confirmationTimeoutJob?.cancel()
-        confirmationTimeoutJob = null
-        pinVerificationTimeoutJob?.cancel()
-        pinVerificationTimeoutJob = null
-
-        // Close subscriptions
-        confirmationSubscriptionId?.let { nostrService.closeSubscription(it) }
-        confirmationSubscriptionId = null
-        riderRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
-        riderRideStateSubscriptionId = null
-        chatSubscriptionId?.let { nostrService.closeSubscription(it) }
-        chatSubscriptionId = null
-        cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
-        cancellationSubscriptionId = null
-
-        // Unsubscribe from rider profile
+        // Synchronous cleanup
+        closeAllRideSubscriptionsAndJobs()
         state.acceptedOffer?.riderPubKey?.let { unsubscribeFromRiderProfile(it) }
-
-        // Clear driver state history
         clearDriverStateHistory()
-
-        // Broadcast OFFLINE status to RoadFlare followers before stopping
-        // Without this, followers still see "On Ride" from the last broadcast
         broadcastRoadflareOfflineStatus()
         stopRoadflareBroadcasting()
-
-        // Stop the foreground service
         DriverOnlineService.stop(getApplication())
 
         // Capture state values before launching coroutine
@@ -1083,7 +1164,6 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             // Send cancelled status if we have a confirmation
             if (confId != null && riderPubKey != null) {
-                // Send cancellation event so rider gets notified
                 Log.d(TAG, "Publishing ride cancellation to rider")
                 val cancellationEventId = nostrService.publishRideCancellation(
                     confirmationEventId = confId,
@@ -1092,7 +1172,6 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 )
                 cancellationEventId?.let { myRideEventIds.add(it) }
 
-                // Also send cancelled status via driver ride state
                 val statusEventId = updateDriverStatus(
                     confirmationEventId = confId,
                     riderPubKey = riderPubKey,
@@ -1104,40 +1183,17 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
             // Broadcast offline status so riders/followers see driver is unavailable
             nostrService.broadcastAvailability(
-                location = null,  // Locationless - preserves privacy
+                location = null,
                 status = DriverAvailabilityEvent.STATUS_OFFLINE
             )
 
-            // Update state immediately (UI transition first)
-            _uiState.value = _uiState.value.copy(
+            // Reset ALL ride state
+            resetRideUiState(
                 stage = DriverStage.OFFLINE,
-                isCancelling = false,  // Reset cancelling flag
-                acceptedOffer = null,
-                acceptedBroadcastRequest = null,
-                acceptanceEventId = null,
-                confirmationEventId = null,
-                precisePickupLocation = null,
-                pinAttempts = 0,
-                isAwaitingPinVerification = false,
-                lastPinSubmissionEventId = null,
-                chatMessages = emptyList(),
-                isSendingMessage = false,
-                pendingOffers = emptyList(),
-                pendingBroadcastRequests = emptyList(),
-                statusMessage = "Ride cancelled. Tap to go online.",
-                // Clear HTLC escrow state
-                activePaymentHash = null,
-                activePreimage = null,
-                activeEscrowToken = null,
-                canSettleEscrow = false,
-                pendingDepositQuoteId = null,
-                pendingDepositAmount = null
+                statusMessage = "Ride cancelled. Tap to go online."
             )
 
-            // Clear persisted ride state
             clearSavedRideState()
-
-            // Clean up ride events in background (non-blocking)
             cleanupRideEventsInBackground("ride cancelled")
         }
     }
@@ -1146,52 +1202,24 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      * Return to available after completing a ride.
      */
     fun finishAndGoOnline(location: Location) {
-        // Capture state for ride history BEFORE clearing
+        // CRITICAL: Capture state BEFORE any cleanup — used for history save + mode restore
         val state = _uiState.value
         val offer = state.acceptedOffer
+        val restoreRoadflareOnly = stageBeforeRide == DriverStage.ROADFLARE_ONLY
 
-        // Close subscriptions
-        confirmationSubscriptionId?.let { nostrService.closeSubscription(it) }
-        confirmationSubscriptionId = null
-        riderRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
-        riderRideStateSubscriptionId = null
-        chatSubscriptionId?.let { nostrService.closeSubscription(it) }
-        chatSubscriptionId = null
-        cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
-        cancellationSubscriptionId = null
-
-        // Clear driver state history
+        // Synchronous cleanup
+        closeAllRideSubscriptionsAndJobs()
         clearDriverStateHistory()
 
-        // Update state immediately (UI transition first)
-        _uiState.value = _uiState.value.copy(
+        // Reset ALL ride state
+        resetRideUiState(
             stage = DriverStage.OFFLINE,
-            acceptedOffer = null,
-            acceptedBroadcastRequest = null,
-            acceptanceEventId = null,
-            confirmationEventId = null,
-            precisePickupLocation = null,
-            pinAttempts = 0,
-            isAwaitingPinVerification = false,
-            lastPinSubmissionEventId = null,
-            chatMessages = emptyList(),
-            isSendingMessage = false,
-            pendingOffers = emptyList(),
-            pendingBroadcastRequests = emptyList(),
-            statusMessage = "Tap to go online",
-            // Clear HTLC escrow state
-            activePaymentHash = null,
-            activePreimage = null,
-            activeEscrowToken = null,
-            canSettleEscrow = false,
-            pendingDepositQuoteId = null,
-            pendingDepositAmount = null
+            statusMessage = "Tap to go online"
         )
 
-        // Clear persisted ride state
         clearSavedRideState()
 
-        // Save completed ride to history (using 6-char geohashes for ~1.2km precision)
+        // Save completed ride to history using PRE-RESET captured state
         if (offer != null) {
             viewModelScope.launch {
                 try {
@@ -1202,23 +1230,19 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                         timestamp = RideHistoryBuilder.currentTimestampSeconds(),
                         role = "driver",
                         counterpartyPubKey = offer.riderPubKey,
-                        pickupGeohash = offer.approxPickup.geohash(6),  // ~1.2km precision
+                        pickupGeohash = offer.approxPickup.geohash(6),
                         dropoffGeohash = offer.destination.geohash(6),
                         distanceMiles = RideHistoryBuilder.toDistanceMiles(offer.rideRouteKm),
                         durationMinutes = offer.rideRouteMin?.toInt() ?: 0,
                         fareSats = offer.fareEstimate.toLong(),
                         status = "completed",
-                        // Vehicle info for ride details
                         vehicleMake = vehicle?.make,
                         vehicleModel = vehicle?.model,
-                        // Rider profile info
                         counterpartyFirstName = RideHistoryBuilder.extractCounterpartyFirstName(riderProfile),
                         appOrigin = RideHistoryRepository.APP_ORIGIN_DRIVESTR
                     )
                     rideHistoryRepository.addRide(historyEntry)
                     Log.d(TAG, "Saved completed ride to history: ${historyEntry.rideId}")
-
-                    // Backup to Nostr (encrypted to self)
                     rideHistoryRepository.backupToNostr(nostrService)
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to save ride to history", e)
@@ -1226,24 +1250,21 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
 
-        // Unsubscribe from rider profile
+        // Post-reset cleanup
         offer?.riderPubKey?.let { unsubscribeFromRiderProfile(it) }
-
-        // Clean up ride events in background (non-blocking)
         cleanupRideEventsInBackground("ride completed")
 
-        // Reset broadcast state for a fresh start
-        // This ensures we don't try to delete already-deleted events
+        // Reset broadcast state for fresh start
         publishedAvailabilityEventIds.clear()
         lastBroadcastLocation = null
         lastBroadcastTimeMs = 0L
-        Log.d(TAG, "Reset broadcast state before going back online")
 
-        // Restore pre-ride mode or default to full online
-        val restoreRoadflareOnly = stageBeforeRide == DriverStage.ROADFLARE_ONLY
-        stageBeforeRide = null  // Clear after use
+        stageBeforeRide = null
 
-        // Go online immediately - restore previous mode
+        // Reset RoadFlare on-ride flag BEFORE going online
+        updateRoadflareOnRideStatus(false)
+
+        // Restore pre-ride mode using PRE-RESET captured state
         if (restoreRoadflareOnly) {
             Log.d(TAG, "Restoring ROADFLARE_ONLY mode after ride completion")
             goRoadflareOnly(location, state.activeVehicle)
@@ -1679,19 +1700,19 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      * Cancel the current ride (can be called at any stage).
      */
     fun cancelCurrentRide(reason: String = "driver_cancelled") {
-        // Clear saved pre-ride mode to prevent stale restore
-        stageBeforeRide = null
-
         val state = _uiState.value
         val confirmationEventId = state.confirmationEventId
         val riderPubKey = state.acceptedOffer?.riderPubKey
         val offer = state.acceptedOffer
 
-        // Cancel timeout jobs if running
-        pinVerificationTimeoutJob?.cancel()
-        pinVerificationTimeoutJob = null
-        confirmationTimeoutJob?.cancel()
-        confirmationTimeoutJob = null
+        // Synchronous cleanup
+        closeAllRideSubscriptionsAndJobs()
+        state.acceptedOffer?.riderPubKey?.let { unsubscribeFromRiderProfile(it) }
+        clearDriverStateHistory()
+        stageBeforeRide = null
+        broadcastRoadflareOfflineStatus()
+        stopRoadflareBroadcasting()
+        DriverOnlineService.stop(getApplication())
 
         viewModelScope.launch {
             // Save cancelled ride to history (only if we had an accepted offer)
@@ -1706,8 +1727,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                         pickupGeohash = offer.approxPickup.geohash(6),
                         dropoffGeohash = offer.destination.geohash(6),
                         distanceMiles = RideHistoryBuilder.toDistanceMiles(offer.rideRouteKm),
-                        durationMinutes = 0,  // Ride was cancelled, no actual duration
-                        fareSats = 0,  // No fare earned for cancelled ride
+                        durationMinutes = 0,
+                        fareSats = 0,
                         status = "cancelled",
                         vehicleMake = vehicle?.make,
                         vehicleModel = vehicle?.model,
@@ -1715,8 +1736,6 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     )
                     rideHistoryRepository.addRide(historyEntry)
                     Log.d(TAG, "Saved cancelled ride to history: ${historyEntry.rideId}")
-
-                    // Backup to Nostr (encrypted to self)
                     rideHistoryRepository.backupToNostr(nostrService)
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to save cancelled ride to history", e)
@@ -1730,58 +1749,17 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     otherPartyPubKey = riderPubKey,
                     reason = reason
                 )
-                cancellationEventId?.let { myRideEventIds.add(it) }  // Track for cleanup
+                cancellationEventId?.let { myRideEventIds.add(it) }
                 Log.d(TAG, "Sent cancellation event for ride: $confirmationEventId")
             }
 
-            // Clean up all subscriptions
-            confirmationSubscriptionId?.let { nostrService.closeSubscription(it) }
-            confirmationSubscriptionId = null
-            riderRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
-            riderRideStateSubscriptionId = null
-            chatSubscriptionId?.let { nostrService.closeSubscription(it) }
-            chatSubscriptionId = null
-            cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
-            cancellationSubscriptionId = null
-            chatRefreshJob?.stop()
-            chatRefreshJob = null
-
-            // Unsubscribe from rider profile
-            state.acceptedOffer?.riderPubKey?.let { unsubscribeFromRiderProfile(it) }
-
-            // Clear driver state history
-            clearDriverStateHistory()
-
-            // Stop the foreground service
-            DriverOnlineService.stop(getApplication())
-
-            // Update state immediately (UI transition first)
-            _uiState.value = _uiState.value.copy(
+            // Reset ALL ride state
+            resetRideUiState(
                 stage = DriverStage.OFFLINE,
-                acceptedOffer = null,
-                confirmationEventId = null,
-                precisePickupLocation = null,
-                pinAttempts = 0,
-                isAwaitingPinVerification = false,
-                pinVerificationTimedOut = false,
-                lastPinSubmissionEventId = null,
-                chatMessages = emptyList(),
-                isSendingMessage = false,
-                error = null,
-                statusMessage = "Ride cancelled",
-                // Clear HTLC escrow state
-                activePaymentHash = null,
-                activePreimage = null,
-                activeEscrowToken = null,
-                canSettleEscrow = false,
-                pendingDepositQuoteId = null,
-                pendingDepositAmount = null
+                statusMessage = "Ride cancelled"
             )
 
-            // Clean up ride events in background (non-blocking)
             cleanupRideEventsInBackground("ride cancelled")
-
-            // Clear persisted ride state
             clearSavedRideState()
         }
     }
@@ -1889,36 +1867,27 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             val remainingAttempts = 3 - attempt
             if (remainingAttempts <= 0) {
                 // Rider cancelled due to brute force protection
-                confirmationSubscriptionId?.let { nostrService.closeSubscription(it) }
-                confirmationSubscriptionId = null
-                riderRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
-                riderRideStateSubscriptionId = null
-                chatSubscriptionId?.let { nostrService.closeSubscription(it) }
-                chatSubscriptionId = null
-                cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
-                cancellationSubscriptionId = null
+                Log.w(TAG, "PIN brute force detected - cancelling ride")
 
-                // Stop the foreground service
-                val context = getApplication<Application>()
-                DriverOnlineService.stop(context)
+                val riderPubKey = state.acceptedOffer?.riderPubKey
 
-                // Clear driver state history
+                // Full cleanup
+                closeAllRideSubscriptionsAndJobs()
+                riderPubKey?.let { unsubscribeFromRiderProfile(it) }
                 clearDriverStateHistory()
+                stageBeforeRide = null
+                broadcastRoadflareOfflineStatus()
+                stopRoadflareBroadcasting()
+                DriverOnlineService.stop(getApplication())
 
-                // Clean up ride events from relays (NIP-09 deletion)
-                // CRITICAL: Must call this to prevent event accumulation on relays
-                cleanupRideEventsInBackground("pin_brute_force")
-
-                _uiState.value = _uiState.value.copy(
+                resetRideUiState(
                     stage = DriverStage.OFFLINE,
-                    acceptedOffer = null,
-                    acceptanceEventId = null,
-                    confirmationEventId = null,
-                    chatMessages = emptyList(),
-                    isSendingMessage = false,
-                    error = "Ride cancelled - too many wrong PIN attempts",
-                    statusMessage = "Ride cancelled by rider"
+                    statusMessage = "Ride cancelled by rider",
+                    error = "Ride cancelled - too many wrong PIN attempts"
                 )
+
+                clearSavedRideState()
+                cleanupRideEventsInBackground("pin_brute_force")
             } else {
                 _uiState.value = _uiState.value.copy(
                     statusMessage = "Wrong PIN! $remainingAttempts attempts remaining. Ask rider again."
@@ -2290,8 +2259,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         val state = _uiState.value
         val offer = state.acceptedOffer ?: return
 
-        // Stop chat refresh job since ride is ending
-        stopChatRefreshJob()
+        // Close all ride subscriptions and jobs since ride is ending
+        closeAllRideSubscriptionsAndJobs()
 
         // Reset RoadFlare on-ride status (broadcasts "ONLINE" instead of "ON_RIDE")
         updateRoadflareOnRideStatus(false)
@@ -2482,45 +2451,35 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      * This typically means the rider cancelled before we accepted.
      */
     private fun handleConfirmationTimeout() {
-        // Clear saved pre-ride mode to prevent stale restore
         stageBeforeRide = null
 
         val context = getApplication<Application>()
-
-        // Notify service of cancellation (plays sound, updates notification)
         DriverOnlineService.updateStatus(context, DriverStatus.Cancelled)
 
-        // Close subscriptions
-        confirmationSubscriptionId?.let { nostrService.closeSubscription(it) }
-        confirmationSubscriptionId = null
-        riderRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
-        riderRideStateSubscriptionId = null
+        // Capture before reset
+        _uiState.value.acceptedOffer?.riderPubKey?.let { unsubscribeFromRiderProfile(it) }
 
-        // Unsubscribe from rider profile (capture before state reset)
-        val state = _uiState.value
-        state.acceptedOffer?.riderPubKey?.let { unsubscribeFromRiderProfile(it) }
-
-        // Clear driver state history
+        closeAllRideSubscriptionsAndJobs()
         clearDriverStateHistory()
-
-        // Reset RoadFlare on-ride status (returning to AVAILABLE)
         updateRoadflareOnRideStatus(false)
 
-        // Return to available state
-        _uiState.value = _uiState.value.copy(
+        // Reset ALL ride state
+        resetRideUiState(
             stage = DriverStage.AVAILABLE,
-            acceptedOffer = null,
-            acceptedBroadcastRequest = null,
-            acceptanceEventId = null,
-            confirmationEventId = null,
-            error = "Rider may have cancelled - no confirmation received",
             statusMessage = "Ride cancelled - no response from rider",
-            pendingDepositQuoteId = null,
-            pendingDepositAmount = null
+            error = "Rider may have cancelled - no confirmation received"
         )
 
-        // Restart availability broadcasts if we have a location
-        _uiState.value.currentLocation?.let { location ->
+        // Clear persisted ride state — ride was persisted on accept,
+        // so timeout must clear it to prevent stale restore on app restart
+        clearSavedRideState()
+
+        // Resume broadcasting
+        val location = _uiState.value.currentLocation
+        if (location != null) {
+            publishedAvailabilityEventIds.clear()
+            lastBroadcastLocation = null
+            lastBroadcastTimeMs = 0L
             startBroadcasting(location)
             subscribeToBroadcastRequests(location)
             subscribeToOffers()
@@ -2789,14 +2748,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      * Perform cancellation cleanup (subscriptions, state, etc.)
      */
     private fun performCancellationCleanup(state: DriverUiState, offer: RideOfferData?, reason: String?) {
-        // Clear saved pre-ride mode to prevent stale restore
         stageBeforeRide = null
-
-        // Cancel timeout jobs synchronously to prevent race conditions
-        confirmationTimeoutJob?.cancel()
-        confirmationTimeoutJob = null
-        pinVerificationTimeoutJob?.cancel()
-        pinVerificationTimeoutJob = null
 
         val context = getApplication<Application>()
 
@@ -2807,23 +2759,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
 
-        // Close active subscriptions
-        confirmationSubscriptionId?.let { nostrService.closeSubscription(it) }
-        confirmationSubscriptionId = null
-        riderRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
-        riderRideStateSubscriptionId = null
-        chatSubscriptionId?.let { nostrService.closeSubscription(it) }
-        chatSubscriptionId = null
-        cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
-        cancellationSubscriptionId = null
-
-        // Unsubscribe from rider profile
+        closeAllRideSubscriptionsAndJobs()
         offer?.riderPubKey?.let { unsubscribeFromRiderProfile(it) }
-
-        // Clear driver state history
         clearDriverStateHistory()
-
-        // Clear persisted ride state
         clearSavedRideState()
 
         // Return to available state (if they were online) or offline
@@ -2832,20 +2770,23 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Stop the foreground service and RoadFlare broadcasting if going offline
         if (newStage == DriverStage.OFFLINE) {
             DriverOnlineService.stop(context)
-            // Broadcast OFFLINE status before stopping so followers see driver go offline
             broadcastRoadflareOfflineStatus()
             stopRoadflareBroadcasting()
-            // Note: driverOnlineStatus is now set by DriverOnlineService (authoritative)
         } else {
             // Returning to AVAILABLE - reset on-ride status
             updateRoadflareOnRideStatus(false)
-            // Update service to Available status (service is authoritative for driverOnlineStatus)
             DriverOnlineService.updateStatus(context, DriverStatus.Available(0))
         }
 
+        // Reset ALL ride state BEFORE resuming subscriptions (prevents stale offers being cleared)
+        resetRideUiState(
+            stage = newStage,
+            statusMessage = if (newStage == DriverStage.AVAILABLE) "Rider cancelled - waiting for new requests" else "Rider cancelled ride",
+            error = reason ?: "Rider cancelled the ride"
+        )
+
         // Resume broadcasting and subscriptions if returning to AVAILABLE
         if (newStage == DriverStage.AVAILABLE && state.currentLocation != null) {
-            // Reset broadcast state for a fresh start (same as finishAndGoOnline)
             publishedAvailabilityEventIds.clear()
             lastBroadcastLocation = null
             lastBroadcastTimeMs = 0L
@@ -2856,26 +2797,6 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             subscribeToOffers()
             Log.d(TAG, "Resumed broadcasting after rider cancellation")
         }
-
-        _uiState.value = _uiState.value.copy(
-            stage = newStage,
-            acceptedOffer = null,
-            acceptedBroadcastRequest = null,
-            acceptanceEventId = null,
-            confirmationEventId = null,
-            precisePickupLocation = null,
-            isAwaitingPinVerification = false,
-            chatMessages = emptyList(),
-            pendingBroadcastRequests = emptyList(),
-            // Clear escrow state
-            activePaymentHash = null,
-            activePreimage = null,
-            activeEscrowToken = null,
-            canSettleEscrow = false,
-            riderCancelledFareAmount = null,
-            statusMessage = if (newStage == DriverStage.AVAILABLE) "Rider cancelled - waiting for new requests" else "Rider cancelled ride",
-            error = reason ?: "Rider cancelled the ride"
-        )
     }
 
     /**
@@ -2940,100 +2861,62 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun clearAcceptedOffer() {
-        // Only clear if ride is completed
-        if (_uiState.value.stage == DriverStage.RIDE_COMPLETED) {
-            // Capture state for ride history BEFORE clearing
-            val state = _uiState.value
-            val offer = state.acceptedOffer
-            val context = getApplication<Application>()
+        if (_uiState.value.stage != DriverStage.RIDE_COMPLETED) return
 
-            // Stop chat refresh job
-            stopChatRefreshJob()
+        // Capture state for ride history BEFORE clearing
+        val state = _uiState.value
+        val offer = state.acceptedOffer
+        val riderPubKey = offer?.riderPubKey
 
-            // Close subscriptions
-            confirmationSubscriptionId?.let { nostrService.closeSubscription(it) }
-            confirmationSubscriptionId = null
-            riderRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
-            riderRideStateSubscriptionId = null
-            chatSubscriptionId?.let { nostrService.closeSubscription(it) }
-            chatSubscriptionId = null
-            cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
-            cancellationSubscriptionId = null
+        // Synchronous cleanup
+        closeAllRideSubscriptionsAndJobs()
+        clearDriverStateHistory()
+        stageBeforeRide = null
+        broadcastRoadflareOfflineStatus()
+        stopRoadflareBroadcasting()
+        DriverOnlineService.stop(getApplication())
 
-            // Clear driver state history
-            clearDriverStateHistory()
+        // Reset ALL ride state
+        resetRideUiState(
+            stage = DriverStage.OFFLINE,
+            statusMessage = "Tap to go online"
+        )
 
-            // Stop the foreground service since driver is going offline
-            DriverOnlineService.stop(context)
+        clearSavedRideState()
 
-            // Update state immediately (UI transition first)
-            _uiState.value = _uiState.value.copy(
-                stage = DriverStage.OFFLINE,
-                acceptedOffer = null,
-                acceptedBroadcastRequest = null,
-                acceptanceEventId = null,
-                confirmationEventId = null,
-                precisePickupLocation = null,
-                pinAttempts = 0,
-                isAwaitingPinVerification = false,
-                lastPinSubmissionEventId = null,
-                chatMessages = emptyList(),
-                isSendingMessage = false,
-                pendingBroadcastRequests = emptyList(),
-                statusMessage = "Tap to go online",
-                // Clear HTLC escrow state
-                activePaymentHash = null,
-                activePreimage = null,
-                activeEscrowToken = null,
-                canSettleEscrow = false,
-                pendingDepositQuoteId = null,
-                pendingDepositAmount = null
-            )
-
-            // Clear persisted ride state
-            clearSavedRideState()
-
-            // Save completed ride to history (using 6-char geohashes for ~1.2km precision)
-            if (offer != null) {
-                viewModelScope.launch {
-                    try {
-                        val vehicle = state.activeVehicle
-                        val riderProfile = state.riderProfiles[offer.riderPubKey]
-                        val historyEntry = RideHistoryEntry(
-                            rideId = state.confirmationEventId ?: state.acceptanceEventId ?: offer.eventId,
-                            timestamp = RideHistoryBuilder.currentTimestampSeconds(),
-                            role = "driver",
-                            counterpartyPubKey = offer.riderPubKey,
-                            pickupGeohash = offer.approxPickup.geohash(6),  // ~1.2km precision
-                            dropoffGeohash = offer.destination.geohash(6),
-                            distanceMiles = RideHistoryBuilder.toDistanceMiles(offer.rideRouteKm),
-                            durationMinutes = offer.rideRouteMin?.toInt() ?: 0,
-                            fareSats = offer.fareEstimate.toLong(),
-                            status = "completed",
-                            // Vehicle info for ride details
-                            vehicleMake = vehicle?.make,
-                            vehicleModel = vehicle?.model,
-                            // Rider profile info
-                            counterpartyFirstName = RideHistoryBuilder.extractCounterpartyFirstName(riderProfile),
-                            appOrigin = RideHistoryRepository.APP_ORIGIN_DRIVESTR
-                        )
-                        rideHistoryRepository.addRide(historyEntry)
-                        Log.d(TAG, "Saved completed ride to history (go offline): ${historyEntry.rideId}")
-
-                        // Backup to Nostr (encrypted to self)
-                        rideHistoryRepository.backupToNostr(nostrService)
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed to save ride to history", e)
-                    }
+        // Save completed ride to history using PRE-RESET captured state
+        if (offer != null) {
+            viewModelScope.launch {
+                try {
+                    val vehicle = state.activeVehicle
+                    val riderProfile = state.riderProfiles[offer.riderPubKey]
+                    val historyEntry = RideHistoryEntry(
+                        rideId = state.confirmationEventId ?: state.acceptanceEventId ?: offer.eventId,
+                        timestamp = RideHistoryBuilder.currentTimestampSeconds(),
+                        role = "driver",
+                        counterpartyPubKey = offer.riderPubKey,
+                        pickupGeohash = offer.approxPickup.geohash(6),
+                        dropoffGeohash = offer.destination.geohash(6),
+                        distanceMiles = RideHistoryBuilder.toDistanceMiles(offer.rideRouteKm),
+                        durationMinutes = offer.rideRouteMin?.toInt() ?: 0,
+                        fareSats = offer.fareEstimate.toLong(),
+                        status = "completed",
+                        vehicleMake = vehicle?.make,
+                        vehicleModel = vehicle?.model,
+                        counterpartyFirstName = RideHistoryBuilder.extractCounterpartyFirstName(riderProfile),
+                        appOrigin = RideHistoryRepository.APP_ORIGIN_DRIVESTR
+                    )
+                    rideHistoryRepository.addRide(historyEntry)
+                    Log.d(TAG, "Saved completed ride to history (go offline): ${historyEntry.rideId}")
+                    rideHistoryRepository.backupToNostr(nostrService)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to save ride to history", e)
                 }
             }
-
-            // Unsubscribe from rider profile
-            offer?.riderPubKey?.let { unsubscribeFromRiderProfile(it) }
-
-            // Clean up ride events in background (non-blocking)
-            cleanupRideEventsInBackground("ride completed")
         }
+
+        riderPubKey?.let { unsubscribeFromRiderProfile(it) }
+        cleanupRideEventsInBackground("ride completed")
     }
 
     fun clearError() {

@@ -88,7 +88,10 @@ Any state → cancelCurrentRide() → CANCELLED → goOnline() → AVAILABLE
 | `acceptOffer()` | AVAILABLE/ROADFLARE_ONLY | RIDE_ACCEPTED | Kind 3174 |
 | `acceptBroadcastRequest()` | AVAILABLE | RIDE_ACCEPTED | Kind 3174 |
 | `updateDriverStatus()` | Various | Various | Kind 30180 |
-| `cancelCurrentRide()` | Any | CANCELLED | Kind 3179 |
+| `cancelRide()` | Any active | OFFLINE | Kind 3179 |
+| `cancelCurrentRide()` | Any | OFFLINE | Kind 3179 (public API, currently zero callers) |
+| `finishAndGoOnline()` | RIDE_COMPLETED | AVAILABLE/ROADFLARE_ONLY | Restores pre-ride mode |
+| `clearAcceptedOffer()` | RIDE_COMPLETED | OFFLINE | "Go Offline" after completion |
 | `clearDriverStateHistory()` | - | - | **CRITICAL**: Must call when starting new ride |
 
 ---
@@ -172,10 +175,17 @@ Screen.MAIN_MAP → (go online) → VehiclePickerDialog (if multiple vehicles)
   - `acceptBroadcastRequest()` (line ~2798)
 - History actions: `status`, `location_update`, `pin_submit`, `settlement`
 
+### State Reset (Phase 1 Consolidation)
+- `resetRideUiState(stage, statusMessage, error?)` - Single authoritative reset for ALL ride fields. Called at every ride boundary.
+- `closeAllRideSubscriptionsAndJobs()` - Closes 4 ride subs + cancels 3 jobs (chat, confirmation timeout, pin verification timeout). Does NOT close offer/broadcast/deletion subs.
+- All 8 ride-ending paths use `resetRideUiState()`: `cancelRide()`, `finishAndGoOnline()`, `handleConfirmationTimeout()`, `performCancellationCleanup()`, `completeRideInternal()` (partial), `cancelCurrentRide()`, PIN brute-force, `clearAcceptedOffer()`
+- Fields NOT reset (persist across rides): `currentLocation`, `activeVehicle`, `expandedSearch`, `myPubKey`, cached routes, dialog state
+
 ### Phantom Cancellation Bug Prevention
 The phantom cancellation bug was caused by not clearing history between rides.
 - Old cancellation actions from ride #1 would appear in ride #2's events
 - Fix: Always call `clearDriverStateHistory()` at the START of a new ride
+- Additional fix (Phase 1): `resetRideUiState()` ensures ALL fields are cleared, not just a subset
 
 ### Payment Claiming
 - `claimHtlcPayment()` called at line 2220 after ride completion
@@ -232,7 +242,7 @@ Driver broadcasts availability every 5 minutes (`AVAILABILITY_BROADCAST_INTERVAL
 - **CRITICAL**: When going back online after ride, must reset broadcast state:
   - `publishedAvailabilityEventIds.clear()` - prevents deleting already-deleted events
   - `lastBroadcastLocation = null` - ensures fresh throttle tracking
-  - Done in both `finishAndGoOnline()` (line 970) and `performCancellationCleanup()` (line 2204)
+  - Done in `finishAndGoOnline()`, `performCancellationCleanup()`, and `handleConfirmationTimeout()`
 
 ### Deposit/Withdraw
 - Tap wallet card in `WalletScreen.kt` → navigates to `WalletDetailScreen` (common)
