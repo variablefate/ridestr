@@ -135,10 +135,10 @@ fun RiderModeScreen(
     ChatBottomSheet(
         showSheet = showChatSheet,
         onDismiss = { showChatSheet = false },
-        messages = uiState.chatMessages,
+        messages = uiState.rideSession.chatMessages,
         myPubKey = uiState.myPubKey,
         otherPartyName = "Driver",
-        isSending = uiState.isSendingMessage,
+        isSending = uiState.rideSession.isSendingMessage,
         onSendMessage = { message ->
             viewModel.sendChatMessage(message)
         }
@@ -320,7 +320,7 @@ fun RiderModeScreen(
     }
 
     // Cancel warning dialog (shown when cancelling after PIN verification)
-    if (uiState.showCancelWarningDialog) {
+    if (uiState.rideSession.showCancelWarningDialog) {
         AlertDialog(
             onDismissRequest = { viewModel.dismissCancelWarning() },
             icon = {
@@ -364,7 +364,7 @@ fun RiderModeScreen(
     }
 
     // Driver unavailable dialog (shown when selected driver goes offline)
-    if (uiState.showDriverUnavailableDialog) {
+    if (uiState.rideSession.showDriverUnavailableDialog) {
         AlertDialog(
             onDismissRequest = { viewModel.dismissDriverUnavailable() },
             icon = {
@@ -479,7 +479,7 @@ fun RiderModeScreen(
             Spacer(modifier = Modifier.height(16.dp))
         }
 
-        when (uiState.rideStage) {
+        when (uiState.rideSession.rideStage) {
             RideStage.IDLE -> {
                 // Collect geocoding state
                 val pickupSearchResults by viewModel.pickupSearchResults.collectAsState()
@@ -570,7 +570,7 @@ fun RiderModeScreen(
                     uiState = uiState,
                     onCancel = viewModel::attemptCancelRide,
                     onOpenChat = { showChatSheet = true },
-                    chatMessageCount = uiState.chatMessages.size,
+                    chatMessageCount = uiState.rideSession.chatMessages.size,
                     settingsManager = settingsManager,
                     priceService = viewModel.bitcoinPriceService
                 )
@@ -580,7 +580,7 @@ fun RiderModeScreen(
                     uiState = uiState,
                     onOpenChat = { showChatSheet = true },
                     onCancel = { viewModel.attemptCancelRide() },
-                    chatMessageCount = uiState.chatMessages.size
+                    chatMessageCount = uiState.rideSession.chatMessages.size
                 )
             }
             RideStage.DRIVER_ARRIVED -> {
@@ -588,7 +588,7 @@ fun RiderModeScreen(
                     uiState = uiState,
                     onOpenChat = { showChatSheet = true },
                     onCancel = { viewModel.attemptCancelRide() },
-                    chatMessageCount = uiState.chatMessages.size
+                    chatMessageCount = uiState.rideSession.chatMessages.size
                 )
             }
             RideStage.IN_PROGRESS -> {
@@ -596,12 +596,12 @@ fun RiderModeScreen(
                     uiState = uiState,
                     onOpenChat = { showChatSheet = true },
                     onCancelRide = viewModel::attemptCancelRide,
-                    chatMessageCount = uiState.chatMessages.size
+                    chatMessageCount = uiState.rideSession.chatMessages.size
                 )
             }
             RideStage.COMPLETED -> {
                 // Get driver info for favorite prompt
-                val driverPubKey = uiState.acceptance?.driverPubKey
+                val driverPubKey = uiState.rideSession.acceptance?.driverPubKey
                 val driverProfile = driverPubKey?.let { uiState.driverProfiles[it] }
                 val driverName = driverProfile?.bestName()?.split(" ")?.firstOrNull()
 
@@ -720,7 +720,7 @@ private fun IdleContent(
                 followedDriversRepository = followedDriversRepository,
                 pickupLocation = uiState.pickupLocation,
                 routeResult = uiState.routeResult,
-                isSending = uiState.isSendingOffer,
+                isSending = uiState.rideSession.isSendingOffer,
                 nostrService = nostrService,
                 settingsManager = settingsManager,
                 priceService = priceService,
@@ -797,7 +797,7 @@ private fun IdleContent(
                     routeResult = uiState.routeResult,
                     fareEstimate = uiState.fareEstimateWithFees,  // Display fare including 2% fee buffer
                     isCalculatingRoute = uiState.isCalculatingRoute,
-                    isSendingOffer = uiState.isSendingOffer,
+                    isSendingOffer = uiState.rideSession.isSendingOffer,
                     onSearchPickup = onSearchPickup,
                     onSearchDest = onSearchDest,
                     onSelectPickupFromSearch = onSelectPickupFromSearch,
@@ -1905,9 +1905,9 @@ private fun DriverSelectionSheetContent(
     priceService: BitcoinPriceService
 ) {
     val drivers = uiState.availableDrivers
-    val selectedDriver = uiState.selectedDriver
+    val selectedDriver = uiState.rideSession.selectedDriver
     val driverProfiles = uiState.driverProfiles
-    val isSending = uiState.isSendingOffer
+    val isSending = uiState.rideSession.isSendingOffer
     val pickupLocation = uiState.pickupLocation
 
     Column(
@@ -2268,23 +2268,23 @@ private fun RideWaitingContent(
 ) {
     // Mode-specific values
     val startTime = when (mode) {
-        WaitingMode.BROADCAST -> uiState.broadcastStartTimeMs
-        WaitingMode.DIRECT -> uiState.acceptanceTimeoutStartMs
+        WaitingMode.BROADCAST -> uiState.rideSession.broadcastStartTimeMs
+        WaitingMode.DIRECT -> uiState.rideSession.acceptanceTimeoutStartMs
     }
     val duration = when (mode) {
         WaitingMode.BROADCAST -> uiState.broadcastTimeoutDurationMs
         WaitingMode.DIRECT -> uiState.acceptanceTimeoutDurationMs
     }
     val timedOut = when (mode) {
-        WaitingMode.BROADCAST -> uiState.broadcastTimedOut
-        WaitingMode.DIRECT -> uiState.directOfferTimedOut
+        WaitingMode.BROADCAST -> uiState.rideSession.broadcastTimedOut
+        WaitingMode.DIRECT -> uiState.rideSession.directOfferTimedOut
     }
     val totalBoostSats = when (mode) {
-        WaitingMode.BROADCAST -> uiState.totalBoostSats
-        WaitingMode.DIRECT -> uiState.directOfferBoostSats
+        WaitingMode.BROADCAST -> uiState.rideSession.totalBoostSats
+        WaitingMode.DIRECT -> uiState.rideSession.directOfferBoostSats
     }
     val driverCount = uiState.nearbyDriverCount
-    val driverName = uiState.selectedDriver?.let {
+    val driverName = uiState.rideSession.selectedDriver?.let {
         uiState.driverProfiles[it.driverPubKey]?.bestName()?.split(" ")?.firstOrNull()
     } ?: "driver"
 
@@ -2691,10 +2691,10 @@ private fun DriverAcceptedContent(
     priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
     // Get driver info
-    val driverPubKey = uiState.acceptance?.driverPubKey
+    val driverPubKey = uiState.rideSession.acceptance?.driverPubKey
     val driverProfile = driverPubKey?.let { uiState.driverProfiles[it] }
     val driverAvailability = driverPubKey?.let { pk ->
-        uiState.selectedDriver?.takeIf { it.driverPubKey == pk }
+        uiState.rideSession.selectedDriver?.takeIf { it.driverPubKey == pk }
             ?: uiState.availableDrivers.find { it.driverPubKey == pk }
     }
 
@@ -2713,12 +2713,12 @@ private fun DriverAcceptedContent(
             // Status header with spinner
             // AtoB Pattern: Show "Ride Confirmed!" when confirmationEventId is set,
             // even though rideStage is still DRIVER_ACCEPTED (waiting for driver to start)
-            val isRideConfirmed = uiState.confirmationEventId != null
+            val isRideConfirmed = uiState.rideSession.confirmationEventId != null
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.Center
             ) {
-                if (uiState.isConfirmingRide) {
+                if (uiState.rideSession.isConfirmingRide) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(24.dp),
                         strokeWidth = 2.dp
@@ -2746,7 +2746,7 @@ private fun DriverAcceptedContent(
             }
 
             // Show PIN prominently when ride is confirmed
-            if (isRideConfirmed && uiState.pickupPin != null) {
+            if (isRideConfirmed && uiState.rideSession.pickupPin != null) {
                 Spacer(modifier = Modifier.height(16.dp))
                 Card(
                     colors = CardDefaults.cardColors(
@@ -2766,7 +2766,7 @@ private fun DriverAcceptedContent(
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = uiState.pickupPin,
+                            text = uiState.rideSession.pickupPin,
                             style = MaterialTheme.typography.headlineLarge,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onPrimaryContainer
@@ -2968,11 +2968,11 @@ private fun DriverOnTheWayContent(
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             // Get driver info from acceptance
-            val driverPubKey = uiState.acceptance?.driverPubKey
+            val driverPubKey = uiState.rideSession.acceptance?.driverPubKey
             val driverProfile = driverPubKey?.let { uiState.driverProfiles[it] }
             // Find driver availability data for vehicle info
             val driverAvailability = driverPubKey?.let { pk ->
-                uiState.selectedDriver?.takeIf { it.driverPubKey == pk }
+                uiState.rideSession.selectedDriver?.takeIf { it.driverPubKey == pk }
                     ?: uiState.availableDrivers.find { it.driverPubKey == pk }
             }
 
@@ -3011,7 +3011,7 @@ private fun DriverOnTheWayContent(
             )
 
             // Display pickup PIN prominently
-            uiState.pickupPin?.let { pin ->
+            uiState.rideSession.pickupPin?.let { pin ->
                 Spacer(modifier = Modifier.height(16.dp))
 
                 Card(
@@ -3115,11 +3115,11 @@ private fun DriverArrivedContent(
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             // Get driver info from acceptance
-            val driverPubKey = uiState.acceptance?.driverPubKey
+            val driverPubKey = uiState.rideSession.acceptance?.driverPubKey
             val driverProfile = driverPubKey?.let { uiState.driverProfiles[it] }
             // Find driver availability data for vehicle info
             val driverAvailability = driverPubKey?.let { pk ->
-                uiState.selectedDriver?.takeIf { it.driverPubKey == pk }
+                uiState.rideSession.selectedDriver?.takeIf { it.driverPubKey == pk }
                     ?: uiState.availableDrivers.find { it.driverPubKey == pk }
             }
 
@@ -3163,7 +3163,7 @@ private fun DriverArrivedContent(
             }
 
             // Display pickup PIN prominently
-            uiState.pickupPin?.let { pin ->
+            uiState.rideSession.pickupPin?.let { pin ->
                 Spacer(modifier = Modifier.height(16.dp))
 
                 Card(
@@ -3303,7 +3303,7 @@ private fun RideInProgressContent(
             }
 
             // Show PIN from state (rider generated)
-            uiState.pickupPin?.let { pin ->
+            uiState.rideSession.pickupPin?.let { pin ->
                 Spacer(modifier = Modifier.height(16.dp))
 
                 Card(

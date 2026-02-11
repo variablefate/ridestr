@@ -58,6 +58,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
@@ -369,82 +370,35 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /**
+     * Atomically update only ride-session fields.
+     * For pure session updates (no outer UiState fields changed).
+     */
+    private inline fun updateRideSession(crossinline transform: DriverRideSession.() -> DriverRideSession) {
+        _uiState.update { current ->
+            current.copy(rideSession = current.rideSession.transform())
+        }
+    }
+
+    /**
      * Reset ALL ride-related UI state fields to defaults.
      * Called at every ride boundary (completion, cancellation, timeout).
      *
-     * This is the SINGLE authoritative reset function. Do NOT scatter
-     * field resets across multiple .copy() calls — add fields here instead.
-     *
-     * Fields NOT reset (persist across rides):
-     * - currentLocation (GPS), activeVehicle (selected car)
-     * - expandedSearch (search preference)
-     * - myPubKey (identity)
-     * - pickupRoutes, directOfferPickupRoutes, directOfferRideRoutes (cached routes)
-     * - showWalletNotSetupWarning and related (dialog state managed separately)
-     * - sliderResetToken (monotonic counter, never reset)
-     * - confirmationWaitDurationMs (constant 30s)
+     * This is the SINGLE authoritative reset function. New fields added to
+     * DriverRideSession are automatically reset to defaults.
      */
     private fun resetRideUiState(
         stage: DriverStage,
         statusMessage: String,
         error: String? = null
     ) {
-        _uiState.value = _uiState.value.copy(
-            // Stage & status
-            stage = stage,
-            statusMessage = statusMessage,
-            error = error,
-
-            // Active ride
-            acceptedOffer = null,
-            acceptedBroadcastRequest = null,
-            acceptanceEventId = null,
-            confirmationEventId = null,
-            precisePickupLocation = null,
-            preciseDestinationLocation = null,
-            isProcessingOffer = false,
-
-            // PIN verification
-            pinAttempts = 0,
-            isAwaitingPinVerification = false,
-            pinVerificationTimedOut = false,
-            lastPinSubmissionEventId = null,
-
-            // Confirmation wait
-            confirmationWaitStartMs = null,
-
-            // Chat
-            chatMessages = emptyList(),
-            isSendingMessage = false,
-
-            // Guards
-            isCancelling = false,
-
-            // HTLC Escrow
-            activePaymentHash = null,
-            activePreimage = null,
-            activeEscrowToken = null,
-            canSettleEscrow = false,
-
-            // Multi-mint payment
-            paymentPath = PaymentPath.NO_PAYMENT,
-            riderMintUrl = null,
-            crossMintPaymentComplete = false,
-            pendingDepositQuoteId = null,
-            pendingDepositAmount = null,
-
-            // Payment warning dialog
-            showPaymentWarningDialog = false,
-            paymentWarningStatus = null,
-
-            // Rider cancelled claim dialog
-            showRiderCancelledClaimDialog = false,
-            riderCancelledFareAmount = null,
-
-            // Pending offers (clear stale offers when ending a ride)
-            pendingOffers = emptyList(),
-            pendingBroadcastRequests = emptyList()
-        )
+        _uiState.update { current ->
+            current.copy(
+                stage = stage,
+                rideSession = DriverRideSession(),
+                statusMessage = statusMessage,
+                error = error
+            )
+        }
     }
 
     /**
@@ -532,9 +486,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             Log.d(TAG, "Valhalla routing service initialized: $initialized")
 
             // If we have pending requests that couldn't calculate routes, retry now
-            if (initialized && _uiState.value.pendingBroadcastRequests.isNotEmpty()) {
-                Log.d(TAG, "Recalculating routes for ${_uiState.value.pendingBroadcastRequests.size} pending requests")
-                _uiState.value.pendingBroadcastRequests.forEach { request ->
+            if (initialized && _uiState.value.rideSession.pendingBroadcastRequests.isNotEmpty()) {
+                Log.d(TAG, "Recalculating routes for ${_uiState.value.rideSession.pendingBroadcastRequests.size} pending requests")
+                _uiState.value.rideSession.pendingBroadcastRequests.forEach { request ->
                     calculatePickupRoute(request.eventId, request.pickupArea)
                 }
             }
@@ -578,7 +532,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         // If we have an active ride with a confirmation, refresh subscriptions
-        val confId = state.confirmationEventId
+        val session = state.rideSession
+        val confId = session.confirmationEventId
         if (confId != null && state.stage in listOf(
                 DriverStage.EN_ROUTE_TO_PICKUP,
                 DriverStage.ARRIVED_AT_PICKUP,
@@ -591,7 +546,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             startChatRefreshJob(confId)
 
             // Restore rider ride state subscription (handles verification and location reveals)
-            state.acceptedOffer?.riderPubKey?.let { riderPubKey ->
+            session.acceptedOffer?.riderPubKey?.let { riderPubKey ->
                 Log.d(TAG, "Refreshing rider ride state subscription")
                 subscribeToRiderRideState(confId, riderPubKey)
             }
@@ -603,6 +558,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      */
     private fun saveRideState() {
         val state = _uiState.value
+        val session = state.rideSession
 
         // Only save if we're in an active ride
         if (!state.isInRide) {
@@ -610,15 +566,15 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
 
-        val offer = state.acceptedOffer ?: return
+        val offer = session.acceptedOffer ?: return
 
         try {
             val json = JSONObject().apply {
                 put("timestamp", System.currentTimeMillis())
                 put("stage", state.stage.name)
-                put("acceptanceEventId", state.acceptanceEventId)
-                put("confirmationEventId", state.confirmationEventId)
-                put("pinAttempts", state.pinAttempts)
+                put("acceptanceEventId", session.acceptanceEventId)
+                put("confirmationEventId", session.confirmationEventId)
+                put("pinAttempts", session.pinAttempts)
 
                 // Offer data
                 put("offer_eventId", offer.eventId)
@@ -633,14 +589,14 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 put("offer_destLon", offer.destination.lon)
 
                 // Precise pickup if available
-                state.precisePickupLocation?.let {
+                session.precisePickupLocation?.let {
                     put("precisePickupLat", it.lat)
                     put("precisePickupLon", it.lon)
                 }
 
                 // Chat messages
                 val messagesArray = org.json.JSONArray()
-                for (msg in state.chatMessages) {
+                for (msg in session.chatMessages) {
                     val msgJson = JSONObject().apply {
                         put("eventId", msg.eventId)
                         put("senderPubKey", msg.senderPubKey)
@@ -664,7 +620,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             }
 
             prefs.edit().putString(KEY_RIDE_STATE, json.toString()).apply()
-            Log.d(TAG, "Saved ride state: stage=${state.stage}, messages=${state.chatMessages.size}, eventIds=${myRideEventIds.size}")
+            Log.d(TAG, "Saved ride state: stage=${state.stage}, messages=${session.chatMessages.size}, eventIds=${myRideEventIds.size}")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to save ride state", e)
         }
@@ -757,16 +713,20 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             Log.d(TAG, "Restoring ride state: stage=$stage, confirmationId=$confirmationEventId, messages=${chatMessages.size}, eventIds=${myRideEventIds.size}")
 
             // Restore state
-            _uiState.value = _uiState.value.copy(
-                stage = stage,
-                acceptedOffer = offer,
-                acceptanceEventId = acceptanceEventId,
-                confirmationEventId = confirmationEventId,
-                precisePickupLocation = precisePickup,
-                pinAttempts = pinAttempts,
-                chatMessages = chatMessages,
-                statusMessage = getStatusMessageForStage(stage)
-            )
+            _uiState.update { current ->
+                current.copy(
+                    stage = stage,
+                    statusMessage = getStatusMessageForStage(stage),
+                    rideSession = DriverRideSession(
+                        acceptedOffer = offer,
+                        acceptanceEventId = acceptanceEventId,
+                        confirmationEventId = confirmationEventId,
+                        precisePickupLocation = precisePickup,
+                        pinAttempts = pinAttempts,
+                        chatMessages = chatMessages
+                    )
+                )
+            }
 
             // Re-subscribe to relevant events
             if (acceptanceEventId != null && stage == DriverStage.RIDE_ACCEPTED) {
@@ -1128,12 +1088,13 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      */
     fun cancelRide() {
         val state = _uiState.value
+        val session = state.rideSession
 
         // Clear saved pre-ride mode to prevent stale restore
         stageBeforeRide = null
 
         // Guard: Already cancelling - prevent duplicate invocations
-        if (state.isCancelling) {
+        if (session.isCancelling) {
             Log.d(TAG, "Already cancelling, ignoring duplicate cancelRide() call")
             return
         }
@@ -1146,19 +1107,19 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         validateTransition(RideEvent.Cancel(myPubkey, "Driver cancelled"))
 
         // Set cancelling flag IMMEDIATELY (synchronous) to prevent race conditions
-        _uiState.value = state.copy(isCancelling = true)
+        updateRideSession { copy(isCancelling = true) }
 
         // Synchronous cleanup
         closeAllRideSubscriptionsAndJobs()
-        state.acceptedOffer?.riderPubKey?.let { unsubscribeFromRiderProfile(it) }
+        session.acceptedOffer?.riderPubKey?.let { unsubscribeFromRiderProfile(it) }
         clearDriverStateHistory()
         broadcastRoadflareOfflineStatus()
         stopRoadflareBroadcasting()
         DriverOnlineService.stop(getApplication())
 
         // Capture state values before launching coroutine
-        val confId = state.confirmationEventId
-        val riderPubKey = state.acceptedOffer?.riderPubKey
+        val confId = session.confirmationEventId
+        val riderPubKey = session.acceptedOffer?.riderPubKey
         val currentLoc = state.currentLocation
 
         viewModelScope.launch {
@@ -1204,7 +1165,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     fun finishAndGoOnline(location: Location) {
         // CRITICAL: Capture state BEFORE any cleanup — used for history save + mode restore
         val state = _uiState.value
-        val offer = state.acceptedOffer
+        val session = state.rideSession
+        val offer = session.acceptedOffer
         val restoreRoadflareOnly = stageBeforeRide == DriverStage.ROADFLARE_ONLY
 
         // Synchronous cleanup
@@ -1226,7 +1188,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     val vehicle = state.activeVehicle
                     val riderProfile = state.riderProfiles[offer.riderPubKey]
                     val historyEntry = RideHistoryEntry(
-                        rideId = state.confirmationEventId ?: state.acceptanceEventId ?: offer.eventId,
+                        rideId = session.confirmationEventId ?: session.acceptanceEventId ?: offer.eventId,
                         timestamp = RideHistoryBuilder.currentTimestampSeconds(),
                         role = "driver",
                         counterpartyPubKey = offer.riderPubKey,
@@ -1357,7 +1319,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 mintUrl = walletService?.getSavedMintUrl()
             ))
 
-            _uiState.value = _uiState.value.copy(isProcessingOffer = true)
+            updateRideSession { copy(isProcessingOffer = true) }
 
             // Get wallet pubkey for P2PK escrow (driver will sign with this key to claim)
             val walletPubKey = walletService?.getWalletPubKey()
@@ -1396,28 +1358,30 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 val paymentPath = PaymentPath.determine(riderMintUrl, driverMintUrl, offer.paymentMethod)
                 Log.d(TAG, "PaymentPath: $paymentPath (rider: $riderMintUrl, driver: $driverMintUrl)")
 
-                _uiState.value = _uiState.value.copy(
-                    stage = DriverStage.RIDE_ACCEPTED,
-                    isProcessingOffer = false,
-                    acceptedOffer = offer,
-                    acceptanceEventId = eventId,  // Track for cleanup later
-                    confirmationEventId = null,  // CRITICAL: Clear old confirmation to prevent stale state
-                    pendingOffers = emptyList(), // Clear all pending offers
-                    pinAttempts = 0,
-                    confirmationWaitStartMs = System.currentTimeMillis(),  // Start confirmation timer
-                    statusMessage = "Ride accepted! Waiting for rider confirmation...",
-                    // HTLC escrow tracking - paymentHash comes in confirmation now
-                    activePaymentHash = null,  // Will be set when confirmation received
-                    activePreimage = null,
-                    activeEscrowToken = null,
-                    canSettleEscrow = false,
-                    // Multi-mint support
-                    paymentPath = paymentPath,
-                    riderMintUrl = riderMintUrl,
-                    crossMintPaymentComplete = false,  // Reset for new ride
-                    pendingDepositQuoteId = null,      // Reset pending deposit
-                    pendingDepositAmount = null
-                )
+                _uiState.update { current ->
+                    current.copy(
+                        stage = DriverStage.RIDE_ACCEPTED,
+                        statusMessage = "Ride accepted! Waiting for rider confirmation...",
+                        rideSession = current.rideSession.copy(
+                            isProcessingOffer = false,
+                            acceptedOffer = offer,
+                            acceptanceEventId = eventId,
+                            confirmationEventId = null,
+                            pendingOffers = emptyList(),
+                            pinAttempts = 0,
+                            confirmationWaitStartMs = System.currentTimeMillis(),
+                            activePaymentHash = null,
+                            activePreimage = null,
+                            activeEscrowToken = null,
+                            canSettleEscrow = false,
+                            paymentPath = paymentPath,
+                            riderMintUrl = riderMintUrl,
+                            crossMintPaymentComplete = false,
+                            pendingDepositQuoteId = null,
+                            pendingDepositAmount = null
+                        )
+                    )
+                }
 
                 // STATE_MACHINE: Update state after successful acceptance
                 updateStateMachineState(
@@ -1445,10 +1409,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 // Subscribe to rider profile to get their name for ride history
                 subscribeToRiderProfile(offer.riderPubKey)
             } else {
-                _uiState.value = _uiState.value.copy(
-                    isProcessingOffer = false,
-                    error = "Failed to accept ride"
-                )
+                _uiState.update { current ->
+                    current.copy(
+                        error = "Failed to accept ride",
+                        rideSession = current.rideSession.copy(isProcessingOffer = false)
+                    )
+                }
             }
         }
     }
@@ -1459,12 +1425,13 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      */
     fun startRouteToPickup() {
         val state = _uiState.value
+        val session = state.rideSession
         if (state.stage != DriverStage.RIDE_ACCEPTED) return
 
         viewModelScope.launch {
             // Send status update to rider via driver ride state
-            state.confirmationEventId?.let { confId ->
-                state.acceptedOffer?.riderPubKey?.let { riderPubKey ->
+            session.confirmationEventId?.let { confId ->
+                session.acceptedOffer?.riderPubKey?.let { riderPubKey ->
                     val eventId = updateDriverStatus(
                         confirmationEventId = confId,
                         riderPubKey = riderPubKey,
@@ -1476,10 +1443,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 }
             }
 
-            _uiState.value = state.copy(
-                stage = DriverStage.EN_ROUTE_TO_PICKUP,
-                statusMessage = "Ride accepted, Heading to Pickup"
-            )
+            _uiState.update { current ->
+                current.copy(
+                    stage = DriverStage.EN_ROUTE_TO_PICKUP,
+                    statusMessage = "Ride accepted, Heading to Pickup"
+                )
+            }
         }
     }
 
@@ -1488,10 +1457,11 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      */
     fun arrivedAtPickup() {
         val state = _uiState.value
+        val session = state.rideSession
 
         // Guard: Check stage and cancelling flag to prevent race conditions
         if (state.stage != DriverStage.EN_ROUTE_TO_PICKUP) return
-        if (state.isCancelling) {
+        if (session.isCancelling) {
             Log.d(TAG, "Ignoring arrivedAtPickup - ride is being cancelled")
             return
         }
@@ -1506,8 +1476,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         val context = getApplication<Application>()
 
         // Capture values for coroutine
-        val confId = state.confirmationEventId
-        val riderPubKey = state.acceptedOffer?.riderPubKey
+        val confId = session.confirmationEventId
+        val riderPubKey = session.acceptedOffer?.riderPubKey
         val currentLoc = state.currentLocation
 
         viewModelScope.launch {
@@ -1540,20 +1510,23 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      */
     fun submitPinForVerification(enteredPin: String) {
         val state = _uiState.value
+        val session = state.rideSession
         if (state.stage != DriverStage.ARRIVED_AT_PICKUP) return
 
-        val confirmationEventId = state.confirmationEventId ?: return
-        val riderPubKey = state.acceptedOffer?.riderPubKey ?: return
+        val confirmationEventId = session.confirmationEventId ?: return
+        val riderPubKey = session.acceptedOffer?.riderPubKey ?: return
 
         viewModelScope.launch {
-            _uiState.value = state.copy(
-                isAwaitingPinVerification = true,
-                statusMessage = "Verifying PIN..."
-            )
+            _uiState.update { current ->
+                current.copy(
+                    statusMessage = "Verifying PIN...",
+                    rideSession = current.rideSession.copy(isAwaitingPinVerification = true)
+                )
+            }
 
             // For CROSS_MINT: Share deposit invoice first so rider can pay after PIN verification
-            if (state.paymentPath == PaymentPath.CROSS_MINT) {
-                val fareAmount = state.acceptedOffer?.fareEstimate?.toLong() ?: 0L
+            if (session.paymentPath == PaymentPath.CROSS_MINT) {
+                val fareAmount = session.acceptedOffer?.fareEstimate?.toLong() ?: 0L
                 if (fareAmount > 0) {
                     Log.d(TAG, "CROSS_MINT: Requesting deposit invoice for $fareAmount sats")
                     shareDepositInvoice(confirmationEventId, riderPubKey, fareAmount)
@@ -1573,17 +1546,21 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 Log.d(TAG, "Submitted PIN via driver ride state: $eventId")
                 // Track for cleanup on ride completion
                 trackEventForCleanup(eventId, "DRIVER_RIDE_STATE")
-                _uiState.value = _uiState.value.copy(
-                    lastPinSubmissionEventId = eventId,
-                    statusMessage = "Waiting for rider to verify PIN..."
-                )
+                _uiState.update { current ->
+                    current.copy(
+                        statusMessage = "Waiting for rider to verify PIN...",
+                        rideSession = current.rideSession.copy(lastPinSubmissionEventId = eventId)
+                    )
+                }
                 // Start timeout for PIN verification
                 startPinVerificationTimeout()
             } else {
-                _uiState.value = _uiState.value.copy(
-                    isAwaitingPinVerification = false,
-                    error = "Failed to submit PIN"
-                )
+                _uiState.update { current ->
+                    current.copy(
+                        error = "Failed to submit PIN",
+                        rideSession = current.rideSession.copy(isAwaitingPinVerification = false)
+                    )
+                }
             }
         }
     }
@@ -1599,7 +1576,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     ) {
         // Guard: Don't create a new quote if one already exists for this ride
         // This prevents race condition where rider pays first quote but driver tracks second
-        val existingQuoteId = _uiState.value.pendingDepositQuoteId
+        val existingQuoteId = _uiState.value.rideSession.pendingDepositQuoteId
         if (existingQuoteId != null) {
             Log.d(TAG, "Deposit invoice already exists (quote=$existingQuoteId) - skipping duplicate")
             return
@@ -1617,10 +1594,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             Log.d(TAG, "Quote ID for claiming tokens: ${quote.quote}")
 
             // Store the quote ID so we can claim tokens when BridgeComplete arrives
-            _uiState.value = _uiState.value.copy(
+            updateRideSession { copy(
                 pendingDepositQuoteId = quote.quote,
                 pendingDepositAmount = amountSats
-            )
+            ) }
 
             // Also save to WalletStorage for recovery if app restarts
             walletService?.savePendingDeposit(
@@ -1677,13 +1654,17 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
             // Check if still waiting for verification
             val state = _uiState.value
-            if (state.isAwaitingPinVerification && state.stage == DriverStage.ARRIVED_AT_PICKUP) {
+            if (state.rideSession.isAwaitingPinVerification && state.stage == DriverStage.ARRIVED_AT_PICKUP) {
                 Log.w(TAG, "PIN verification timed out - no response from rider")
-                _uiState.value = state.copy(
-                    isAwaitingPinVerification = false,
-                    pinVerificationTimedOut = true,
-                    statusMessage = "No response from rider. Try again or cancel."
-                )
+                _uiState.update { current ->
+                    current.copy(
+                        statusMessage = "No response from rider. Try again or cancel.",
+                        rideSession = current.rideSession.copy(
+                            isAwaitingPinVerification = false,
+                            pinVerificationTimedOut = true
+                        )
+                    )
+                }
             }
         }
     }
@@ -1692,7 +1673,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      * Retry PIN submission after timeout.
      */
     fun retryPinSubmission(pin: String) {
-        _uiState.value = _uiState.value.copy(pinVerificationTimedOut = false)
+        updateRideSession { copy(pinVerificationTimedOut = false) }
         submitPinForVerification(pin)
     }
 
@@ -1701,13 +1682,14 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      */
     fun cancelCurrentRide(reason: String = "driver_cancelled") {
         val state = _uiState.value
-        val confirmationEventId = state.confirmationEventId
-        val riderPubKey = state.acceptedOffer?.riderPubKey
-        val offer = state.acceptedOffer
+        val session = state.rideSession
+        val confirmationEventId = session.confirmationEventId
+        val riderPubKey = session.acceptedOffer?.riderPubKey
+        val offer = session.acceptedOffer
 
         // Synchronous cleanup
         closeAllRideSubscriptionsAndJobs()
-        state.acceptedOffer?.riderPubKey?.let { unsubscribeFromRiderProfile(it) }
+        session.acceptedOffer?.riderPubKey?.let { unsubscribeFromRiderProfile(it) }
         clearDriverStateHistory()
         stageBeforeRide = null
         broadcastRoadflareOfflineStatus()
@@ -1720,7 +1702,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 try {
                     val vehicle = state.activeVehicle
                     val historyEntry = RideHistoryEntry(
-                        rideId = confirmationEventId ?: state.acceptanceEventId ?: offer.eventId,
+                        rideId = confirmationEventId ?: session.acceptanceEventId ?: offer.eventId,
                         timestamp = RideHistoryBuilder.currentTimestampSeconds(),
                         role = "driver",
                         counterpartyPubKey = offer.riderPubKey,
@@ -1839,6 +1821,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         pinVerificationTimeoutJob = null
 
         val state = _uiState.value
+        val session = state.rideSession
 
         // Only process if we're at pickup AND we actually submitted a PIN (or timed out)
         if (state.stage != DriverStage.ARRIVED_AT_PICKUP) {
@@ -1846,18 +1829,18 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
 
-        if (!state.isAwaitingPinVerification && !state.pinVerificationTimedOut) {
+        if (!session.isAwaitingPinVerification && !session.pinVerificationTimedOut) {
             Log.d(TAG, "Ignoring verification - not awaiting verification (stale event?)")
             return
         }
 
         Log.d(TAG, "Processing PIN verification: verified=$verified, attempt=$attempt")
 
-        _uiState.value = state.copy(
+        updateRideSession { copy(
             isAwaitingPinVerification = false,
             pinVerificationTimedOut = false,
             pinAttempts = attempt
-        )
+        ) }
 
         if (verified) {
             Log.d(TAG, "PIN verified! Starting ride.")
@@ -1869,7 +1852,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 // Rider cancelled due to brute force protection
                 Log.w(TAG, "PIN brute force detected - cancelling ride")
 
-                val riderPubKey = state.acceptedOffer?.riderPubKey
+                val riderPubKey = session.acceptedOffer?.riderPubKey
 
                 // Full cleanup
                 closeAllRideSubscriptionsAndJobs()
@@ -1900,8 +1883,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      * Handle a location reveal action from the rider.
      */
     private fun handleLocationReveal(reveal: RiderRideAction.LocationReveal) {
-        val state = _uiState.value
-        val riderPubKey = state.acceptedOffer?.riderPubKey ?: return
+        val riderPubKey = _uiState.value.rideSession.acceptedOffer?.riderPubKey ?: return
 
         viewModelScope.launch {
             // Decrypt the location
@@ -1916,17 +1898,21 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             when (reveal.locationType) {
                 RiderRideStateEvent.LocationType.PICKUP -> {
                     Log.d(TAG, "Updating navigation to precise pickup location")
-                    _uiState.value = _uiState.value.copy(
-                        precisePickupLocation = location,
-                        statusMessage = "Received precise pickup location"
-                    )
+                    _uiState.update { current ->
+                        current.copy(
+                            statusMessage = "Received precise pickup location",
+                            rideSession = current.rideSession.copy(precisePickupLocation = location)
+                        )
+                    }
                 }
                 RiderRideStateEvent.LocationType.DESTINATION -> {
                     Log.d(TAG, "Received precise destination location")
-                    _uiState.value = _uiState.value.copy(
-                        preciseDestinationLocation = location,
-                        statusMessage = "Received precise destination"
-                    )
+                    _uiState.update { current ->
+                        current.copy(
+                            statusMessage = "Received precise destination",
+                            rideSession = current.rideSession.copy(preciseDestinationLocation = location)
+                        )
+                    }
                 }
                 else -> {
                     Log.w(TAG, "Unknown location type: ${reveal.locationType}")
@@ -1941,8 +1927,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      */
     private fun handlePreimageShare(preimageShare: RiderRideAction.PreimageShare) {
         Log.d(TAG, "=== HANDLING PREIMAGE SHARE ===")
-        val state = _uiState.value
-        val riderPubKey = state.acceptedOffer?.riderPubKey ?: run {
+        val session = _uiState.value.rideSession
+        val riderPubKey = session.acceptedOffer?.riderPubKey ?: run {
             Log.e(TAG, "No accepted offer - cannot handle preimage share")
             return
         }
@@ -1961,14 +1947,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 if (BuildConfig.DEBUG) Log.d(TAG, "Decrypted preimage: ${preimage.length} chars, ${preimage.take(16)}...")
 
                 // Verify preimage matches payment hash (if we have one)
-                val paymentHash = state.activePaymentHash
+                val paymentHash = session.activePaymentHash
                 if (paymentHash != null) {
                     if (BuildConfig.DEBUG) Log.d(TAG, "Verifying preimage against payment hash: ${paymentHash.take(16)}...")
                     if (!PaymentCrypto.verifyPreimage(preimage, paymentHash)) {
                         Log.e(TAG, "Preimage verification FAILED - hash mismatch!")
-                        _uiState.value = state.copy(
-                            error = "Invalid payment preimage received"
-                        )
+                        _uiState.value = _uiState.value.copy(error = "Invalid payment preimage received")
                         return@launch
                     }
                     Log.d(TAG, "Preimage verified successfully!")
@@ -1993,14 +1977,13 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 // Update state with escrow info
                 val canSettle = preimage != null && escrowToken != null
                 Log.d(TAG, "Updating state: canSettleEscrow=$canSettle")
-                _uiState.value = state.copy(
+                updateRideSession { copy(
                     activePreimage = preimage,
                     activeEscrowToken = escrowToken,
                     canSettleEscrow = canSettle,
-                    // Auto-dismiss payment warning dialog if payment is now ready
-                    showPaymentWarningDialog = if (canSettle) false else state.showPaymentWarningDialog,
-                    paymentWarningStatus = if (canSettle) null else state.paymentWarningStatus
-                )
+                    showPaymentWarningDialog = if (canSettle) false else showPaymentWarningDialog,
+                    paymentWarningStatus = if (canSettle) null else paymentWarningStatus
+                ) }
 
                 if (canSettle) {
                     Log.d(TAG, "=== ESCROW READY FOR SETTLEMENT ===")
@@ -2008,18 +1991,17 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     Log.w(TAG, "Escrow NOT ready: preimage=${preimage != null}, escrowToken=${escrowToken != null}")
 
                     // EARLY WARNING: If payment was expected but can't be claimed, warn driver immediately
-                    // This ensures driver finds out RIGHT after PIN verification, not at dropoff
                     // Skip for CROSS_MINT - escrow token is expected to be null (uses Lightning bridge instead)
-                    if (state.activePaymentHash != null && state.paymentPath == PaymentPath.SAME_MINT) {
+                    if (session.activePaymentHash != null && session.paymentPath == PaymentPath.SAME_MINT) {
                         Log.w(TAG, "Payment issue detected - showing warning dialog immediately")
-                        _uiState.value = _uiState.value.copy(
+                        updateRideSession { copy(
                             showPaymentWarningDialog = true,
                             paymentWarningStatus = when {
                                 preimage == null -> PaymentStatus.MISSING_PREIMAGE
                                 escrowToken == null -> PaymentStatus.MISSING_ESCROW_TOKEN
                                 else -> PaymentStatus.UNKNOWN_ERROR
                             }
-                        )
+                        ) }
                     }
                 }
             } catch (e: Exception) {
@@ -2041,20 +2023,20 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // The Lightning preimage proves the rider paid the deposit invoice.
         // Now we need to claim the tokens from our mint using the stored quote ID.
 
-        val state = _uiState.value
-        val quoteId = state.pendingDepositQuoteId
-        val amount = state.pendingDepositAmount
+        val session = _uiState.value.rideSession
+        val quoteId = session.pendingDepositQuoteId
+        val amount = session.pendingDepositAmount
 
         if (quoteId == null || amount == null) {
             Log.e(TAG, "Cannot claim tokens: missing quote ID or amount")
             Log.e(TAG, "  pendingDepositQuoteId: $quoteId")
             Log.e(TAG, "  pendingDepositAmount: $amount")
             // Still mark as complete so ride can proceed (best effort)
-            _uiState.value = state.copy(
+            updateRideSession { copy(
                 activePreimage = bridgeComplete.preimage,
                 canSettleEscrow = false,
                 crossMintPaymentComplete = true
-            )
+            ) }
             return
         }
 
@@ -2095,13 +2077,13 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 }
 
                 if (claimResult?.success == true && claimResult.claimedCount > 0) {
-                    _uiState.value = _uiState.value.copy(
+                    updateRideSession { copy(
                         activePreimage = bridgeComplete.preimage,
                         canSettleEscrow = false,
                         crossMintPaymentComplete = true,
                         pendingDepositQuoteId = null,
                         pendingDepositAmount = null
-                    )
+                    ) }
 
                     Log.d(TAG, "Cross-mint payment complete: received ${claimResult.totalSats} sats")
                 } else {
@@ -2109,23 +2091,23 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     Log.e(TAG, "Last result: ${claimResult?.error ?: "null"}")
                     // Still mark as complete to let ride proceed
                     // User can claim manually via Wallet Settings > Claim by Quote ID
-                    _uiState.value = _uiState.value.copy(
+                    updateRideSession { copy(
                         activePreimage = bridgeComplete.preimage,
                         canSettleEscrow = false,
                         crossMintPaymentComplete = true,
                         pendingDepositQuoteId = null,
                         pendingDepositAmount = null
-                    )
+                    ) }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Exception claiming tokens: ${e.message}", e)
-                _uiState.value = _uiState.value.copy(
+                updateRideSession { copy(
                     activePreimage = bridgeComplete.preimage,
                     canSettleEscrow = false,
                     crossMintPaymentComplete = true,
                     pendingDepositQuoteId = null,
                     pendingDepositAmount = null
-                )
+                ) }
             }
         }
     }
@@ -2135,11 +2117,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      */
     private fun startRide() {
         val state = _uiState.value
+        val session = state.rideSession
         val context = getApplication<Application>()
 
         viewModelScope.launch {
-            state.confirmationEventId?.let { confId ->
-                state.acceptedOffer?.riderPubKey?.let { riderPubKey ->
+            session.confirmationEventId?.let { confId ->
+                session.acceptedOffer?.riderPubKey?.let { riderPubKey ->
                     val eventId = updateDriverStatus(
                         confirmationEventId = confId,
                         riderPubKey = riderPubKey,
@@ -2172,15 +2155,20 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      * Get current payment status for HTLC escrow.
      */
     fun getPaymentStatus(): PaymentStatus {
-        val state = _uiState.value
+        val session = _uiState.value.rideSession
         return when {
-            // Cross-mint payment already completed via Lightning bridge - no action needed
-            state.crossMintPaymentComplete -> PaymentStatus.NO_PAYMENT_EXPECTED
-            state.activePaymentHash == null -> PaymentStatus.NO_PAYMENT_EXPECTED
-            state.canSettleEscrow -> PaymentStatus.READY_TO_CLAIM
-            state.activePreimage == null && state.activeEscrowToken == null -> PaymentStatus.WAITING_FOR_PREIMAGE
-            state.activePreimage == null -> PaymentStatus.MISSING_PREIMAGE
-            state.activeEscrowToken == null -> PaymentStatus.MISSING_ESCROW_TOKEN
+            // Bridge payment already completed
+            session.crossMintPaymentComplete -> PaymentStatus.NO_PAYMENT_EXPECTED
+            // Non-HTLC payment paths — these don't use escrow
+            session.paymentPath == PaymentPath.CROSS_MINT -> PaymentStatus.NO_PAYMENT_EXPECTED
+            session.paymentPath == PaymentPath.FIAT_CASH -> PaymentStatus.NO_PAYMENT_EXPECTED
+            session.paymentPath == PaymentPath.NO_PAYMENT -> PaymentStatus.NO_PAYMENT_EXPECTED
+            // HTLC escrow checks (SAME_MINT only from here down)
+            session.activePaymentHash == null -> PaymentStatus.NO_PAYMENT_EXPECTED
+            session.canSettleEscrow -> PaymentStatus.READY_TO_CLAIM
+            session.activePreimage == null && session.activeEscrowToken == null -> PaymentStatus.WAITING_FOR_PREIMAGE
+            session.activePreimage == null -> PaymentStatus.MISSING_PREIMAGE
+            session.activeEscrowToken == null -> PaymentStatus.MISSING_ESCROW_TOKEN
             else -> PaymentStatus.UNKNOWN_ERROR
         }
     }
@@ -2195,7 +2183,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
         // STATE_MACHINE: Validate COMPLETE transition
         val myPubkey = nostrService.getPubKeyHex() ?: ""
-        validateTransition(RideEvent.Complete(myPubkey, state.acceptedOffer?.fareEstimate?.toLong()))
+        validateTransition(RideEvent.Complete(myPubkey, state.rideSession.acceptedOffer?.fareEstimate?.toLong()))
 
         val paymentStatus = getPaymentStatus()
         Log.d(TAG, "completeRide: paymentStatus=$paymentStatus")
@@ -2205,10 +2193,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             paymentStatus != PaymentStatus.NO_PAYMENT_EXPECTED) {
             // Show warning dialog - driver won't be able to claim payment
             Log.w(TAG, "Payment not ready for claim - showing warning dialog")
-            _uiState.value = state.copy(
+            updateRideSession { copy(
                 showPaymentWarningDialog = true,
                 paymentWarningStatus = paymentStatus
-            )
+            ) }
             return
         }
 
@@ -2221,10 +2209,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      */
     fun confirmCompleteWithoutPayment() {
         Log.d(TAG, "User confirmed to complete ride without payment")
-        _uiState.value = _uiState.value.copy(
+        updateRideSession { copy(
             showPaymentWarningDialog = false,
             paymentWarningStatus = null
-        )
+        ) }
         completeRideInternal()
     }
 
@@ -2233,10 +2221,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      */
     fun cancelRideDueToPaymentIssue() {
         Log.d(TAG, "User chose to cancel ride due to payment issue")
-        _uiState.value = _uiState.value.copy(
+        updateRideSession { copy(
             showPaymentWarningDialog = false,
             paymentWarningStatus = null
-        )
+        ) }
         cancelRide()
     }
 
@@ -2244,11 +2232,15 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      * Dismiss payment warning dialog without action (e.g., wait for payment to arrive).
      */
     fun dismissPaymentWarningDialog() {
-        _uiState.value = _uiState.value.copy(
-            showPaymentWarningDialog = false,
-            paymentWarningStatus = null,
-            sliderResetToken = _uiState.value.sliderResetToken + 1  // Reset slider position
-        )
+        _uiState.update { current ->
+            current.copy(
+                sliderResetToken = current.sliderResetToken + 1,
+                rideSession = current.rideSession.copy(
+                    showPaymentWarningDialog = false,
+                    paymentWarningStatus = null
+                )
+            )
+        }
     }
 
     /**
@@ -2257,7 +2249,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      */
     private fun completeRideInternal() {
         val state = _uiState.value
-        val offer = state.acceptedOffer ?: return
+        val session = state.rideSession
+        val offer = session.acceptedOffer ?: return
 
         // Close all ride subscriptions and jobs since ride is ending
         closeAllRideSubscriptionsAndJobs()
@@ -2267,17 +2260,17 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
         viewModelScope.launch {
             // Correlation ID for payment tracking
-            val rideCorrelationId = state.confirmationEventId?.take(8) ?: "unknown"
+            val rideCorrelationId = session.confirmationEventId?.take(8) ?: "unknown"
 
             // Attempt to settle HTLC escrow if we have preimage and token
             var settlementMessage = ""
-            if (state.canSettleEscrow && state.activePreimage != null && state.activeEscrowToken != null) {
-                Log.d(TAG, "[RIDE $rideCorrelationId] Claiming HTLC: paymentHash=${state.activePaymentHash?.take(16)}...")
+            if (session.canSettleEscrow && session.activePreimage != null && session.activeEscrowToken != null) {
+                Log.d(TAG, "[RIDE $rideCorrelationId] Claiming HTLC: paymentHash=${session.activePaymentHash?.take(16)}...")
                 try {
                     val claimResult = walletService?.claimHtlcPayment(
-                        htlcToken = state.activeEscrowToken,
-                        preimage = state.activePreimage,
-                        paymentHash = state.activePaymentHash
+                        htlcToken = session.activeEscrowToken,
+                        preimage = session.activePreimage,
+                        paymentHash = session.activePaymentHash
                     )
 
                     settlementMessage = when (claimResult) {
@@ -2306,13 +2299,13 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     Log.e(TAG, "[RIDE $rideCorrelationId] Claim ERROR: ${e.message}", e)
                     settlementMessage = " (payment error)"
                 }
-            } else if (state.activePaymentHash != null) {
-                // Had payment hash but no preimage/token - log for debugging
-                Log.w(TAG, "[RIDE $rideCorrelationId] Cannot settle - preimage=${state.activePreimage != null}, token=${state.activeEscrowToken != null}")
+            } else if (session.activePaymentHash != null && session.paymentPath == PaymentPath.SAME_MINT) {
+                // SAME_MINT: Had payment hash but no preimage/token - log for debugging
+                Log.w(TAG, "[RIDE $rideCorrelationId] Cannot settle - preimage=${session.activePreimage != null}, token=${session.activeEscrowToken != null}")
                 settlementMessage = " (no payment received)"
             }
 
-            state.confirmationEventId?.let { confId ->
+            session.confirmationEventId?.let { confId ->
                 val eventId = updateDriverStatus(
                     confirmationEventId = confId,
                     riderPubKey = offer.riderPubKey,
@@ -2324,19 +2317,22 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 eventId?.let { trackEventForCleanup(it, "DRIVER_RIDE_STATE") }
             }
 
-            _uiState.value = state.copy(
-                stage = DriverStage.RIDE_COMPLETED,
-                statusMessage = "Ride completed! Fare: ${offer.fareEstimate.toInt()} sats$settlementMessage",
-                // Clear HTLC state
-                activePaymentHash = null,
-                activePreimage = null,
-                activeEscrowToken = null,
-                canSettleEscrow = false,
-                showPaymentWarningDialog = false,
-                paymentWarningStatus = null,
-                pendingDepositQuoteId = null,
-                pendingDepositAmount = null
-            )
+            _uiState.update { current ->
+                current.copy(
+                    stage = DriverStage.RIDE_COMPLETED,
+                    statusMessage = "Ride completed! Fare: ${offer.fareEstimate.toInt()} sats$settlementMessage",
+                    rideSession = current.rideSession.copy(
+                        activePaymentHash = null,
+                        activePreimage = null,
+                        activeEscrowToken = null,
+                        canSettleEscrow = false,
+                        showPaymentWarningDialog = false,
+                        paymentWarningStatus = null,
+                        pendingDepositQuoteId = null,
+                        pendingDepositAmount = null
+                    )
+                )
+            }
         }
     }
 
@@ -2382,12 +2378,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             }
 
             // Store confirmation data including payment info
-            _uiState.value = _uiState.value.copy(
+            updateRideSession { copy(
                 confirmationEventId = confirmation.eventId,
                 precisePickupLocation = confirmation.precisePickup,
                 activePaymentHash = paymentHash,
                 activeEscrowToken = escrowToken
-            )
+            ) }
 
             // STATE_MACHINE: Update state to CONFIRMED after receiving confirmation
             // RideContext.withConfirmation() already supports paymentHash and escrowToken
@@ -2410,7 +2406,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             subscribeToCancellation(confirmation.eventId)
 
             // Subscribe to rider ride state (handles verification and location reveals)
-            _uiState.value.acceptedOffer?.riderPubKey?.let { riderPubKey ->
+            _uiState.value.rideSession.acceptedOffer?.riderPubKey?.let { riderPubKey ->
                 subscribeToRiderRideState(confirmation.eventId, riderPubKey)
             }
 
@@ -2457,7 +2453,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         DriverOnlineService.updateStatus(context, DriverStatus.Cancelled)
 
         // Capture before reset
-        _uiState.value.acceptedOffer?.riderPubKey?.let { unsubscribeFromRiderProfile(it) }
+        _uiState.value.rideSession.acceptedOffer?.riderPubKey?.let { unsubscribeFromRiderProfile(it) }
 
         closeAllRideSubscriptionsAndJobs()
         clearDriverStateHistory()
@@ -2493,7 +2489,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      */
     private fun autoStartRouteToPickup(confirmationEventId: String) {
         val state = _uiState.value
-        val riderPubKey = state.acceptedOffer?.riderPubKey ?: return
+        val riderPubKey = state.rideSession.acceptedOffer?.riderPubKey ?: return
         val context = getApplication<Application>()
 
         viewModelScope.launch {
@@ -2533,13 +2529,13 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             Log.d(TAG, "Received chat message from ${chatData.senderPubKey.take(8)}: ${chatData.message}")
 
             // Add to chat messages list
-            val currentMessages = _uiState.value.chatMessages.toMutableList()
+            val currentMessages = _uiState.value.rideSession.chatMessages.toMutableList()
             // Avoid duplicates
             if (currentMessages.none { it.eventId == chatData.eventId }) {
                 currentMessages.add(chatData)
                 // Sort by timestamp
                 currentMessages.sortBy { it.createdAt }
-                _uiState.value = _uiState.value.copy(chatMessages = currentMessages)
+                updateRideSession { copy(chatMessages = currentMessages) }
                 // Persist messages for app restart
                 saveRideState()
 
@@ -2597,7 +2593,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             Log.d(TAG, "Received ride cancellation: event conf=${cancellation.confirmationEventId.take(8)}, reason=${cancellation.reason ?: "none"}")
 
             val currentState = _uiState.value
-            val currentConfirmationId = currentState.confirmationEventId
+            val currentSession = currentState.rideSession
+            val currentConfirmationId = currentSession.confirmationEventId
 
             // CRITICAL: Validate the EVENT's confirmation ID matches current ride
             // This is the definitive check - the event itself knows which ride it belongs to
@@ -2607,7 +2604,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             }
 
             // Only process if we're in an active ride and not already cancelling
-            if (currentState.isCancelling) {
+            if (currentSession.isCancelling) {
                 Log.d(TAG, "Ignoring cancellation - already cancelling")
                 return@subscribeToCancellation
             }
@@ -2635,21 +2632,26 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      */
     private fun handleRideCancellation(reason: String?) {
         val state = _uiState.value
+        val session = state.rideSession
         val context = getApplication<Application>()
-        val offer = state.acceptedOffer
+        val offer = session.acceptedOffer
 
         // Notify service of cancellation (plays sound, updates notification)
         DriverOnlineService.updateStatus(context, DriverStatus.Cancelled)
         Log.d(TAG, "Ride cancelled - notified service")
 
         // If driver can claim payment (has preimage + escrow token), show dialog instead of cleaning up
-        if (state.canSettleEscrow && offer != null) {
+        if (session.canSettleEscrow && offer != null) {
             Log.d(TAG, "Rider cancelled after PIN verification - driver can claim payment")
-            _uiState.value = state.copy(
-                showRiderCancelledClaimDialog = true,
-                riderCancelledFareAmount = offer.fareEstimate,
-                error = reason ?: "Rider cancelled the ride"
-            )
+            _uiState.update { current ->
+                current.copy(
+                    error = reason ?: "Rider cancelled the ride",
+                    rideSession = current.rideSession.copy(
+                        showRiderCancelledClaimDialog = true,
+                        riderCancelledFareAmount = offer.fareEstimate
+                    )
+                )
+            }
             return  // Don't cleanup yet - wait for driver decision
         }
 
@@ -2662,17 +2664,18 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      */
     fun claimPaymentAfterCancellation() {
         val state = _uiState.value
-        val offer = state.acceptedOffer
-        val rideCorrelationId = state.confirmationEventId?.take(8) ?: "unknown"
+        val session = state.rideSession
+        val offer = session.acceptedOffer
+        val rideCorrelationId = session.confirmationEventId?.take(8) ?: "unknown"
 
         viewModelScope.launch {
             // Attempt to settle HTLC escrow
-            if (state.canSettleEscrow && state.activePreimage != null && state.activeEscrowToken != null) {
+            if (session.canSettleEscrow && session.activePreimage != null && session.activeEscrowToken != null) {
                 Log.d(TAG, "[RIDE $rideCorrelationId] Claiming payment after rider cancellation...")
                 try {
                     val claimResult = walletService?.claimHtlcPayment(
-                        htlcToken = state.activeEscrowToken,
-                        preimage = state.activePreimage
+                        htlcToken = session.activeEscrowToken,
+                        preimage = session.activePreimage
                     )
 
                     when (claimResult) {
@@ -2696,7 +2699,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             }
 
             // Now do cleanup
-            _uiState.value = _uiState.value.copy(showRiderCancelledClaimDialog = false)
+            updateRideSession { copy(showRiderCancelledClaimDialog = false) }
             performCancellationCleanup(state, offer, "Rider cancelled the ride")
         }
     }
@@ -2706,8 +2709,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      */
     fun dismissRiderCancelledDialog() {
         val state = _uiState.value
-        _uiState.value = state.copy(showRiderCancelledClaimDialog = false)
-        performCancellationCleanup(state, state.acceptedOffer, "Rider cancelled the ride")
+        updateRideSession { copy(showRiderCancelledClaimDialog = false) }
+        performCancellationCleanup(state, state.rideSession.acceptedOffer, "Rider cancelled the ride")
     }
 
     /**
@@ -2722,7 +2725,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         try {
             val vehicle = state.activeVehicle
             val historyEntry = RideHistoryEntry(
-                rideId = state.confirmationEventId ?: state.acceptanceEventId ?: offer.eventId,
+                rideId = state.rideSession.confirmationEventId ?: state.rideSession.acceptanceEventId ?: offer.eventId,
                 timestamp = RideHistoryBuilder.currentTimestampSeconds(),
                 role = "driver",
                 counterpartyPubKey = offer.riderPubKey,
@@ -2753,7 +2756,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         val context = getApplication<Application>()
 
         // Save cancelled ride to history (only if we had an accepted offer and not already saved)
-        if (offer != null && !state.showRiderCancelledClaimDialog) {
+        if (offer != null && !state.rideSession.showRiderCancelledClaimDialog) {
             viewModelScope.launch {
                 saveCancelledRideToHistory(state, offer, claimed = false)
             }
@@ -2803,14 +2806,14 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      * Send a chat message to the rider.
      */
     fun sendChatMessage(message: String) {
-        val state = _uiState.value
-        val confirmationEventId = state.confirmationEventId ?: return
-        val riderPubKey = state.acceptedOffer?.riderPubKey ?: return
+        val session = _uiState.value.rideSession
+        val confirmationEventId = session.confirmationEventId ?: return
+        val riderPubKey = session.acceptedOffer?.riderPubKey ?: return
 
         if (message.isBlank()) return
 
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isSendingMessage = true)
+            updateRideSession { copy(isSendingMessage = true) }
 
             val eventId = nostrService.sendChatMessage(
                 confirmationEventId = confirmationEventId,
@@ -2820,9 +2823,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
             if (eventId != null) {
                 Log.d(TAG, "Sent chat message: $eventId")
-                // Track for unified cleanup on ride completion
                 trackEventForCleanup(eventId, "CHAT")
-                // Add locally for immediate feedback
                 val myPubKey = nostrService.getPubKeyHex() ?: ""
 
                 val localMessage = RideshareChatData(
@@ -2834,30 +2835,31 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     createdAt = System.currentTimeMillis() / 1000
                 )
 
-                val currentMessages = _uiState.value.chatMessages.toMutableList()
+                val currentMessages = _uiState.value.rideSession.chatMessages.toMutableList()
                 currentMessages.add(localMessage)
                 currentMessages.sortBy { it.createdAt }
 
-                _uiState.value = _uiState.value.copy(
+                updateRideSession { copy(
                     isSendingMessage = false,
                     chatMessages = currentMessages
-                )
+                ) }
 
-                // Persist messages for app restart
                 saveRideState()
             } else {
-                _uiState.value = _uiState.value.copy(
-                    isSendingMessage = false,
-                    error = "Failed to send message"
-                )
+                _uiState.update { current ->
+                    current.copy(
+                        error = "Failed to send message",
+                        rideSession = current.rideSession.copy(isSendingMessage = false)
+                    )
+                }
             }
         }
     }
 
     fun declineOffer(offer: RideOfferData) {
-        _uiState.value = _uiState.value.copy(
-            pendingOffers = _uiState.value.pendingOffers.filter { it.eventId != offer.eventId }
-        )
+        updateRideSession { copy(
+            pendingOffers = pendingOffers.filter { it.eventId != offer.eventId }
+        ) }
     }
 
     fun clearAcceptedOffer() {
@@ -2865,7 +2867,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
         // Capture state for ride history BEFORE clearing
         val state = _uiState.value
-        val offer = state.acceptedOffer
+        val offer = state.rideSession.acceptedOffer
         val riderPubKey = offer?.riderPubKey
 
         // Synchronous cleanup
@@ -2891,7 +2893,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     val vehicle = state.activeVehicle
                     val riderProfile = state.riderProfiles[offer.riderPubKey]
                     val historyEntry = RideHistoryEntry(
-                        rideId = state.confirmationEventId ?: state.acceptanceEventId ?: offer.eventId,
+                        rideId = state.rideSession.confirmationEventId ?: state.rideSession.acceptanceEventId ?: offer.eventId,
                         timestamp = RideHistoryBuilder.currentTimestampSeconds(),
                         role = "driver",
                         counterpartyPubKey = offer.riderPubKey,
@@ -3058,7 +3060,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
 
-        val currentOffers = _uiState.value.pendingOffers
+        val currentOffers = _uiState.value.rideSession.pendingOffers
         val isNewOffer = currentOffers.none { it.eventId == offer.eventId }
         // Check if this is a fare boost (same rider, different event)
         val isFareBoost = currentOffers.any { it.riderPubKey == offer.riderPubKey }
@@ -3074,9 +3076,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 compareByDescending<RideOfferData> { it.isRoadflare }
                     .thenByDescending { it.createdAt }
             )
-            _uiState.value = _uiState.value.copy(
-                pendingOffers = sortedOffers
-            )
+            updateRideSession { copy(pendingOffers = sortedOffers) }
 
             // Update deletion subscription to watch for this offer being cancelled
             updateDeletionSubscription()
@@ -3183,7 +3183,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 lastRouteRecalcTimeMs = now
 
                 // Recalculate routes for all visible requests
-                _uiState.value.pendingBroadcastRequests.forEach { request ->
+                _uiState.value.rideSession.pendingBroadcastRequests.forEach { request ->
                     calculatePickupRoute(request.eventId, request.pickupArea)
                 }
             }
@@ -3459,7 +3459,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             }
 
             // Check if we already have this exact request
-            val currentRequests = _uiState.value.pendingBroadcastRequests
+            val currentRequests = _uiState.value.rideSession.pendingBroadcastRequests
             val isNewRequest = currentRequests.none { it.eventId == request.eventId }
 
             // Check if this is a fare boost (same rider, new event with higher fare)
@@ -3508,9 +3508,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                         .thenByDescending { it.fareEstimate }
                         .thenByDescending { it.createdAt })
 
-                _uiState.value = _uiState.value.copy(
-                    pendingBroadcastRequests = sortedRequests
-                )
+                updateRideSession { copy(pendingBroadcastRequests = sortedRequests) }
 
                 // Calculate route to pickup location
                 calculatePickupRoute(request.eventId, request.pickupArea)
@@ -3558,17 +3556,19 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      */
     private fun removeRideRequest(requestEventId: String) {
         // Remove from pending requests
-        val currentRequests = _uiState.value.pendingBroadcastRequests
+        val currentRequests = _uiState.value.rideSession.pendingBroadcastRequests
         val updatedRequests = currentRequests.filter { it.eventId != requestEventId }
 
         // Remove from eventId -> cacheKey mapping (but keep location cache for other requests with same location)
         eventToCacheKey.remove(requestEventId)
         val updatedRoutes = _uiState.value.pickupRoutes - requestEventId
 
-        _uiState.value = _uiState.value.copy(
-            pendingBroadcastRequests = updatedRequests,
-            pickupRoutes = updatedRoutes
-        )
+        _uiState.update { current ->
+            current.copy(
+                pickupRoutes = updatedRoutes,
+                rideSession = current.rideSession.copy(pendingBroadcastRequests = updatedRequests)
+            )
+        }
 
         // Close the acceptance subscription for this request (no longer needed)
         requestAcceptanceSubscriptionIds.remove(requestEventId)?.let {
@@ -3590,13 +3590,11 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         removeRideRequest(requestEventId)
 
         // Also remove from direct offers
-        val currentOffers = _uiState.value.pendingOffers
+        val currentOffers = _uiState.value.rideSession.pendingOffers
         val updatedOffers = currentOffers.filter { it.eventId != requestEventId }
         if (updatedOffers.size != currentOffers.size) {
             Log.d(TAG, "Removed cancelled direct offer: ${requestEventId.take(8)}")
-            _uiState.value = _uiState.value.copy(
-                pendingOffers = updatedOffers
-            )
+            updateRideSession { copy(pendingOffers = updatedOffers) }
         }
     }
 
@@ -3611,8 +3609,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         deletionSubscriptionId = null
 
         // Combine event IDs from BOTH broadcast requests AND direct offers
-        val broadcastEventIds = _uiState.value.pendingBroadcastRequests.map { it.eventId }
-        val directOfferEventIds = _uiState.value.pendingOffers.map { it.eventId }
+        val session = _uiState.value.rideSession
+        val broadcastEventIds = session.pendingBroadcastRequests.map { it.eventId }
+        val directOfferEventIds = session.pendingOffers.map { it.eventId }
         val allPendingEventIds = (broadcastEventIds + directOfferEventIds).distinct()
 
         if (allPendingEventIds.isEmpty()) return
@@ -3636,7 +3635,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             // Save pre-ride mode for "Stay Online" restoration (MUST be before stage change)
             stageBeforeRide = _uiState.value.stage
 
-            _uiState.value = _uiState.value.copy(isProcessingOffer = true)
+            updateRideSession { copy(isProcessingOffer = true) }
 
             // Include wallet pubkey for P2PK escrow - driver signs with wallet key, not Nostr key
             val walletPubKey = walletService?.getWalletPubKey()
@@ -3686,25 +3685,29 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 val paymentPath = PaymentPath.determine(riderMintUrl, driverMintUrl, request.paymentMethod)
                 Log.d(TAG, "PaymentPath (broadcast): $paymentPath (rider: $riderMintUrl, driver: $driverMintUrl)")
 
-                _uiState.value = _uiState.value.copy(
-                    stage = DriverStage.RIDE_ACCEPTED,
-                    isProcessingOffer = false,
-                    acceptedOffer = compatibleOffer,
-                    acceptedBroadcastRequest = request,  // Keep original for reference
-                    acceptanceEventId = eventId,
-                    confirmationEventId = null,  // CRITICAL: Clear old confirmation to prevent stale state
-                    pendingOffers = emptyList(),
-                    pendingBroadcastRequests = emptyList(),
-                    pinAttempts = 0,
-                    confirmationWaitStartMs = System.currentTimeMillis(),  // Start confirmation timer
-                    statusMessage = "Ride accepted! Waiting for rider confirmation...",
-                    // Multi-mint support
-                    paymentPath = paymentPath,
-                    riderMintUrl = riderMintUrl,
-                    crossMintPaymentComplete = false,  // Reset for new ride
-                    pendingDepositQuoteId = null,      // Reset pending deposit
-                    pendingDepositAmount = null
-                )
+                _uiState.update { current ->
+                    current.copy(
+                        stage = DriverStage.RIDE_ACCEPTED,
+                        statusMessage = "Ride accepted! Waiting for rider confirmation...",
+                        rideSession = current.rideSession.copy(
+                            isProcessingOffer = false,
+                            acceptedOffer = compatibleOffer,
+                            acceptedBroadcastRequest = request,  // Keep original for reference
+                            acceptanceEventId = eventId,
+                            confirmationEventId = null,  // CRITICAL: Clear old confirmation to prevent stale state
+                            pendingOffers = emptyList(),
+                            pendingBroadcastRequests = emptyList(),
+                            pinAttempts = 0,
+                            confirmationWaitStartMs = System.currentTimeMillis(),  // Start confirmation timer
+                            // Multi-mint support
+                            paymentPath = paymentPath,
+                            riderMintUrl = riderMintUrl,
+                            crossMintPaymentComplete = false,  // Reset for new ride
+                            pendingDepositQuoteId = null,      // Reset pending deposit
+                            pendingDepositAmount = null
+                        )
+                    )
+                }
 
                 // Update RoadFlare broadcaster to indicate on-ride status
                 updateRoadflareOnRideStatus(true)
@@ -3721,10 +3724,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 // Subscribe to rider profile to get their name for ride history
                 subscribeToRiderProfile(request.riderPubKey)
             } else {
-                _uiState.value = _uiState.value.copy(
-                    isProcessingOffer = false,
-                    error = "Failed to accept ride request"
-                )
+                _uiState.update { current ->
+                    current.copy(
+                        error = "Failed to accept ride request",
+                        rideSession = current.rideSession.copy(isProcessingOffer = false)
+                    )
+                }
             }
         }
     }
@@ -3762,7 +3767,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         var stateChanged = false
 
         // Prune stale broadcast requests
-        val currentRequests = _uiState.value.pendingBroadcastRequests
+        val currentRequests = _uiState.value.rideSession.pendingBroadcastRequests
         val freshRequests = currentRequests.filter { request ->
             val ageSeconds = currentTimeSeconds - request.createdAt
             val isFresh = ageSeconds <= maxRequestAgeSeconds
@@ -3773,7 +3778,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         // Prune stale direct offers
-        val currentOffers = _uiState.value.pendingOffers
+        val currentOffers = _uiState.value.rideSession.pendingOffers
         val freshOffers = currentOffers.filter { offer ->
             val ageSeconds = currentTimeSeconds - offer.createdAt
             val isFresh = ageSeconds <= maxRequestAgeSeconds
@@ -3794,10 +3799,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         if (stateChanged) {
-            _uiState.value = _uiState.value.copy(
+            updateRideSession { copy(
                 pendingBroadcastRequests = freshRequests,
                 pendingOffers = freshOffers
-            )
+            ) }
             // Update foreground service notification with total count
             val totalRequests = freshRequests.size + freshOffers.size
             DriverOnlineService.updateStatus(getApplication(), DriverStatus.Available(totalRequests))
@@ -3810,10 +3815,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      * Decline a broadcast ride request (remove from list without accepting).
      */
     fun declineBroadcastRequest(request: BroadcastRideOfferData) {
-        val currentRequests = _uiState.value.pendingBroadcastRequests
-        _uiState.value = _uiState.value.copy(
-            pendingBroadcastRequests = currentRequests.filter { it.eventId != request.eventId }
-        )
+        val currentRequests = _uiState.value.rideSession.pendingBroadcastRequests
+        updateRideSession { copy(pendingBroadcastRequests = currentRequests.filter { it.eventId != request.eventId }) }
         // Add to declined set to prevent it from showing again on refresh
         declinedOfferEventIds.add(request.eventId)
         Log.d(TAG, "Declined request ${request.eventId.take(8)}, total declined: ${declinedOfferEventIds.size}")
@@ -4150,6 +4153,64 @@ enum class PaymentStatus {
 }
 
 /**
+ * Ride-scoped state fields that are reset when a ride ends.
+ * Any field added here is automatically included in reset via `resetRideUiState()`.
+ *
+ * Fields classified by `resetRideUiState()` — every field it resets lives here.
+ */
+data class DriverRideSession(
+    // Active ride info
+    val acceptedOffer: RideOfferData? = null,
+    val acceptedBroadcastRequest: BroadcastRideOfferData? = null,
+    val acceptanceEventId: String? = null,
+    val confirmationEventId: String? = null,
+    val precisePickupLocation: Location? = null,
+    val preciseDestinationLocation: Location? = null,
+    val isProcessingOffer: Boolean = false,
+
+    // PIN verification
+    val pinAttempts: Int = 0,
+    val isAwaitingPinVerification: Boolean = false,
+    val pinVerificationTimedOut: Boolean = false,
+    val lastPinSubmissionEventId: String? = null,
+
+    // Confirmation wait
+    val confirmationWaitStartMs: Long? = null,
+
+    // Chat
+    val chatMessages: List<RideshareChatData> = emptyList(),
+    val isSendingMessage: Boolean = false,
+
+    // Guards
+    val isCancelling: Boolean = false,
+
+    // HTLC Escrow
+    val activePaymentHash: String? = null,
+    val activePreimage: String? = null,
+    val activeEscrowToken: String? = null,
+    val canSettleEscrow: Boolean = false,
+
+    // Multi-mint payment
+    val paymentPath: PaymentPath = PaymentPath.NO_PAYMENT,
+    val riderMintUrl: String? = null,
+    val crossMintPaymentComplete: Boolean = false,
+    val pendingDepositQuoteId: String? = null,
+    val pendingDepositAmount: Long? = null,
+
+    // Payment warning dialog
+    val showPaymentWarningDialog: Boolean = false,
+    val paymentWarningStatus: PaymentStatus? = null,
+
+    // Rider cancelled claim dialog
+    val showRiderCancelledClaimDialog: Boolean = false,
+    val riderCancelledFareAmount: Double? = null,
+
+    // Availability-lifecycle fields — included in session for reset completeness
+    val pendingOffers: List<RideOfferData> = emptyList(),
+    val pendingBroadcastRequests: List<BroadcastRideOfferData> = emptyList()
+)
+
+/**
  * UI state for driver mode.
  */
 data class DriverUiState(
@@ -4157,80 +4218,32 @@ data class DriverUiState(
     val stage: DriverStage = DriverStage.OFFLINE,
     val currentLocation: Location? = null,
     val lastBroadcastTime: Long? = null,
-    // Active vehicle for this driving session (shown to riders)
     val activeVehicle: Vehicle? = null,
-    // Search settings - default to expanded (20+ mile radius) for better coverage
     val expandedSearch: Boolean = true,
 
-    // Ride offers - Direct offers (legacy/advanced - only shown when AVAILABLE)
-    val pendingOffers: List<RideOfferData> = emptyList(),
-    // Ride offers - Broadcast requests (new primary flow)
-    val pendingBroadcastRequests: List<BroadcastRideOfferData> = emptyList(),
+    // Ride session (reset as a unit when ride ends)
+    val rideSession: DriverRideSession = DriverRideSession(),
+
     // Cached pickup routes for broadcast requests (keyed by eventId)
     val pickupRoutes: Map<String, RouteResult> = emptyMap(),
-    // Cached routes for direct offers (keyed by eventId)
-    val directOfferPickupRoutes: Map<String, RouteResult> = emptyMap(),  // Driver to pickup
-    val directOfferRideRoutes: Map<String, RouteResult> = emptyMap(),    // Pickup to destination
-    val isProcessingOffer: Boolean = false,
+    val directOfferPickupRoutes: Map<String, RouteResult> = emptyMap(),
+    val directOfferRideRoutes: Map<String, RouteResult> = emptyMap(),
 
-    // Active ride info
-    val acceptedOffer: RideOfferData? = null,                 // Compatible format for ride flow
-    val acceptedBroadcastRequest: BroadcastRideOfferData? = null, // Original broadcast data (if applicable)
-    val acceptanceEventId: String? = null,  // Our acceptance event (Kind 3174) for cleanup
-    val confirmationEventId: String? = null,
-    val precisePickupLocation: Location? = null,
-    val preciseDestinationLocation: Location? = null,  // Received via progressive reveal after PIN verified
-
-    // PIN verification (rider generates PIN, driver submits for verification)
-    val pinAttempts: Int = 0,                           // Number of PIN submission attempts
-    val isAwaitingPinVerification: Boolean = false,     // Waiting for rider to verify
-    val pinVerificationTimedOut: Boolean = false,       // True if verification timed out (show retry/cancel)
-    val lastPinSubmissionEventId: String? = null,       // Last PIN submission event ID
-
-    // Confirmation wait tracking (waiting for rider to confirm after accepting)
-    val confirmationWaitStartMs: Long? = null,          // When we started waiting for confirmation
-    val confirmationWaitDurationMs: Long = 30_000L,     // 30 seconds to wait for confirmation
-
-    // Chat (NIP-17 style private messaging)
-    val chatMessages: List<RideshareChatData> = emptyList(),
-    val isSendingMessage: Boolean = false,
+    // Confirmation wait duration (constant)
+    val confirmationWaitDurationMs: Long = 30_000L,
 
     // User identity
     val myPubKey: String = "",
-
-    // Rider profiles (for displaying name in history)
     val riderProfiles: Map<String, UserProfile> = emptyMap(),
 
     // UI
     val statusMessage: String = "Tap to go online",
     val error: String? = null,
 
-    // Guards for race condition prevention
-    val isCancelling: Boolean = false,  // Prevents concurrent cancel/arrive operations
+    // Slider reset (monotonic counter, never reset)
+    val sliderResetToken: Int = 0,
 
-    // HTLC Escrow state (NUT-14)
-    val activePaymentHash: String? = null,      // Payment hash from ride offer
-    val activePreimage: String? = null,         // Preimage received from rider after PIN verification
-    val activeEscrowToken: String? = null,      // HTLC token received from rider
-    val canSettleEscrow: Boolean = false,       // True when we have preimage + escrow token
-
-    // Multi-mint payment (Issue #13)
-    val paymentPath: PaymentPath = PaymentPath.NO_PAYMENT,  // How payment will be handled
-    val riderMintUrl: String? = null,                        // Rider's mint URL (from offer)
-    val crossMintPaymentComplete: Boolean = false,           // True when cross-mint bridge payment completed
-    val pendingDepositQuoteId: String? = null,               // Quote ID for cross-mint deposit (to claim tokens)
-    val pendingDepositAmount: Long? = null,                  // Amount for cross-mint deposit
-
-    // Payment warning dialog (shown when trying to complete without valid escrow)
-    val showPaymentWarningDialog: Boolean = false,
-    val paymentWarningStatus: PaymentStatus? = null,
-    val sliderResetToken: Int = 0,  // Increment to trigger slider reset (monotonic counter)
-
-    // Rider cancelled claim dialog (shown when rider cancels after PIN verification)
-    val showRiderCancelledClaimDialog: Boolean = false,
-    val riderCancelledFareAmount: Double? = null,  // Fare amount to potentially claim
-
-    // Wallet not set up warning (shown when going online without wallet configured)
+    // Wallet not set up warning
     val showWalletNotSetupWarning: Boolean = false,
     val pendingGoOnlineLocation: Location? = null,
     val pendingGoOnlineVehicle: Vehicle? = null

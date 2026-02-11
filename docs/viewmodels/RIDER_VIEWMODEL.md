@@ -1,7 +1,7 @@
 # RiderViewModel Reference
 
 **File**: `rider-app/src/main/java/com/ridestr/rider/viewmodels/RiderViewModel.kt`
-**Last Updated**: 2026-02-02
+**Last Updated**: 2026-02-11
 
 This document provides a complete reference of all functions, state fields, and subscriptions in RiderViewModel.
 
@@ -130,12 +130,13 @@ This document provides a complete reference of all functions, state fields, and 
 | `revealDestination(confId, driverPubKey)` | Share destination after PIN verified |
 | `checkAndRevealPrecisePickup(confId, driverLocation)` | Check distance and reveal if close |
 
-### State Reset (Phase 1 Consolidation)
+### State Reset (Phase 1 + Phase 3)
 
 | Function | Purpose |
 |----------|---------|
-| `resetRideUiState(stage, statusMessage, error?)` | Single authoritative reset for ALL ride-related UI fields. Called at every ride boundary. |
+| `resetRideUiState(stage, statusMessage, error?)` | Resets `rideSession` to defaults. Any new field added to `RiderRideSession` is automatically included. |
 | `closeAllRideSubscriptionsAndJobs()` | Close all ride subs + availability sub + cancel all jobs (superset) |
+| `updateRideSession { ... }` | Atomic helper for pure ride-session updates using `StateFlow.update {}` |
 
 ### Cleanup Functions
 
@@ -165,75 +166,51 @@ This document provides a complete reference of all functions, state fields, and 
 
 ---
 
-## State Fields (RiderUiState)
+## State Fields (RiderUiState + RiderRideSession)
 
-### Ride Identification
+### Outer RiderUiState (persistent across rides)
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `availableDrivers` | List | Nearby available drivers |
+| `driverProfiles` | Map | Cached driver profiles |
+| `pickupLocation` | Location? | Pickup coordinates |
+| `destination` | Location? | Destination coordinates |
+| `routeResult` | RouteResult? | Calculated route |
+| `fareEstimate` | Double | Fare in satoshis |
+| `fareEstimateWithFees` | Double | Fare with fees |
+| `isCalculatingRoute` | Boolean | Route calculation in progress |
+| `isRoutingReady` | Boolean | Routing engine ready |
+| `myPubKey` | String? | User's public key |
+| `statusMessage` | String | Status message to display |
+| `error` | String? | Error message to display |
+| `rideSession` | RiderRideSession | All ride-scoped state (see below) |
+
+### RiderRideSession (reset to defaults when ride ends)
 
 | Field | Type | Purpose |
 |-------|------|---------|
 | `rideStage` | RideStage | Current stage in ride flow |
-| `confirmationEventId` | String? | Canonical ride identifier |
 | `pendingOfferEventId` | String? | Event ID of pending offer |
 | `acceptance` | RideAcceptanceData? | Driver's acceptance data |
-
-### Driver Information
-
-| Field | Type | Purpose |
-|-------|------|---------|
-| `availableDrivers` | List<DriverAvailabilityData> | Nearby available drivers |
+| `confirmationEventId` | String? | Canonical ride identifier |
 | `selectedDriver` | DriverAvailabilityData? | Currently selected driver |
-| `driverProfiles` | Map<String, UserProfile> | Cached driver profiles |
-
-### Locations
-
-| Field | Type | Purpose |
-|-------|------|---------|
-| `pickupLocation` | Location? | Pickup coordinates |
-| `destinationLocation` | Location? | Destination coordinates |
-| `pickupAddress` | String? | Geocoded pickup address |
-| `destinationAddress` | String? | Geocoded destination address |
-| `precisePickupShared` | Boolean | Whether precise pickup sent |
-| `destinationShared` | Boolean | Whether destination sent |
-
-### Route & Fare
-
-| Field | Type | Purpose |
-|-------|------|---------|
-| `routeResult` | RouteResult? | Calculated route |
-| `fareEstimate` | Double | Fare in satoshis |
-| `displayCurrency` | DisplayCurrency | USD or SATS |
-
-### PIN Verification
-
-| Field | Type | Purpose |
-|-------|------|---------|
+| `isSendingOffer` | Boolean | Sending offer in progress |
+| `isConfirmingRide` | Boolean | Confirming ride in progress |
 | `pickupPin` | String? | 4-digit verification PIN |
-| `pinFailedAttempts` | Int | Failed verification count |
+| `pinAttempts` | Int | Failed verification count |
 | `pinVerified` | Boolean | Whether PIN verified |
-
-### Chat
-
-| Field | Type | Purpose |
-|-------|------|---------|
-| `chatMessages` | List<RideshareChatData> | Chat history |
-| `hasUnreadMessages` | Boolean | Unread message indicator |
-
-### UI State
-
-| Field | Type | Purpose |
-|-------|------|---------|
-| `isLoading` | Boolean | Loading indicator |
-| `statusMessage` | String? | Status message to display |
-| `errorMessage` | String? | Error message to display |
-| `directOfferTimedOut` | Boolean | Show retry options |
-| `isRoutingReady` | Boolean | Routing engine ready |
-
-### User Info
-
-| Field | Type | Purpose |
-|-------|------|---------|
-| `myPubKey` | String? | User's public key |
-| `myProfile` | UserProfile? | User's profile |
+| `chatMessages` | List | Chat history |
+| `precisePickupShared` | Boolean | Whether precise pickup sent |
+| `preciseDestinationShared` | Boolean | Whether destination sent |
+| `driverLocation` | Location? | Live driver location |
+| `activePreimage` | String? | HTLC preimage |
+| `activePaymentHash` | String? | HTLC payment hash |
+| `escrowToken` | String? | Escrow token |
+| `preimageShared` | Boolean | Whether preimage was shared |
+| `paymentPath` | PaymentPath | Same/cross mint |
+| `showDriverUnavailableDialog` | Boolean | Driver went offline dialog |
+| `showCancelWarningDialog` | Boolean | Cancel after PIN warning |
 
 ---
 

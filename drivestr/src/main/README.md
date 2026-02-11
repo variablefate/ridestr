@@ -175,11 +175,14 @@ Screen.MAIN_MAP → (go online) → VehiclePickerDialog (if multiple vehicles)
   - `acceptBroadcastRequest()` (line ~2798)
 - History actions: `status`, `location_update`, `pin_submit`, `settlement`
 
-### State Reset (Phase 1 Consolidation)
-- `resetRideUiState(stage, statusMessage, error?)` - Single authoritative reset for ALL ride fields. Called at every ride boundary.
-- `closeAllRideSubscriptionsAndJobs()` - Closes 4 ride subs + cancels 3 jobs (chat, confirmation timeout, pin verification timeout). Does NOT close offer/broadcast/deletion subs.
+### State Reset (Phase 1 + Phase 3 RideSession)
+- `DriverRideSession` data class holds ALL ride-scoped fields. Defined before `DriverUiState`.
+- `resetRideUiState(stage, statusMessage, error?)` resets to `DriverRideSession()` defaults — new fields automatically included.
+- `updateRideSession { ... }` helper uses atomic `StateFlow.update {}` for pure ride-session mutations.
+- `closeAllRideSubscriptionsAndJobs()` - Closes 4 ride subs + cancels 3 jobs. Does NOT close offer/broadcast/deletion subs.
 - All 8 ride-ending paths use `resetRideUiState()`: `cancelRide()`, `finishAndGoOnline()`, `handleConfirmationTimeout()`, `performCancellationCleanup()`, `completeRideInternal()` (partial), `cancelCurrentRide()`, PIN brute-force, `clearAcceptedOffer()`
-- Fields NOT reset (persist across rides): `currentLocation`, `activeVehicle`, `expandedSearch`, `myPubKey`, cached routes, dialog state
+- Outer `DriverUiState` persists across rides: `stage`, `currentLocation`, `activeVehicle`, `expandedSearch`, `myPubKey`, cached routes, `statusMessage`, `error`
+- UI reads: `uiState.rideSession.fieldName` for ride-scoped fields, `uiState.fieldName` for persistent fields
 
 ### Phantom Cancellation Bug Prevention
 The phantom cancellation bug was caused by not clearing history between rides.

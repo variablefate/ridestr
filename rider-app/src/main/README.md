@@ -211,10 +211,13 @@ Screen.RIDE_DETAIL → (from history) → Full ride details
 - `closeAllRideSubscriptionsAndJobs()` - Superset: closes all subs + availability sub + cancels all jobs. Used by all ride-ending paths.
 - `closeDriverAvailabilitySubscription()` - Clean up driver monitoring on acceptance/cancel
 
-### State Reset (Phase 1 Consolidation)
-- `resetRideUiState(stage, statusMessage, error?)` - Single authoritative reset for ALL ride fields. Called at every ride boundary.
-- All 5 ride-ending paths use this function: `clearRide()`, `handleDriverCancellation()`, `handleRideCompletion()` (partial), PIN brute force, `cancelOffer()` (handles both direct and broadcast cancellation)
-- Fields NOT reset (persist across rides): `availableDrivers`, `pickupLocation`, `destination`, `routeResult`, `fareEstimate`, `myPubKey`, dialog state
+### State Reset (Phase 1 + Phase 3 RideSession)
+- `RiderRideSession` data class holds ALL ride-scoped fields. Defined before `RiderUiState`.
+- `resetRideUiState(stage, statusMessage, error?)` resets to `RiderRideSession()` defaults — new fields automatically included.
+- `updateRideSession { ... }` helper uses atomic `StateFlow.update {}` for pure ride-session mutations.
+- All 5 ride-ending paths use `resetRideUiState()`: `clearRide()`, `handleDriverCancellation()`, `handleRideCompletion()` (partial), PIN brute force, `cancelOffer()`
+- Outer `RiderUiState` persists across rides: `availableDrivers`, `pickupLocation`, `destination`, `routeResult`, `fareEstimate`, `myPubKey`, `statusMessage`, `error`
+- UI reads: `uiState.rideSession.fieldName` for ride-scoped fields, `uiState.fieldName` for persistent fields
 
 ### Confirmation Flow Protection (January 2026)
 Race condition fix prevents duplicate confirmation events:

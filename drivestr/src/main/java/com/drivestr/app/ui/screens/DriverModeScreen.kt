@@ -296,10 +296,10 @@ fun DriverModeScreen(
     ChatBottomSheet(
         showSheet = showChatSheet,
         onDismiss = { showChatSheet = false },
-        messages = uiState.chatMessages,
+        messages = uiState.rideSession.chatMessages,
         myPubKey = uiState.myPubKey,
         otherPartyName = "Rider",
-        isSending = uiState.isSendingMessage,
+        isSending = uiState.rideSession.isSendingMessage,
         onSendMessage = { message ->
             viewModel.sendChatMessage(message)
         }
@@ -365,12 +365,12 @@ fun DriverModeScreen(
         }
 
         // Payment warning dialog (shown when trying to complete ride without payment)
-        if (uiState.showPaymentWarningDialog) {
-            val isWaiting = uiState.paymentWarningStatus == PaymentStatus.WAITING_FOR_PREIMAGE
+        if (uiState.rideSession.showPaymentWarningDialog) {
+            val isWaiting = uiState.rideSession.paymentWarningStatus == PaymentStatus.WAITING_FOR_PREIMAGE
 
             AlertDialog(
                 onDismissRequest = {
-                    if (!isWaiting) viewModel.dismissPaymentWarningDialog()
+                    viewModel.dismissPaymentWarningDialog()
                 },
                 icon = {
                     if (isWaiting) {
@@ -392,11 +392,11 @@ fun DriverModeScreen(
                 },
                 text = {
                     Text(when {
-                        uiState.paymentWarningStatus == PaymentStatus.WAITING_FOR_PREIMAGE ->
-                            "Waiting for payment to complete. This may take a moment for cross-mint bridge payments."
-                        uiState.paymentWarningStatus == PaymentStatus.MISSING_PREIMAGE ->
+                        uiState.rideSession.paymentWarningStatus == PaymentStatus.WAITING_FOR_PREIMAGE ->
+                            "Waiting for payment authorization from rider. This may take a moment."
+                        uiState.rideSession.paymentWarningStatus == PaymentStatus.MISSING_PREIMAGE ->
                             "Payment authorization not received from rider."
-                        uiState.paymentWarningStatus == PaymentStatus.MISSING_ESCROW_TOKEN ->
+                        uiState.rideSession.paymentWarningStatus == PaymentStatus.MISSING_ESCROW_TOKEN ->
                             "Escrow token not received. Payment cannot be claimed."
                         else -> "There was an issue with the payment."
                     })
@@ -409,11 +409,11 @@ fun DriverModeScreen(
                     }
                 },
                 dismissButton = {
-                    if (!isWaiting) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            TextButton(onClick = { viewModel.dismissPaymentWarningDialog() }) {
-                                Text("Go Back")
-                            }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(onClick = { viewModel.dismissPaymentWarningDialog() }) {
+                            Text("Go Back")
+                        }
+                        if (!isWaiting) {
                             TextButton(onClick = { viewModel.cancelRideDueToPaymentIssue() }) {
                                 Text("Cancel Ride", color = MaterialTheme.colorScheme.error)
                             }
@@ -464,7 +464,7 @@ fun DriverModeScreen(
         }
 
         // Rider cancelled claim dialog (shown when rider cancels after PIN verification)
-        if (uiState.showRiderCancelledClaimDialog) {
+        if (uiState.rideSession.showRiderCancelledClaimDialog) {
             AlertDialog(
                 onDismissRequest = { /* Don't dismiss on outside tap - require explicit choice */ },
                 icon = {
@@ -483,7 +483,7 @@ fun DriverModeScreen(
                         Text(
                             "The rider cancelled after payment was authorized."
                         )
-                        uiState.riderCancelledFareAmount?.let { fare ->
+                        uiState.rideSession.riderCancelledFareAmount?.let { fare ->
                             Text(
                                 "You can still claim the fare of ${String.format("%.0f", fare)} sats.",
                                 fontWeight = FontWeight.Medium
@@ -583,11 +583,11 @@ fun DriverModeScreen(
             DriverStage.RIDE_ACCEPTED -> {
                 RideAcceptedContent(
                     uiState = uiState,
-                    precisePickupLocation = uiState.precisePickupLocation,
+                    precisePickupLocation = uiState.rideSession.precisePickupLocation,
                     onStartRoute = { viewModel.startRouteToPickup() },
                     onCancel = { viewModel.cancelRide() },
                     onOpenChat = { showChatSheet = true },
-                    chatMessageCount = uiState.chatMessages.size,
+                    chatMessageCount = uiState.rideSession.chatMessages.size,
                     settingsManager = settingsManager,
                     priceService = viewModel.bitcoinPriceService
                 )
@@ -596,12 +596,12 @@ fun DriverModeScreen(
             DriverStage.EN_ROUTE_TO_PICKUP -> {
                 EnRouteContent(
                     uiState = uiState,
-                    precisePickupLocation = uiState.precisePickupLocation,
+                    precisePickupLocation = uiState.rideSession.precisePickupLocation,
                     autoOpenNavigation = autoOpenNavigation,
                     onArrived = { viewModel.arrivedAtPickup() },
                     onCancel = { viewModel.cancelRide() },
                     onOpenChat = { showChatSheet = true },
-                    chatMessageCount = uiState.chatMessages.size,
+                    chatMessageCount = uiState.rideSession.chatMessages.size,
                     settingsManager = settingsManager,
                     priceService = viewModel.bitcoinPriceService
                 )
@@ -613,7 +613,7 @@ fun DriverModeScreen(
                     onSubmitPin = { viewModel.submitPinForVerification(it) },
                     onCancel = { viewModel.cancelRide() },
                     onOpenChat = { showChatSheet = true },
-                    chatMessageCount = uiState.chatMessages.size
+                    chatMessageCount = uiState.rideSession.chatMessages.size
                 )
             }
 
@@ -624,7 +624,7 @@ fun DriverModeScreen(
                     onComplete = { viewModel.completeRide() },
                     onCancel = { viewModel.cancelRide() },
                     onOpenChat = { showChatSheet = true },
-                    chatMessageCount = uiState.chatMessages.size,
+                    chatMessageCount = uiState.rideSession.chatMessages.size,
                     settingsManager = settingsManager,
                     priceService = viewModel.bitcoinPriceService,
                     sliderResetToken = uiState.sliderResetToken
@@ -814,18 +814,18 @@ private fun RoadflareOnlyContent(
         }
 
         // Pending RoadFlare offers
-        if (uiState.pendingOffers.isNotEmpty()) {
+        if (uiState.rideSession.pendingOffers.isNotEmpty()) {
             Text(
                 text = "RoadFlare Requests",
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.padding(top = 8.dp)
             )
-            uiState.pendingOffers.forEach { offer ->
+            uiState.rideSession.pendingOffers.forEach { offer ->
                 RideOfferCard(
                     offer = offer,
                     pickupRoute = uiState.directOfferPickupRoutes[offer.eventId],
                     rideRoute = uiState.directOfferRideRoutes[offer.eventId],
-                    isProcessing = uiState.isProcessingOffer,
+                    isProcessing = uiState.rideSession.isProcessingOffer,
                     onAccept = { onAcceptOffer(offer) },
                     onDecline = { onDeclineOffer(offer) },
                     settingsManager = settingsManager,
@@ -889,12 +889,12 @@ private fun AvailableContent(
     // This is a UI-level safety net in addition to ViewModel cleanup
     val currentTimeSeconds = currentTimeMs / 1000
     val maxAgeSeconds = 2 * 60 // 2 minutes
-    val freshBroadcastRequests = uiState.pendingBroadcastRequests.filter { request ->
+    val freshBroadcastRequests = uiState.rideSession.pendingBroadcastRequests.filter { request ->
         (currentTimeSeconds - request.createdAt) < maxAgeSeconds
     }
 
     // Total requests count (filtered broadcast + direct)
-    val totalRequests = freshBroadcastRequests.size + uiState.pendingOffers.size
+    val totalRequests = freshBroadcastRequests.size + uiState.rideSession.pendingOffers.size
 
     // Online status card
     Card(
@@ -1024,7 +1024,7 @@ private fun AvailableContent(
                 BroadcastRideRequestCard(
                     request = request,
                     pickupRoute = uiState.pickupRoutes[request.eventId],
-                    isProcessing = uiState.isProcessingOffer,
+                    isProcessing = uiState.rideSession.isProcessingOffer,
                     onAccept = { onAcceptBroadcastRequest(request) },
                     onDecline = { onDeclineBroadcastRequest(request) },
                     settingsManager = settingsManager,
@@ -1033,21 +1033,21 @@ private fun AvailableContent(
             }
 
             // Show direct offers (legacy/advanced) if any
-            if (uiState.pendingOffers.isNotEmpty()) {
+            if (uiState.rideSession.pendingOffers.isNotEmpty()) {
                 item {
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Direct Requests (${uiState.pendingOffers.size})",
+                        text = "Direct Requests (${uiState.rideSession.pendingOffers.size})",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                items(uiState.pendingOffers) { offer ->
+                items(uiState.rideSession.pendingOffers) { offer ->
                     RideOfferCard(
                         offer = offer,
                         pickupRoute = uiState.directOfferPickupRoutes[offer.eventId],
                         rideRoute = uiState.directOfferRideRoutes[offer.eventId],
-                        isProcessing = uiState.isProcessingOffer,
+                        isProcessing = uiState.rideSession.isProcessingOffer,
                         onAccept = { onAcceptOffer(offer) },
                         onDecline = { onDeclineOffer(offer) },
                         settingsManager = settingsManager,
@@ -1071,7 +1071,7 @@ private fun RideAcceptedContent(
     priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
     val context = LocalContext.current
-    val offer = uiState.acceptedOffer ?: return
+    val offer = uiState.rideSession.acceptedOffer ?: return
 
     // Use precise pickup if available, otherwise fall back to approximate
     val pickup = precisePickupLocation ?: offer.approxPickup
@@ -1087,11 +1087,11 @@ private fun RideAcceptedContent(
     }
 
     // Confirmation countdown timer state
-    val startTime = uiState.confirmationWaitStartMs
+    val startTime = uiState.rideSession.confirmationWaitStartMs
     val duration = uiState.confirmationWaitDurationMs
     var progress by remember { mutableFloatStateOf(0f) }
     var remainingSeconds by remember { mutableIntStateOf((duration / 1000).toInt()) }
-    val showTimer = startTime != null && uiState.precisePickupLocation == null
+    val showTimer = startTime != null && uiState.rideSession.precisePickupLocation == null
 
     LaunchedEffect(startTime, showTimer) {
         if (startTime != null && showTimer) {
@@ -1287,7 +1287,7 @@ private fun EnRouteContent(
     priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
     val context = LocalContext.current
-    val offer = uiState.acceptedOffer ?: return
+    val offer = uiState.rideSession.acceptedOffer ?: return
 
     // Use precise pickup if available, otherwise fall back to approximate
     val pickup = precisePickupLocation ?: offer.approxPickup
@@ -1448,8 +1448,8 @@ private fun ArrivedAtPickupContent(
     var pinInput by remember { mutableStateOf("") }
 
     // Clear input when a new attempt is allowed (verification failed)
-    LaunchedEffect(uiState.pinAttempts) {
-        if (uiState.pinAttempts > 0 && !uiState.isAwaitingPinVerification) {
+    LaunchedEffect(uiState.rideSession.pinAttempts) {
+        if (uiState.rideSession.pinAttempts > 0 && !uiState.rideSession.isAwaitingPinVerification) {
             pinInput = ""
         }
     }
@@ -1491,12 +1491,12 @@ private fun ArrivedAtPickupContent(
             )
 
             // Show attempts remaining if any failed attempts
-            if (uiState.pinAttempts > 0) {
+            if (uiState.rideSession.pinAttempts > 0) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "${3 - uiState.pinAttempts} attempts remaining",
+                    text = "${3 - uiState.rideSession.pinAttempts} attempts remaining",
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (uiState.pinAttempts >= 2)
+                    color = if (uiState.rideSession.pinAttempts >= 2)
                         MaterialTheme.colorScheme.error
                     else
                         MaterialTheme.colorScheme.onSurfaceVariant
@@ -1515,7 +1515,7 @@ private fun ArrivedAtPickupContent(
                 },
                 label = { Text("Enter Rider's PIN") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
-                enabled = !uiState.isAwaitingPinVerification,
+                enabled = !uiState.rideSession.isAwaitingPinVerification,
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true
             )
@@ -1539,7 +1539,7 @@ private fun ArrivedAtPickupContent(
             Spacer(modifier = Modifier.height(8.dp))
 
             // Show timeout message if verification timed out
-            if (uiState.pinVerificationTimedOut) {
+            if (uiState.rideSession.pinVerificationTimedOut) {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     colors = CardDefaults.cardColors(
@@ -1577,10 +1577,10 @@ private fun ArrivedAtPickupContent(
                 onClick = {
                     onSubmitPin(pinInput)
                 },
-                enabled = pinInput.length == 4 && !uiState.isAwaitingPinVerification,
+                enabled = pinInput.length == 4 && !uiState.rideSession.isAwaitingPinVerification,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                if (uiState.isAwaitingPinVerification) {
+                if (uiState.rideSession.isAwaitingPinVerification) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(18.dp),
                         strokeWidth = 2.dp,
@@ -1588,7 +1588,7 @@ private fun ArrivedAtPickupContent(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("Verifying...")
-                } else if (uiState.pinVerificationTimedOut) {
+                } else if (uiState.rideSession.pinVerificationTimedOut) {
                     Icon(Icons.Default.Refresh, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("Retry PIN Verification")
@@ -1625,10 +1625,10 @@ private fun InRideContent(
     sliderResetToken: Int = 0  // Pass through to SlideToConfirm
 ) {
     val context = LocalContext.current
-    val offer = uiState.acceptedOffer ?: return
+    val offer = uiState.rideSession.acceptedOffer ?: return
 
     // Use precise destination if available, otherwise fall back to approximate
-    val destination = uiState.preciseDestinationLocation ?: offer.destination
+    val destination = uiState.rideSession.preciseDestinationLocation ?: offer.destination
 
     // Geocoding for destination address
     val geocodingService = remember { GeocodingService(context) }
@@ -1774,7 +1774,7 @@ private fun RideCompletedContent(
     settingsManager: SettingsManager,
     priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
-    val offer = uiState.acceptedOffer
+    val offer = uiState.rideSession.acceptedOffer
 
     Card(
         modifier = Modifier.fillMaxWidth(),

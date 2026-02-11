@@ -1,7 +1,7 @@
 # DriverViewModel Reference
 
 **File**: `drivestr/src/main/java/com/drivestr/app/viewmodels/DriverViewModel.kt`
-**Last Updated**: 2026-02-02
+**Last Updated**: 2026-02-11
 
 This document provides a complete reference of all functions, state fields, and subscriptions in DriverViewModel.
 
@@ -118,12 +118,13 @@ This document provides a complete reference of all functions, state fields, and 
 | `addStatusAction(status, location)` | Add status to history and publish |
 | `addPinSubmitAction(pin)` | Add PIN submission to history |
 
-### State Reset (Phase 1 Consolidation)
+### State Reset (Phase 1 + Phase 3)
 
 | Function | Purpose |
 |----------|---------|
-| `resetRideUiState(stage, statusMessage, error?)` | Single authoritative reset for ALL ride-related UI fields. Called at every ride boundary. |
+| `resetRideUiState(stage, statusMessage, error?)` | Resets `rideSession` to defaults. Any new field added to `DriverRideSession` is automatically included. |
 | `closeAllRideSubscriptionsAndJobs()` | Close 4 ride subs + cancel 3 jobs (superset for ride-ending paths) |
+| `updateRideSession { ... }` | Atomic helper for pure ride-session updates using `StateFlow.update {}` |
 
 ### Cleanup Functions
 
@@ -159,80 +160,57 @@ This document provides a complete reference of all functions, state fields, and 
 
 ---
 
-## State Fields (DriverUiState)
+## State Fields (DriverUiState + DriverRideSession)
 
-### Driver Status
+### Outer DriverUiState (persistent across rides)
 
 | Field | Type | Purpose |
 |-------|------|---------|
 | `stage` | DriverStage | Current stage in driver flow |
-| `isOnline` | Boolean | Whether driver is accepting rides |
 | `currentLocation` | Location? | Driver's GPS location |
-
-### Ride Identification
-
-| Field | Type | Purpose |
-|-------|------|---------|
-| `confirmationEventId` | String? | Canonical ride identifier |
-| `acceptedOffer` | RideOfferData? | Current accepted offer |
-| `pendingOffers` | List<RideOfferData> | Incoming ride offers |
-| `broadcastRequests` | List<RideBroadcastData> | Incoming broadcast requests |
-
-### Rider Information
-
-| Field | Type | Purpose |
-|-------|------|---------|
-| `riderPubKey` | String? | Current rider's public key |
-| `riderProfile` | UserProfile? | Current rider's profile |
-
-### Locations (Progressive Reveal)
-
-| Field | Type | Purpose |
-|-------|------|---------|
-| `pickupGeohash` | String? | Approximate pickup area |
-| `pickupLocation` | Location? | Precise pickup (after <1 mile) |
-| `destinationGeohash` | String? | Approximate destination area |
-| `destinationLocation` | Location? | Precise destination (after PIN) |
-
-### Fare & Earnings
-
-| Field | Type | Purpose |
-|-------|------|---------|
-| `fareEstimate` | Double | Fare in satoshis |
-| `todayEarnings` | Double | Today's earnings |
-| `weekEarnings` | Double | This week's earnings |
-| `monthEarnings` | Double | This month's earnings |
-| `displayCurrency` | DisplayCurrency | USD or SATS |
-
-### PIN Verification
-
-| Field | Type | Purpose |
-|-------|------|---------|
-| `submittedPin` | String? | PIN driver submitted |
-| `pinVerified` | Boolean | Whether PIN was verified |
-| `pinAttempts` | Int | Number of PIN attempts |
-
-### Chat
-
-| Field | Type | Purpose |
-|-------|------|---------|
-| `chatMessages` | List<RideshareChatData> | Chat history |
-| `hasUnreadMessages` | Boolean | Unread message indicator |
-
-### UI State
-
-| Field | Type | Purpose |
-|-------|------|---------|
-| `isLoading` | Boolean | Loading indicator |
-| `statusMessage` | String? | Status message to display |
-| `errorMessage` | String? | Error message to display |
-
-### User Info
-
-| Field | Type | Purpose |
-|-------|------|---------|
+| `lastBroadcastTime` | Long? | Last availability broadcast time |
+| `activeVehicle` | Vehicle? | Selected vehicle |
+| `expandedSearch` | Boolean | Expanded geohash search |
+| `pickupRoutes` | Map | Cached pickup routes |
+| `directOfferPickupRoutes` | Map | Direct offer pickup routes |
+| `directOfferRideRoutes` | Map | Direct offer ride routes |
+| `confirmationWaitDurationMs` | Long | Confirmation timeout duration |
 | `myPubKey` | String? | Driver's public key |
-| `myProfile` | UserProfile? | Driver's profile |
+| `riderProfiles` | Map | Cached rider profiles |
+| `statusMessage` | String | Status message to display |
+| `error` | String? | Error message to display |
+| `sliderResetToken` | Int | Token to reset slider UI |
+| `showWalletNotSetupWarning` | Boolean | Wallet setup dialog |
+| `rideSession` | DriverRideSession | All ride-scoped state (see below) |
+
+### DriverRideSession (reset to defaults when ride ends)
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `acceptedOffer` | RideOfferData? | Current accepted offer |
+| `acceptedBroadcastRequest` | BroadcastRideOfferData? | Original broadcast request |
+| `acceptanceEventId` | String? | Acceptance event ID |
+| `confirmationEventId` | String? | Canonical ride identifier |
+| `precisePickupLocation` | Location? | Precise pickup (after <1 mile) |
+| `preciseDestinationLocation` | Location? | Precise destination (after PIN) |
+| `isProcessingOffer` | Boolean | Processing offer flag |
+| `pinAttempts` | Int | Number of PIN attempts |
+| `isAwaitingPinVerification` | Boolean | Waiting for PIN response |
+| `pinVerificationTimedOut` | Boolean | PIN verification timed out |
+| `chatMessages` | List | Chat history |
+| `isSendingMessage` | Boolean | Sending message flag |
+| `isCancelling` | Boolean | Cancellation in progress |
+| `activePaymentHash` | String? | HTLC payment hash |
+| `activePreimage` | String? | HTLC preimage |
+| `activeEscrowToken` | String? | Escrow token |
+| `canSettleEscrow` | Boolean | Can claim payment |
+| `paymentPath` | PaymentPath | Same/cross mint |
+| `riderMintUrl` | String? | Rider's mint URL |
+| `crossMintPaymentComplete` | Boolean | Cross-mint bridge done |
+| `showPaymentWarningDialog` | Boolean | Payment warning dialog |
+| `showRiderCancelledClaimDialog` | Boolean | Cancellation claim dialog |
+| `pendingOffers` | List | Incoming ride offers |
+| `pendingBroadcastRequests` | List | Incoming broadcast requests |
 
 ---
 
