@@ -27,6 +27,7 @@ This document provides a complete reference of all functions, state fields, and 
 |----------|---------|----------------------|
 | `broadcastRideRequest()` | Send ride request to all nearby drivers | IDLE -> BROADCASTING_REQUEST |
 | `sendRideOffer(driver)` | Send direct ride offer to specific driver | IDLE -> WAITING_FOR_ACCEPTANCE |
+| `cancelOffer()` | Cancel pending offer or broadcast request | WAITING_FOR_ACCEPTANCE / BROADCASTING_REQUEST -> IDLE |
 | `clearRide()` | Cancel current ride and reset state | Any -> IDLE |
 | `boostFare()` | Increase fare offer by $1 or 1000 sats | Updates `fareEstimate` |
 | `retryRideRequest()` | Retry after timeout with same parameters | IDLE -> WAITING/BROADCASTING |

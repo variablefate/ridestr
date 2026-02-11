@@ -544,7 +544,7 @@ fun RiderModeScreen(
                     uiState = uiState,
                     onBoostFare = viewModel::boostFare,  // BROADCAST boost - creates public event
                     onContinueWaiting = viewModel::continueWaiting,
-                    onCancel = viewModel::cancelBroadcastRequest,
+                    onCancel = viewModel::cancelOffer,
                     settingsManager = settingsManager,
                     priceService = viewModel.bitcoinPriceService
                 )

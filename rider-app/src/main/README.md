@@ -93,7 +93,7 @@ Any active state → cancelRide() or driverCancelled() → IDLE
 | `sendRoadflareToAll()` | IDLE | WAITING_FOR_ACCEPTANCE | Kind 3173 (batch to all followed drivers, sorted by proximity, batches of 3) |
 | `autoConfirmRide()` | DRIVER_ACCEPTED | RIDE_CONFIRMED | Kind 3175 |
 | `handleDriverRideState()` | Various | Various | Receives Kind 30180 |
-| `cancelOffer()` | WAITING_FOR_ACCEPTANCE | IDLE | Cancels pending offer |
+| `cancelOffer()` | WAITING_FOR_ACCEPTANCE / BROADCASTING_REQUEST | IDLE | Cancels pending offer or broadcast request |
 | `cancelRide()` | Any active | IDLE | Kind 3179 |
 | `clearRiderStateHistory()` | - | - | **CRITICAL**: Must call when starting new ride |
 
@@ -213,7 +213,7 @@ Screen.RIDE_DETAIL → (from history) → Full ride details
 
 ### State Reset (Phase 1 Consolidation)
 - `resetRideUiState(stage, statusMessage, error?)` - Single authoritative reset for ALL ride fields. Called at every ride boundary.
-- All 6 ride-ending paths use this function: `clearRide()`, `handleDriverCancellation()`, `handleRideCompletion()` (partial), PIN brute force, `cancelOffer()`, `cancelBroadcastRequest()`
+- All 5 ride-ending paths use this function: `clearRide()`, `handleDriverCancellation()`, `handleRideCompletion()` (partial), PIN brute force, `cancelOffer()` (handles both direct and broadcast cancellation)
 - Fields NOT reset (persist across rides): `availableDrivers`, `pickupLocation`, `destination`, `routeResult`, `fareEstimate`, `myPubKey`, dialog state
 
 ### Confirmation Flow Protection (January 2026)
