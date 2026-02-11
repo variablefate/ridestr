@@ -2190,7 +2190,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     pickup = pickup, destination = destination,
                     fareEstimate = fareEstimate, rideRoute = routeResult,
                     preimage = preimage, paymentHash = paymentHash,
-                    paymentMethod = paymentMethod ?: "cashu",
+                    paymentMethod = paymentMethod,
                     isRoadflare = false, isBroadcast = true,
                     statusMessage = "Searching for drivers...",
                     roadflareTargetPubKey = null, roadflareTargetLocation = null
