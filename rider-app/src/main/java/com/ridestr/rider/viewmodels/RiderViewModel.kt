@@ -2425,16 +2425,6 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 // Driver may go offline after confirmation but before acknowledging.
                 // The availability subscription detects this and triggers cancellation.
 
-                // Subscribe to cancellation events from driver
-                subscribeToCancellation(eventId)
-
-                // Subscribe to driver ride state (Kind 30180) for status updates
-                subscribeToDriverRideState(eventId, acceptance.driverPubKey)
-
-                // Subscribe to chat messages for this ride
-                subscribeToChatMessages(eventId)
-                startChatRefreshJob(eventId)
-
                 // Start foreground service to keep process alive during ride
                 val driverName = _uiState.value.driverProfiles[acceptance.driverPubKey]?.bestName()?.split(" ")?.firstOrNull()
                 RiderActiveService.updateStatus(getApplication(), RiderStatus.DriverAccepted(driverName))
@@ -2455,6 +2445,14 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
                 // Save ride state for restart recovery
                 saveRideState()
+
+                // Subscribe AFTER state is set — handlers validate against
+                // rideSession.confirmationEventId, so early events would be
+                // rejected if confirmationEventId were still null.
+                subscribeToDriverRideState(eventId, acceptance.driverPubKey)
+                subscribeToChatMessages(eventId)
+                startChatRefreshJob(eventId)
+                subscribeToCancellation(eventId)
             } else {
                 _uiState.update { current ->
                     current.copy(
