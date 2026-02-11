@@ -59,6 +59,7 @@ class NostrService(context: Context, relays: List<String>) {
     private val cryptoHelper = NostrCryptoHelper(keyManager)
     private val profileBackupService = ProfileBackupService(relayManager, keyManager)
     private val roadflareDomainService = RoadflareDomainService(relayManager, keyManager)
+    private val rideshareDomainService = RideshareDomainService(relayManager, keyManager)
 }
 ```
 

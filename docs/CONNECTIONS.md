@@ -6,6 +6,7 @@ This document provides a comprehensive view of how all modules connect in the Ri
 
 **Phase 5 Changes (February 2026):**
 - NostrService split into domain services (facade pattern for backward compatibility)
+- RideshareDomainService extracted (22 ride protocol methods: offers, acceptance, confirmation, state, chat, cancellation)
 - CashuTokenCodec extracted from CashuBackend (stateless utilities)
 - Region comments added to CashuBackend and WalletService with HTLC invariants
 - Correlation ID logging for payment tracing (`[RIDE xxxxxxxx]` prefix)
@@ -567,6 +568,7 @@ Nostr Layer (Phase 5 Domain Decomposition)
 │   ├── Depends on: NostrCryptoHelper (encryption)
 │   ├── Depends on: ProfileBackupService (profile/history backup)
 │   ├── Depends on: RoadflareDomainService (RoadFlare events)
+│   ├── Depends on: RideshareDomainService (ride protocol events)
 │   ├── Used by: RiderViewModel, DriverViewModel
 │   ├── Used by: All SyncAdapters
 │   └── Used by: Nip60WalletSync
@@ -595,6 +597,19 @@ Nostr Layer (Phase 5 Domain Decomposition)
 │   ├── Location: publishRoadflareLocation(), subscribeToRoadflareLocations() (Kind 30014)
 │   ├── Keys: publishRoadflareKeyShare(), subscribeToRoadflareKeyShares() (Kind 3186)
 │   ├── Ack: publishRoadflareKeyAck(), subscribeToRoadflareKeyAcks() (Kind 3188)
+│   └── Used by: NostrService (delegation)
+│
+├── RideshareDomainService (~900 lines)
+│   ├── Depends on: RelayManager, KeyManager
+│   ├── Availability: broadcastAvailability(), subscribeToDrivers(), subscribeToDriverAvailability() (Kind 30173)
+│   ├── Offers: sendRideOffer(), broadcastRideRequest(), subscribeToBroadcastRideRequests(), subscribeToOffers() (Kind 3173)
+│   ├── Acceptance: acceptRide(), acceptBroadcastRide(), subscribeToAcceptance(), subscribeToAcceptancesForOffer() (Kind 3174)
+│   ├── Confirmation: confirmRide(), subscribeToConfirmation() (Kind 3175)
+│   ├── DriverState: publishDriverRideState(), subscribeToDriverRideState() (Kind 30180)
+│   ├── RiderState: publishRiderRideState(), subscribeToRiderRideState() (Kind 30181)
+│   ├── Chat: sendChatMessage(), subscribeToChatMessages() (Kind 3178)
+│   ├── Cancel: publishRideCancellation(), subscribeToCancellation() (Kind 3179)
+│   ├── Deletions: subscribeToRideRequestDeletions() (Kind 5)
 │   └── Used by: NostrService (delegation)
 │
 ├── RelayManager (connection pool)
@@ -938,6 +953,7 @@ private var connectionGeneration = 0L  // Increments on connect()
 | **NostrCryptoHelper** | `common/src/main/java/com/ridestr/common/nostr/NostrCryptoHelper.kt` |
 | **ProfileBackupService** | `common/src/main/java/com/ridestr/common/nostr/ProfileBackupService.kt` |
 | **RoadflareDomainService** | `common/src/main/java/com/ridestr/common/nostr/RoadflareDomainService.kt` |
+| **RideshareDomainService** | `common/src/main/java/com/ridestr/common/nostr/RideshareDomainService.kt` |
 | **WalletService** | `common/src/main/java/com/ridestr/common/payment/WalletService.kt` |
 | **CashuBackend** | `common/src/main/java/com/ridestr/common/payment/cashu/CashuBackend.kt` |
 | **CashuTokenCodec** | `common/src/main/java/com/ridestr/common/payment/cashu/CashuTokenCodec.kt` |

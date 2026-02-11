@@ -22,6 +22,7 @@ Technical reference for developers and AI agents working on the Ridestr codebase
 | Component | File | Purpose |
 |-----------|------|---------|
 | Nostr Service | `common/.../nostr/NostrService.kt` | Event publishing/subscription facade |
+| Rideshare Domain | `common/.../nostr/RideshareDomainService.kt` | Ride protocol (offers, state, chat, cancel) |
 | Event Kinds | `common/.../nostr/events/RideshareEventKinds.kt` | All kind constants |
 | Cashu Backend | `common/.../payment/cashu/CashuBackend.kt` | Mint operations (~2000 lines) |
 | Wallet Service | `common/.../payment/WalletService.kt` | Payment orchestration (~1500 lines) |

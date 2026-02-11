@@ -187,7 +187,7 @@ Use `closeAllRideSubscriptions()` to clean up.
 |---------|------|---------------|
 | Rider state | `RiderViewModel.kt` | `clearRiderStateHistory()`:340, `handleDriverRideState()` |
 | Driver state | `DriverViewModel.kt` | `clearDriverStateHistory()`:243, `handleRiderRideState()` |
-| State publishing | `NostrService.kt` | `publishDriverRideState()`, `publishRiderRideState()` |
+| State publishing | `RideshareDomainService.kt` | `publishDriverRideState()`, `publishRiderRideState()` |
 
 ### Event Handling
 
@@ -201,7 +201,7 @@ Use `closeAllRideSubscriptions()` to clean up.
 
 | Purpose | File | Functions |
 |---------|------|-----------|
-| Create subscriptions | `NostrService.kt` | `subscribeToDriverRideState()`, `subscribeToRiderRideState()` |
+| Create subscriptions | `RideshareDomainService.kt` | `subscribeToDriverRideState()`, `subscribeToRiderRideState()` |
 | Close subscriptions | ViewModels | `closeAllRideSubscriptions()` |
 
 ---
@@ -225,7 +225,7 @@ When debugging ride flow issues:
 ### Enable Verbose Logging
 
 Key tags to watch:
-- `NostrService` - Event publishing and subscription
+- `NostrService` / `RideshareDomainSvc` - Event publishing and subscription
 - `RiderViewModel` - Rider state changes
 - `DriverViewModel` - Driver state changes
 - `RelayManager` - Connection status

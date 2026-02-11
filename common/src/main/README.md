@@ -33,6 +33,7 @@ The `common` module contains all shared code used by both rider and driver apps:
 | `NostrCryptoHelper.kt` | NIP-44 encryption utilities | `encryptForUser()`, `decryptFromUser()`, `encryptLocationForRiderState()`, `decryptLocationFromRiderState()`, `encryptPinForDriverState()`, `decryptPinFromDriverState()` |
 | `ProfileBackupService.kt` | Profile & backup operations (Kind 0, 30174, 30177) | `publishProfile()`, `subscribeToProfile()`, `publishRideHistoryBackup()`, `fetchRideHistory()`, `publishProfileBackup()`, `fetchProfileBackup()` |
 | `RoadflareDomainService.kt` | RoadFlare operations (Kind 30011, 30012, 30014, 3186, 3187, 3188) | `publishFollowedDrivers()`, `fetchFollowedDrivers()`, `publishRoadflareLocation()`, `subscribeToRoadflareLocations()`, `publishRoadflareKeyShare()` |
+| `RideshareDomainService.kt` | Ride protocol operations (Kind 3173-3179, 30173, 30180-30181) | `sendRideOffer()`, `acceptRide()`, `confirmRide()`, `publishDriverRideState()`, `subscribeToChatMessages()`, `publishRideCancellation()` |
 | `relay/RelayManager.kt` | WebSocket connection pool, EOSE-aware subscriptions | `connectAll()`, `publish()`, `subscribe(onEose=...)`, `closeSubscription()` |
 | `relay/RelayConnection.kt` | Single relay connection | WebSocket lifecycle management |
 | `relay/RelayConfig.kt` | Configuration constants | Default relays, timeouts |
@@ -196,6 +197,7 @@ Reusable composables extracted from both apps' SettingsScreen files.
 | `NostrService` | `NostrCryptoHelper` | NIP-44 encryption | `cryptoHelper.encryptForUser()` |
 | `NostrService` | `ProfileBackupService` | Profile & backup operations | `profileBackupService.publishProfile()` |
 | `NostrService` | `RoadflareDomainService` | RoadFlare operations | `roadflareDomainService.publishRoadflareLocation()` |
+| `NostrService` | `RideshareDomainService` | Ride protocol operations | `rideshareDomainService.sendRideOffer()` |
 | `CashuBackend` | `CashuTokenCodec` | Token encoding/decoding | `CashuTokenCodec.encodeHtlcProofsAsToken()` |
 | `CashuBackend` | Cashu Mint (HTTP) | Token operations | `POST /v1/mint/quote` |
 | `Nip60WalletSync` | `NostrService` | Proof publishing | Kind 7375 events |

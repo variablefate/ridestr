@@ -18,7 +18,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 // GlobalScope removed - all decrypt coroutines now use caller-provided scope
@@ -51,6 +50,7 @@ class NostrService(
     private val cryptoHelper = NostrCryptoHelper(keyManager)
     private val profileBackupService = ProfileBackupService(relayManager, keyManager)
     private val roadflareDomainService = RoadflareDomainService(relayManager, keyManager)
+    private val rideshareDomainService = RideshareDomainService(relayManager, keyManager)
 
     /**
      * Connection states for all relays.
@@ -151,30 +151,7 @@ class NostrService(
         vehicle: Vehicle? = null,
         mintUrl: String? = null,
         paymentMethods: List<String> = listOf("cashu")
-    ): String? {
-        val signer = keyManager.getSigner()
-        if (signer == null) {
-            Log.e(TAG, "Cannot broadcast availability: Not logged in")
-            return null
-        }
-
-        return try {
-            val event = DriverAvailabilityEvent.create(
-                signer = signer,
-                location = location,
-                status = status,
-                vehicle = vehicle,
-                mintUrl = mintUrl,
-                paymentMethods = paymentMethods
-            )
-            relayManager.publish(event)
-            Log.d(TAG, "Broadcast availability: status=$status, location=${location != null}, vehicle=${vehicle?.shortName() ?: "none"} (${event.id})")
-            event.id
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to broadcast availability", e)
-            null
-        }
-    }
+    ): String? = rideshareDomainService.broadcastAvailability(location, status, vehicle, mintUrl, paymentMethods)
 
     /**
      * Request deletion of events (NIP-09).
@@ -611,30 +588,7 @@ class NostrService(
         walletPubKey: String? = null,
         mintUrl: String? = null,
         paymentMethod: String? = null
-    ): String? {
-        val signer = keyManager.getSigner()
-        if (signer == null) {
-            Log.e(TAG, "Cannot accept ride: Not logged in")
-            return null
-        }
-
-        return try {
-            val event = RideAcceptanceEvent.create(
-                signer = signer,
-                offerEventId = offer.eventId,
-                riderPubKey = offer.riderPubKey,
-                walletPubKey = walletPubKey,
-                mintUrl = mintUrl,
-                paymentMethod = paymentMethod
-            )
-            relayManager.publish(event)
-            Log.d(TAG, "Accepted ride: ${event.id}, mint: ${mintUrl ?: "none"}, method: ${paymentMethod ?: "none"}")
-            event.id
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to accept ride", e)
-            null
-        }
-    }
+    ): String? = rideshareDomainService.acceptRide(offer, walletPubKey, mintUrl, paymentMethod)
 
     // ==================== Driver Ride State (Kind 30180) ====================
 
@@ -659,32 +613,7 @@ class NostrService(
         finalFare: Long? = null,
         invoice: String? = null,
         lastTransitionId: String? = null
-    ): String? {
-        val signer = keyManager.getSigner()
-        if (signer == null) {
-            Log.e(TAG, "Cannot publish driver ride state: Not logged in")
-            return null
-        }
-
-        return try {
-            val event = DriverRideStateEvent.create(
-                signer = signer,
-                confirmationEventId = confirmationEventId,
-                riderPubKey = riderPubKey,
-                currentStatus = currentStatus,
-                history = history,
-                finalFare = finalFare,
-                invoice = invoice,
-                lastTransitionId = lastTransitionId
-            )
-            relayManager.publish(event)
-            Log.d(TAG, "Published driver ride state: ${event.id} ($currentStatus, ${history.size} actions)")
-            event.id
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to publish driver ride state", e)
-            null
-        }
-    }
+    ): String? = rideshareDomainService.publishDriverRideState(confirmationEventId, riderPubKey, currentStatus, history, finalFare, invoice, lastTransitionId)
 
     /**
      * Subscribe to driver ride state updates for a confirmed ride.
@@ -697,23 +626,7 @@ class NostrService(
         confirmationEventId: String,
         driverPubKey: String,
         onState: (DriverRideStateData) -> Unit
-    ): String? {
-        val myPubKey = keyManager.getPubKeyHex() ?: return null
-
-        // Subscribe to Kind 30180 events from the driver for this ride
-        // d-tag is the confirmation event ID
-        // NOTE: No timestamp filter - handlers validate event's confirmationEventId against current ride
-        return relayManager.subscribe(
-            kinds = listOf(RideshareEventKinds.DRIVER_RIDE_STATE),
-            authors = listOf(driverPubKey),
-            tags = mapOf("d" to listOf(confirmationEventId))
-        ) { event, _ ->
-            Log.d(TAG, "Received driver ride state ${event.id} from ${event.pubKey.take(8)}")
-            DriverRideStateEvent.parse(event, expectedDriverPubKey = driverPubKey)?.let { data ->
-                onState(data)
-            }
-        }
-    }
+    ): String? = rideshareDomainService.subscribeToDriverRideState(confirmationEventId, driverPubKey, onState)
 
     // ==================== Rider Ride State (Kind 30181) ====================
 
@@ -734,30 +647,7 @@ class NostrService(
         currentPhase: String,
         history: List<RiderRideAction>,
         lastTransitionId: String? = null
-    ): String? {
-        val signer = keyManager.getSigner()
-        if (signer == null) {
-            Log.e(TAG, "Cannot publish rider ride state: Not logged in")
-            return null
-        }
-
-        return try {
-            val event = RiderRideStateEvent.create(
-                signer = signer,
-                confirmationEventId = confirmationEventId,
-                driverPubKey = driverPubKey,
-                currentPhase = currentPhase,
-                history = history,
-                lastTransitionId = lastTransitionId
-            )
-            relayManager.publish(event)
-            Log.d(TAG, "Published rider ride state: ${event.id} ($currentPhase, ${history.size} actions)")
-            event.id
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to publish rider ride state", e)
-            null
-        }
-    }
+    ): String? = rideshareDomainService.publishRiderRideState(confirmationEventId, driverPubKey, currentPhase, history, lastTransitionId)
 
     /**
      * Subscribe to rider ride state updates for a confirmed ride.
@@ -770,22 +660,7 @@ class NostrService(
         confirmationEventId: String,
         riderPubKey: String,
         onState: (RiderRideStateData) -> Unit
-    ): String? {
-        val myPubKey = keyManager.getPubKeyHex() ?: return null
-
-        // Subscribe to Kind 30181 events from the rider for this ride
-        // d-tag is the confirmation event ID
-        return relayManager.subscribe(
-            kinds = listOf(RideshareEventKinds.RIDER_RIDE_STATE),
-            authors = listOf(riderPubKey),
-            tags = mapOf("d" to listOf(confirmationEventId))
-        ) { event, _ ->
-            Log.d(TAG, "Received rider ride state ${event.id} from ${event.pubKey.take(8)}")
-            RiderRideStateEvent.parse(event, expectedRiderPubKey = riderPubKey)?.let { data ->
-                onState(data)
-            }
-        }
-    }
+    ): String? = rideshareDomainService.subscribeToRiderRideState(confirmationEventId, riderPubKey, onState)
 
     /**
      * Encrypt a location for inclusion in rider ride state history.
@@ -896,38 +771,7 @@ class NostrService(
         mintUrl: String? = null,
         paymentMethod: String? = "cashu",
         isRoadflare: Boolean = false
-    ): String? {
-        val signer = keyManager.getSigner()
-        if (signer == null) {
-            Log.e(TAG, "Cannot send ride offer: Not logged in")
-            return null
-        }
-
-        return try {
-            val event = RideOfferEvent.create(
-                signer = signer,
-                driverAvailabilityEventId = driverAvailabilityEventId,
-                driverPubKey = driverPubKey,
-                pickup = pickup,
-                destination = destination,
-                fareEstimate = fareEstimate,
-                pickupRouteKm = pickupRouteKm,
-                pickupRouteMin = pickupRouteMin,
-                rideRouteKm = rideRouteKm,
-                rideRouteMin = rideRouteMin,
-                mintUrl = mintUrl,
-                paymentMethod = paymentMethod ?: "cashu",
-                isRoadflare = isRoadflare
-            )
-            relayManager.publish(event)
-            val offerType = if (isRoadflare) "RoadFlare" else "ride"
-            Log.d(TAG, "Sent $offerType offer to ${driverPubKey.take(16)}: ${event.id}, method: ${paymentMethod ?: "cashu"}")
-            event.id
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to send ride offer", e)
-            null
-        }
-    }
+    ): String? = rideshareDomainService.sendRideOffer(driverPubKey, driverAvailabilityEventId, pickup, destination, fareEstimate, pickupRouteKm, pickupRouteMin, rideRouteKm, rideRouteMin, mintUrl, paymentMethod, isRoadflare)
 
     /**
      * Confirm a ride with precise pickup location (encrypted).
@@ -942,30 +786,7 @@ class NostrService(
         precisePickup: Location,
         paymentHash: String? = null,
         escrowToken: String? = null
-    ): String? {
-        val signer = keyManager.getSigner()
-        if (signer == null) {
-            Log.e(TAG, "Cannot confirm ride: Not logged in")
-            return null
-        }
-
-        return try {
-            val event = RideConfirmationEvent.create(
-                signer = signer,
-                acceptanceEventId = acceptance.eventId,
-                driverPubKey = acceptance.driverPubKey,
-                precisePickup = precisePickup,
-                paymentHash = paymentHash,
-                escrowToken = escrowToken
-            )
-            relayManager.publish(event)
-            Log.d(TAG, "Confirmed ride: ${event.id}${paymentHash?.let { " with payment hash" } ?: ""}")
-            event.id
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to confirm ride", e)
-            null
-        }
-    }
+    ): String? = rideshareDomainService.confirmRide(acceptance, precisePickup, paymentHash, escrowToken)
 
     // ==================== Broadcast Ride Operations ====================
 
@@ -988,32 +809,7 @@ class NostrService(
         routeDurationMin: Double,
         mintUrl: String? = null,
         paymentMethod: String = "cashu"
-    ): String? {
-        val signer = keyManager.getSigner()
-        if (signer == null) {
-            Log.e(TAG, "Cannot broadcast ride request: Not logged in")
-            return null
-        }
-
-        return try {
-            val event = RideOfferEvent.createBroadcast(
-                signer = signer,
-                pickup = pickup,
-                destination = destination,
-                fareEstimate = fareEstimate,
-                routeDistanceKm = routeDistanceKm,
-                routeDurationMin = routeDurationMin,
-                mintUrl = mintUrl,
-                paymentMethod = paymentMethod
-            )
-            relayManager.publish(event)
-            Log.d(TAG, "Broadcast ride request: ${event.id} (fare=$fareEstimate sats, method=$paymentMethod)")
-            event.id
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to broadcast ride request", e)
-            null
-        }
-    }
+    ): String? = rideshareDomainService.broadcastRideRequest(pickup, destination, fareEstimate, routeDistanceKm, routeDurationMin, mintUrl, paymentMethod)
 
     /**
      * Subscribe to broadcast ride requests in an area (for drivers).
@@ -1028,32 +824,7 @@ class NostrService(
         location: Location,
         expandSearch: Boolean = false,
         onRequest: (BroadcastRideOfferData) -> Unit
-    ): String {
-        // Get geohashes for driver's area
-        val geohashes = Geohash.getSearchAreaGeohashes(location.lat, location.lon, expandSearch)
-        Log.d(TAG, "=== DRIVER SUBSCRIBING TO RIDE REQUESTS ===")
-        Log.d(TAG, "Driver location: ${location.lat}, ${location.lon}")
-        Log.d(TAG, "Expanded search: $expandSearch")
-        Log.d(TAG, "Geohash filter: $geohashes")
-
-        // Only get requests from last 5 minutes to avoid stale ones
-        val fiveMinutesAgo = (System.currentTimeMillis() / 1000) - (5 * 60)
-
-        return relayManager.subscribe(
-            kinds = listOf(RideshareEventKinds.RIDE_OFFER),
-            tags = mapOf(
-                "g" to geohashes,
-                "t" to listOf(RideOfferEvent.RIDE_REQUEST_TAG)  // Only broadcast requests
-            ),
-            since = fiveMinutesAgo
-        ) { event, _ ->
-            // Parse as broadcast offer (not direct)
-            RideOfferEvent.parseBroadcast(event)?.let { data ->
-                Log.d(TAG, "Received ride request ${event.id.take(8)} from ${event.pubKey.take(8)}, fare=${data.fareEstimate}")
-                onRequest(data)
-            }
-        }
-    }
+    ): String = rideshareDomainService.subscribeToBroadcastRideRequests(location, expandSearch, onRequest)
 
     /**
      * Subscribe to deletion events (NIP-09 Kind 5) for ride request event IDs.
@@ -1066,27 +837,7 @@ class NostrService(
     fun subscribeToRideRequestDeletions(
         eventIds: List<String>,
         onDeletion: (String) -> Unit
-    ): String? {
-        if (eventIds.isEmpty()) return null
-
-        Log.d(TAG, "Subscribing to deletion events for ${eventIds.size} ride requests")
-
-        return relayManager.subscribe(
-            kinds = listOf(DeletionEvent.KIND),
-            tags = mapOf("e" to eventIds)
-        ) { event, _ ->
-            // Extract which event IDs are being deleted
-            for (tag in event.tags) {
-                if (tag.getOrNull(0) == "e") {
-                    val deletedEventId = tag.getOrNull(1)
-                    if (deletedEventId != null && deletedEventId in eventIds) {
-                        Log.d(TAG, "Ride request deleted: ${deletedEventId.take(8)}")
-                        onDeletion(deletedEventId)
-                    }
-                }
-            }
-        }
-    }
+    ): String? = rideshareDomainService.subscribeToRideRequestDeletions(eventIds, onDeletion)
 
     /**
      * Accept a broadcast ride request.
@@ -1099,30 +850,7 @@ class NostrService(
         walletPubKey: String? = null,
         mintUrl: String? = null,
         paymentMethod: String? = null
-    ): String? {
-        val signer = keyManager.getSigner()
-        if (signer == null) {
-            Log.e(TAG, "Cannot accept broadcast ride: Not logged in")
-            return null
-        }
-
-        return try {
-            val event = RideAcceptanceEvent.create(
-                signer = signer,
-                offerEventId = request.eventId,
-                riderPubKey = request.riderPubKey,
-                walletPubKey = walletPubKey,
-                mintUrl = mintUrl,
-                paymentMethod = paymentMethod
-            )
-            relayManager.publish(event)
-            Log.d(TAG, "Accepted broadcast ride: ${event.id}, mint: ${mintUrl ?: "none"}, method: ${paymentMethod ?: "none"}")
-            event.id
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to accept broadcast ride", e)
-            null
-        }
-    }
+    ): String? = rideshareDomainService.acceptBroadcastRide(request, walletPubKey, mintUrl, paymentMethod)
 
     /**
      * Subscribe to acceptances for a broadcast ride request.
@@ -1136,17 +864,7 @@ class NostrService(
     fun subscribeToAcceptancesForOffer(
         offerEventId: String,
         onAcceptance: (RideAcceptanceData) -> Unit
-    ): String {
-        return relayManager.subscribe(
-            kinds = listOf(RideshareEventKinds.RIDE_ACCEPTANCE),
-            tags = mapOf("e" to listOf(offerEventId))
-        ) { event, _ ->
-            RideAcceptanceEvent.parse(event)?.let { data ->
-                Log.d(TAG, "Received acceptance for offer ${offerEventId.take(8)} from driver ${data.driverPubKey.take(8)}")
-                onAcceptance(data)
-            }
-        }
-    }
+    ): String = rideshareDomainService.subscribeToAcceptancesForOffer(offerEventId, onAcceptance)
 
     // ==================== Subscriptions ====================
 
@@ -1167,36 +885,7 @@ class NostrService(
         location: Location? = null,
         expandSearch: Boolean = false,
         onDriver: (DriverAvailabilityData) -> Unit
-    ): String {
-        val tags = mutableMapOf<String, List<String>>(
-            "t" to listOf(RideshareTags.RIDESHARE_TAG)
-        )
-
-        // If location provided, add geohash filters
-        location?.let {
-            val geohashes = Geohash.getSearchAreaGeohashes(it.lat, it.lon, expandSearch)
-            tags["g"] = geohashes  // Note: RelayManager adds # prefix automatically
-            Log.d(TAG, "=== RIDER SUBSCRIBING TO DRIVERS ===")
-            Log.d(TAG, "Rider location: ${it.lat}, ${it.lon}")
-            Log.d(TAG, "Expanded search: $expandSearch")
-            Log.d(TAG, "Geohash filter: $geohashes")
-        } ?: run {
-            Log.d(TAG, "=== RIDER SUBSCRIBING TO DRIVERS (no location filter) ===")
-        }
-
-        // Only get events from last 15 minutes to avoid stale drivers
-        val fifteenMinutesAgo = (System.currentTimeMillis() / 1000) - (15 * 60)
-
-        return relayManager.subscribe(
-            kinds = listOf(RideshareEventKinds.DRIVER_AVAILABILITY),
-            tags = tags,
-            since = fifteenMinutesAgo
-        ) { event, _ ->
-            DriverAvailabilityEvent.parse(event)?.let { data ->
-                onDriver(data)
-            }
-        }
-    }
+    ): String = rideshareDomainService.subscribeToDrivers(location, expandSearch, onDriver)
 
     /**
      * Subscribe to a specific driver's availability updates.
@@ -1208,25 +897,7 @@ class NostrService(
     fun subscribeToDriverAvailability(
         driverPubKey: String,
         onAvailability: (DriverAvailabilityData) -> Unit
-    ): String {
-        Log.d(TAG, "Subscribing to availability for driver ${driverPubKey.take(8)}")
-
-        // Align with STALE_DRIVER_TIMEOUT_MS (10 min) - drivers broadcast every ~5 min
-        // Using shorter window might miss valid availability events
-        val tenMinutesAgo = (System.currentTimeMillis() / 1000) - (10 * 60)
-
-        return relayManager.subscribe(
-            kinds = listOf(RideshareEventKinds.DRIVER_AVAILABILITY),
-            authors = listOf(driverPubKey),
-            tags = mapOf("t" to listOf(RideshareTags.RIDESHARE_TAG)),
-            since = tenMinutesAgo  // Filter out very old events from relay history
-        ) { event, _ ->
-            DriverAvailabilityEvent.parse(event)?.let { data ->
-                Log.d(TAG, "Driver ${driverPubKey.take(8)} availability: ${data.status}")
-                onAvailability(data)
-            }
-        }
-    }
+    ): String = rideshareDomainService.subscribeToDriverAvailability(driverPubKey, onAvailability)
 
     /**
      * Subscribe to ride offers for the current user (as driver).
@@ -1239,29 +910,7 @@ class NostrService(
     fun subscribeToOffers(
         scope: CoroutineScope,
         onOffer: (RideOfferData) -> Unit
-    ): String? {
-        val myPubKey = keyManager.getPubKeyHex() ?: return null
-        val signer = keyManager.getSigner() ?: return null
-
-        // Only get offers from last 10 minutes to avoid old requests
-        val tenMinutesAgo = (System.currentTimeMillis() / 1000) - (10 * 60)
-
-        return relayManager.subscribe(
-            kinds = listOf(RideshareEventKinds.RIDE_OFFER),
-            tags = mapOf("p" to listOf(myPubKey)),
-            since = tenMinutesAgo
-        ) { event, _ ->
-            // Direct offers are now encrypted - parse and decrypt
-            RideOfferEvent.parseEncrypted(event)?.let { encryptedData ->
-                scope.launch {
-                    RideOfferEvent.decrypt(signer, encryptedData)?.let { data ->
-                        Log.d(TAG, "Decrypted direct offer from ${data.riderPubKey.take(8)}")
-                        onOffer(data)
-                    }
-                }
-            }
-        }
-    }
+    ): String? = rideshareDomainService.subscribeToOffers(scope, onOffer)
 
     /**
      * Subscribe to ride acceptances for a specific direct offer.
@@ -1276,16 +925,7 @@ class NostrService(
         offerEventId: String,
         expectedDriverPubKey: String,
         onAcceptance: (RideAcceptanceData) -> Unit
-    ): String {
-        return relayManager.subscribe(
-            kinds = listOf(RideshareEventKinds.RIDE_ACCEPTANCE),
-            tags = mapOf("e" to listOf(offerEventId))
-        ) { event, _ ->
-            RideAcceptanceEvent.parse(event, expectedDriverPubKey = expectedDriverPubKey)?.let { data ->
-                onAcceptance(data)
-            }
-        }
-    }
+    ): String = rideshareDomainService.subscribeToAcceptance(offerEventId, expectedDriverPubKey, onAcceptance)
 
     /**
      * Subscribe to ride confirmations for a specific acceptance (driver listens for rider's confirmation).
@@ -1302,25 +942,7 @@ class NostrService(
         scope: CoroutineScope,
         expectedRiderPubKey: String,
         onConfirmation: (RideConfirmationData) -> Unit
-    ): String {
-        return relayManager.subscribe(
-            kinds = listOf(RideshareEventKinds.RIDE_CONFIRMATION),
-            tags = mapOf("e" to listOf(acceptanceEventId))
-        ) { event, _ ->
-            // Parse encrypted confirmation, validating sender matches expected rider
-            RideConfirmationEvent.parseEncrypted(event, expectedRiderPubKey = expectedRiderPubKey)?.let { encryptedData ->
-                // Decrypt using driver's key
-                val signer = keyManager.getSigner()
-                if (signer != null) {
-                    scope.launch {
-                        RideConfirmationEvent.decrypt(signer, encryptedData)?.let { data ->
-                            onConfirmation(data)
-                        }
-                    }
-                }
-            }
-        }
-    }
+    ): String = rideshareDomainService.subscribeToConfirmation(acceptanceEventId, scope, expectedRiderPubKey, onConfirmation)
 
     /**
      * Publish a ride cancellation event.
@@ -1333,28 +955,7 @@ class NostrService(
         confirmationEventId: String,
         otherPartyPubKey: String,
         reason: String? = null
-    ): String? {
-        val signer = keyManager.getSigner()
-        if (signer == null) {
-            Log.e(TAG, "Cannot publish cancellation: Not logged in")
-            return null
-        }
-
-        return try {
-            val event = RideCancellationEvent.create(
-                signer = signer,
-                confirmationEventId = confirmationEventId,
-                otherPartyPubKey = otherPartyPubKey,
-                reason = reason
-            )
-            relayManager.publish(event)
-            Log.d(TAG, "Published ride cancellation: ${event.id}")
-            event.id
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to publish cancellation", e)
-            null
-        }
-    }
+    ): String? = rideshareDomainService.publishRideCancellation(confirmationEventId, otherPartyPubKey, reason)
 
     /**
      * Subscribe to ride cancellation events for a confirmed ride.
@@ -1365,25 +966,7 @@ class NostrService(
     fun subscribeToCancellation(
         confirmationEventId: String,
         onCancellation: (RideCancellationData) -> Unit
-    ): String? {
-        val myPubKey = keyManager.getPubKeyHex() ?: return null
-
-        // Subscribe to Kind 3179 events addressed to us for this ride
-        // Filter by both p tag (recipient) and e tag (confirmation) for reliable delivery
-        // NOTE: No timestamp filter - handlers validate event's confirmationEventId against current ride
-        return relayManager.subscribe(
-            kinds = listOf(RideCancellationEvent.KIND),
-            tags = mapOf(
-                "p" to listOf(myPubKey),
-                "e" to listOf(confirmationEventId)
-            )
-        ) { event, _ ->
-            Log.d(TAG, "Received cancellation event ${event.id} from ${event.pubKey.take(8)}")
-            RideCancellationEvent.parse(event)?.let { data ->
-                onCancellation(data)
-            }
-        }
-    }
+    ): String? = rideshareDomainService.subscribeToCancellation(confirmationEventId, onCancellation)
 
     /**
      * Close a subscription.
@@ -1408,30 +991,7 @@ class NostrService(
         confirmationEventId: String,
         recipientPubKey: String,
         message: String
-    ): String? {
-        val signer = keyManager.getSigner()
-        if (signer == null) {
-            Log.e(TAG, "Cannot send chat message: Not logged in")
-            return null
-        }
-
-        return try {
-            // Create encrypted chat message (NIP-44)
-            val event = RideshareChatEvent.create(
-                signer = signer,
-                confirmationEventId = confirmationEventId,
-                recipientPubKey = recipientPubKey,
-                message = message
-            )
-
-            relayManager.publish(event)
-            Log.d(TAG, "Sent chat message: ${event.id} to ${recipientPubKey.take(8)}")
-            event.id
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to send chat message", e)
-            null
-        }
-    }
+    ): String? = rideshareDomainService.sendChatMessage(confirmationEventId, recipientPubKey, message)
 
     /**
      * Subscribe to private chat messages for the current user.
@@ -1446,38 +1006,7 @@ class NostrService(
         confirmationEventId: String? = null,
         scope: CoroutineScope,
         onMessage: (RideshareChatData) -> Unit
-    ): String? {
-        val myPubKey = keyManager.getPubKeyHex() ?: return null
-
-        // Subscribe to Kind 3178 chat events addressed to us
-        return relayManager.subscribe(
-            kinds = listOf(RideshareEventKinds.RIDESHARE_CHAT),
-            tags = mapOf("p" to listOf(myPubKey))
-        ) { event, _ ->
-            Log.d(TAG, "Received chat event ${event.id} from ${event.pubKey.take(8)}")
-
-            // Decrypt the message
-            val signer = keyManager.getSigner()
-            if (signer != null) {
-                scope.launch {
-                    try {
-                        RideshareChatEvent.parseAndDecrypt(signer, event)?.let { chatData ->
-                            // Filter by confirmation event if specified
-                            if (confirmationEventId == null ||
-                                chatData.confirmationEventId == confirmationEventId) {
-                                Log.d(TAG, "Decrypted chat message: ${chatData.message.take(20)}...")
-                                onMessage(chatData)
-                            } else {
-                                Log.d(TAG, "Ignoring chat for different ride: ${chatData.confirmationEventId.take(8)}")
-                            }
-                        }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed to decrypt chat message", e)
-                    }
-                }
-            }
-        }
-    }
+    ): String? = rideshareDomainService.subscribeToChatMessages(confirmationEventId, scope, onMessage)
 
     // ==================== Profile Operations ====================
 

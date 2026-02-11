@@ -44,16 +44,17 @@ Ridestr is a decentralized rideshare application built on the Nostr protocol. It
 
 ## Core Components
 
-### NostrService
+### NostrService (Facade)
 
 **File**: `common/src/main/java/com/ridestr/common/nostr/NostrService.kt`
 
-Central service for all Nostr operations:
+Facade for all Nostr operations, delegates to domain services:
 - Connection management to relays
-- Event publishing (all 9 event kinds)
-- Subscription management
-- NIP-44 encryption/decryption
-- Profile fetching
+- Event deletion and cleanup utilities
+- NIP-44 encryption/decryption (via NostrCryptoHelper)
+- Ride protocol (via RideshareDomainService)
+- Profile & backup (via ProfileBackupService)
+- RoadFlare (via RoadflareDomainService)
 
 ### RiderViewModel
 
@@ -170,7 +171,7 @@ All events have expiration tags to prevent relay bloat:
 |-----------|-------|---------|
 | RiderViewModel | ~2800 | Too large, hard to navigate |
 | DriverViewModel | ~2800 | Too large, hard to navigate |
-| NostrService | ~1500 | Manageable |
+| NostrService (facade) | ~1400 | Manageable (delegates to 4 domain services) |
 | **Total** | ~7100 | Needs simplification |
 
 ### Simplification Opportunities
