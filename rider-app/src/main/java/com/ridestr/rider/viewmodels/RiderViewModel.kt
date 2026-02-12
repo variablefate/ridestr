@@ -15,6 +15,7 @@ import com.ridestr.common.nostr.events.RideHistoryEntry
 import com.ridestr.common.location.GeocodingResult
 import com.ridestr.common.location.GeocodingService
 import com.ridestr.common.nostr.NostrService
+import com.ridestr.common.nostr.SubscriptionManager
 import com.ridestr.common.nostr.events.DriverAvailabilityData
 import com.ridestr.common.nostr.events.DriverRideAction
 import com.ridestr.common.nostr.events.DriverRideStateData
@@ -183,14 +184,21 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     private val _uiState = MutableStateFlow(RiderUiState())
     val uiState: StateFlow<RiderUiState> = _uiState.asStateFlow()
 
-    private var driverSubscriptionId: String? = null
-    private var acceptanceSubscriptionId: String? = null
-    private var chatSubscriptionId: String? = null
-    private var cancellationSubscriptionId: String? = null
-    // Driver ride state subscription (replaces pinSubmissionSubscriptionId and statusSubscriptionId)
-    private var driverRideStateSubscriptionId: String? = null
-    // Monitor selected driver's availability while waiting for acceptance
-    private var selectedDriverAvailabilitySubId: String? = null
+    private val subs = SubscriptionManager(nostrService::closeSubscription)
+
+    private object SubKeys {
+        const val DRIVERS = "drivers"
+        const val DRIVER_PROFILES = "driver_profiles"  // group
+        const val ACCEPTANCE = "acceptance"
+        const val CHAT = "chat"
+        const val CANCELLATION = "cancellation"
+        const val DRIVER_RIDE_STATE = "driver_ride_state"
+        const val SELECTED_DRIVER_AVAILABILITY = "selected_driver_availability"
+
+        val RIDE_BASE = arrayOf(CANCELLATION, DRIVER_RIDE_STATE, CHAT, ACCEPTANCE)
+        val RIDE_ALL = arrayOf(*RIDE_BASE, SELECTED_DRIVER_AVAILABILITY)
+    }
+
     // Track last seen timestamp for selected driver availability (reject out-of-order events)
     private var selectedDriverLastAvailabilityTimestamp: Long = 0L
     private var staleDriverCleanupJob: Job? = null
@@ -198,7 +206,6 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     private var acceptanceTimeoutJob: Job? = null
     private var broadcastTimeoutJob: Job? = null
     private var bridgePendingPollJob: Job? = null
-    private val profileSubscriptionIds = mutableMapOf<String, String>()
     private var currentSubscriptionGeohash: String? = null
     // First-acceptance-wins flag for broadcast mode
     private var hasAcceptedDriver: Boolean = false
@@ -289,18 +296,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      * CRITICAL: Call this before starting a new ride to prevent old events affecting the new ride.
      */
     private fun closeAllRideSubscriptions() {
-        cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
-        cancellationSubscriptionId = null
-
-        driverRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
-        driverRideStateSubscriptionId = null
-
-        chatSubscriptionId?.let { nostrService.closeSubscription(it) }
-        chatSubscriptionId = null
-
-        acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
-        acceptanceSubscriptionId = null
-
+        subs.closeAll(*SubKeys.RIDE_BASE)
         Log.d(TAG, "Closed all ride subscriptions before new ride")
     }
 
@@ -526,19 +522,13 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      * where availability monitoring must stay active.
      * Use this function for RIDE-ENDING paths where everything must stop.
      *
-     * Does NOT close: driverSubscriptionId (driver list), profileSubscriptionIds (profiles).
+     * Does NOT close: DRIVERS (driver list), DRIVER_PROFILES (profiles).
      * Those are managed by the driver discovery lifecycle, not ride lifecycle.
      */
     private fun closeAllRideSubscriptionsAndJobs() {
-        // Close the base ride subscriptions (cancellation, driverRideState, chat, acceptance)
-        closeAllRideSubscriptions()
-
-        // ADDITIONALLY close driver availability monitoring (not closed by base function)
-        selectedDriverAvailabilitySubId?.let { nostrService.closeSubscription(it) }
-        selectedDriverAvailabilitySubId = null
+        subs.closeAll(*SubKeys.RIDE_ALL)
         selectedDriverLastAvailabilityTimestamp = 0L
 
-        // Jobs
         stopChatRefreshJob()
         acceptanceTimeoutJob?.cancel()
         acceptanceTimeoutJob = null
@@ -926,7 +916,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      */
     private fun resubscribeToDrivers(clearExisting: Boolean = false) {
         // Close existing subscription
-        driverSubscriptionId?.let { nostrService.closeSubscription(it) }
+        subs.close(SubKeys.DRIVERS)
 
         if (clearExisting) {
             // Only clear when changing regions - drivers from old region are invalid
@@ -940,8 +930,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             // Close profile subscriptions
-            profileSubscriptionIds.values.forEach { nostrService.closeSubscription(it) }
-            profileSubscriptionIds.clear()
+            subs.closeGroup(SubKeys.DRIVER_PROFILES)
 
             // Clear receivedAt tracking (Fix 2 map cleanup)
             driverLastReceivedAt.clear()
@@ -2045,8 +2034,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             // Close old acceptance subscription
-            acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
-            acceptanceSubscriptionId = null
+            subs.close(SubKeys.ACCEPTANCE)
 
             // Update fare in state - reset timeout flag since we're boosting
             val newFareWithFeesDouble = newFare * (1 + FEE_BUFFER_PERCENT)
@@ -2238,8 +2226,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             // Close old acceptance subscription
-            acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
-            acceptanceSubscriptionId = null
+            subs.close(SubKeys.ACCEPTANCE)
 
             // Update fare in state - store actual sats boosted (not count)
             // Reset broadcastTimedOut AND broadcastStartTimeMs to prevent race condition with UI
@@ -2291,9 +2278,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      * First acceptance wins - subsequent ones are ignored.
      */
     private fun subscribeToAcceptancesForBroadcast(offerEventId: String) {
-        acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
-
-        acceptanceSubscriptionId = nostrService.subscribeToAcceptancesForOffer(offerEventId) { acceptance ->
+        subs.set(SubKeys.ACCEPTANCE, nostrService.subscribeToAcceptancesForOffer(offerEventId) { acceptance ->
             // First-acceptance-wins logic
             if (hasAcceptedDriver) {
                 Log.d(TAG, "Ignoring duplicate acceptance from ${acceptance.driverPubKey.take(8)} - already accepted")
@@ -2325,7 +2310,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
             // Auto-confirm the ride (send precise pickup location)
             autoConfirmRide(acceptance)
-        }
+        })
     }
 
     /**
@@ -2432,8 +2417,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
                 // Close acceptance subscription - we don't need it anymore
                 // This prevents duplicate acceptance events from affecting state
-                acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
-                acceptanceSubscriptionId = null
+                subs.close(SubKeys.ACCEPTANCE)
 
                 // Keep availability subscription OPEN - don't close until EN_ROUTE_PICKUP
                 // Driver may go offline after confirmation but before acknowledging.
@@ -2673,7 +2657,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         currentSubscriptionGeohash = filterLocation?.geohash(precision = 4)
         Log.d(TAG, "Subscribing to drivers - geohash: $currentSubscriptionGeohash, expanded: $expandSearch")
 
-        driverSubscriptionId = nostrService.subscribeToDrivers(filterLocation, expandSearch) { driver ->
+        subs.set(SubKeys.DRIVERS, nostrService.subscribeToDrivers(filterLocation, expandSearch) { driver ->
             Log.d(TAG, "Found driver: ${driver.driverPubKey.take(8)}... status=${driver.status}, methods=${driver.paymentMethods}")
 
             val currentDrivers = _uiState.value.availableDrivers.toMutableList()
@@ -2740,14 +2724,14 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 )
             }
-        }
+        })
     }
 
     /**
      * Subscribe to a driver's profile to get their name.
      */
     private fun subscribeToDriverProfile(driverPubKey: String) {
-        if (profileSubscriptionIds.containsKey(driverPubKey)) return
+        if (subs.groupContains(SubKeys.DRIVER_PROFILES, driverPubKey)) return
 
         val subId = nostrService.subscribeToProfile(driverPubKey) { profile ->
             Log.d(TAG, "Got profile for driver ${driverPubKey.take(8)}: ${profile.bestName()}")
@@ -2755,16 +2739,14 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             currentProfiles[driverPubKey] = profile
             _uiState.value = _uiState.value.copy(driverProfiles = currentProfiles)
         }
-        profileSubscriptionIds[driverPubKey] = subId
+        subs.setInGroup(SubKeys.DRIVER_PROFILES, driverPubKey, subId)
     }
 
     /**
      * Unsubscribe from a driver's profile.
      */
     private fun unsubscribeFromDriverProfile(driverPubKey: String) {
-        profileSubscriptionIds.remove(driverPubKey)?.let { subId ->
-            nostrService.closeSubscription(subId)
-        }
+        subs.closeInGroup(SubKeys.DRIVER_PROFILES, driverPubKey)
         // Also remove from cached profiles
         val currentProfiles = _uiState.value.driverProfiles.toMutableMap()
         currentProfiles.remove(driverPubKey)
@@ -2840,9 +2822,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun subscribeToAcceptance(offerEventId: String, expectedDriverPubKey: String) {
-        acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
-
-        acceptanceSubscriptionId = nostrService.subscribeToAcceptance(offerEventId, expectedDriverPubKey) { acceptance ->
+        subs.set(SubKeys.ACCEPTANCE, nostrService.subscribeToAcceptance(offerEventId, expectedDriverPubKey) { acceptance ->
             Log.d(TAG, "Driver accepted ride: ${acceptance.eventId}")
 
             // Cancel the acceptance timeout - driver responded
@@ -2869,7 +2849,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             } else {
                 Log.d(TAG, "Ignoring duplicate acceptance - already in stage ${_uiState.value.rideSession.rideStage}")
             }
-        }
+        })
     }
 
     /**
@@ -2882,7 +2862,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
         Log.d(TAG, "Monitoring availability for selected driver ${driverPubKey.take(8)}")
 
-        selectedDriverAvailabilitySubId = nostrService.subscribeToDriverAvailability(driverPubKey) { availability ->
+        subs.set(SubKeys.SELECTED_DRIVER_AVAILABILITY, nostrService.subscribeToDriverAvailability(driverPubKey) { availability ->
             // Reject out-of-order events - late OFFLINE events shouldn't override newer ONLINE
             if (availability.createdAt < selectedDriverLastAvailabilityTimestamp) {
                 Log.d(TAG, "Ignoring out-of-order availability event (${availability.createdAt} < $selectedDriverLastAvailabilityTimestamp)")
@@ -2919,7 +2899,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             }
-        }
+        })
     }
 
     /**
@@ -2927,10 +2907,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      * Also resets the timestamp guard to prevent stale events from affecting future subscriptions.
      */
     private fun closeDriverAvailabilitySubscription() {
-        selectedDriverAvailabilitySubId?.let {
-            nostrService.closeSubscription(it)
-            selectedDriverAvailabilitySubId = null
-        }
+        subs.close(SubKeys.SELECTED_DRIVER_AVAILABILITY)
         // Reset timestamp when subscription closes - new subscription should accept fresh events
         selectedDriverLastAvailabilityTimestamp = 0L
     }
@@ -3075,8 +3052,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 // Close acceptance subscription - we don't need it anymore
-                acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
-                acceptanceSubscriptionId = null
+                subs.close(SubKeys.ACCEPTANCE)
 
                 // Keep availability subscription OPEN - don't close until EN_ROUTE_PICKUP
                 // Driver may go offline after confirmation but before acknowledging.
@@ -3140,24 +3116,20 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         Log.w(TAG, "  For confirmationEventId: $confirmationEventId")
         Log.w(TAG, "  Current state confirmationEventId: ${_uiState.value.rideSession.confirmationEventId}")
         Log.w(TAG, "  Current rideStage: ${_uiState.value.rideSession.rideStage}")
-        Log.w(TAG, "  Old subscriptionId: $driverRideStateSubscriptionId")
-
-        driverRideStateSubscriptionId?.let {
-            Log.w(TAG, "  Closing old subscription: $it")
-            nostrService.closeSubscription(it)
-        }
+        Log.w(TAG, "  Old subscriptionId: ${subs.get(SubKeys.DRIVER_RIDE_STATE)}")
 
         Log.d(TAG, "Subscribing to driver ride state for confirmation: ${confirmationEventId.take(8)}")
 
-        driverRideStateSubscriptionId = nostrService.subscribeToDriverRideState(
+        val newSubId = nostrService.subscribeToDriverRideState(
             confirmationEventId = confirmationEventId,
             driverPubKey = driverPubKey
         ) { driverState ->
             handleDriverRideState(driverState, confirmationEventId, driverPubKey)
         }
+        subs.set(SubKeys.DRIVER_RIDE_STATE, newSubId)
 
-        if (driverRideStateSubscriptionId != null) {
-            Log.d(TAG, "Driver ride state subscription created: $driverRideStateSubscriptionId")
+        if (newSubId != null) {
+            Log.d(TAG, "Driver ride state subscription created: $newSubId")
         } else {
             Log.e(TAG, "Failed to create driver ride state subscription - not logged in?")
         }
@@ -3789,10 +3761,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      * Creates new subscription before closing old one to avoid gaps in message delivery.
      */
     private fun subscribeToChatMessages(confirmationEventId: String) {
-        val oldSubscriptionId = chatSubscriptionId
-
-        // Create new subscription FIRST (before closing old one to avoid gaps)
-        chatSubscriptionId = nostrService.subscribeToChatMessages(confirmationEventId, viewModelScope) { chatData ->
+        // Create new subscription FIRST — set() stores new before closing old (create-before-close)
+        val newId = nostrService.subscribeToChatMessages(confirmationEventId, viewModelScope) { chatData ->
             Log.d(TAG, "Received chat message from ${chatData.senderPubKey.take(8)}: ${chatData.message}")
 
             // Add to chat messages list
@@ -3818,9 +3788,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
-
-        // Now close old subscription (after new one is active)
-        oldSubscriptionId?.let { nostrService.closeSubscription(it) }
+        subs.set(SubKeys.CHAT, newId)
     }
 
     /**
@@ -3905,8 +3873,6 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      * Subscribe to ride cancellation events from the driver.
      */
     private fun subscribeToCancellation(confirmationEventId: String) {
-        cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
-
         Log.d(TAG, "Subscribing to cancellation events for confirmation: ${confirmationEventId.take(8)}")
 
         val newSubId = nostrService.subscribeToCancellation(confirmationEventId) { cancellation ->
@@ -3949,9 +3915,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             Log.w(TAG, "  >>> VALIDATION PASSED - processing cancellation (marked as processed) <<<")
             handleDriverCancellation(cancellation.reason)
         }
+        subs.set(SubKeys.CANCELLATION, newSubId)
 
         if (newSubId != null) {
-            cancellationSubscriptionId = newSubId
             Log.d(TAG, "Cancellation subscription created: $newSubId")
         } else {
             Log.e(TAG, "Failed to create cancellation subscription - not logged in?")
@@ -4137,7 +4103,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         Log.w(TAG, "  Reason: $reason")
         Log.w(TAG, "  Current confirmationEventId: ${_uiState.value.rideSession.confirmationEventId}")
         Log.w(TAG, "  Current rideStage: ${_uiState.value.rideSession.rideStage}")
-        Log.w(TAG, "  driverRideStateSubscriptionId: $driverRideStateSubscriptionId")
+        Log.w(TAG, "  driverRideStateSubscriptionId: ${subs.get(SubKeys.DRIVER_RIDE_STATE)}")
 
         // Synchronous cleanup
         closeAllRideSubscriptionsAndJobs()
@@ -4449,19 +4415,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         chatRefreshJob?.stop()
         acceptanceTimeoutJob?.cancel()
         broadcastTimeoutJob?.cancel()
-        driverSubscriptionId?.let { nostrService.closeSubscription(it) }
-        acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
-        selectedDriverAvailabilitySubId?.let { nostrService.closeSubscription(it) }
-        driverRideStateSubscriptionId?.let { nostrService.closeSubscription(it) }
-        chatSubscriptionId?.let { nostrService.closeSubscription(it) }
-        cancellationSubscriptionId?.let { nostrService.closeSubscription(it) }
-        // Close all profile subscriptions
-        profileSubscriptionIds.values.forEach { subId ->
-            nostrService.closeSubscription(subId)
-        }
-        profileSubscriptionIds.clear()
+        subs.closeAll()
         nostrService.disconnect()
-        // Clean up Bitcoin price service
         bitcoinPriceService.cleanup()
     }
 
