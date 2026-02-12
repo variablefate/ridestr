@@ -1,6 +1,6 @@
 # Ridestr Module Connections
 
-**Last Updated**: 2026-02-03 (Phase 6 Test Infrastructure)
+**Last Updated**: 2026-02-11 (Ride Flow Simplification Phase 4 - SubscriptionManager)
 
 This document provides a comprehensive view of how all modules connect in the Ridestr codebase. Use this as a reference when making changes to understand what might be affected.
 
@@ -12,10 +12,17 @@ This document provides a comprehensive view of how all modules connect in the Ri
 - Correlation ID logging for payment tracing (`[RIDE xxxxxxxx]` prefix)
 
 **Phase 6 Changes (February 2026):**
-- Payment test infrastructure: 181 unit tests with MockK + Robolectric
+- Payment test infrastructure: 204 unit tests with MockK + Robolectric
 - FakeMintApi for queuing mock swap/checkstate responses
 - CashuBackend test state injection (`setTestState()`, `testActiveKeyset`)
 - `MintUnreachable` error variant for distinguishing network failures from HTTP errors
+
+**Ride Flow Simplification Phase 4 (February 2026):**
+- SubscriptionManager extracted to `common/nostr/` — centralized subscription ID lifecycle
+- Replaces 10+ scattered nullable subscription ID variables in each ViewModel
+- SubKeys constants for type safety, auto-close on replace, group subscriptions
+- 23 unit tests in SubscriptionManagerTest.kt
+- Bug fix: `proceedGoOnline()` re-establishes DELETION watcher for pending items surviving offline→online
 
 ---
 
@@ -38,6 +45,7 @@ graph TB
     subgraph "Common Module"
         subgraph "Nostr Layer"
             NS[NostrService Facade]
+            SM[SubscriptionManager]
             NCH[NostrCryptoHelper]
             PBS[ProfileBackupService]
             RDS[RoadflareDomainService]
@@ -68,8 +76,10 @@ graph TB
     end
 
     RVM --> NS
+    RVM --> SM
     RVM --> WS
     DVM --> NS
+    DVM --> SM
     DVM --> WS
 
     NS --> NCH
@@ -513,7 +523,7 @@ Payment System (Phase 5 Reorganization)
 │   ├── Implementation: Nip60WalletSync
 │   └── Test Double: FakeNip60Store (in test sources)
 │
-├── Test Infrastructure (Phase 6 - 181 tests)
+├── Test Infrastructure (Phase 6 + Phase 4 - 204 tests)
 │   ├── FakeMintApi - Queue mock responses for swap/checkstate
 │   │   ├── queueSwapSuccess(), queueSwapHttpError(), queueSwapTransportFailure()
 │   │   └── queueCheckstateSuccess(), queueCheckstateHttpError()
@@ -525,14 +535,15 @@ Payment System (Phase 5 Reorganization)
 │   │   ├── Sets currentMintUrl, testActiveKeyset, walletSeed directly
 │   │   └── @VisibleForTesting annotation for safety
 │   ├── MainDispatcherRule - JUnit rule for Dispatchers.Main override
-│   ├── Test Files (181 tests total):
+│   ├── Test Files (204 tests total):
 │   │   ├── PaymentCryptoTest.kt (23) - Preimage/hash generation
 │   │   ├── CashuCryptoTest.kt (30) - hashToCurve, NUT-13, BIP-39
 │   │   ├── CashuTokenCodecTest.kt (30) - Token encoding/decoding
 │   │   ├── HtlcResultTest.kt (23) - Sealed class exhaustiveness
 │   │   ├── CashuBackendErrorTest.kt (32) - Error mapping with FakeMintApi
 │   │   ├── FakeNip60StoreTest.kt (32) - Mock NIP-60 API behavior
-│   │   └── ProofConservationTest.kt (10) - Proof safety invariants
+│   │   ├── ProofConservationTest.kt (10) - Proof safety invariants
+│   │   └── SubscriptionManagerTest.kt (23) - Subscription lifecycle, auto-close, groups
 │   └── Dependencies: MockK, Robolectric, androidx.test.core, kotlinx-coroutines-test
 │
 ├── CashuWebSocket (NUT-17 WebSocket subscriptions)
@@ -611,6 +622,14 @@ Nostr Layer (Phase 5 Domain Decomposition)
 │   ├── Cancel: publishRideCancellation(), subscribeToCancellation() (Kind 3179)
 │   ├── Deletions: subscribeToRideRequestDeletions() (Kind 5)
 │   └── Used by: NostrService (delegation)
+│
+├── SubscriptionManager (Phase 4 - subscription lifecycle)
+│   ├── Depends on: NostrService.closeSubscription() (callback)
+│   ├── Singular: set(), get(), close(), closeAll(vararg keys)
+│   ├── Groups: setInGroup(), closeInGroup(), closeGroup(), groupContains()
+│   ├── Thread-safe: synchronized lock, relay I/O outside lock
+│   ├── Auto-closes old subscription when setting new one for same key
+│   └── Used by: RiderViewModel (SubKeys: DRIVERS, ACCEPTANCE, CHAT, etc.), DriverViewModel (SubKeys: OFFERS, DELETION, etc.)
 │
 ├── RelayManager (connection pool)
 │   ├── Connects to: Nostr Relays (WebSocket)
@@ -954,6 +973,7 @@ private var connectionGeneration = 0L  // Increments on connect()
 | **ProfileBackupService** | `common/src/main/java/com/ridestr/common/nostr/ProfileBackupService.kt` |
 | **RoadflareDomainService** | `common/src/main/java/com/ridestr/common/nostr/RoadflareDomainService.kt` |
 | **RideshareDomainService** | `common/src/main/java/com/ridestr/common/nostr/RideshareDomainService.kt` |
+| **SubscriptionManager** | `common/src/main/java/com/ridestr/common/nostr/SubscriptionManager.kt` |
 | **WalletService** | `common/src/main/java/com/ridestr/common/payment/WalletService.kt` |
 | **CashuBackend** | `common/src/main/java/com/ridestr/common/payment/cashu/CashuBackend.kt` |
 | **CashuTokenCodec** | `common/src/main/java/com/ridestr/common/payment/cashu/CashuTokenCodec.kt` |

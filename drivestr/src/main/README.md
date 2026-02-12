@@ -179,10 +179,18 @@ Screen.MAIN_MAP → (go online) → VehiclePickerDialog (if multiple vehicles)
 - `DriverRideSession` data class holds ALL ride-scoped fields. Defined before `DriverUiState`.
 - `resetRideUiState(stage, statusMessage, error?)` resets to `DriverRideSession()` defaults — new fields automatically included.
 - `updateRideSession { ... }` helper uses atomic `StateFlow.update {}` for pure ride-session mutations.
-- `closeAllRideSubscriptionsAndJobs()` - Closes 4 ride subs + cancels 3 jobs. Does NOT close offer/broadcast/deletion subs.
+- `closeAllRideSubscriptionsAndJobs()` - Closes `SubKeys.RIDE_ALL` (4 ride subs) + cancels 3 jobs. Does NOT close offer/broadcast/deletion subs.
 - All 8 ride-ending paths use `resetRideUiState()`: `cancelRide()`, `finishAndGoOnline()`, `handleConfirmationTimeout()`, `performCancellationCleanup()`, `completeRideInternal()` (partial), `cancelCurrentRide()`, PIN brute-force, `clearAcceptedOffer()`
 - Outer `DriverUiState` persists across rides: `stage`, `currentLocation`, `activeVehicle`, `expandedSearch`, `myPubKey`, cached routes, `statusMessage`, `error`
 - UI reads: `uiState.rideSession.fieldName` for ride-scoped fields, `uiState.fieldName` for persistent fields
+
+### Subscription Management (Phase 4 SubscriptionManager)
+- All subscription IDs managed via `SubscriptionManager` instance (`subs`), replacing 10 scattered nullable variables.
+- `SubKeys` object defines constants: `OFFERS`, `ROADFLARE_OFFERS`, `BROADCAST_REQUESTS`, `DELETION`, `REQUEST_ACCEPTANCES` (group), `RIDER_PROFILES` (group), `CONFIRMATION`, `RIDER_RIDE_STATE`, `CHAT`, `CANCELLATION`
+- `subs.set(key, id)` auto-closes previous subscription for same key
+- `subs.setInGroup(key, entityId, id)` for per-entity subscriptions (rider profiles, request acceptances)
+- `subs.closeAll(*SubKeys.RIDE_ALL)` for ride cleanup; `subs.closeAll(*SubKeys.OFFER_ALL)` for offer cleanup
+- `proceedGoOnline()` calls `updateDeletionSubscription()` after re-subscribing to offers — ensures DELETION watcher covers any pending items that survived offline
 
 ### Phantom Cancellation Bug Prevention
 The phantom cancellation bug was caused by not clearing history between rides.

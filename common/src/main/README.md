@@ -34,6 +34,7 @@ The `common` module contains all shared code used by both rider and driver apps:
 | `ProfileBackupService.kt` | Profile & backup operations (Kind 0, 30174, 30177) | `publishProfile()`, `subscribeToProfile()`, `publishRideHistoryBackup()`, `fetchRideHistory()`, `publishProfileBackup()`, `fetchProfileBackup()` |
 | `RoadflareDomainService.kt` | RoadFlare operations (Kind 30011, 30012, 30014, 3186, 3187, 3188) | `publishFollowedDrivers()`, `fetchFollowedDrivers()`, `publishRoadflareLocation()`, `subscribeToRoadflareLocations()`, `publishRoadflareKeyShare()` |
 | `RideshareDomainService.kt` | Ride protocol operations (Kind 3173-3179, 30173, 30180-30181) | `sendRideOffer()`, `acceptRide()`, `confirmRide()`, `publishDriverRideState()`, `subscribeToChatMessages()`, `publishRideCancellation()` |
+| `SubscriptionManager.kt` | Centralized subscription ID lifecycle (singular + group) | `set()`, `get()`, `close()`, `closeAll()`, `setInGroup()`, `closeGroup()`, `groupContains()` |
 | `relay/RelayManager.kt` | WebSocket connection pool, EOSE-aware subscriptions | `connectAll()`, `publish()`, `subscribe(onEose=...)`, `closeSubscription()` |
 | `relay/RelayConnection.kt` | Single relay connection | WebSocket lifecycle management |
 | `relay/RelayConfig.kt` | Configuration constants | Default relays, timeouts |
@@ -213,6 +214,9 @@ Reusable composables extracted from both apps' SettingsScreen files.
 | `SettingsManager` | MainActivity | Auto-backup observer | `syncableSettingsHash` Flow triggers backup |
 | `WalletDetailScreen` | `WalletService` | Deposit/Withdraw | `walletService.requestDeposit()` |
 | `RelayManager` | Nostr Relays (WebSocket) | Event transport | WebSocket connections |
+| `SubscriptionManager` | `NostrService` | Subscription close callback | `closeSubscription: nostrService::closeSubscription` |
+| `SubscriptionManager` | `DriverViewModel` | Subscription lifecycle | `subs.set(SubKeys.OFFERS, id)`, `subs.closeAll(*SubKeys.RIDE_ALL)` |
+| `SubscriptionManager` | `RiderViewModel` | Subscription lifecycle | `subs.set(SubKeys.ACCEPTANCE, id)`, `subs.closeAll(*SubKeys.RIDE_ALL)` |
 | `RideStateMachine` | `DriverViewModel` | Transition validation | `stateMachine.processEvent(event, state, context)` |
 | `RideStateMachine` | `RiderViewModel` | Transition validation | `stateMachine.canTransition(state, "CONFIRM", context)` |
 | `RideGuards` | `RideContext` | Authorization evaluation | `Guards.isRider(context)` |
@@ -407,7 +411,7 @@ Protocol events now include payment method fields for multi-mint compatibility:
 
 ### Payment Test Infrastructure (February 2026)
 
-The payment module includes **181 unit tests** covering all error paths and proof conservation invariants.
+The payment module includes **204 unit tests** covering all error paths and proof conservation invariants.
 
 **Test Support in Production Code:**
 - `CashuBackend.setTestState(mintUrl, keyset, seed)` - Inject test state to bypass HTTP calls
@@ -428,6 +432,7 @@ The payment module includes **181 unit tests** covering all error paths and proo
 | `CashuBackendErrorTest.kt` | 32 | Error mapping with FakeMintApi |
 | `FakeNip60StoreTest.kt` | 32 | Mock NIP-60 API behavior |
 | `ProofConservationTest.kt` | 10 | Proof safety invariants |
+| `SubscriptionManagerTest.kt` | 23 | Subscription lifecycle, auto-close, groups |
 
 **Running Tests:**
 ```bash

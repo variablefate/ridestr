@@ -203,15 +203,22 @@ Screen.RIDE_DETAIL → (from history) → Full ride details
 - Called after PIN verification at pickup
 - Driver uses preimage to claim HTLC payment
 
-### Subscriptions
+### Subscriptions (Phase 4 SubscriptionManager)
+All subscription IDs managed via `SubscriptionManager` instance (`subs`), replacing 7 scattered nullable variables.
+
+**SubKeys:** `DRIVERS`, `DRIVER_PROFILES` (group), `ACCEPTANCE`, `CHAT`, `CANCELLATION`, `DRIVER_RIDE_STATE`, `SELECTED_DRIVER_AVAILABILITY`
+
+**Key subscription methods:**
 - `subscribeToDriverRideState()` - Watch driver's Kind 30180 events
 - `subscribeToAcceptances()` - Watch for Kind 3174 responses
 - `subscribeToSelectedDriverAvailability()` - Watch selected driver's Kind 30173 (Issue #22)
-- `closeAllRideSubscriptions()` - Close 4 ride subs (used by `confirmRide()` only — keeps availability sub open for Issue #22)
-- `closeAllRideSubscriptionsAndJobs()` - Superset: closes all subs + availability sub + cancels all jobs. Used by all ride-ending paths.
+
+**Cleanup tiers:**
+- `closeAllRideSubscriptions()` - Closes `SubKeys.RIDE_BASE` (4 subs: acceptance, cancellation, driver_ride_state, chat). Used by `confirmRide()` only — keeps `SELECTED_DRIVER_AVAILABILITY` open for Issue #22.
+- `closeAllRideSubscriptionsAndJobs()` - Closes `SubKeys.RIDE_ALL` (5 subs, includes availability) + cancels all jobs. Used by all ride-ending paths.
 - `closeDriverAvailabilitySubscription()` - Clean up driver monitoring on acceptance/cancel
 
-### State Reset (Phase 1 + Phase 3 RideSession)
+### State Reset (Phase 1 + Phase 3 RideSession + Phase 4 SubscriptionManager)
 - `RiderRideSession` data class holds ALL ride-scoped fields. Defined before `RiderUiState`.
 - `resetRideUiState(stage, statusMessage, error?)` resets to `RiderRideSession()` defaults — new fields automatically included.
 - `updateRideSession { ... }` helper uses atomic `StateFlow.update {}` for pure ride-session mutations.
