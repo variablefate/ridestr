@@ -2416,6 +2416,20 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 Log.d(TAG, "Confirmed ride: $eventId${state.rideSession.activePaymentHash?.let { " with payment hash" } ?: ""}")
                 myRideEventIds.add(eventId)  // Track for cleanup
 
+                // Guard: If ride was cancelled while we were suspended at confirmRide(),
+                // clearRide() already reset state to IDLE but couldn't publish cancellation
+                // (confirmationEventId was null in its snapshot). We must notify the driver.
+                if (_uiState.value.rideSession.rideStage != RideStage.DRIVER_ACCEPTED) {
+                    Log.w(TAG, "Ride cancelled during confirmation - publishing cancellation for $eventId")
+                    nostrService.publishRideCancellation(
+                        confirmationEventId = eventId,
+                        otherPartyPubKey = acceptance.driverPubKey,
+                        reason = "Rider cancelled"
+                    )?.let { myRideEventIds.add(it) }
+                    cleanupRideEventsInBackground("ride cancelled during confirmation")
+                    return@launch
+                }
+
                 // Close acceptance subscription - we don't need it anymore
                 // This prevents duplicate acceptance events from affecting state
                 acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
@@ -3045,6 +3059,20 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             if (eventId != null) {
                 Log.d(TAG, "Auto-confirmed ride: $eventId")
                 myRideEventIds.add(eventId)  // Track for cleanup
+
+                // Guard: If ride was cancelled while we were suspended at confirmRide(),
+                // clearRide() already reset state to IDLE but couldn't publish cancellation
+                // (confirmationEventId was null in its snapshot). We must notify the driver.
+                if (_uiState.value.rideSession.rideStage != RideStage.DRIVER_ACCEPTED) {
+                    Log.w(TAG, "Ride cancelled during confirmation - publishing cancellation for $eventId")
+                    nostrService.publishRideCancellation(
+                        confirmationEventId = eventId,
+                        otherPartyPubKey = acceptance.driverPubKey,
+                        reason = "Rider cancelled"
+                    )?.let { myRideEventIds.add(it) }
+                    cleanupRideEventsInBackground("ride cancelled during confirmation")
+                    return@launch
+                }
 
                 // Close acceptance subscription - we don't need it anymore
                 acceptanceSubscriptionId?.let { nostrService.closeSubscription(it) }
