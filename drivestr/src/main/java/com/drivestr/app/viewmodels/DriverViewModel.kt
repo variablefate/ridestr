@@ -837,6 +837,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         startBroadcasting(location)
         subscribeToBroadcastRequests(location)
         subscribeToOffers()
+        // Re-establish DELETION watcher for any pending offers/requests that survived offline
+        updateDeletionSubscription()
 
         if (wasRoadflareOnly) {
             // Close roadflare-only subscription (full subscribeToOffers replaces it)
