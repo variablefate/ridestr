@@ -1,6 +1,6 @@
 # Ridestr Module Connections
 
-**Last Updated**: 2026-02-11 (Ride Flow Simplification Phase 4 - SubscriptionManager)
+**Last Updated**: 2026-02-12 (Ride Flow Simplification Phase 6 - Double-Confirmation Race Guard)
 
 This document provides a comprehensive view of how all modules connect in the Ridestr codebase. Use this as a reference when making changes to understand what might be affected.
 
@@ -23,6 +23,17 @@ This document provides a comprehensive view of how all modules connect in the Ri
 - SubKeys constants for type safety, auto-close on replace, group subscriptions
 - 23 unit tests in SubscriptionManagerTest.kt
 - Bug fix: `proceedGoOnline()` re-establishes DELETION watcher for pending items surviving offline→online
+
+**Ride Flow Simplification Phase 5 (February 2026):**
+- Unified `acceptRide()` in DriverViewModel replaces duplicate `acceptOffer()` / `acceptBroadcastRequest()` flows
+
+**Ride Flow Simplification Phase 6 (February 2026):**
+- AtomicBoolean CAS guards prevent double-confirmation from concurrent multi-relay callbacks
+- `confirmationInFlight` guards `autoConfirmRide()` and `confirmRide()` (exactly one wins per ride)
+- `hasAcceptedDriver` converted to AtomicBoolean with `compareAndSet` for broadcast first-wins
+- Callback stage checks use `StateFlow.update {}` CAS with `shouldConfirm` re-derived at lambda top
+- Post-suspension guards check acceptance identity before stage (prevents cross-ride contamination)
+- try/catch with `CancellationException` rethrow wraps confirmation coroutines
 
 ---
 

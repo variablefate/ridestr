@@ -226,12 +226,15 @@ All subscription IDs managed via `SubscriptionManager` instance (`subs`), replac
 - Outer `RiderUiState` persists across rides: `availableDrivers`, `pickupLocation`, `destination`, `routeResult`, `fareEstimate`, `myPubKey`, `statusMessage`, `error`
 - UI reads: `uiState.rideSession.fieldName` for ride-scoped fields, `uiState.fieldName` for persistent fields
 
-### Confirmation Flow Protection (January 2026)
-Race condition fix prevents duplicate confirmation events:
-- `autoConfirmRide()` sets `isConfirmingRide = true` **before** launching coroutine (line 1844)
-- `confirmRide()` guards against `isConfirmingRide` and existing `confirmationEventId` (lines 1489-1498)
-- Both paths reset `isConfirmingRide = false` on success or failure
-- **Without this**: User could tap manual confirm during async auto-confirm, causing two Kind 3175 events with different IDs → rider/driver desync
+### Confirmation Flow Protection (Phase 6 — February 2026)
+Thread-safe race condition fix prevents duplicate confirmation from multi-relay delivery:
+- `confirmationInFlight` AtomicBoolean — `compareAndSet(false, true)` as very first operation in both `autoConfirmRide()` and `confirmRide()`. Only one IO thread wins.
+- `hasAcceptedDriver` AtomicBoolean — `compareAndSet` for broadcast first-acceptance-wins
+- Callback stage checks (`subscribeToAcceptance`, `handleBatchAcceptance`, `subscribeToAcceptancesForBroadcast`) use `StateFlow.update {}` CAS with `shouldConfirm` re-derived from `current` at lambda top
+- Post-suspension guards check acceptance identity FIRST (cross-ride), then stage (same-ride cancel)
+- try/catch with `CancellationException` rethrow wraps confirmation coroutines; catch guards reset with identity check
+- `isConfirmingRide` remains as UI spinner state; `confirmationInFlight` is the thread-safe mutex
+- **Without this**: Multi-relay delivery causes double HTLC lock, two Kind 3175 events, subscription mismatches
 
 ### Auto-Confirm UI (January 2026)
 - When driver accepts, rider UI shows ride summary with "Confirming ride..." spinner
