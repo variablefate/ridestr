@@ -102,8 +102,6 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         private const val MAX_RIDE_STATE_AGE_MS = 2 * 60 * 60 * 1000L
         // Route cache settings
         private const val LOCATION_CACHE_PRECISION = 3 // ~100m precision for cache key
-        private const val DRIVER_MOVEMENT_THRESHOLD_KM = 0.5 // Recalculate if driver moved >500m
-        private const val ROUTE_RECALC_THROTTLE_MS = 30 * 1000L // Min 30s between full recalculations
         // Location update throttling - don't spam relays with frequent updates
         private const val MIN_LOCATION_UPDATE_DISTANCE_M = 1000.0 // Min 1000m movement
         private const val MIN_LOCATION_UPDATE_INTERVAL_MS = 30 * 1000L // Min 30 seconds between updates
@@ -171,10 +169,6 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     // Map eventId -> cache key for UI state lookup
     private val eventToCacheKey = mutableMapOf<String, String>()
 
-    // Track the driver location used for each cached route (to invalidate on significant movement)
-    private var lastCacheDriverLocation: Location? = null
-    // Track last time we did a full route recalculation (throttle to avoid excessive recalcs)
-    private var lastRouteRecalcTimeMs: Long = 0
 
     private val _uiState = MutableStateFlow(DriverUiState())
     val uiState: StateFlow<DriverUiState> = _uiState.asStateFlow()
@@ -830,9 +824,6 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             pendingGoOnlineLocation = null,
             pendingGoOnlineVehicle = null
         )
-        // Initialize cache location tracker
-        lastCacheDriverLocation = location
-
         // Start availability broadcasting and full offer subscriptions
         resumeOfferSubscriptions(location)
 
@@ -1060,9 +1051,6 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             currentLocation = newLocation
         )
 
-        // Update cache location tracker for route calculations
-        lastCacheDriverLocation = newLocation
-
         // Track this broadcast for throttling
         lastBroadcastLocation = newLocation
         lastBroadcastTimeMs = System.currentTimeMillis()
@@ -1274,7 +1262,6 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         subscribeToOffers()
         updateDeletionSubscription()
     }
-
 
     fun acceptOffer(offer: RideOfferData) {
         viewModelScope.launch {
@@ -3162,16 +3149,6 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         val pLat = String.format("%.${LOCATION_CACHE_PRECISION}f", pickupLoc.lat)
         val pLon = String.format("%.${LOCATION_CACHE_PRECISION}f", pickupLoc.lon)
         return "$dLat,$dLon->$pLat,$pLon"
-    }
-
-
-    /**
-     * Clear all cached routes.
-     */
-    private fun clearRouteCache() {
-        locationRouteCache.clear()
-        eventToCacheKey.clear()
-        _uiState.value = _uiState.value.copy(pickupRoutes = emptyMap())
     }
 
     /**
