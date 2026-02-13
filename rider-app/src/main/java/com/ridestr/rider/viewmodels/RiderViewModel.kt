@@ -54,6 +54,8 @@ import com.ridestr.common.state.TransitionResult
 import com.ridestr.common.state.riderStageFromDriverStatus
 import com.ridestr.common.util.PeriodicRefreshJob
 import com.ridestr.common.util.RideHistoryBuilder
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -207,8 +209,12 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     private var broadcastTimeoutJob: Job? = null
     private var bridgePendingPollJob: Job? = null
     private var currentSubscriptionGeohash: String? = null
-    // First-acceptance-wins flag for broadcast mode
-    private var hasAcceptedDriver: Boolean = false
+    // First-acceptance-wins flag for broadcast mode (AtomicBoolean for thread safety)
+    private val hasAcceptedDriver = AtomicBoolean(false)
+    // Thread-safe guard: ensures exactly one confirmation per ride.
+    // compareAndSet(false, true) is atomic — only one caller wins across IO threads.
+    // Reset to false in resetRideUiState() and on confirmation failure.
+    private val confirmationInFlight = AtomicBoolean(false)
     // Track when we last received an event per driver (receivedAt, not createdAt)
     // Used for accurate staleness detection - network latency can make fresh events appear stale
     private val driverLastReceivedAt = mutableMapOf<String, Long>()
@@ -491,6 +497,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         statusMessage: String,
         error: String? = null
     ) {
+        confirmationInFlight.set(false)  // Allow confirmation for next ride
         _uiState.update { current ->
             current.copy(
                 rideSession = RiderRideSession(rideStage = stage),
@@ -1296,7 +1303,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         myRideEventIds.add(eventId)
 
         if (isBroadcast) {
-            hasAcceptedDriver = false
+            hasAcceptedDriver.set(false)
             subscribeToAcceptancesForBroadcast(eventId)
             startBroadcastTimeout()
             RiderActiveService.startSearching(getApplication())
@@ -1861,9 +1868,12 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         // NOTE: Don't close availability subscription yet - keep monitoring through DRIVER_ACCEPTED
         // in case driver goes offline before we send confirmation (Kind 3179 won't work without confId)
 
-        // Only process if we're still waiting
-        if (_uiState.value.rideSession.rideStage == RideStage.WAITING_FOR_ACCEPTANCE) {
-            _uiState.update { current ->
+        // Atomic stage transition: only proceed if still WAITING_FOR_ACCEPTANCE
+        // shouldConfirm is re-derived each CAS retry (StateFlow.update re-runs lambda on contention)
+        var shouldConfirm = false
+        _uiState.update { current ->
+            shouldConfirm = current.rideSession.rideStage == RideStage.WAITING_FOR_ACCEPTANCE
+            if (shouldConfirm) {
                 current.copy(
                     statusMessage = "Driver accepted! Confirming ride...",
                     rideSession = current.rideSession.copy(
@@ -1874,12 +1884,15 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                         roadflareTargetDriverLocation = null  // Clear stale location
                     )
                 )
+            } else {
+                current  // No change — someone else already transitioned
             }
+        }
 
-            // Auto-confirm the ride
-            viewModelScope.launch {
-                autoConfirmRide(acceptance)
-            }
+        if (shouldConfirm) {
+            autoConfirmRide(acceptance)
+        } else {
+            Log.d(TAG, "Ignoring batch acceptance - already in stage ${_uiState.value.rideSession.rideStage}")
         }
     }
 
@@ -2279,37 +2292,41 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      */
     private fun subscribeToAcceptancesForBroadcast(offerEventId: String) {
         subs.set(SubKeys.ACCEPTANCE, nostrService.subscribeToAcceptancesForOffer(offerEventId) { acceptance ->
-            // First-acceptance-wins logic
-            if (hasAcceptedDriver) {
+            // First-acceptance-wins logic (atomic CAS — only one thread proceeds)
+            if (!hasAcceptedDriver.compareAndSet(false, true)) {
                 Log.d(TAG, "Ignoring duplicate acceptance from ${acceptance.driverPubKey.take(8)} - already accepted")
                 return@subscribeToAcceptancesForOffer
             }
 
-            // Only process if we're still broadcasting
-            if (_uiState.value.rideSession.rideStage != RideStage.BROADCASTING_REQUEST) {
-                Log.d(TAG, "Ignoring acceptance - not in broadcasting stage (stage=${_uiState.value.rideSession.rideStage})")
-                return@subscribeToAcceptancesForOffer
-            }
-
             Log.d(TAG, "First driver accepted! ${acceptance.driverPubKey.take(8)}")
-            hasAcceptedDriver = true
 
             // Cancel the timeout
             cancelBroadcastTimeout()
 
+            // Atomic stage transition: only proceed if still BROADCASTING_REQUEST
+            // shouldConfirm is re-derived each CAS retry (StateFlow.update re-runs lambda on contention)
+            var shouldConfirm = false
             _uiState.update { current ->
-                current.copy(
-                    statusMessage = "Driver accepted! Confirming ride...",
-                    rideSession = current.rideSession.copy(
-                        acceptance = acceptance,
-                        rideStage = RideStage.DRIVER_ACCEPTED,
-                        broadcastStartTimeMs = null
+                shouldConfirm = current.rideSession.rideStage == RideStage.BROADCASTING_REQUEST
+                if (shouldConfirm) {
+                    current.copy(
+                        statusMessage = "Driver accepted! Confirming ride...",
+                        rideSession = current.rideSession.copy(
+                            acceptance = acceptance,
+                            rideStage = RideStage.DRIVER_ACCEPTED,
+                            broadcastStartTimeMs = null
+                        )
                     )
-                )
+                } else {
+                    current  // No change — someone else already transitioned
+                }
             }
 
-            // Auto-confirm the ride (send precise pickup location)
-            autoConfirmRide(acceptance)
+            if (shouldConfirm) {
+                autoConfirmRide(acceptance)
+            } else {
+                Log.d(TAG, "Ignoring acceptance - not in broadcasting stage (stage=${_uiState.value.rideSession.rideStage})")
+            }
         })
     }
 
@@ -2370,14 +2387,14 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         val acceptance = state.rideSession.acceptance ?: return
         val pickup = state.pickupLocation ?: return
 
-        // CRITICAL: Prevent duplicate confirmations
-        // autoConfirmRide() runs async, so user could tap confirm button during that window
-        if (state.rideSession.isConfirmingRide) {
-            Log.d(TAG, "Ignoring confirmRide - already confirming")
+        // Atomic guard: prevents overlap with autoConfirmRide() and duplicate relay callbacks
+        if (!confirmationInFlight.compareAndSet(false, true)) {
+            Log.d(TAG, "Ignoring confirmRide — confirmation already in flight or completed")
             return
         }
         if (state.rideSession.confirmationEventId != null) {
             Log.d(TAG, "Ignoring confirmRide - already confirmed: ${state.rideSession.confirmationEventId.take(8)}")
+            confirmationInFlight.set(false)
             return
         }
 
@@ -2386,77 +2403,111 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         closeAllRideSubscriptions()
 
         viewModelScope.launch {
-            updateRideSession { copy(isConfirmingRide = true) }
+            try {
+                updateRideSession { copy(isConfirmingRide = true) }
 
-            // Pass paymentHash in confirmation (moved from offer for correct HTLC timing)
-            // Manual path doesn't have escrow locked yet, so escrowToken is null
-            val eventId = nostrService.confirmRide(
-                acceptance = acceptance,
-                precisePickup = pickup,
-                paymentHash = state.rideSession.activePaymentHash,
-                escrowToken = null  // Manual path doesn't lock escrow
-            )
+                // Pass paymentHash in confirmation (moved from offer for correct HTLC timing)
+                // Manual path doesn't have escrow locked yet, so escrowToken is null
+                val eventId = nostrService.confirmRide(
+                    acceptance = acceptance,
+                    precisePickup = pickup,
+                    paymentHash = state.rideSession.activePaymentHash,
+                    escrowToken = null  // Manual path doesn't lock escrow
+                )
 
-            if (eventId != null) {
-                Log.d(TAG, "Confirmed ride: $eventId${state.rideSession.activePaymentHash?.let { " with payment hash" } ?: ""}")
-                myRideEventIds.add(eventId)  // Track for cleanup
+                if (eventId != null) {
+                    Log.d(TAG, "Confirmed ride: $eventId${state.rideSession.activePaymentHash?.let { " with payment hash" } ?: ""}")
+                    myRideEventIds.add(eventId)  // Track for cleanup
 
-                // Guard: If ride was cancelled while we were suspended at confirmRide(),
-                // clearRide() already reset state to IDLE but couldn't publish cancellation
-                // (confirmationEventId was null in its snapshot). We must notify the driver.
-                if (_uiState.value.rideSession.rideStage != RideStage.DRIVER_ACCEPTED) {
-                    Log.w(TAG, "Ride cancelled during confirmation - publishing cancellation for $eventId")
-                    nostrService.publishRideCancellation(
-                        confirmationEventId = eventId,
-                        otherPartyPubKey = acceptance.driverPubKey,
-                        reason = "Rider cancelled"
-                    )?.let { myRideEventIds.add(it) }
-                    cleanupRideEventsInBackground("ride cancelled during confirmation")
-                    return@launch
-                }
+                    // Guard: If ride was cancelled while we were suspended at confirmRide(),
+                    // check acceptance identity FIRST (cross-ride), then stage (same-ride cancel).
+                    val currentAcceptance = _uiState.value.rideSession.acceptance
+                    if (currentAcceptance?.eventId != acceptance.eventId) {
+                        // Case 1: Different ride (or no ride) is now active — targeted cancel only.
+                        // DO NOT run cleanupRideEventsInBackground() — it deletes ALL rideshare events
+                        // by author (not ride-scoped), which would nuke the new ride's live events.
+                        Log.w(TAG, "Stale confirmation from previous ride - " +
+                            "expected acceptance=${acceptance.eventId.take(8)}, " +
+                            "current=${currentAcceptance?.eventId?.take(8)}")
+                        nostrService.publishRideCancellation(
+                            confirmationEventId = eventId,
+                            otherPartyPubKey = acceptance.driverPubKey,
+                            reason = "Rider cancelled"
+                        )?.let { myRideEventIds.add(it) }
+                        // No global cleanup, no confirmationInFlight reset (new ride owns it now)
+                        return@launch
+                    } else if (_uiState.value.rideSession.rideStage != RideStage.DRIVER_ACCEPTED) {
+                        // Case 2: Same ride, but user cancelled while we were suspended.
+                        // Safe to run global cleanup — no other ride is active.
+                        Log.w(TAG, "Ride cancelled during confirmation - publishing cancellation for $eventId")
+                        nostrService.publishRideCancellation(
+                            confirmationEventId = eventId,
+                            otherPartyPubKey = acceptance.driverPubKey,
+                            reason = "Rider cancelled"
+                        )?.let { myRideEventIds.add(it) }
+                        cleanupRideEventsInBackground("ride cancelled during confirmation")
+                        confirmationInFlight.set(false)
+                        return@launch
+                    }
 
-                // Close acceptance subscription - we don't need it anymore
-                // This prevents duplicate acceptance events from affecting state
-                subs.close(SubKeys.ACCEPTANCE)
+                    // Close acceptance subscription - we don't need it anymore
+                    // This prevents duplicate acceptance events from affecting state
+                    subs.close(SubKeys.ACCEPTANCE)
 
-                // Keep availability subscription OPEN - don't close until EN_ROUTE_PICKUP
-                // Driver may go offline after confirmation but before acknowledging.
-                // The availability subscription detects this and triggers cancellation.
+                    // Keep availability subscription OPEN - don't close until EN_ROUTE_PICKUP
+                    // Driver may go offline after confirmation but before acknowledging.
+                    // The availability subscription detects this and triggers cancellation.
 
-                // Start foreground service to keep process alive during ride
-                val driverName = _uiState.value.driverProfiles[acceptance.driverPubKey]?.bestName()?.split(" ")?.firstOrNull()
-                RiderActiveService.updateStatus(getApplication(), RiderStatus.DriverAccepted(driverName))
+                    // Start foreground service to keep process alive during ride
+                    val driverName = _uiState.value.driverProfiles[acceptance.driverPubKey]?.bestName()?.split(" ")?.firstOrNull()
+                    RiderActiveService.updateStatus(getApplication(), RiderStatus.DriverAccepted(driverName))
 
-                // AtoB Pattern: Don't transition to RIDE_CONFIRMED yet - wait for driver's
-                // EN_ROUTE_PICKUP status. The driver is the single source of truth.
-                // We store confirmationEventId to track the ride, but keep DRIVER_ACCEPTED
-                // until driver acknowledges with Kind 30180.
-                _uiState.update { current ->
-                    current.copy(
-                        statusMessage = "Ride confirmed! Waiting for driver to start...",
-                        rideSession = current.rideSession.copy(
-                            isConfirmingRide = false,
-                            confirmationEventId = eventId
+                    // AtoB Pattern: Don't transition to RIDE_CONFIRMED yet - wait for driver's
+                    // EN_ROUTE_PICKUP status. The driver is the single source of truth.
+                    // We store confirmationEventId to track the ride, but keep DRIVER_ACCEPTED
+                    // until driver acknowledges with Kind 30180.
+                    _uiState.update { current ->
+                        current.copy(
+                            statusMessage = "Ride confirmed! Waiting for driver to start...",
+                            rideSession = current.rideSession.copy(
+                                isConfirmingRide = false,
+                                confirmationEventId = eventId
+                            )
                         )
-                    )
+                    }
+
+                    // Save ride state for restart recovery
+                    saveRideState()
+
+                    // Subscribe AFTER state is set — handlers validate against
+                    // rideSession.confirmationEventId, so early events would be
+                    // rejected if confirmationEventId were still null.
+                    subscribeToDriverRideState(eventId, acceptance.driverPubKey)
+                    subscribeToChatMessages(eventId)
+                    startChatRefreshJob(eventId)
+                    subscribeToCancellation(eventId)
+                } else {
+                    confirmationInFlight.set(false)  // Allow retry
+                    _uiState.update { current ->
+                        current.copy(
+                            error = "Failed to confirm ride",
+                            rideSession = current.rideSession.copy(isConfirmingRide = false)
+                        )
+                    }
                 }
-
-                // Save ride state for restart recovery
-                saveRideState()
-
-                // Subscribe AFTER state is set — handlers validate against
-                // rideSession.confirmationEventId, so early events would be
-                // rejected if confirmationEventId were still null.
-                subscribeToDriverRideState(eventId, acceptance.driverPubKey)
-                subscribeToChatMessages(eventId)
-                startChatRefreshJob(eventId)
-                subscribeToCancellation(eventId)
-            } else {
-                _uiState.update { current ->
-                    current.copy(
-                        error = "Failed to confirm ride",
-                        rideSession = current.rideSession.copy(isConfirmingRide = false)
-                    )
+            } catch (e: CancellationException) {
+                throw e  // Preserve structured concurrency — don't swallow scope cancellation
+            } catch (e: Exception) {
+                Log.e(TAG, "confirmRide failed unexpectedly: ${e.message}", e)
+                // Only reset if this coroutine still owns the ride
+                if (_uiState.value.rideSession.acceptance?.eventId == acceptance.eventId) {
+                    confirmationInFlight.set(false)
+                    _uiState.update { current ->
+                        current.copy(
+                            error = "Failed to confirm ride: ${e.message}",
+                            rideSession = current.rideSession.copy(isConfirmingRide = false)
+                        )
+                    }
                 }
             }
         }
@@ -2830,10 +2881,12 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             // NOTE: Don't close availability subscription yet - keep monitoring through DRIVER_ACCEPTED
             // in case driver goes offline before confirmation is sent (Kind 3179 won't work without confId)
 
-            // Only process if we're still waiting for acceptance
-            // This prevents duplicate events from resetting the state after confirmation
-            if (_uiState.value.rideSession.rideStage == RideStage.WAITING_FOR_ACCEPTANCE) {
-                _uiState.update { current ->
+            // Atomic stage transition: only proceed if still WAITING_FOR_ACCEPTANCE
+            // shouldConfirm is re-derived each CAS retry (StateFlow.update re-runs lambda on contention)
+            var shouldConfirm = false
+            _uiState.update { current ->
+                shouldConfirm = current.rideSession.rideStage == RideStage.WAITING_FOR_ACCEPTANCE
+                if (shouldConfirm) {
                     current.copy(
                         statusMessage = "Driver accepted! Confirming ride...",
                         rideSession = current.rideSession.copy(
@@ -2842,9 +2895,12 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                             acceptanceTimeoutStartMs = null
                         )
                     )
+                } else {
+                    current  // No change — someone else already transitioned
                 }
+            }
 
-                // Auto-confirm the ride (send precise pickup location)
+            if (shouldConfirm) {
                 autoConfirmRide(acceptance)
             } else {
                 Log.d(TAG, "Ignoring duplicate acceptance - already in stage ${_uiState.value.rideSession.rideStage}")
@@ -2917,10 +2973,20 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      * Generates PIN locally and sends precise pickup location to the driver.
      */
     private fun autoConfirmRide(acceptance: RideAcceptanceData) {
-        val pickup = _uiState.value.pickupLocation ?: return
+        // Atomic guard: only one confirmation proceeds per ride.
+        // Multi-relay delivery can call this concurrently from different IO threads.
+        if (!confirmationInFlight.compareAndSet(false, true)) {
+            Log.d(TAG, "Ignoring duplicate autoConfirmRide — confirmation already in flight")
+            return
+        }
 
-        // CRITICAL: Set flag IMMEDIATELY (before coroutine) to prevent race condition
-        // Without this, user could tap manual confirm button while coroutine is launching
+        val pickup = _uiState.value.pickupLocation
+        if (pickup == null) {
+            confirmationInFlight.set(false)
+            return
+        }
+
+        // Set UI flag for spinner (after CAS succeeds — only winner shows spinner)
         updateRideSession { copy(isConfirmingRide = true) }
 
         // Generate PIN locally - rider is the one with money at stake
@@ -2939,168 +3005,204 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         val isRoadflareRide = _uiState.value.rideSession.roadflareTargetDriverPubKey != null
 
         viewModelScope.launch {
-            // Send APPROXIMATE pickup for privacy - precise location revealed when driver is close
-            // UNLESS: driver is already within 1 mile, OR this is a RoadFlare ride (trusted network)
-            val pickupToSend = if (driverAlreadyClose || isRoadflareRide) {
-                val reason = if (isRoadflareRide) "RoadFlare trusted network" else "driver within 1 mile"
-                Log.d(TAG, "Sending precise pickup immediately ($reason)")
-                pickup
-            } else {
-                pickup.approximate()
-            }
-            Log.d(TAG, "Sending pickup: ${pickupToSend.lat}, ${pickupToSend.lon} (precise: ${pickup.lat}, ${pickup.lon}, roadflare: $isRoadflareRide, driver close: $driverAlreadyClose)")
+            try {
+                // Send APPROXIMATE pickup for privacy - precise location revealed when driver is close
+                // UNLESS: driver is already within 1 mile, OR this is a RoadFlare ride (trusted network)
+                val pickupToSend = if (driverAlreadyClose || isRoadflareRide) {
+                    val reason = if (isRoadflareRide) "RoadFlare trusted network" else "driver within 1 mile"
+                    Log.d(TAG, "Sending precise pickup immediately ($reason)")
+                    pickup
+                } else {
+                    pickup.approximate()
+                }
+                Log.d(TAG, "Sending pickup: ${pickupToSend.lat}, ${pickupToSend.lon} (precise: ${pickup.lat}, ${pickup.lon}, roadflare: $isRoadflareRide, driver close: $driverAlreadyClose)")
 
-            // Determine payment path (same mint vs cross-mint)
-            val riderMintUrl = walletService?.getCurrentMintUrl()
-            val driverMintUrl = acceptance.mintUrl
-            val paymentMethod = acceptance.paymentMethod ?: "cashu"
-            val paymentPath = PaymentPath.determine(riderMintUrl, driverMintUrl, paymentMethod)
-            Log.d(TAG, "PaymentPath: $paymentPath (rider: $riderMintUrl, driver: $driverMintUrl)")
+                // Determine payment path (same mint vs cross-mint)
+                val riderMintUrl = walletService?.getCurrentMintUrl()
+                val driverMintUrl = acceptance.mintUrl
+                val paymentMethod = acceptance.paymentMethod ?: "cashu"
+                val paymentPath = PaymentPath.determine(riderMintUrl, driverMintUrl, paymentMethod)
+                Log.d(TAG, "PaymentPath: $paymentPath (rider: $riderMintUrl, driver: $driverMintUrl)")
 
-            // Lock HTLC escrow NOW using driver's wallet pubkey from acceptance
-            // This ensures the P2PK condition matches the key the driver will sign with
-            val paymentHash = _uiState.value.rideSession.activePaymentHash
-            val fareAmount = _uiState.value.fareEstimate?.toLong() ?: 0L
-            // Use driver's wallet pubkey for P2PK, fall back to Nostr key if not provided (legacy)
-            val rawDriverKey = acceptance.walletPubKey ?: acceptance.driverPubKey
-            // Cashu NUT-11 requires compressed pubkey (33 bytes = 66 hex chars)
-            // If driver sent x-only pubkey (32 bytes = 64 hex), add "02" prefix
-            val driverP2pkKey = if (rawDriverKey.length == 64) "02$rawDriverKey" else rawDriverKey
+                // Lock HTLC escrow NOW using driver's wallet pubkey from acceptance
+                // This ensures the P2PK condition matches the key the driver will sign with
+                val paymentHash = _uiState.value.rideSession.activePaymentHash
+                val fareAmount = _uiState.value.fareEstimate?.toLong() ?: 0L
+                // Use driver's wallet pubkey for P2PK, fall back to Nostr key if not provided (legacy)
+                val rawDriverKey = acceptance.walletPubKey ?: acceptance.driverPubKey
+                // Cashu NUT-11 requires compressed pubkey (33 bytes = 66 hex chars)
+                // If driver sent x-only pubkey (32 bytes = 64 hex), add "02" prefix
+                val driverP2pkKey = if (rawDriverKey.length == 64) "02$rawDriverKey" else rawDriverKey
 
-            // HTLC Escrow Locking - only for SAME_MINT path
-            // For CROSS_MINT, payment happens via Lightning bridge at pickup
-            // Correlation ID: Use acceptanceEventId for pre-confirmation logging
-            val rideCorrelationId = acceptance.eventId.take(8)
+                // HTLC Escrow Locking - only for SAME_MINT path
+                // For CROSS_MINT, payment happens via Lightning bridge at pickup
+                // Correlation ID: Use acceptanceEventId for pre-confirmation logging
+                val rideCorrelationId = acceptance.eventId.take(8)
 
-            val escrowToken = if (paymentPath == PaymentPath.SAME_MINT) {
-                Log.d(TAG, "[RIDE $rideCorrelationId] Locking HTLC: fareAmount=$fareAmount, paymentHash=${paymentHash?.take(16)}...")
-                Log.d(TAG, "[RIDE $rideCorrelationId] driverP2pkKey (${driverP2pkKey.length} chars)=${driverP2pkKey.take(16)}...")
+                val escrowToken = if (paymentPath == PaymentPath.SAME_MINT) {
+                    Log.d(TAG, "[RIDE $rideCorrelationId] Locking HTLC: fareAmount=$fareAmount, paymentHash=${paymentHash?.take(16)}...")
+                    Log.d(TAG, "[RIDE $rideCorrelationId] driverP2pkKey (${driverP2pkKey.length} chars)=${driverP2pkKey.take(16)}...")
 
-                if (paymentHash != null && fareAmount > 0) {
-                    try {
-                        val lockResult = walletService?.lockForRide(
-                            amountSats = fareAmount,
-                            paymentHash = paymentHash,
-                            driverPubKey = driverP2pkKey,
-                            expirySeconds = 900L,  // 15 minutes
-                            preimage = _uiState.value.rideSession.activePreimage  // Store for future-proof refunds
-                        )
-                        when (lockResult) {
-                            is LockResult.Success -> {
-                                Log.d(TAG, "[RIDE $rideCorrelationId] Lock SUCCESS (token: ${lockResult.escrowLock.htlcToken.length} chars)")
-                                lockResult.escrowLock.htlcToken
+                    if (paymentHash != null && fareAmount > 0) {
+                        try {
+                            val lockResult = walletService?.lockForRide(
+                                amountSats = fareAmount,
+                                paymentHash = paymentHash,
+                                driverPubKey = driverP2pkKey,
+                                expirySeconds = 900L,  // 15 minutes
+                                preimage = _uiState.value.rideSession.activePreimage  // Store for future-proof refunds
+                            )
+                            when (lockResult) {
+                                is LockResult.Success -> {
+                                    Log.d(TAG, "[RIDE $rideCorrelationId] Lock SUCCESS (token: ${lockResult.escrowLock.htlcToken.length} chars)")
+                                    lockResult.escrowLock.htlcToken
+                                }
+                                is LockResult.Failure.InsufficientBalance -> {
+                                    Log.e(TAG, "[RIDE $rideCorrelationId] Lock FAILED: ${lockResult.message} (need ${lockResult.required}, have ${lockResult.available})")
+                                    null
+                                }
+                                is LockResult.Failure.ProofsSpent -> {
+                                    Log.e(TAG, "[RIDE $rideCorrelationId] Lock FAILED: ${lockResult.message} (${lockResult.spentCount}/${lockResult.totalSelected} spent)")
+                                    null
+                                }
+                                is LockResult.Failure -> {
+                                    Log.e(TAG, "[RIDE $rideCorrelationId] Lock FAILED: ${lockResult.message}")
+                                    null
+                                }
+                                null -> {
+                                    Log.e(TAG, "[RIDE $rideCorrelationId] Lock FAILED: WalletService not available")
+                                    null
+                                }
                             }
-                            is LockResult.Failure.InsufficientBalance -> {
-                                Log.e(TAG, "[RIDE $rideCorrelationId] Lock FAILED: ${lockResult.message} (need ${lockResult.required}, have ${lockResult.available})")
-                                null
-                            }
-                            is LockResult.Failure.ProofsSpent -> {
-                                Log.e(TAG, "[RIDE $rideCorrelationId] Lock FAILED: ${lockResult.message} (${lockResult.spentCount}/${lockResult.totalSelected} spent)")
-                                null
-                            }
-                            is LockResult.Failure -> {
-                                Log.e(TAG, "[RIDE $rideCorrelationId] Lock FAILED: ${lockResult.message}")
-                                null
-                            }
-                            null -> {
-                                Log.e(TAG, "[RIDE $rideCorrelationId] Lock FAILED: WalletService not available")
-                                null
-                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "[RIDE $rideCorrelationId] Exception during lockForRide: ${e.message}", e)
+                            null
                         }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "[RIDE $rideCorrelationId] Exception during lockForRide: ${e.message}", e)
+                    } else {
+                        Log.w(TAG, "[RIDE $rideCorrelationId] Cannot lock escrow: paymentHash=$paymentHash, fareAmount=$fareAmount")
                         null
                     }
                 } else {
-                    Log.w(TAG, "[RIDE $rideCorrelationId] Cannot lock escrow: paymentHash=$paymentHash, fareAmount=$fareAmount")
-                    null
-                }
-            } else {
-                Log.d(TAG, "[RIDE $rideCorrelationId] Skipping escrow lock (${paymentPath.name}) - payment via ${if (paymentPath == PaymentPath.CROSS_MINT) "Lightning bridge" else paymentPath.name}")
-                null  // No escrow token for cross-mint - payment happens at pickup
-            }
-
-            if (escrowToken == null && paymentPath == PaymentPath.SAME_MINT) {
-                Log.e(TAG, "[RIDE $rideCorrelationId] ESCROW LOCK FAILED - ride will proceed WITHOUT payment security")
-            }
-
-            // Pass paymentHash in confirmation (moved from offer for correct HTLC timing)
-            // Driver needs paymentHash for PIN verification and HTLC claim
-            val eventId = nostrService.confirmRide(
-                acceptance = acceptance,
-                precisePickup = pickupToSend,  // Send precise if driver is close, approximate otherwise
-                paymentHash = paymentHash,
-                escrowToken = escrowToken
-            )
-
-            if (eventId != null) {
-                Log.d(TAG, "Auto-confirmed ride: $eventId")
-                myRideEventIds.add(eventId)  // Track for cleanup
-
-                // Guard: If ride was cancelled while we were suspended at confirmRide(),
-                // clearRide() already reset state to IDLE but couldn't publish cancellation
-                // (confirmationEventId was null in its snapshot). We must notify the driver.
-                if (_uiState.value.rideSession.rideStage != RideStage.DRIVER_ACCEPTED) {
-                    Log.w(TAG, "Ride cancelled during confirmation - publishing cancellation for $eventId")
-                    nostrService.publishRideCancellation(
-                        confirmationEventId = eventId,
-                        otherPartyPubKey = acceptance.driverPubKey,
-                        reason = "Rider cancelled"
-                    )?.let { myRideEventIds.add(it) }
-                    cleanupRideEventsInBackground("ride cancelled during confirmation")
-                    return@launch
+                    Log.d(TAG, "[RIDE $rideCorrelationId] Skipping escrow lock (${paymentPath.name}) - payment via ${if (paymentPath == PaymentPath.CROSS_MINT) "Lightning bridge" else paymentPath.name}")
+                    null  // No escrow token for cross-mint - payment happens at pickup
                 }
 
-                // Close acceptance subscription - we don't need it anymore
-                subs.close(SubKeys.ACCEPTANCE)
+                if (escrowToken == null && paymentPath == PaymentPath.SAME_MINT) {
+                    Log.e(TAG, "[RIDE $rideCorrelationId] ESCROW LOCK FAILED - ride will proceed WITHOUT payment security")
+                }
 
-                // Keep availability subscription OPEN - don't close until EN_ROUTE_PICKUP
-                // Driver may go offline after confirmation but before acknowledging.
-                // The availability subscription detects this and triggers cancellation.
+                // Pass paymentHash in confirmation (moved from offer for correct HTLC timing)
+                // Driver needs paymentHash for PIN verification and HTLC claim
+                val eventId = nostrService.confirmRide(
+                    acceptance = acceptance,
+                    precisePickup = pickupToSend,  // Send precise if driver is close, approximate otherwise
+                    paymentHash = paymentHash,
+                    escrowToken = escrowToken
+                )
 
-                // Update service status - keep DriverAccepted until driver sends EN_ROUTE_PICKUP
-                // AtoB Pattern: Don't transition notification until driver confirms state
-                val driverName = _uiState.value.driverProfiles[acceptance.driverPubKey]?.bestName()?.split(" ")?.firstOrNull()
-                RiderActiveService.updateStatus(getApplication(), RiderStatus.DriverAccepted(driverName))
+                if (eventId != null) {
+                    Log.d(TAG, "Auto-confirmed ride: $eventId")
+                    myRideEventIds.add(eventId)  // Track for cleanup
 
-                // AtoB Pattern: Don't transition to RIDE_CONFIRMED yet - wait for driver's
-                // EN_ROUTE_PICKUP status. The driver is the single source of truth.
-                // We store confirmationEventId and PIN, but keep DRIVER_ACCEPTED stage.
-                _uiState.update { current ->
-                    current.copy(
-                        statusMessage = "Ride confirmed! Your PIN is: $pickupPin",
-                        rideSession = current.rideSession.copy(
-                            isConfirmingRide = false,
+                    // Guard: If ride was cancelled while we were suspended at confirmRide(),
+                    // check acceptance identity FIRST (cross-ride), then stage (same-ride cancel).
+                    val currentAcceptance = _uiState.value.rideSession.acceptance
+                    if (currentAcceptance?.eventId != acceptance.eventId) {
+                        // Case 1: Different ride (or no ride) is now active — targeted cancel only.
+                        // DO NOT run cleanupRideEventsInBackground() — it deletes ALL rideshare events
+                        // by author (not ride-scoped), which would nuke the new ride's live events.
+                        Log.w(TAG, "Stale confirmation from previous ride - " +
+                            "expected acceptance=${acceptance.eventId.take(8)}, " +
+                            "current=${currentAcceptance?.eventId?.take(8)}")
+                        nostrService.publishRideCancellation(
                             confirmationEventId = eventId,
-                            pickupPin = pickupPin,
-                            pinAttempts = 0,
-                            precisePickupShared = driverAlreadyClose,
-                            escrowToken = escrowToken,
-                            paymentPath = paymentPath,
-                            driverMintUrl = driverMintUrl
+                            otherPartyPubKey = acceptance.driverPubKey,
+                            reason = "Rider cancelled"
+                        )?.let { myRideEventIds.add(it) }
+                        // No global cleanup, no confirmationInFlight reset (new ride owns it now)
+                        return@launch
+                    } else if (_uiState.value.rideSession.rideStage != RideStage.DRIVER_ACCEPTED) {
+                        // Case 2: Same ride, but user cancelled while we were suspended.
+                        // Safe to run global cleanup — no other ride is active.
+                        Log.w(TAG, "Ride cancelled during confirmation - publishing cancellation for $eventId")
+                        nostrService.publishRideCancellation(
+                            confirmationEventId = eventId,
+                            otherPartyPubKey = acceptance.driverPubKey,
+                            reason = "Rider cancelled"
+                        )?.let { myRideEventIds.add(it) }
+                        cleanupRideEventsInBackground("ride cancelled during confirmation")
+                        confirmationInFlight.set(false)
+                        return@launch
+                    }
+
+                    // Close acceptance subscription - we don't need it anymore
+                    subs.close(SubKeys.ACCEPTANCE)
+
+                    // Keep availability subscription OPEN - don't close until EN_ROUTE_PICKUP
+                    // Driver may go offline after confirmation but before acknowledging.
+                    // The availability subscription detects this and triggers cancellation.
+
+                    // Update service status - keep DriverAccepted until driver sends EN_ROUTE_PICKUP
+                    // AtoB Pattern: Don't transition notification until driver confirms state
+                    val driverName = _uiState.value.driverProfiles[acceptance.driverPubKey]?.bestName()?.split(" ")?.firstOrNull()
+                    RiderActiveService.updateStatus(getApplication(), RiderStatus.DriverAccepted(driverName))
+
+                    // AtoB Pattern: Don't transition to RIDE_CONFIRMED yet - wait for driver's
+                    // EN_ROUTE_PICKUP status. The driver is the single source of truth.
+                    // We store confirmationEventId and PIN, but keep DRIVER_ACCEPTED stage.
+                    _uiState.update { current ->
+                        current.copy(
+                            statusMessage = "Ride confirmed! Your PIN is: $pickupPin",
+                            rideSession = current.rideSession.copy(
+                                isConfirmingRide = false,
+                                confirmationEventId = eventId,
+                                pickupPin = pickupPin,
+                                pinAttempts = 0,
+                                precisePickupShared = driverAlreadyClose,
+                                escrowToken = escrowToken,
+                                paymentPath = paymentPath,
+                                driverMintUrl = driverMintUrl
+                            )
                         )
-                    )
+                    }
+
+                    // Save ride state for persistence
+                    saveRideState()
+
+                    // Subscribe to driver ride state (PIN submissions and status updates)
+                    subscribeToDriverRideState(eventId, acceptance.driverPubKey)
+
+                    // Subscribe to chat messages for this ride
+                    subscribeToChatMessages(eventId)
+                    // Start periodic refresh to ensure messages are received
+                    startChatRefreshJob(eventId)
+
+                    // Subscribe to cancellation events
+                    subscribeToCancellation(eventId)
+                } else {
+                    confirmationInFlight.set(false)  // Allow retry
+                    _uiState.update { current ->
+                        current.copy(
+                            error = "Failed to confirm ride",
+                            rideSession = current.rideSession.copy(isConfirmingRide = false)
+                        )
+                    }
                 }
-
-                // Save ride state for persistence
-                saveRideState()
-
-                // Subscribe to driver ride state (PIN submissions and status updates)
-                subscribeToDriverRideState(eventId, acceptance.driverPubKey)
-
-                // Subscribe to chat messages for this ride
-                subscribeToChatMessages(eventId)
-                // Start periodic refresh to ensure messages are received
-                startChatRefreshJob(eventId)
-
-                // Subscribe to cancellation events
-                subscribeToCancellation(eventId)
-            } else {
-                _uiState.update { current ->
-                    current.copy(
-                        error = "Failed to confirm ride",
-                        rideSession = current.rideSession.copy(isConfirmingRide = false)
-                    )
+            } catch (e: CancellationException) {
+                throw e  // Preserve structured concurrency — don't swallow scope cancellation
+            } catch (e: Exception) {
+                Log.e(TAG, "autoConfirmRide failed unexpectedly: ${e.message}", e)
+                // Only reset confirmationInFlight if this coroutine still owns the ride.
+                // A stale Ride A coroutine throwing in the mismatch path must NOT
+                // clear the lock that Ride B now holds.
+                if (_uiState.value.rideSession.acceptance?.eventId == acceptance.eventId) {
+                    confirmationInFlight.set(false)
+                    _uiState.update { current ->
+                        current.copy(
+                            error = "Failed to confirm ride: ${e.message}",
+                            rideSession = current.rideSession.copy(isConfirmingRide = false)
+                        )
+                    }
                 }
             }
         }
