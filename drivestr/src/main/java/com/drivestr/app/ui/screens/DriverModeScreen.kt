@@ -255,7 +255,7 @@ fun DriverModeScreen(
                 Log.d(TAG, "Using manual location for refresh: $manualDriverLat, $manualDriverLon")
                 val manualLocation = Location(lat = manualDriverLat, lon = manualDriverLon)
                 currentLocation = manualLocation
-                viewModel.updateLocation(manualLocation, force = false)
+                viewModel.handleLocationUpdate(manualLocation, force = false)
                 return@LaunchedEffect
             }
 
@@ -281,7 +281,7 @@ fun DriverModeScreen(
                         val loc = Location(lat = location.latitude, lon = location.longitude)
                         currentLocation = loc
                         // Use default throttling (not forced) for background refresh
-                        viewModel.updateLocation(loc, force = false)
+                        viewModel.handleLocationUpdate(loc, force = false)
                     } else {
                         Log.w(TAG, "GPS returned null on foreground refresh")
                     }

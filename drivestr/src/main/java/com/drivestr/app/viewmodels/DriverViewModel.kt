@@ -520,7 +520,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         val state = _uiState.value
 
         // If driver is AVAILABLE or ROADFLARE_ONLY, request location refresh
-        // The UI will fetch GPS and call updateLocation()
+        // The UI will fetch GPS and call handleLocationUpdate()
         if (state.stage == DriverStage.AVAILABLE || state.stage == DriverStage.ROADFLARE_ONLY) {
             Log.d(TAG, "Driver is ${state.stage}, requesting location refresh")
             _locationRefreshRequested.value = true
@@ -1024,7 +1024,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      * @param newLocation The new location
      * @param force If true, bypasses throttling (use for deliberate user actions like toggling demo mode)
      */
-    fun updateLocation(newLocation: Location, force: Boolean = false) {
+    fun handleLocationUpdate(newLocation: Location, force: Boolean = false) {
         val currentState = _uiState.value
 
         // Only update if we're available (online and not in a ride)
@@ -1275,17 +1275,6 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         updateDeletionSubscription()
     }
 
-    fun updateLocation(location: Location) {
-        // Update location when available or during a ride
-        if (_uiState.value.stage != DriverStage.OFFLINE) {
-            _uiState.value = _uiState.value.copy(currentLocation = location)
-
-            // Check if driver moved significantly and needs route recalculation
-            if (_uiState.value.stage == DriverStage.AVAILABLE) {
-                checkDriverLocationChange(location)
-            }
-        }
-    }
 
     fun acceptOffer(offer: RideOfferData) {
         viewModelScope.launch {
@@ -3175,42 +3164,6 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         return "$dLat,$dLon->$pLat,$pLon"
     }
 
-    /**
-     * Check if driver has moved significantly since last cache update.
-     * If so, clear the cache and recalculate routes for visible requests.
-     * Throttled to prevent excessive recalculations when many rides are available.
-     */
-    private fun checkDriverLocationChange(newLocation: Location) {
-        val lastLoc = lastCacheDriverLocation
-        if (lastLoc != null) {
-            // Simple distance approximation (good enough for ~500m threshold)
-            val latDiff = Math.abs(newLocation.lat - lastLoc.lat)
-            val lonDiff = Math.abs(newLocation.lon - lastLoc.lon)
-            // Roughly convert to km (1 degree ~= 111km)
-            val distKm = Math.sqrt(latDiff * latDiff + lonDiff * lonDiff) * 111.0
-
-            if (distKm > DRIVER_MOVEMENT_THRESHOLD_KM) {
-                // Check time throttle - don't recalculate too frequently
-                val now = System.currentTimeMillis()
-                if (now - lastRouteRecalcTimeMs < ROUTE_RECALC_THROTTLE_MS) {
-                    Log.d(TAG, "Driver moved but throttling recalc (${(now - lastRouteRecalcTimeMs) / 1000}s since last)")
-                    return
-                }
-
-                Log.d(TAG, "Driver moved ${String.format("%.2f", distKm)} km, clearing route cache")
-                clearRouteCache()
-                lastCacheDriverLocation = newLocation
-                lastRouteRecalcTimeMs = now
-
-                // Recalculate routes for all visible requests
-                _uiState.value.rideSession.pendingBroadcastRequests.forEach { request ->
-                    calculatePickupRoute(request.eventId, request.pickupArea)
-                }
-            }
-        } else {
-            lastCacheDriverLocation = newLocation
-        }
-    }
 
     /**
      * Clear all cached routes.

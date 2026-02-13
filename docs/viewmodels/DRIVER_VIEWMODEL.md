@@ -46,7 +46,7 @@ This document provides a complete reference of all functions, state fields, and 
 
 | Function | Purpose |
 |----------|---------|
-| `updateLocation(location)` | Update driver's current location |
+| `handleLocationUpdate(newLocation, force)` | Process location update: throttled broadcasting, geohash resubscription, route cache |
 | `setCurrentLocationAsPickup()` | Use GPS location as pickup reference |
 
 ### Chat Functions
