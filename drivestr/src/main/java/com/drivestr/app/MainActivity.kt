@@ -610,6 +610,7 @@ fun DrivestrApp() {
 
                 ProfileSetupScreen(
                     viewModel = profileViewModel,
+                    canSkip = isKeyImport,
                     onComplete = {
                         // Start tile discovery early (before location permission)
                         tileDiscoveryService.startDiscovery()

@@ -73,6 +73,11 @@ class ProfileViewModel(application: Application) : AndroidViewModel(application)
     fun saveProfile(onComplete: () -> Unit) {
         val state = _uiState.value
 
+        if (state.displayName.isBlank()) {
+            _uiState.value = state.copy(error = "Please enter a name")
+            return
+        }
+
         _uiState.value = state.copy(isSaving = true, error = null)
 
         viewModelScope.launch {

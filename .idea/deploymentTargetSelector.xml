@@ -7,10 +7,10 @@
       </SelectionState>
       <SelectionState runConfigName="rider-app">
         <option name="selectionMode" value="DROPDOWN" />
-        <DropdownSelection timestamp="2026-01-21T20:32:23.286684800Z">
+        <DropdownSelection timestamp="2026-02-06T00:53:41.589623500Z">
           <Target type="DEFAULT_BOOT">
             <handle>
-              <DeviceId pluginId="PhysicalDevice" identifier="serial=4B231JEBF09534" />
+              <DeviceId pluginId="LocalEmulator" identifier="path=C:\Users\Iwill\.android\avd\Pixel_8_Pro_2_2.avd" />
             </handle>
           </Target>
         </DropdownSelection>
@@ -18,7 +18,7 @@
       </SelectionState>
       <SelectionState runConfigName="drivestr">
         <option name="selectionMode" value="DROPDOWN" />
-        <DropdownSelection timestamp="2026-01-21T18:41:16.807773500Z">
+        <DropdownSelection timestamp="2026-02-13T22:28:24.950234100Z">
           <Target type="DEFAULT_BOOT">
             <handle>
               <DeviceId pluginId="LocalEmulator" identifier="path=C:\Users\Iwill\.android\avd\Pixel_8_Pro_2_2.avd" />

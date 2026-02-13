@@ -507,6 +507,7 @@ fun RidestrApp() {
                 val profileViewModel: ProfileViewModel = viewModel()
                 ProfileSetupScreen(
                     viewModel = profileViewModel,
+                    canSkip = isKeyImport,
                     onComplete = {
                         // Start tile discovery early (before location permission)
                         tileDiscoveryService.startDiscovery()

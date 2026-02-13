@@ -18,6 +18,7 @@ fun ProfileSetupScreen(
     viewModel: ProfileViewModel,
     onComplete: () -> Unit,
     isEditMode: Boolean = false,
+    canSkip: Boolean = true,
     onBack: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
@@ -45,7 +46,7 @@ fun ProfileSetupScreen(
                     {}
                 },
                 actions = {
-                    if (!isEditMode) {
+                    if (!isEditMode && canSkip) {
                         TextButton(onClick = { viewModel.skip(onComplete) }) {
                             Text("Skip")
                         }
@@ -55,17 +56,12 @@ fun ProfileSetupScreen(
         }
     ) { padding ->
         ProfileSetupContent(
-            npub = uiState.npub,
             displayName = uiState.displayName,
-            about = uiState.about,
             picture = uiState.picture,
             isSaving = uiState.isSaving,
             error = uiState.error,
-            roleDescriptionText = "Tell drivers about yourself",
-            aboutPlaceholderText = "Regular commuter, prefer quick rides...",
             signer = viewModel.getSigner(),
             onDisplayNameChange = viewModel::updateDisplayName,
-            onAboutChange = viewModel::updateAbout,
             onPictureChange = viewModel::updatePicture,
             onSave = { viewModel.saveProfile(onComplete) },
             modifier = modifier.padding(padding)

@@ -7,8 +7,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.ridestr.common.ui.ProfilePictureEditor
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
@@ -17,33 +15,23 @@ import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
  * Shared content for profile setup screens.
  * Used by both rider and driver apps with different role-specific text.
  *
- * @param npub The user's public key (npub format) to display
  * @param displayName Current display name value
- * @param about Current about/bio value
  * @param picture Current profile picture URL
  * @param isSaving Whether the profile is currently being saved
  * @param error Optional error message to display
- * @param roleDescriptionText Role-specific text (e.g., "Tell drivers about yourself")
- * @param aboutPlaceholderText Role-specific placeholder for the about field
  * @param signer NostrSigner for Blossom upload authentication
  * @param onDisplayNameChange Callback when display name changes
- * @param onAboutChange Callback when about text changes
  * @param onPictureChange Callback when picture URL changes
  * @param onSave Callback when save button is clicked
  */
 @Composable
 fun ProfileSetupContent(
-    npub: String?,
     displayName: String,
-    about: String,
     picture: String,
     isSaving: Boolean,
     error: String?,
-    roleDescriptionText: String,
-    aboutPlaceholderText: String,
     signer: NostrSigner?,
     onDisplayNameChange: (String) -> Unit,
-    onAboutChange: (String) -> Unit,
     onPictureChange: (String) -> Unit,
     onSave: () -> Unit,
     modifier: Modifier = Modifier
@@ -60,26 +48,6 @@ fun ProfileSetupContent(
             pictureUrl = picture,
             onPictureUrlChange = onPictureChange,
             signer = signer
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        npub?.let { key ->
-            Text(
-                text = key.take(20) + "..." + key.takeLast(8),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontFamily = FontFamily.Monospace
-            )
-        }
-
-        Spacer(modifier = Modifier.height(24.dp))
-
-        Text(
-            text = roleDescriptionText,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center
         )
 
         Spacer(modifier = Modifier.height(24.dp))
@@ -109,23 +77,11 @@ fun ProfileSetupContent(
             singleLine = true
         )
 
-        Spacer(modifier = Modifier.height(12.dp))
-
-        OutlinedTextField(
-            value = about,
-            onValueChange = onAboutChange,
-            label = { Text("About") },
-            placeholder = { Text(aboutPlaceholderText) },
-            modifier = Modifier.fillMaxWidth(),
-            minLines = 2,
-            maxLines = 4
-        )
-
         Spacer(modifier = Modifier.height(32.dp))
 
         Button(
             onClick = onSave,
-            enabled = !isSaving,
+            enabled = !isSaving && displayName.isNotBlank(),
             modifier = Modifier.fillMaxWidth()
         ) {
             if (isSaving) {

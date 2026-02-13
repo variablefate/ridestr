@@ -25,7 +25,7 @@ import androidx.compose.ui.unit.dp
  * @param isLoading Whether a key operation is in progress
  * @param headlineText App-specific headline (e.g., "Welcome to Ridestr")
  * @param subtitleText App-specific subtitle (e.g., "Decentralized ridesharing for riders")
- * @param onGenerateKey Callback when user taps "Create New Identity"
+ * @param onGenerateKey Callback when user taps "Create New Account"
  * @param onImportKey Callback when user imports a key
  */
 @Composable
@@ -96,7 +96,7 @@ fun KeySetupScreen(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
             }
-            Text("Create New Identity")
+            Text("Create New Account")
         }
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -165,7 +165,7 @@ fun KeySetupScreen(
                 onClick = { showImportField = true },
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text("Import Existing Key")
+                Text("Log In With Existing Key")
             }
         }
 

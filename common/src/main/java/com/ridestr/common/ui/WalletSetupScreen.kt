@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.dp
 import com.ridestr.common.payment.MintOption
 import com.ridestr.common.payment.WalletService
 import com.ridestr.common.payment.cashu.MintCapabilities
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 /**
@@ -56,6 +57,8 @@ fun WalletSetupScreen(
     var restoredBalance by remember { mutableStateOf<Long?>(null) }
     var showStartFreshConfirmation by remember { mutableStateOf(false) }
     var showRestoreFailedDialog by remember { mutableStateOf(false) }
+    var showInfoDialog by remember { mutableStateOf(false) }
+    var showAdvanced by remember { mutableStateOf(false) }
 
     // Check for existing NIP-60 wallet on launch
     LaunchedEffect(Unit) {
@@ -231,51 +234,120 @@ fun WalletSetupScreen(
                     )
                 }
 
-                // New wallet setup - provider selection
-                LazyColumn(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    item {
-                        Text(
-                            text = "Choose a wallet provider:",
-                            style = MaterialTheme.typography.titleMedium,
-                            modifier = Modifier.padding(bottom = 8.dp)
-                        )
-                    }
-
-                    items(WalletService.DEFAULT_MINTS) { mint ->
-                        MintOptionCard(
-                            mint = mint,
-                            isSelected = selectedMint == mint,
-                            onSelect = {
-                                selectedMint = mint
-                                showCustomInput = false
-                                verificationError = null
+                if (showInfoDialog) {
+                    AlertDialog(
+                        onDismissRequest = { showInfoDialog = false },
+                        icon = {
+                            Icon(
+                                Icons.Default.Info,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        },
+                        title = { Text("About Your Wallet") },
+                        text = {
+                            Text(
+                                "This app uses the Cashu protocol \u2014 a fast, private way to pay with Bitcoin " +
+                                "(super low fees, instant rides, and nobody tracking your spending).\n\n" +
+                                "Your Bitcoin is held by the provider when in the app wallet, so don\u2019t store " +
+                                "your life savings in here. It\u2019s designed for quick daily payments, not long-term storage."
+                            )
+                        },
+                        confirmButton = {
+                            Button(onClick = { showInfoDialog = false }) {
+                                Text("Got it")
                             }
-                        )
-                    }
+                        }
+                    )
+                }
 
-                    item {
-                        // Custom option
-                        CustomMintCard(
-                            isSelected = showCustomInput,
-                            customUrl = customUrl,
-                            onSelect = {
-                                showCustomInput = true
-                                selectedMint = null
-                                verificationError = null
+                // Shared verify → connect → sync logic for both simple and advanced modes
+                val connectToMint: (String) -> Unit = { mintUrl ->
+                    scope.launch {
+                        isVerifying = true
+                        verificationError = null
+                        try {
+                            val capabilities = walletService.verifyMint(mintUrl)
+                            if (capabilities == null) {
+                                verificationError = "Couldn't connect. Check the URL and try again."
+                                return@launch
+                            }
+                            if (!capabilities.supportsEscrow()) {
+                                verificationError = "This provider doesn't support ride payments. Try LN Server instead."
+                                return@launch
+                            }
+
+                            val connected = walletService.connect(mintUrl)
+                            if (connected) {
+                                walletService.syncToNip60()
+                                onComplete()
+                            } else {
+                                verificationError = "Failed to connect. Please try again."
+                            }
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (_: Exception) {
+                            verificationError = "Something went wrong. Please try again."
+                        } finally {
+                            isVerifying = false
+                        }
+                    }
+                }
+
+                if (!showAdvanced) {
+                    // Simple mode — one-tap recommended setup
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        verticalArrangement = Arrangement.Center,
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Button(
+                            onClick = {
+                                val recommendedMint = WalletService.DEFAULT_MINTS.firstOrNull { it.recommended }
+                                if (recommendedMint != null) {
+                                    connectToMint(recommendedMint.url)
+                                } else {
+                                    showAdvanced = true
+                                }
                             },
-                            onUrlChange = {
-                                customUrl = it
-                                verificationError = null
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !isVerifying
+                        ) {
+                            if (isVerifying) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    color = MaterialTheme.colorScheme.onPrimary,
+                                    strokeWidth = 2.dp
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Connecting...")
+                            } else {
+                                Text("Continue with Recommended Setup")
                             }
-                        )
-                    }
+                        }
 
-                    // Error message
-                    if (verificationError != null) {
-                        item {
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Text(
+                            text = "Quick, secure, and used by most riders.\nLow fees and easy for everyday rides.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Text(
+                            text = "You can change your provider later in Settings.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center
+                        )
+
+                        if (verificationError != null) {
+                            Spacer(modifier = Modifier.height(12.dp))
                             Card(
                                 colors = CardDefaults.cardColors(
                                     containerColor = MaterialTheme.colorScheme.errorContainer
@@ -298,78 +370,141 @@ fun WalletSetupScreen(
                                 }
                             }
                         }
-                    }
-                }
 
-                // Buttons
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Button(
-                        onClick = {
-                            scope.launch {
+                        Spacer(modifier = Modifier.weight(1f))
+
+                        TextButton(
+                            onClick = {
+                                showAdvanced = true
+                                if (selectedMint == null && !showCustomInput) {
+                                    selectedMint = WalletService.DEFAULT_MINTS.firstOrNull { it.recommended }
+                                }
+                            }
+                        ) {
+                            Text("Advanced options")
+                        }
+                    }
+                } else {
+                    // Advanced mode — full mint picker
+                    LazyColumn(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        item {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Choose a wallet provider:",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                IconButton(onClick = { showInfoDialog = true }) {
+                                    Icon(
+                                        Icons.Default.Info,
+                                        contentDescription = "Learn about wallet providers",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+
+                        items(WalletService.DEFAULT_MINTS) { mint ->
+                            MintOptionCard(
+                                mint = mint,
+                                isSelected = selectedMint == mint,
+                                onSelect = {
+                                    selectedMint = mint
+                                    showCustomInput = false
+                                    verificationError = null
+                                }
+                            )
+                        }
+
+                        item {
+                            CustomMintCard(
+                                isSelected = showCustomInput,
+                                customUrl = customUrl,
+                                onSelect = {
+                                    showCustomInput = true
+                                    selectedMint = null
+                                    verificationError = null
+                                },
+                                onUrlChange = {
+                                    customUrl = it
+                                    verificationError = null
+                                }
+                            )
+                        }
+
+                        if (verificationError != null) {
+                            item {
+                                Card(
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = MaterialTheme.colorScheme.errorContainer
+                                    )
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(16.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Error,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.error
+                                        )
+                                        Spacer(modifier = Modifier.width(12.dp))
+                                        Text(
+                                            text = verificationError!!,
+                                            color = MaterialTheme.colorScheme.onErrorContainer
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Advanced mode buttons
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = {
                                 val mintUrl = if (showCustomInput) {
                                     customUrl.trim().ifEmpty { null }
                                 } else {
                                     selectedMint?.url
                                 }
-
                                 if (mintUrl == null) {
                                     verificationError = "Please select a wallet provider"
-                                    return@launch
-                                }
-
-                                isVerifying = true
-                                verificationError = null
-
-                                val capabilities = walletService.verifyMint(mintUrl)
-                                if (capabilities == null) {
-                                    verificationError = "Couldn't connect. Check the URL and try again."
-                                    isVerifying = false
-                                    return@launch
-                                }
-
-                                if (!capabilities.supportsEscrow()) {
-                                    verificationError = "This provider doesn't support ride payments. Try LN Server instead."
-                                    isVerifying = false
-                                    return@launch
-                                }
-
-                                // Connect!
-                                val connected = walletService.connect(mintUrl)
-                                isVerifying = false
-
-                                if (connected) {
-                                    // Sync wallet metadata to Nostr for backup/restore
-                                    walletService.syncToNip60()
-                                    onComplete()
                                 } else {
-                                    verificationError = "Failed to connect. Please try again."
+                                    connectToMint(mintUrl)
                                 }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !isVerifying && (selectedMint != null || (showCustomInput && customUrl.isNotBlank()))
+                        ) {
+                            if (isVerifying) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    color = MaterialTheme.colorScheme.onPrimary,
+                                    strokeWidth = 2.dp
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Connecting...")
+                            } else {
+                                Text("Set Up & Continue")
                             }
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        enabled = !isVerifying && (selectedMint != null || (showCustomInput && customUrl.isNotBlank()))
-                    ) {
-                        if (isVerifying) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(20.dp),
-                                color = MaterialTheme.colorScheme.onPrimary,
-                                strokeWidth = 2.dp
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Connecting...")
-                        } else {
-                            Text("Continue")
                         }
-                    }
 
-                    TextButton(
-                        onClick = onSkip,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Skip for now")
+                        TextButton(
+                            onClick = onSkip,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Skip for now")
+                        }
                     }
                 }
             }

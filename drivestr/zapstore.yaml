@@ -1,26 +1,33 @@
-# Zapstore publishing config for Drivestr Driver App
-# Publish with: cd drivestr && zapstore publish
-
 repository: https://github.com/variablefate/ridestr
+match: drivestr-release\.apk$
 name: Drivestr
-summary: Nostr-based rideshare app for drivers
 description: |
-  Accept ride requests and earn Bitcoin using Cashu ecash.
-  Built on Nostr for censorship-resistant, peer-to-peer ridesharing.
+    Accept rides and earn Bitcoin using Cashu ecash.
+    Built on Nostr for censorship-resistant, peer-to-peer ridesharing.
 
-  Features:
-  - RoadFlare personal network - build your rider following
-  - Broadcast availability to nearby riders or go RoadFlare-only
-  - Receive payments via Cashu ecash (trustless HTLC escrow)
-  - Real-time navigation to pickup/destination
-  - Encrypted chat with riders
-  - Cross-device wallet sync via NIP-60
-tags: bitcoin nostr rideshare cashu ecash transportation driver roadflare
-license: MIT-No-Shitcoins
-icon: icon.png
-
-assets:
-  - build/outputs/apk/release/.*\.apk
-
-remote_metadata:
-  - github
+    Features:
+    - RoadFlare personal network - build a rider following
+    - Accept direct, broadcast, and RoadFlare ride offers
+    - Get paid with Cashu ecash (trustless HTLC escrow)
+    - Real-time navigation to pickup and destination
+    - Encrypted chat with riders
+    - Cross-device wallet sync via NIP-60
+summary: Nostr-based rideshare app for drivers
+tags:
+    - bitcoin
+    - nostr
+    - rideshare
+    - cashu
+    - ecash
+    - transportation
+license: MIT
+website: https://github.com/variablefate/ridestr
+icon: ./icon.png
+supported_nips:
+    - "01"
+    - "09"
+    - "44"
+    - "60"
+    - "014173"
+metadata_sources:
+    - github
