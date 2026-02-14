@@ -1,11 +1,16 @@
 package com.ridestr.common.ui.screens
 
 import androidx.annotation.DrawableRes
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -17,6 +22,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 
@@ -191,6 +197,7 @@ fun BackupReminderScreen(
 ) {
     var showNsec by remember { mutableStateOf(false) }
     var hasCopied by remember { mutableStateOf(false) }
+    var showInfo by remember { mutableStateOf(false) }
     val clipboardManager = LocalClipboardManager.current
 
     Column(
@@ -202,7 +209,7 @@ fun BackupReminderScreen(
         verticalArrangement = Arrangement.Center
     ) {
         Text(
-            text = "Backup Your Key",
+            text = "Backup Your Account Key",
             style = MaterialTheme.typography.headlineMedium,
             textAlign = TextAlign.Center
         )
@@ -219,15 +226,13 @@ fun BackupReminderScreen(
                 modifier = Modifier.padding(16.dp)
             ) {
                 Text(
-                    text = "Important!",
+                    text = "This key is your entire account.",
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onTertiaryContainer
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "Your private key (nsec) is the only way to access your Nostr identity. " +
-                            "If you lose it, you cannot recover your account. " +
-                            "Store it somewhere safe and never share it.",
+                    text = "If you get a new phone, delete the app, switch devices, or need to log out and back in \u2014 this backup key is the only way to regain access to your wallet, ride history, favorites, and settings.\n\nThere\u2019s no \"forgot password,\" email reset, or support team that can help. Save it safely and never share it with anyone.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onTertiaryContainer
                 )
@@ -243,12 +248,12 @@ fun BackupReminderScreen(
                 modifier = Modifier.padding(16.dp)
             ) {
                 Text(
-                    text = "Your Private Key",
+                    text = "Your Backup Key",
                     style = MaterialTheme.typography.titleSmall
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = if (showNsec) nsec else "nsec1••••••••••••••••••••",
+                    text = if (showNsec) nsec else "••••••••••••••••••••••••••••••••",
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = FontFamily.Monospace
                 )
@@ -265,11 +270,55 @@ fun BackupReminderScreen(
                         onClick = {
                             clipboardManager.setText(AnnotatedString(nsec))
                             hasCopied = true
-                        },
-                        enabled = showNsec
+                        }
                     ) {
                         Text(if (hasCopied) "Copied!" else "Copy")
                     }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        TextButton(
+            onClick = { showInfo = !showInfo },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Icon(
+                Icons.Outlined.Info,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(if (showInfo) "Hide details" else "How does this work?")
+        }
+
+        AnimatedVisibility(
+            visible = showInfo,
+            enter = expandVertically(),
+            exit = shrinkVertically()
+        ) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "About Your Keys",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Ridestr is built on Nostr, an open protocol where your identity is a cryptographic key pair \u2014 not an email or phone number." +
+                            "\n\nYour Account ID (npub) is your public key. Anyone can see it." +
+                            "\n\nYour Backup Key (nsec) is your private key. It proves you own the account. There\u2019s no central server storing your password, which means no one can reset it for you \u2014 but it also means no one can lock you out." +
+                            "\n\nThis is why saving your backup key matters: it\u2019s the only proof of ownership that exists.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }

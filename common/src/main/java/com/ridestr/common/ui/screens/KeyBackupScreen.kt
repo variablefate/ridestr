@@ -1,6 +1,9 @@
 package com.ridestr.common.ui.screens
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -8,6 +11,7 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -33,11 +37,12 @@ fun KeyBackupScreen(
     var showNsec by remember { mutableStateOf(false) }
     var copiedNpub by remember { mutableStateOf(false) }
     var copiedNsec by remember { mutableStateOf(false) }
+    var showInfo by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Backup Keys") },
+                title = { Text("Backup Your Account Key") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -72,14 +77,14 @@ fun KeyBackupScreen(
                     Spacer(modifier = Modifier.width(12.dp))
                     Column {
                         Text(
-                            text = "Keep your private key safe!",
+                            text = "This key is your entire account.",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onErrorContainer
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "Your private key (nsec) is like a password that can never be changed. Anyone with access to it has full control of your identity. Never share it with anyone.",
+                            text = "If you get a new phone, delete the app, switch devices, or need to log out and back in — this backup key is the only way to regain access to your wallet, ride history, favorites, and settings.\n\nThere's no \"forgot password,\" email reset, or support team that can help. Save it safely and never share it with anyone.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onErrorContainer
                         )
@@ -94,13 +99,13 @@ fun KeyBackupScreen(
                     modifier = Modifier.padding(16.dp)
                 ) {
                     Text(
-                        text = "Public Key (npub)",
+                        text = "Account ID",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "Your public identity. Share this with others.",
+                        text = "Your public account identifier. Safe to share with others.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -135,7 +140,7 @@ fun KeyBackupScreen(
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text(if (copiedNpub) "Copied!" else "Copy Public Key")
+                            Text(if (copiedNpub) "Copied!" else "Copy Account ID")
                         }
                     }
                 }
@@ -148,15 +153,15 @@ fun KeyBackupScreen(
                     modifier = Modifier.padding(16.dp)
                 ) {
                     Text(
-                        text = "Private Key (nsec)",
+                        text = "Backup Key",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "Keep this secret. Required to recover your identity.",
+                        text = "Keep this secret. Required to recover your account.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(modifier = Modifier.height(12.dp))
 
@@ -170,7 +175,7 @@ fun KeyBackupScreen(
                                 text = if (showNsec) {
                                     key.take(20) + "..." + key.takeLast(8)
                                 } else {
-                                    "nsec1****************************"
+                                    "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"
                                 },
                                 modifier = Modifier.padding(12.dp),
                                 style = MaterialTheme.typography.bodySmall,
@@ -190,7 +195,7 @@ fun KeyBackupScreen(
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text(if (showNsec) "Hide Private Key" else "Reveal Private Key")
+                            Text(if (showNsec) "Hide Backup Key" else "Reveal Backup Key")
                         }
 
                         Spacer(modifier = Modifier.height(8.dp))
@@ -200,11 +205,7 @@ fun KeyBackupScreen(
                                 clipboardManager.setText(AnnotatedString(key))
                                 copiedNsec = true
                             },
-                            modifier = Modifier.fillMaxWidth(),
-                            enabled = showNsec,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.error
-                            )
+                            modifier = Modifier.fillMaxWidth()
                         ) {
                             Icon(
                                 Icons.Default.ContentCopy,
@@ -212,21 +213,64 @@ fun KeyBackupScreen(
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text(if (copiedNsec) "Copied!" else "Copy Private Key")
+                            Text(if (copiedNsec) "Copied!" else "Copy Backup Key")
                         }
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.weight(1f))
-
             Text(
-                text = "Store your private key in a secure password manager or write it down and keep it safe.",
+                text = "Tip: If you use a password manager (like the built-in one on your phone, 1Password, Bitwarden, etc.), paste it there \u2014 it\u2019s one of the easiest and safest spots.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth()
             )
+
+            TextButton(
+                onClick = { showInfo = !showInfo },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(
+                    Icons.Outlined.Info,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(if (showInfo) "Hide details" else "How does this work?")
+            }
+
+            AnimatedVisibility(
+                visible = showInfo,
+                enter = expandVertically(),
+                exit = shrinkVertically()
+            ) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = "About Your Keys",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Ridestr is built on Nostr, an open protocol where your identity is a cryptographic key pair \u2014 not an email or phone number." +
+                                "\n\nYour Account ID (npub) is your public key. Anyone can see it." +
+                                "\n\nYour Backup Key (nsec) is your private key. It proves you own the account. There\u2019s no central server storing your password, which means no one can reset it for you \u2014 but it also means no one can lock you out." +
+                                "\n\nThis is why saving your backup key matters: it\u2019s the only proof of ownership that exists.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.weight(1f))
         }
     }
 }

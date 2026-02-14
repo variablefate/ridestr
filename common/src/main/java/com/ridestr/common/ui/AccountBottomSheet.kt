@@ -17,7 +17,7 @@ import androidx.compose.ui.unit.dp
  *
  * Consolidates the previous 4 header buttons (Key, Person, Settings, Debug)
  * into a cleaner 2-button header (Account, Settings) with this sheet
- * containing Profile, Backup Keys, and Logout.
+ * containing Profile, Backup Account Key, and Logout.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -105,8 +105,8 @@ fun AccountBottomSheet(
 
             AccountMenuItem(
                 icon = Icons.Default.Lock,
-                title = "Backup Keys",
-                subtitle = "View and copy your Nostr keys",
+                title = "Backup Account Key",
+                subtitle = "Save your account recovery key",
                 onClick = {
                     onBackupKeys()
                     onDismiss()
