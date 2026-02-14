@@ -30,6 +30,7 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.google.android.gms.location.LocationServices
 import com.drivestr.app.ui.screens.DriverModeScreen
+import com.ridestr.common.LogoutManager
 import com.ridestr.common.ui.screens.KeyBackupScreen
 import com.drivestr.app.ui.screens.OnboardingScreen
 import com.drivestr.app.ui.screens.ProfileSetupScreen
@@ -758,28 +759,15 @@ fun DrivestrApp() {
                     profileSyncManager = profileSyncManager,
                     walletService = walletService,
                     onLogout = {
-                        // Disconnect from Nostr
-                        nostrService.disconnect()
-
-                        // Clear Nostr key and profile
+                        LogoutManager.performFullCleanup(
+                            context = context,
+                            nostrService = nostrService,
+                            settingsManager = settingsManager,
+                            walletService = walletService,
+                            walletKeyManager = walletKeyManager,
+                            tileDiscoveryService = tileDiscoveryService
+                        )
                         onboardingViewModel.logout()
-
-                        // Clear all settings (relays, preferences, onboarding, wallet setup)
-                        settingsManager.clearAllData()
-
-                        // Clear wallet data and key
-                        walletService.resetWallet()
-                        walletKeyManager.clearWalletKey()
-
-                        // Clear ride history
-                        rideHistoryRepository.clearAllHistory()
-
-                        // Clear saved locations (favorites/recents)
-                        com.ridestr.common.data.SavedLocationRepository.getInstance(context).clearAll()
-
-                        // Clear vehicle repository
-                        vehicleRepository.clearAll()
-
                         currentScreen = Screen.ONBOARDING
                     },
                     onOpenProfile = {

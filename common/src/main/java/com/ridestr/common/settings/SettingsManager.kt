@@ -743,7 +743,7 @@ class SettingsManager(context: Context) {
 
         // Reset all StateFlows to defaults
         _autoOpenNavigation.value = true
-        _displayCurrency.value = DisplayCurrency.SATS
+        _displayCurrency.value = DisplayCurrency.USD
         _distanceUnit.value = DistanceUnit.MILES
         _useGeocodingSearch.value = true
         _useManualDriverLocation.value = false
@@ -765,6 +765,10 @@ class SettingsManager(context: Context) {
         _roadflarePaymentMethods.value = emptySet()
         // Favorite LN addresses (Issue #14)
         _favoriteLnAddresses.value = emptyList()
+        // RoadFlare + coordination state
+        _ignoreFollowNotifications.value = false
+        _roadflareAlertsEnabled.value = false
+        _driverOnlineStatus.value = null
     }
 
     // ========================================

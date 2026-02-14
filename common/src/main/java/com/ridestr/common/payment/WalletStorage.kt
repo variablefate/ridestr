@@ -677,6 +677,7 @@ class WalletStorage(private val context: Context) {
             .remove(KEY_PENDING_BRIDGE_PAYMENTS)
             .remove(KEY_RECOVERY_TOKENS)
             .remove(KEY_PENDING_BLINDED_OPS)
+            .remove(KEY_KEYSET_COUNTERS)
             .apply()
         Log.d(TAG, "Cleared all wallet storage")
     }

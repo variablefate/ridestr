@@ -29,6 +29,7 @@ import com.ridestr.rider.ui.screens.RiderModeScreen
 import com.ridestr.rider.ui.screens.RoadflareTab
 import com.ridestr.rider.ui.screens.AddDriverScreen
 import com.ridestr.rider.ui.screens.HistoryScreen
+import com.ridestr.common.LogoutManager
 import com.ridestr.common.ui.screens.KeyBackupScreen
 import com.ridestr.rider.ui.screens.OnboardingScreen
 import com.ridestr.rider.ui.screens.ProfileSetupScreen
@@ -632,25 +633,15 @@ fun RidestrApp() {
                         com.ridestr.common.nostr.events.Location(it.latitude, it.longitude)
                     },
                     onLogout = {
-                        // Disconnect from Nostr
-                        nostrService.disconnect()
-
-                        // Clear Nostr key and profile
+                        LogoutManager.performFullCleanup(
+                            context = context,
+                            nostrService = nostrService,
+                            settingsManager = settingsManager,
+                            walletService = walletService,
+                            walletKeyManager = walletKeyManager,
+                            tileDiscoveryService = tileDiscoveryService
+                        )
                         onboardingViewModel.logout()
-
-                        // Clear all settings (relays, preferences, onboarding, wallet setup)
-                        settingsManager.clearAllData()
-
-                        // Clear wallet data and key
-                        walletService.resetWallet()
-                        walletKeyManager.clearWalletKey()
-
-                        // Clear ride history (singleton)
-                        RideHistoryRepository.getInstance(context).clearAllHistory()
-
-                        // Clear saved locations (favorites/recents)
-                        com.ridestr.common.data.SavedLocationRepository.getInstance(context).clearAll()
-
                         currentScreen = Screen.ONBOARDING
                     },
                     onOpenProfile = {
