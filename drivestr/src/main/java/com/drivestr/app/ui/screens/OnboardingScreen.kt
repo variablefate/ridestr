@@ -7,6 +7,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import com.drivestr.app.R
 import com.drivestr.app.viewmodels.OnboardingViewModel
 import com.ridestr.common.ui.screens.BackupReminderScreen
 import com.ridestr.common.ui.screens.KeySetupScreen
@@ -62,7 +63,8 @@ fun OnboardingScreen(
                 error = uiState.error,
                 isLoading = uiState.isLoading,
                 headlineText = "Welcome to Drivestr",
-                subtitleText = "Decentralized ridesharing for drivers",
+                appLogoRes = R.drawable.ic_app_logo,
+                appLogoDescription = "Drivestr logo",
                 onGenerateKey = {
                     wasKeyImport = false
                     viewModel.generateNewKey()

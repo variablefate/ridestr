@@ -1,5 +1,7 @@
 package com.ridestr.common.ui.screens
 
+import androidx.annotation.DrawableRes
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -9,6 +11,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
@@ -24,7 +27,8 @@ import androidx.compose.ui.unit.dp
  * @param error Current error message, if any
  * @param isLoading Whether a key operation is in progress
  * @param headlineText App-specific headline (e.g., "Welcome to Ridestr")
- * @param subtitleText App-specific subtitle (e.g., "Decentralized ridesharing for riders")
+ * @param appLogoRes Drawable resource ID for the app logo
+ * @param appLogoDescription Accessibility description for the app logo
  * @param onGenerateKey Callback when user taps "Create New Account"
  * @param onImportKey Callback when user imports a key
  */
@@ -33,7 +37,8 @@ fun KeySetupScreen(
     error: String?,
     isLoading: Boolean,
     headlineText: String,
-    subtitleText: String,
+    @DrawableRes appLogoRes: Int,
+    appLogoDescription: String,
     onGenerateKey: () -> Unit,
     onImportKey: (String) -> Unit,
     modifier: Modifier = Modifier
@@ -50,18 +55,17 @@ fun KeySetupScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
+        Image(
+            painter = painterResource(appLogoRes),
+            contentDescription = appLogoDescription,
+            modifier = Modifier.size(120.dp)
+        )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
         Text(
             text = headlineText,
             style = MaterialTheme.typography.headlineLarge,
-            textAlign = TextAlign.Center
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        Text(
-            text = subtitleText,
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center
         )
 
@@ -169,15 +173,6 @@ fun KeySetupScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(32.dp))
-
-        Text(
-            text = "Your key is stored securely on this device. " +
-                    "Make sure to backup your nsec - it's the only way to recover your identity.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center
-        )
     }
 }
 

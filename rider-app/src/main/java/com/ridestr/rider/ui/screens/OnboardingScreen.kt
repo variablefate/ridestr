@@ -9,6 +9,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import com.ridestr.common.ui.screens.BackupReminderScreen
 import com.ridestr.common.ui.screens.KeySetupScreen
+import com.ridestr.rider.R
 import com.ridestr.rider.viewmodels.OnboardingViewModel
 
 /**
@@ -62,7 +63,8 @@ fun OnboardingScreen(
                 error = uiState.error,
                 isLoading = uiState.isLoading,
                 headlineText = "Welcome to Ridestr",
-                subtitleText = "Decentralized ridesharing for riders",
+                appLogoRes = R.drawable.ic_app_logo,
+                appLogoDescription = "Ridestr logo",
                 onGenerateKey = {
                     wasKeyImport = false
                     viewModel.generateNewKey()
