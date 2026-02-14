@@ -4035,16 +4035,21 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         Log.d(TAG, "RoadFlare on-ride status: $isOnRide")
     }
 
-    override fun onCleared() {
-        super.onCleared()
+    fun performLogoutCleanup() {
         stopBroadcasting()
         stopStaleRequestCleanup()
         chatRefreshJob?.stop()
         confirmationTimeoutJob?.cancel()
+        pinVerificationTimeoutJob?.cancel()
         subs.closeAll()
         nostrService.disconnect()
         bitcoinPriceService.cleanup()
         roadflareLocationBroadcaster?.destroy()
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        performLogoutCleanup()
     }
 }
 

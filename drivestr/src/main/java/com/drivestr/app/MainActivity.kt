@@ -142,6 +142,7 @@ fun DrivestrApp() {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val onboardingViewModel: OnboardingViewModel = viewModel()
+    val driverViewModel: DriverViewModel = viewModel()
     val uiState by onboardingViewModel.uiState.collectAsState()
 
     // Initialize notification channels once on startup
@@ -759,6 +760,7 @@ fun DrivestrApp() {
                     profileSyncManager = profileSyncManager,
                     walletService = walletService,
                     onLogout = {
+                        driverViewModel.performLogoutCleanup()
                         LogoutManager.performFullCleanup(
                             context = context,
                             nostrService = nostrService,

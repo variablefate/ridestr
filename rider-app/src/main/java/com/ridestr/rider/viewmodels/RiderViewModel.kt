@@ -4511,15 +4511,21 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    override fun onCleared() {
-        super.onCleared()
+    fun performLogoutCleanup() {
         staleDriverCleanupJob?.cancel()
         chatRefreshJob?.stop()
         acceptanceTimeoutJob?.cancel()
         broadcastTimeoutJob?.cancel()
+        bridgePendingPollJob?.cancel()
+        roadflareBatchJob?.cancel()
         subs.closeAll()
         nostrService.disconnect()
         bitcoinPriceService.cleanup()
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        performLogoutCleanup()
     }
 
     // ============ Saved Locations (Favorites & Recents) ============

@@ -135,6 +135,7 @@ class MainActivity : ComponentActivity() {
 fun RidestrApp() {
     val context = LocalContext.current
     val onboardingViewModel: OnboardingViewModel = viewModel()
+    val riderViewModel: RiderViewModel = viewModel()
     val uiState by onboardingViewModel.uiState.collectAsState()
 
     // Initialize notification channels once on startup
@@ -633,6 +634,7 @@ fun RidestrApp() {
                         com.ridestr.common.nostr.events.Location(it.latitude, it.longitude)
                     },
                     onLogout = {
+                        riderViewModel.performLogoutCleanup()
                         LogoutManager.performFullCleanup(
                             context = context,
                             nostrService = nostrService,
