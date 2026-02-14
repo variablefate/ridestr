@@ -1,5 +1,7 @@
 package com.ridestr.common.ui
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -41,7 +43,8 @@ fun WalletSetupScreen(
     walletService: WalletService,
     onComplete: () -> Unit,
     onSkip: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    subtitle: String = "Needed to pay for rides"
 ) {
     val scope = rememberCoroutineScope()
 
@@ -67,37 +70,20 @@ fun WalletSetupScreen(
         checkingNip60 = false
     }
 
+    // New setup = the else branch (no existing wallet, not loading, not restored)
+    val showNewSetup = !checkingNip60 && !hasExistingWallet && restoredBalance == null
+
     Column(
         modifier = modifier
             .fillMaxSize()
             .padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // Header
-        Column(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Icon(
-                imageVector = Icons.Default.AccountBalanceWallet,
-                contentDescription = null,
-                modifier = Modifier.size(64.dp),
-                tint = MaterialTheme.colorScheme.primary
-            )
-            Spacer(modifier = Modifier.height(16.dp))
-            Text(
-                text = "Set Up Your Wallet",
-                style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.Bold
-            )
-            Text(
-                text = "Needed to pay for rides",
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+        // Header pinned at top for loading/existing/restored states
+        if (!showNewSetup) {
+            WalletSetupHeader(subtitle)
+            Spacer(modifier = Modifier.height(8.dp))
         }
-
-        Spacer(modifier = Modifier.height(8.dp))
 
         // Content
         when {
@@ -294,13 +280,25 @@ fun WalletSetupScreen(
                     }
                 }
 
+                // Animated spacer — collapses when switching to advanced
+                val topWeight by animateFloatAsState(
+                    targetValue = if (showAdvanced) 0f else 1f,
+                    animationSpec = tween(350), label = "topWeight"
+                )
+                if (!showAdvanced || topWeight > 0.01f) {
+                    Spacer(modifier = Modifier.weight(topWeight.coerceAtLeast(0.01f)))
+                }
+
+                // Header — position driven by animated spacer above
+                WalletSetupHeader(subtitle)
+                Spacer(modifier = Modifier.height(8.dp))
+
                 if (!showAdvanced) {
-                    // Simple mode — one-tap recommended setup
+                    // Bottom spacer balances top spacer → header centered
+                    Spacer(modifier = Modifier.weight(1f))
+
                     Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f),
-                        verticalArrangement = Arrangement.Center,
+                        modifier = Modifier.fillMaxWidth(),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Button(
@@ -328,24 +326,6 @@ fun WalletSetupScreen(
                             }
                         }
 
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        Text(
-                            text = "Quick, secure, and used by most riders.\nLow fees and easy for everyday rides.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = TextAlign.Center
-                        )
-
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        Text(
-                            text = "You can change your provider later in Settings.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = TextAlign.Center
-                        )
-
                         if (verificationError != null) {
                             Spacer(modifier = Modifier.height(12.dp))
                             Card(
@@ -371,8 +351,6 @@ fun WalletSetupScreen(
                             }
                         }
 
-                        Spacer(modifier = Modifier.weight(1f))
-
                         TextButton(
                             onClick = {
                                 showAdvanced = true
@@ -384,8 +362,8 @@ fun WalletSetupScreen(
                             Text("Advanced options")
                         }
                     }
-                } else {
-                    // Advanced mode — full mint picker
+                } else if (topWeight <= 0.05f) {
+                    // Advanced mode — shown once header has nearly settled at top
                     LazyColumn(
                         modifier = Modifier.weight(1f),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -506,9 +484,38 @@ fun WalletSetupScreen(
                             Text("Skip for now")
                         }
                     }
+                } else {
+                    // Transitioning — hold space while header slides up
+                    Spacer(modifier = Modifier.weight(1f))
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun WalletSetupHeader(subtitle: String) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Icon(
+            imageVector = Icons.Default.AccountBalanceWallet,
+            contentDescription = null,
+            modifier = Modifier.size(64.dp),
+            tint = MaterialTheme.colorScheme.primary
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+        Text(
+            text = "Set Up Your Wallet",
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Bold
+        )
+        Text(
+            text = subtitle,
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 

@@ -672,7 +672,8 @@ fun DrivestrApp() {
                         settingsManager.setWalletSetupSkipped(true)
                         currentScreen = Screen.LOCATION_PERMISSION
                     },
-                    modifier = Modifier.padding(innerPadding)
+                    modifier = Modifier.padding(innerPadding),
+                    subtitle = "Needed to receive payments"
                 )
             }
 
