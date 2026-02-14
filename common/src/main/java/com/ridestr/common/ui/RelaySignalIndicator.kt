@@ -10,6 +10,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 
 /**
@@ -44,39 +47,55 @@ fun RelaySignalIndicator(
 
     val inactiveColor = MaterialTheme.colorScheme.surfaceVariant
 
-    Row(
+    val description = "Relay connection: $connectedCount of $totalRelays connected"
+
+    Box(
         modifier = modifier
-            .height(20.dp)
-            .padding(horizontal = 4.dp)
             .then(
-                if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
+                if (onClick != null) Modifier.clickable(
+                    role = Role.Button,
+                    onClickLabel = "Open relay settings",
+                    onClick = onClick
+                ) else Modifier
+            )
+            .then(
+                if (onClick != null) Modifier.semantics {
+                    this.contentDescription = description
+                } else Modifier
             ),
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
-        verticalAlignment = Alignment.Bottom
+        contentAlignment = Alignment.Center
     ) {
-        // Bar 1 (shortest) - filled if connectedCount >= 1
-        SignalBar(
-            height = 8.dp,
-            isFilled = connectedCount >= 1,
-            activeColor = activeColor,
-            inactiveColor = inactiveColor
-        )
+        Row(
+            modifier = Modifier
+                .height(20.dp)
+                .padding(horizontal = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            verticalAlignment = Alignment.Bottom
+        ) {
+            // Bar 1 (shortest) - filled if connectedCount >= 1
+            SignalBar(
+                height = 8.dp,
+                isFilled = connectedCount >= 1,
+                activeColor = activeColor,
+                inactiveColor = inactiveColor
+            )
 
-        // Bar 2 (medium) - filled if connectedCount >= 2
-        SignalBar(
-            height = 13.dp,
-            isFilled = connectedCount >= 2,
-            activeColor = activeColor,
-            inactiveColor = inactiveColor
-        )
+            // Bar 2 (medium) - filled if connectedCount >= 2
+            SignalBar(
+                height = 13.dp,
+                isFilled = connectedCount >= 2,
+                activeColor = activeColor,
+                inactiveColor = inactiveColor
+            )
 
-        // Bar 3 (tallest) - filled if connectedCount >= 3
-        SignalBar(
-            height = 18.dp,
-            isFilled = connectedCount >= 3,
-            activeColor = activeColor,
-            inactiveColor = inactiveColor
-        )
+            // Bar 3 (tallest) - filled if connectedCount >= 3
+            SignalBar(
+                height = 18.dp,
+                isFilled = connectedCount >= 3,
+                activeColor = activeColor,
+                inactiveColor = inactiveColor
+            )
+        }
     }
 }
 

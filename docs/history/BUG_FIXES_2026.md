@@ -12,6 +12,7 @@ This file archives historical debugging insights, fix details, and implementatio
 - [Encryption Fallback Warning](#encryption-fallback-warning)
 - [Security Hardening Details](#security-hardening-details)
 - [Dead Code Removed](#dead-code-removed)
+- [Accessibility & TalkBack](#accessibility--talkback-february-2026)
 
 ---
 
@@ -321,3 +322,24 @@ Relay message → RelayConnection.handleMessage()
 
 - `WalletService.settleRide()` - orphaned method, deleted
 - UI buttons "Verify Balance" and "Resync Proofs to NIP-60" - redundant with `syncWallet()`
+
+---
+
+## Accessibility & TalkBack (February 2026)
+
+Added semantic annotations across shared UI components so TalkBack (Android screen reader) correctly identifies and announces interactive elements.
+
+### Changes
+
+| Component | File | What Changed |
+|-----------|------|-------------|
+| Relay signal indicator | `RelaySignalIndicator.kt` | Box wrapper with `role = Role.Button`, `semantics { contentDescription }`, `onClickLabel`. Announces "Relay connection: X of Y connected, button" |
+| Fare/currency toggles | `FareDisplay.kt`, `RideDetailScreen.kt`, `WalletDetailScreen.kt` | Added `role = Role.Button` + `onClickLabel = "Toggle currency"` to clickable modifiers |
+| Settings rows | `SettingsComponents.kt` | Added `role = Role.Button` to `SettingsNavigationRow` and `SettingsActionRow` |
+| Ride status icon | `RideDetailScreen.kt` | Added `contentDescription` ("Completed" / "Cancelled") to status icon |
+
+### Spacing Fix (Issue #40 Follow-up)
+
+The initial accessibility pass added `.sizeIn(minWidth = 48.dp, minHeight = 48.dp)` to RelaySignalIndicator and a `Spacer(4.dp)` between it and the account button in both MainActivity files. This expanded the relay indicator from ~21dp to 48dp, creating excessive spacing.
+
+**Fix**: Removed `sizeIn` constraint and both Spacers. The `role = Role.Button` and `semantics { contentDescription }` — which are what actually make TalkBack work — were preserved. Touch target returns to natural size (~21dp).

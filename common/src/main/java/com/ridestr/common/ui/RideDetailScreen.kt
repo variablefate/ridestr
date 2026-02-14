@@ -10,6 +10,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.ridestr.common.nostr.events.RideHistoryEntry
@@ -130,7 +131,7 @@ fun RideDetailScreen(
                     ) {
                         Icon(
                             imageVector = if (isCompleted) Icons.Default.CheckCircle else Icons.Default.Cancel,
-                            contentDescription = null,
+                            contentDescription = if (isCompleted) "Completed" else "Cancelled",
                             tint = if (isCompleted)
                                 MaterialTheme.colorScheme.onPrimaryContainer
                             else
@@ -261,7 +262,7 @@ fun RideDetailScreen(
                                         text = tipDisplay,
                                         style = MaterialTheme.typography.titleSmall,
                                         color = MaterialTheme.colorScheme.onTertiaryContainer,
-                                        modifier = Modifier.clickable { settingsManager.toggleDisplayCurrency() }
+                                        modifier = Modifier.clickable(role = Role.Button, onClickLabel = "Toggle currency") { settingsManager.toggleDisplayCurrency() }
                                     )
                                 }
                             }
@@ -499,7 +500,7 @@ fun RideDetailScreen(
                                     text = fareDisplay,
                                     style = MaterialTheme.typography.headlineMedium,
                                     color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                    modifier = Modifier.clickable { settingsManager.toggleDisplayCurrency() }
+                                    modifier = Modifier.clickable(role = Role.Button, onClickLabel = "Toggle currency") { settingsManager.toggleDisplayCurrency() }
                                 )
                             }
                         }
@@ -530,7 +531,7 @@ fun RideDetailScreen(
                                     text = "Tip: $tipDisplay",
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.tertiary,
-                                    modifier = Modifier.clickable { settingsManager.toggleDisplayCurrency() }
+                                    modifier = Modifier.clickable(role = Role.Button, onClickLabel = "Toggle currency") { settingsManager.toggleDisplayCurrency() }
                                 )
                             }
                         }

@@ -8,6 +8,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import com.ridestr.common.bitcoin.BitcoinPriceService
@@ -59,7 +60,7 @@ fun FareDisplay(
         style = style,
         fontWeight = fontWeight,
         color = color,
-        modifier = modifier.clickable {
+        modifier = modifier.clickable(role = Role.Button, onClickLabel = "Toggle currency") {
             settingsManager.toggleDisplayCurrency()
         }
     )

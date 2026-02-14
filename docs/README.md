@@ -14,6 +14,7 @@ Ridestr is a decentralized rideshare platform built on Nostr with Cashu payments
 | **HTLC Escrow** | ✅ Trustless ride payments with automatic settlement |
 | **Profile Sync** | ✅ Vehicles, saved locations, settings backed up to Nostr |
 | **Offline Routing** | ✅ Valhalla-based turn-by-turn directions |
+| **Accessibility** | ✅ TalkBack support with semantic roles and labels |
 
 ---
 

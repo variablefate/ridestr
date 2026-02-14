@@ -258,7 +258,7 @@ private fun BalanceDisplayCard(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable(onClick = onToggleCurrency)
+                .clickable(role = Role.Button, onClickLabel = "Toggle currency", onClick = onToggleCurrency)
                 .padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
