@@ -108,6 +108,8 @@ Any state → cancelCurrentRide() → CANCELLED → goOnline() → AVAILABLE
 | `DriverViewModel` | `WalletService` | Check wallet connected | `walletService.isConnected` |
 | `DriverViewModel` | `RideHistoryRepository` | Save completed ride | `rideHistoryRepo.addRide()` |
 | `DriverViewModel` | `VehicleRepository` | Get primary vehicle | `vehicleRepo.primaryVehicle` |
+| `MainActivity` | `LogoutManager` | Centralized logout cleanup | `LogoutManager.performFullCleanup(...)` |
+| `MainActivity` | `DriverViewModel` | ViewModel logout cleanup | `viewModel.performLogoutCleanup()` |
 | `MainActivity` | `ProfileSyncManager` | Register sync adapters | `profileSyncManager.registerSyncable()` |
 | `MainActivity` | `Nip60WalletSync` | Wire to WalletService | `walletService.setNip60Sync()` |
 | `MainActivity` | `VehicleRepository` | Vehicle data for UI | `vehicleRepository.vehicles.value` |

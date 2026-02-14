@@ -1,6 +1,6 @@
 # Ridestr Module Connections
 
-**Last Updated**: 2026-02-12 (Ride Flow Simplification Phase 6 - Double-Confirmation Race Guard)
+**Last Updated**: 2026-02-13 (LogoutManager, ViewModel logout cleanup, UX redesigns)
 
 This document provides a comprehensive view of how all modules connect in the Ridestr codebase. Use this as a reference when making changes to understand what might be affected.
 
@@ -16,6 +16,17 @@ This document provides a comprehensive view of how all modules connect in the Ri
 - FakeMintApi for queuing mock swap/checkstate responses
 - CashuBackend test state injection (`setTestState()`, `testActiveKeyset`)
 - `MintUnreachable` error variant for distinguishing network failures from HTTP errors
+
+**Logout & Cleanup (February 2026):**
+- LogoutManager extracted to `common/` — consolidates 16 cleanup operations from both MainActivity files
+- `performLogoutCleanup()` added to both ViewModels — cancels ViewModel-owned jobs/services before Activity destruction
+- Phase 7 dead code removed: `updateLocation()` overload → `handleLocationUpdate()` rename, orphaned constants/fields deleted
+
+**UX Redesigns (February 2026):**
+- Key backup screens redesigned: nsec/npub → "Backup Key"/"Account ID", copy-without-reveal
+- Wallet setup progressive disclosure: mint picker behind "Advanced options", animated header
+- Onboarding: app logos added to KeySetupScreen, subtitle text removed
+- "How does this work?" removed from settings KeyBackupScreen (kept in onboarding)
 
 **Ride Flow Simplification Phase 4 (February 2026):**
 - SubscriptionManager extracted to `common/nostr/` — centralized subscription ID lifecycle
@@ -962,6 +973,34 @@ private var connectionGeneration = 0L  // Increments on connect()
 | Login/Key import | `keyManager.refreshFromStorage()` on both NostrService AND ProfileSyncManager | Ensures shared key state |
 | Wallet connection | `walletService.setNip60Sync()` after creating Nip60WalletSync | Enables cross-device sync |
 
+### Logout Cleanup
+
+```
+Logout System
+├── LogoutManager (common module singleton)
+│   ├── performFullCleanup() - 16 cleanup operations in correct order
+│   ├── Depends on: NostrService, SettingsManager, WalletService, WalletKeyManager
+│   ├── Depends on: All repositories (RideHistory, SavedLocation, Vehicle, FollowedDrivers, DriverRoadflare)
+│   ├── Depends on: NostrTileDiscoveryService, ProfileSyncManager
+│   └── Used by: MainActivity (both apps)
+│
+├── ViewModel.performLogoutCleanup()
+│   ├── RiderViewModel: cancels staleDriverCleanupJob, bridgePendingPollJob, roadflareBatchJob
+│   ├── DriverViewModel: stopBroadcasting(), cancels pinVerificationTimeoutJob
+│   └── Called by: MainActivity on logout BEFORE Activity destruction
+│
+└── Cleanup Order
+    1. NostrService.disconnect()
+    2. KeyManager.logout()
+    3. SettingsManager.clearAllData()
+    4. WalletService.resetWallet()
+    5. WalletKeyManager.clearWalletKey()
+    6-10. All repository clearAll()
+    11-12. SharedPreferences (ride state)
+    13-15. Caches (tiles, remote config, profile picture)
+    16. ProfileSyncManager.clearInstance()
+```
+
 ### Cannot Be Removed Without Breaking
 
 | Component | Used By | Impact if Removed |
@@ -996,6 +1035,7 @@ private var connectionGeneration = 0L  // Increments on connect()
 | **KeyBackupScreen** | `common/src/main/java/com/ridestr/common/ui/screens/KeyBackupScreen.kt` |
 | **ProfileSetupContent** | `common/src/main/java/com/ridestr/common/ui/screens/ProfileSetupContent.kt` |
 | **OnboardingComponents** | `common/src/main/java/com/ridestr/common/ui/screens/OnboardingComponents.kt` |
+| **LogoutManager** | `common/src/main/java/com/ridestr/common/LogoutManager.kt` |
 | **SettingsComponents** | `common/src/main/java/com/ridestr/common/ui/components/SettingsComponents.kt` |
 | **RideHistoryRepository** | `common/src/main/java/com/ridestr/common/data/RideHistoryRepository.kt` |
 | **FollowedDriversRepository** | `common/src/main/java/com/ridestr/common/data/FollowedDriversRepository.kt` |

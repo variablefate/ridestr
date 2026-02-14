@@ -141,6 +141,8 @@ Fixes for driver status bouncing between offline/online:
 | `RiderViewModel` | `SavedLocationRepository` | Recent locations | `savedLocationRepo.addRecent()` |
 | `MainActivity` | `ProfileSyncManager` | Register sync adapters | `profileSyncManager.registerSyncable()` |
 | `MainActivity` | `Nip60WalletSync` | Wire to WalletService | `walletService.setNip60Sync()` |
+| `MainActivity` | `LogoutManager` | Centralized logout cleanup | `LogoutManager.performFullCleanup(...)` |
+| `MainActivity` | `RiderViewModel` | ViewModel logout cleanup | `viewModel.performLogoutCleanup()` |
 | `MainActivity` | `NostrService` | Create service instance | Constructor injection |
 | `WalletScreen` | `WalletService` | Display balance | `walletService.balance.value` |
 | `HistoryScreen` | `RideHistoryRepository` | Display past rides | `rideHistoryRepo.rides.value` |

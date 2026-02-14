@@ -136,7 +136,7 @@ CREATED → ACCEPTED → CONFIRMED → EN_ROUTE → ARRIVED → IN_PROGRESS → 
 |------|---------|
 | `WalletDetailScreen.kt` | Deposit/Withdraw dialogs (**FULLY WORKING**) |
 | `WalletSettingsScreen.kt` | Wallet management (sync, change mint, diagnostics) |
-| `WalletSetupScreen.kt` | Mint connection setup |
+| `WalletSetupScreen.kt` | Wallet setup with progressive disclosure (simple/advanced mode), animated header, app-specific subtitle |
 | `AccountBottomSheet.kt` | Profile, logout, account safety |
 | `AccountSafetyScreen.kt` | Key backup, account recovery options |
 | `ChatBottomSheet.kt` | In-ride messaging UI |
@@ -161,9 +161,9 @@ Extracted from both apps to eliminate duplication. Each app keeps a thin wrapper
 
 | File | Purpose | Params for Customization |
 |------|---------|--------------------------|
-| `KeyBackupScreen.kt` | Key backup display (100% identical between apps) | `npub`, `nsec`, `onBack` |
+| `KeyBackupScreen.kt` | Key backup display with normie-friendly labels (Account ID, Backup Key) | `npub`, `nsec`, `onBack` |
 | `ProfileSetupContent.kt` | Profile editing form (used by ProfileSetupScreen wrapper) | `roleDescriptionText`, `aboutPlaceholderText` |
-| `OnboardingComponents.kt` | Key setup + backup reminder screens | `headlineText`, `subtitleText` |
+| `OnboardingComponents.kt` | Key setup + backup reminder screens | `headlineText`, `appLogoRes`, `appLogoDescription` |
 
 ### Shared UI Components (`java/com/ridestr/common/ui/components/`)
 
@@ -172,6 +172,12 @@ Reusable composables extracted from both apps' SettingsScreen files.
 | File | Components | Notes |
 |------|------------|-------|
 | `SettingsComponents.kt` | `SettingsSwitchRow`, `SettingsNavigationRow`, `SettingsActionRow` | SwitchRow has `enabled: Boolean = true` param with alpha styling |
+
+### Logout (`java/com/ridestr/common/`)
+
+| File | Purpose | Key Methods |
+|------|---------|-------------|
+| `LogoutManager.kt` | Centralized logout cleanup (16 operations in order) | `performFullCleanup()` |
 
 ### Other Services
 
@@ -214,6 +220,7 @@ Reusable composables extracted from both apps' SettingsScreen files.
 | `SettingsManager` | MainActivity | Auto-backup observer | `syncableSettingsHash` Flow triggers backup |
 | `WalletDetailScreen` | `WalletService` | Deposit/Withdraw | `walletService.requestDeposit()` |
 | `RelayManager` | Nostr Relays (WebSocket) | Event transport | WebSocket connections |
+| `LogoutManager` | All repositories + services | Centralized logout cleanup | `LogoutManager.performFullCleanup(...)` |
 | `SubscriptionManager` | `NostrService` | Subscription close callback | `closeSubscription: nostrService::closeSubscription` |
 | `SubscriptionManager` | `DriverViewModel` | Subscription lifecycle | `subs.set(SubKeys.OFFERS, id)`, `subs.closeAll(*SubKeys.RIDE_ALL)` |
 | `SubscriptionManager` | `RiderViewModel` | Subscription lifecycle | `subs.set(SubKeys.ACCEPTANCE, id)`, `subs.closeAll(*SubKeys.RIDE_ALL)` |
