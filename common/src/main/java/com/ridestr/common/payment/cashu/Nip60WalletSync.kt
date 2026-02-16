@@ -701,6 +701,9 @@ class Nip60WalletSync(
         }
     }
 
+    override suspend fun getWalletMetadataMintUrl(): String? =
+        getExistingWalletMetadata()?.mintUrl
+
     /**
      * Check if user has an existing NIP-60 wallet.
      * Checks for EITHER wallet metadata (Kind 17375) OR proof events (Kind 7375).

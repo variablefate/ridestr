@@ -656,16 +656,113 @@ class WalletService(
                     Log.d(TAG, "Deleted ${spentEventIds.size} spent proof events")
                 }
 
-                // Check if any NIP-60 proofs have outdated mint URL and need re-publishing
+                // === Block A: Fetch keyset IDs for current mint ===
+                val currentMintKeysetIds = cashuBackend.getAllKeysetIdsFromMint(mintUrl)
+
+                // === Block B: Keyset-validated URL republish ===
+                // Only republish proofs whose keyset ID actually belongs to the current mint.
+                // This prevents cross-mint corruption (e.g., themilkroad proofs getting minibits URL).
                 val validNip60Proofs = nip60Proofs.filter { it.secret !in spentSecrets }
                 val proofsWithOldUrl = validNip60Proofs.filter {
                     normalizeUrl(it.mintUrl) != normalizeUrl(mintUrl)
                 }
+                var urlUpdatedCount = 0
 
-                if (proofsWithOldUrl.isNotEmpty()) {
-                    Log.d(TAG, "Updating ${proofsWithOldUrl.size} proofs with new mint URL")
-                    // Re-publish proofs with correct mint URL
-                    sync.republishProofsWithNewMint(proofsWithOldUrl, mintUrl)
+                if (proofsWithOldUrl.isNotEmpty() && currentMintKeysetIds != null) {
+                    val (ownedByCurrentMint, foreignProofs) = proofsWithOldUrl.partition {
+                        it.id in currentMintKeysetIds
+                    }
+
+                    if (ownedByCurrentMint.isNotEmpty()) {
+                        Log.d(TAG, "Updating ${ownedByCurrentMint.size} proofs with new mint URL (keyset verified)")
+                        sync.republishProofsWithNewMint(ownedByCurrentMint, mintUrl)
+                        urlUpdatedCount = ownedByCurrentMint.size
+                    }
+
+                    if (foreignProofs.isNotEmpty()) {
+                        val foreignKeysets = foreignProofs.map { it.id }.distinct()
+                        Log.w(TAG, "SKIPPED ${foreignProofs.size} proofs — keyset IDs not found at $mintUrl: $foreignKeysets")
+                    }
+                } else if (proofsWithOldUrl.isNotEmpty()) {
+                    Log.w(TAG, "Cannot validate ${proofsWithOldUrl.size} proofs — mint keyset fetch failed, skipping URL update")
+                }
+
+                // === Block C: Repair already-corrupted proofs ===
+                // Detects proofs that claim to be from current mint but whose keyset IDs
+                // don't exist there — they were corrupted by a previous sync.
+                var repairedCount = 0
+                if (currentMintKeysetIds != null) {
+                    val proofsClaimingCurrentMint = validNip60Proofs.filter {
+                        normalizeUrl(it.mintUrl) == normalizeUrl(mintUrl) && it.id !in currentMintKeysetIds
+                    }
+
+                    if (proofsClaimingCurrentMint.isNotEmpty()) {
+                        val corruptedKeysets = proofsClaimingCurrentMint.map { it.id }.distinct()
+                        Log.w(TAG, "DETECTED ${proofsClaimingCurrentMint.size} corrupted proofs — " +
+                                "claim mintUrl=$mintUrl but keyset IDs $corruptedKeysets not found there")
+
+                        // Gather candidate mint URLs to search for the correct origin
+                        val candidateMints = mutableSetOf<String>()
+
+                        // Source 1: Other mint URLs from NIP-60 proofs
+                        nip60Proofs.map { normalizeUrl(it.mintUrl) }
+                            .filter { it != normalizeUrl(mintUrl) }
+                            .distinct()
+                            .forEach { candidateMints.add(it) }
+
+                        // Source 2: NIP-60 wallet metadata mint URL
+                        val metadataMintUrl = sync.getWalletMetadataMintUrl()
+                        if (metadataMintUrl != null && normalizeUrl(metadataMintUrl) != normalizeUrl(mintUrl)) {
+                            candidateMints.add(normalizeUrl(metadataMintUrl))
+                        }
+
+                        // Source 3: DEFAULT_MINTS as last resort
+                        DEFAULT_MINTS.map { normalizeUrl(it.url) }
+                            .filter { it != normalizeUrl(mintUrl) }
+                            .forEach { candidateMints.add(it) }
+
+                        Log.d(TAG, "Searching ${candidateMints.size} candidate mints for correct keyset origin")
+
+                        // Build keyset→mint mapping (each candidate queried at most once)
+                        val keysetIdToCorrectMint = mutableMapOf<String, String>()
+                        val queriedMints = mutableMapOf<String, Set<String>?>() // cache results
+
+                        for (candidate in candidateMints) {
+                            // Only query if we still have unresolved keysets
+                            val unresolvedKeysets = corruptedKeysets.filter { it !in keysetIdToCorrectMint }
+                            if (unresolvedKeysets.isEmpty()) break
+
+                            val candidateKeysets = queriedMints.getOrPut(candidate) {
+                                cashuBackend.getAllKeysetIdsFromMint(candidate)
+                            }
+
+                            if (candidateKeysets != null) {
+                                for (ks in unresolvedKeysets) {
+                                    if (ks in candidateKeysets) {
+                                        keysetIdToCorrectMint[ks] = candidate
+                                        Log.d(TAG, "Found keyset $ks at mint: $candidate")
+                                    }
+                                }
+                            }
+                        }
+
+                        // Group repairable proofs by correct mint and republish
+                        val repairableProofs = proofsClaimingCurrentMint.filter { it.id in keysetIdToCorrectMint }
+                        val unrepairableProofs = proofsClaimingCurrentMint.filter { it.id !in keysetIdToCorrectMint }
+
+                        repairableProofs.groupBy { keysetIdToCorrectMint[it.id]!! }.forEach { (correctMint, proofs) ->
+                            Log.d(TAG, "REPAIRING ${proofs.size} proofs: reassigning to correct mint $correctMint")
+                            sync.republishProofsWithNewMint(proofs, correctMint)
+                            repairedCount += proofs.size
+                        }
+
+                        if (unrepairableProofs.isNotEmpty()) {
+                            val unresolvedKeysets = unrepairableProofs.map { it.id }.distinct()
+                            Log.w(TAG, "${unrepairableProofs.size} corrupted proofs unresolvable — " +
+                                    "keyset IDs $unresolvedKeysets not found at any candidate mint. " +
+                                    "Proofs preserved, will retry next sync.")
+                        }
+                    }
                 }
 
                 // Calculate final balance: verified NIP-60 proofs + verified local-only proofs
@@ -686,11 +783,12 @@ class WalletService(
                 updateDiagnostics()
 
                 val publishedMsg = if (validLocalOnlyProofs.isNotEmpty()) " (published ${validLocalOnlyProofs.size} local)" else ""
-                val updatedMsg = if (proofsWithOldUrl.isNotEmpty()) " (updated ${proofsWithOldUrl.size} URLs)" else ""
+                val updatedMsg = if (urlUpdatedCount > 0) " (updated $urlUpdatedCount URLs)" else ""
+                val repairedMsg = if (repairedCount > 0) " (repaired $repairedCount corrupted)" else ""
                 val spentMsg = if (spentProofs.isNotEmpty()) ", removed ${spentProofs.size} spent" else ""
                 return@withLock SyncResult(
                     success = true,
-                    message = "Synced: $syncedBalance sats$publishedMsg$updatedMsg$spentMsg",
+                    message = "Synced: $syncedBalance sats$publishedMsg$updatedMsg$repairedMsg$spentMsg",
                     verifiedBalance = syncedBalance,
                     unverifiedBalance = 0,
                     spentCount = spentProofs.size,

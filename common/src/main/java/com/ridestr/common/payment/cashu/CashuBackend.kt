@@ -4500,6 +4500,52 @@ class CashuBackend(
         }
     }
 
+    /**
+     * Get ALL keyset IDs (active + inactive, sat unit) from a specific mint.
+     * Unlike [getActiveKeysetIds] which only returns active keysets for the current mint,
+     * this accepts any mint URL and returns all keysets — inactive ones matter because
+     * proofs may use old keysets.
+     *
+     * @param mintUrl The mint URL to query
+     * @return Set of keyset IDs for O(1) lookup, or null on network failure
+     */
+    suspend fun getAllKeysetIdsFromMint(mintUrl: String): Set<String>? = withContext(Dispatchers.IO) {
+        try {
+            val url = mintUrl.trimEnd('/')
+            val request = Request.Builder()
+                .url("$url/v1/keysets")
+                .get()
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    Log.e(TAG, "getAllKeysetIdsFromMint failed for $url: ${response.code}")
+                    return@withContext null
+                }
+
+                val body = response.body?.string() ?: return@withContext null
+                val json = JSONObject(body)
+                val keysetsArray = json.optJSONArray("keysets") ?: return@withContext null
+
+                val ids = mutableSetOf<String>()
+                for (i in 0 until keysetsArray.length()) {
+                    val keyset = keysetsArray.getJSONObject(i)
+                    val id = keyset.getString("id")
+                    val unit = keyset.optString("unit", "sat")
+                    if (unit == "sat") {
+                        ids.add(id)
+                    }
+                }
+
+                Log.d(TAG, "getAllKeysetIdsFromMint($url): ${ids.size} sat keysets (active + inactive)")
+                ids
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "getAllKeysetIdsFromMint failed: ${e.message}", e)
+            null
+        }
+    }
+
     // endregion
 
     // region ═══════════════════════════════════════════════════════════════════════

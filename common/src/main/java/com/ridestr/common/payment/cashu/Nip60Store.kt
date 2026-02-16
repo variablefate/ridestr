@@ -117,6 +117,13 @@ interface Nip60Store {
         forceOverwrite: Boolean = false
     ): Boolean
 
+    /**
+     * Get the mint URL from existing NIP-60 wallet metadata (Kind 17375).
+     * Used by syncWallet() to find the correct mint for corrupted proofs.
+     * Returns null if no metadata exists or relays are unavailable.
+     */
+    suspend fun getWalletMetadataMintUrl(): String? = null
+
     // ═══════════════════════════════════════════════════════════════════════════════
     // DIAGNOSTICS & ONBOARDING
     // ═══════════════════════════════════════════════════════════════════════════════
