@@ -702,45 +702,43 @@ class WalletService(
                                 "claim mintUrl=$mintUrl but keyset IDs $corruptedKeysets not found there")
 
                         // Gather candidate mint URLs to search for the correct origin
-                        val candidateMints = mutableSetOf<String>()
+                        val candidateMintUrls = mutableMapOf<String, String>() // normalized → original
 
                         // Source 1: Other mint URLs from NIP-60 proofs
-                        nip60Proofs.map { normalizeUrl(it.mintUrl) }
-                            .filter { it != normalizeUrl(mintUrl) }
-                            .distinct()
-                            .forEach { candidateMints.add(it) }
+                        nip60Proofs.filter { normalizeUrl(it.mintUrl) != normalizeUrl(mintUrl) }
+                            .associateBy { normalizeUrl(it.mintUrl) }
+                            .forEach { (norm, proof) -> candidateMintUrls.putIfAbsent(norm, proof.mintUrl) }
 
                         // Source 2: NIP-60 wallet metadata mint URL
                         val metadataMintUrl = sync.getWalletMetadataMintUrl()
                         if (metadataMintUrl != null && normalizeUrl(metadataMintUrl) != normalizeUrl(mintUrl)) {
-                            candidateMints.add(normalizeUrl(metadataMintUrl))
+                            candidateMintUrls.putIfAbsent(normalizeUrl(metadataMintUrl), metadataMintUrl)
                         }
 
                         // Source 3: DEFAULT_MINTS as last resort
-                        DEFAULT_MINTS.map { normalizeUrl(it.url) }
-                            .filter { it != normalizeUrl(mintUrl) }
-                            .forEach { candidateMints.add(it) }
+                        DEFAULT_MINTS.filter { normalizeUrl(it.url) != normalizeUrl(mintUrl) }
+                            .forEach { candidateMintUrls.putIfAbsent(normalizeUrl(it.url), it.url) }
 
-                        Log.d(TAG, "Searching ${candidateMints.size} candidate mints for correct keyset origin")
+                        Log.d(TAG, "Searching ${candidateMintUrls.size} candidate mints for correct keyset origin")
 
                         // Build keyset→mint mapping (each candidate queried at most once)
                         val keysetIdToCorrectMint = mutableMapOf<String, String>()
                         val queriedMints = mutableMapOf<String, Set<String>?>() // cache results
 
-                        for (candidate in candidateMints) {
+                        for ((_, originalUrl) in candidateMintUrls) {
                             // Only query if we still have unresolved keysets
                             val unresolvedKeysets = corruptedKeysets.filter { it !in keysetIdToCorrectMint }
                             if (unresolvedKeysets.isEmpty()) break
 
-                            val candidateKeysets = queriedMints.getOrPut(candidate) {
-                                cashuBackend.getAllKeysetIdsFromMint(candidate)
+                            val candidateKeysets = queriedMints.getOrPut(originalUrl) {
+                                cashuBackend.getAllKeysetIdsFromMint(originalUrl)
                             }
 
                             if (candidateKeysets != null) {
                                 for (ks in unresolvedKeysets) {
                                     if (ks in candidateKeysets) {
-                                        keysetIdToCorrectMint[ks] = candidate
-                                        Log.d(TAG, "Found keyset $ks at mint: $candidate")
+                                        keysetIdToCorrectMint[ks] = originalUrl
+                                        Log.d(TAG, "Found keyset $ks at mint: $originalUrl")
                                     }
                                 }
                             }
