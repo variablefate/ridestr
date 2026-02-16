@@ -8,6 +8,8 @@ import android.os.Build
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -47,6 +49,7 @@ import com.ridestr.common.routing.RouteResult
 import com.ridestr.common.settings.DisplayCurrency
 import com.ridestr.common.settings.DistanceUnit
 import com.ridestr.common.settings.SettingsManager
+import com.ridestr.common.ui.ActiveRideCard
 import com.ridestr.common.ui.ChatBottomSheet
 import com.ridestr.common.ui.FareDisplay
 import com.ridestr.common.ui.SlideToConfirm
@@ -510,7 +513,12 @@ fun DriverModeScreen(
         }
 
         // Main content based on driver stage
-        when (uiState.stage) {
+        Crossfade(
+            targetState = uiState.stage,
+            animationSpec = tween(durationMillis = 300),
+            label = "driverStage"
+        ) { stage ->
+        when (stage) {
             DriverStage.OFFLINE -> {
                 OfflineContent(
                     statusMessage = uiState.statusMessage,
@@ -640,6 +648,7 @@ fun DriverModeScreen(
                     priceService = viewModel.bitcoinPriceService
                 )
             }
+        }
         }
     }
 }
@@ -1107,15 +1116,9 @@ private fun RideAcceptedContent(
     val timerColor = MaterialTheme.colorScheme.primary
     val timerBgColor = MaterialTheme.colorScheme.surfaceVariant
 
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-        )
-    ) {
-        Box(modifier = Modifier.fillMaxWidth()) {
-            // Confirmation timer in top-right corner (only shown while waiting)
-            if (showTimer) {
+    ActiveRideCard(
+        overlay = if (showTimer) {
+            {
                 Box(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
@@ -1123,12 +1126,10 @@ private fun RideAcceptedContent(
                         .size(48.dp)
                 ) {
                     Canvas(modifier = Modifier.fillMaxSize()) {
-                        // Background circle
                         drawCircle(
                             color = timerBgColor,
                             style = Stroke(width = 4.dp.toPx())
                         )
-                        // Progress arc
                         drawArc(
                             color = timerColor,
                             startAngle = -90f,
@@ -1145,39 +1146,32 @@ private fun RideAcceptedContent(
                     )
                 }
             }
+        } else null,
+        header = {
+            Icon(
+                imageVector = Icons.Default.CheckCircle,
+                contentDescription = null,
+                modifier = Modifier.size(48.dp),
+                tint = MaterialTheme.colorScheme.secondary
+            )
 
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(20.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Icon(
-                    imageVector = Icons.Default.CheckCircle,
-                    contentDescription = null,
-                    modifier = Modifier.size(48.dp),
-                    tint = MaterialTheme.colorScheme.secondary
-                )
+            Spacer(modifier = Modifier.height(12.dp))
 
-                Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = "RIDE ACCEPTED",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold
+            )
 
-                Text(
-                    text = "RIDE ACCEPTED",
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Bold
-                )
+            Spacer(modifier = Modifier.height(8.dp))
 
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Text(
-                    text = uiState.statusMessage,
-                    style = MaterialTheme.typography.bodyMedium,
-                    textAlign = TextAlign.Center
-                )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Pickup location info
+            Text(
+                text = uiState.statusMessage,
+                style = MaterialTheme.typography.bodyMedium,
+                textAlign = TextAlign.Center
+            )
+        },
+        body = {
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
@@ -1185,7 +1179,6 @@ private fun RideAcceptedContent(
                 )
             ) {
                 Column(modifier = Modifier.padding(12.dp)) {
-                    // Pickup location (only show if geocoded)
                     pickupAddress?.let { address ->
                         Text(
                             text = "Pickup Location",
@@ -1198,7 +1191,6 @@ private fun RideAcceptedContent(
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                     }
-                    // Destination (only show if geocoded)
                     destinationAddress?.let { address ->
                         Text(
                             text = "Destination",
@@ -1220,10 +1212,8 @@ private fun RideAcceptedContent(
                     )
                 }
             }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Chat button
+        },
+        actions = {
             OutlinedButton(
                 onClick = onOpenChat,
                 modifier = Modifier.fillMaxWidth()
@@ -1239,7 +1229,6 @@ private fun RideAcceptedContent(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Navigate button (opens external map)
             OutlinedButton(
                 onClick = {
                     val geoUri = "geo:0,0?q=${pickup.lat},${pickup.lon}(Pickup)"
@@ -1269,9 +1258,8 @@ private fun RideAcceptedContent(
             TextButton(onClick = onCancel) {
                 Text("Cancel Ride", color = MaterialTheme.colorScheme.error)
             }
-            }  // Close Column
-        }  // Close Box
-    }  // Close Card
+        }
+    )
 }
 
 @Composable
@@ -1320,18 +1308,8 @@ private fun EnRouteContent(
         }
     }
 
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-        )
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(20.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
+    ActiveRideCard(
+        header = {
             Icon(
                 imageVector = Icons.Default.DirectionsCar,
                 contentDescription = null,
@@ -1352,10 +1330,8 @@ private fun EnRouteContent(
                 style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Show pickup address if available (hide if geocoding failed)
+        },
+        body = {
             pickupAddress?.let { address ->
                 Text(
                     text = "Driving to: $address",
@@ -1365,7 +1341,6 @@ private fun EnRouteContent(
                 Spacer(modifier = Modifier.height(8.dp))
             }
 
-            // Fare display
             FareDisplay(
                 satsAmount = offer.fareEstimate,
                 settingsManager = settingsManager,
@@ -1374,7 +1349,6 @@ private fun EnRouteContent(
                 prefix = "Fare: "
             )
 
-            // Auto-navigation countdown indicator (only show if enabled)
             if (autoOpenNavigation && countdown > 0) {
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
@@ -1383,10 +1357,8 @@ private fun EnRouteContent(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Chat button
+        },
+        actions = {
             OutlinedButton(
                 onClick = onOpenChat,
                 modifier = Modifier.fillMaxWidth()
@@ -1402,7 +1374,6 @@ private fun EnRouteContent(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Navigate button (always visible)
             OutlinedButton(
                 onClick = {
                     navigationOpened = true
@@ -1434,7 +1405,7 @@ private fun EnRouteContent(
                 Text("Cancel Ride", color = MaterialTheme.colorScheme.error)
             }
         }
-    }
+    )
 }
 
 @Composable
@@ -1454,18 +1425,8 @@ private fun ArrivedAtPickupContent(
         }
     }
 
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-        )
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(20.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
+    ActiveRideCard(
+        header = {
             Icon(
                 imageVector = Icons.Default.LocationOn,
                 contentDescription = null,
@@ -1490,7 +1451,6 @@ private fun ArrivedAtPickupContent(
                 textAlign = TextAlign.Center
             )
 
-            // Show attempts remaining if any failed attempts
             if (uiState.rideSession.pinAttempts > 0) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
@@ -1502,10 +1462,8 @@ private fun ArrivedAtPickupContent(
                         MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            // PIN input
+        },
+        body = {
             OutlinedTextField(
                 value = pinInput,
                 onValueChange = {
@@ -1520,26 +1478,8 @@ private fun ArrivedAtPickupContent(
                 singleLine = true
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Chat button
-            OutlinedButton(
-                onClick = onOpenChat,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Icon(Icons.Default.Chat, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("Chat with Rider")
-                if (chatMessageCount > 0) {
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Badge { Text(chatMessageCount.toString()) }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Show timeout message if verification timed out
             if (uiState.rideSession.pinVerificationTimedOut) {
+                Spacer(modifier = Modifier.height(16.dp))
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     colors = CardDefaults.cardColors(
@@ -1570,8 +1510,23 @@ private fun ArrivedAtPickupContent(
                         )
                     }
                 }
-                Spacer(modifier = Modifier.height(16.dp))
             }
+        },
+        actions = {
+            OutlinedButton(
+                onClick = onOpenChat,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Default.Chat, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Chat with Rider")
+                if (chatMessageCount > 0) {
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Badge { Text(chatMessageCount.toString()) }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
 
             Button(
                 onClick = {
@@ -1601,7 +1556,6 @@ private fun ArrivedAtPickupContent(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Cancel button - always enabled except when actively verifying
             TextButton(
                 onClick = onCancel,
                 modifier = Modifier.fillMaxWidth()
@@ -1609,7 +1563,7 @@ private fun ArrivedAtPickupContent(
                 Text("Cancel Ride", color = MaterialTheme.colorScheme.error)
             }
         }
-    }
+    )
 }
 
 @Composable
@@ -1658,18 +1612,8 @@ private fun InRideContent(
         }
     }
 
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-        )
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(20.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
+    ActiveRideCard(
+        header = {
             Icon(
                 imageVector = Icons.Default.DirectionsCar,
                 contentDescription = null,
@@ -1684,16 +1628,15 @@ private fun InRideContent(
                 style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.Bold
             )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Show destination address if available (hide if geocoding failed)
+        },
+        body = {
             destinationAddress?.let { address ->
                 Text(
                     text = "Destination: $address",
                     style = MaterialTheme.typography.bodyMedium,
                     textAlign = TextAlign.Center
                 )
+                Spacer(modifier = Modifier.height(8.dp))
             }
 
             FareDisplay(
@@ -1704,7 +1647,6 @@ private fun InRideContent(
                 prefix = "Fare: "
             )
 
-            // Auto-navigation countdown indicator (only show if enabled)
             if (autoOpenNavigation && countdown > 0) {
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
@@ -1713,10 +1655,8 @@ private fun InRideContent(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Navigate to destination (always visible)
+        },
+        actions = {
             OutlinedButton(
                 onClick = {
                     navigationOpened = true
@@ -1733,7 +1673,6 @@ private fun InRideContent(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Chat button
             OutlinedButton(
                 onClick = onOpenChat,
                 modifier = Modifier.fillMaxWidth()
@@ -1749,7 +1688,6 @@ private fun InRideContent(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Slide to drop off rider
             SlideToConfirm(
                 text = "Slide to drop off rider",
                 onConfirm = onComplete,
@@ -1763,7 +1701,7 @@ private fun InRideContent(
                 Text("Cancel Ride", color = MaterialTheme.colorScheme.error)
             }
         }
-    }
+    )
 }
 
 @Composable

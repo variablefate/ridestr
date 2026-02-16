@@ -6,6 +6,7 @@ import android.os.Build
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
@@ -60,6 +61,7 @@ import com.ridestr.common.settings.DisplayCurrency
 import com.ridestr.common.settings.DistanceUnit
 import com.ridestr.common.settings.SettingsManager
 import com.ridestr.common.data.SavedLocation
+import com.ridestr.common.ui.ActiveRideCard
 import com.ridestr.common.ui.ChatBottomSheet
 import com.ridestr.common.ui.ChatButton
 import com.ridestr.common.ui.FareDisplay
@@ -479,7 +481,12 @@ fun RiderModeScreen(
             Spacer(modifier = Modifier.height(16.dp))
         }
 
-        when (uiState.rideSession.rideStage) {
+        Crossfade(
+            targetState = uiState.rideSession.rideStage,
+            animationSpec = tween(durationMillis = 300),
+            label = "rideStage"
+        ) { stage ->
+        when (stage) {
             RideStage.IDLE -> {
                 // Collect geocoding state
                 val pickupSearchResults by viewModel.pickupSearchResults.collectAsState()
@@ -626,6 +633,7 @@ fun RiderModeScreen(
                     onNewRide = viewModel::clearRide
                 )
             }
+        }
         }
     }
 }
@@ -2682,6 +2690,50 @@ private fun RideWaitingContent(
 // Both now use the unified RideWaitingContent component above.
 
 @Composable
+private fun RiderPinCard(pin: String) {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.Pin,
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp),
+                    tint = MaterialTheme.colorScheme.secondary
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Your Pickup PIN",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer
+                )
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = pin,
+                style = MaterialTheme.typography.headlineLarge,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                letterSpacing = 8.sp
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Tell this PIN to your driver",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                textAlign = TextAlign.Center
+            )
+        }
+    }
+}
+
+@Composable
 private fun DriverAcceptedContent(
     uiState: RiderUiState,
     onCancel: () -> Unit,
@@ -2698,104 +2750,57 @@ private fun DriverAcceptedContent(
             ?: uiState.availableDrivers.find { it.driverPubKey == pk }
     }
 
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-        )
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            // Status header with spinner
-            // AtoB Pattern: Show "Ride Confirmed!" when confirmationEventId is set,
-            // even though rideStage is still DRIVER_ACCEPTED (waiting for driver to start)
-            val isRideConfirmed = uiState.rideSession.confirmationEventId != null
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center
-            ) {
-                if (uiState.rideSession.isConfirmingRide) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(24.dp),
-                        strokeWidth = 2.dp
-                    )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Text(
-                        text = "Confirming ride...",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                } else {
-                    Icon(
-                        Icons.Default.CheckCircle,
-                        contentDescription = null,
-                        modifier = Modifier.size(24.dp),
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Text(
-                        text = if (isRideConfirmed) "Ride Confirmed!" else "Driver Accepted!",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
+    // AtoB Pattern: Show "Ride Confirmed!" when confirmationEventId is set,
+    // even though rideStage is still DRIVER_ACCEPTED (waiting for driver to start)
+    val isRideConfirmed = uiState.rideSession.confirmationEventId != null
+
+    ActiveRideCard(
+        header = {
+            // Standardized 48.dp icon header
+            if (uiState.rideSession.isConfirmingRide) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(48.dp),
+                    strokeWidth = 3.dp
+                )
+            } else {
+                Icon(
+                    Icons.Default.CheckCircle,
+                    contentDescription = null,
+                    modifier = Modifier.size(48.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
             }
 
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Text(
+                text = when {
+                    uiState.rideSession.isConfirmingRide -> "Confirming ride..."
+                    isRideConfirmed -> "Ride Confirmed!"
+                    else -> "Driver Accepted!"
+                },
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold
+            )
+        },
+        body = {
             // Show PIN prominently when ride is confirmed
             if (isRideConfirmed && uiState.rideSession.pickupPin != null) {
-                Spacer(modifier = Modifier.height(16.dp))
-                Card(
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer
-                    )
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Text(
-                            text = "Your PIN",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = uiState.rideSession.pickupPin,
-                            style = MaterialTheme.typography.headlineLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "Tell this to your driver when they arrive",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
-                        )
-                    }
-                }
-                // Status message for waiting state
+                RiderPinCard(pin = uiState.rideSession.pickupPin!!)
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = "Waiting for driver to start...",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                Spacer(modifier = Modifier.height(16.dp))
             }
-
-            Spacer(modifier = Modifier.height(20.dp))
 
             // Driver info row
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Driver icon
                 Icon(
                     Icons.Default.Person,
                     contentDescription = "Driver",
@@ -2819,7 +2824,6 @@ private fun DriverAcceptedContent(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    // Use vehicleDescription() like DriverOnTheWayContent does
                     (driverAvailability?.vehicleDescription() ?: driverProfile?.carDescription())?.let { carInfo ->
                         Text(
                             text = carInfo,
@@ -2909,9 +2913,8 @@ private fun DriverAcceptedContent(
                     }
                 }
             }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
+        },
+        actions = {
             // Chat button
             OutlinedButton(
                 onClick = onOpenChat,
@@ -2932,7 +2935,7 @@ private fun DriverAcceptedContent(
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
             // Cancel button only (no confirm button - auto-confirm happens automatically)
             OutlinedButton(
@@ -2945,7 +2948,7 @@ private fun DriverAcceptedContent(
                 Text("Cancel Ride")
             }
         }
-    }
+    )
 }
 
 @Composable
@@ -2955,27 +2958,16 @@ private fun DriverOnTheWayContent(
     onCancel: () -> Unit,
     chatMessageCount: Int
 ) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-        )
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            // Get driver info from acceptance
-            val driverPubKey = uiState.rideSession.acceptance?.driverPubKey
-            val driverProfile = driverPubKey?.let { uiState.driverProfiles[it] }
-            // Find driver availability data for vehicle info
-            val driverAvailability = driverPubKey?.let { pk ->
-                uiState.rideSession.selectedDriver?.takeIf { it.driverPubKey == pk }
-                    ?: uiState.availableDrivers.find { it.driverPubKey == pk }
-            }
+    // Get driver info from acceptance
+    val driverPubKey = uiState.rideSession.acceptance?.driverPubKey
+    val driverProfile = driverPubKey?.let { uiState.driverProfiles[it] }
+    val driverAvailability = driverPubKey?.let { pk ->
+        uiState.rideSession.selectedDriver?.takeIf { it.driverPubKey == pk }
+            ?: uiState.availableDrivers.find { it.driverPubKey == pk }
+    }
 
+    ActiveRideCard(
+        header = {
             Icon(
                 Icons.Default.DirectionsCar,
                 contentDescription = null,
@@ -2983,16 +2975,14 @@ private fun DriverOnTheWayContent(
                 tint = MaterialTheme.colorScheme.primary
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
-            // Driver name
             Text(
                 text = driverProfile?.bestName()?.split(" ")?.firstOrNull() ?: "Your driver",
                 style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.Bold
             )
 
-            // Car description - prefer from availability event, fallback to profile
             (driverAvailability?.vehicleDescription() ?: driverProfile?.carDescription())?.let { carInfo ->
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
@@ -3009,58 +2999,13 @@ private fun DriverOnTheWayContent(
                 style = MaterialTheme.typography.bodyMedium,
                 textAlign = TextAlign.Center
             )
-
-            // Display pickup PIN prominently
+        },
+        body = {
             uiState.rideSession.pickupPin?.let { pin ->
-                Spacer(modifier = Modifier.height(16.dp))
-
-                Card(
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.secondaryContainer
-                    )
-                ) {
-                    Column(
-                        modifier = Modifier.padding(16.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                Icons.Default.Pin,
-                                contentDescription = null,
-                                modifier = Modifier.size(20.dp),
-                                tint = MaterialTheme.colorScheme.secondary
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "Your Pickup PIN",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSecondaryContainer
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = pin,
-                            style = MaterialTheme.typography.headlineLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer,
-                            letterSpacing = 8.sp
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "Tell this PIN to your driver at pickup",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer,
-                            textAlign = TextAlign.Center
-                        )
-                    }
-                }
+                RiderPinCard(pin = pin)
             }
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            // Chat button
+        },
+        actions = {
             OutlinedButton(
                 onClick = onOpenChat,
                 modifier = Modifier.fillMaxWidth()
@@ -3080,9 +3025,8 @@ private fun DriverOnTheWayContent(
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
-            // Cancel button
             TextButton(
                 onClick = onCancel,
                 colors = ButtonDefaults.textButtonColors(
@@ -3092,7 +3036,7 @@ private fun DriverOnTheWayContent(
                 Text("Cancel Ride")
             }
         }
-    }
+    )
 }
 
 @Composable
@@ -3102,27 +3046,16 @@ private fun DriverArrivedContent(
     onCancel: () -> Unit,
     chatMessageCount: Int
 ) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-        )
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            // Get driver info from acceptance
-            val driverPubKey = uiState.rideSession.acceptance?.driverPubKey
-            val driverProfile = driverPubKey?.let { uiState.driverProfiles[it] }
-            // Find driver availability data for vehicle info
-            val driverAvailability = driverPubKey?.let { pk ->
-                uiState.rideSession.selectedDriver?.takeIf { it.driverPubKey == pk }
-                    ?: uiState.availableDrivers.find { it.driverPubKey == pk }
-            }
+    // Get driver info from acceptance
+    val driverPubKey = uiState.rideSession.acceptance?.driverPubKey
+    val driverProfile = driverPubKey?.let { uiState.driverProfiles[it] }
+    val driverAvailability = driverPubKey?.let { pk ->
+        uiState.rideSession.selectedDriver?.takeIf { it.driverPubKey == pk }
+            ?: uiState.availableDrivers.find { it.driverPubKey == pk }
+    }
 
+    ActiveRideCard(
+        header = {
             Icon(
                 Icons.Default.LocationOn,
                 contentDescription = null,
@@ -3130,7 +3063,7 @@ private fun DriverArrivedContent(
                 tint = MaterialTheme.colorScheme.primary
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
             Text(
                 text = "Your driver has arrived!",
@@ -3141,7 +3074,6 @@ private fun DriverArrivedContent(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Car description - show prominently so rider knows what to look for
             val carInfo = driverAvailability?.vehicleDescription() ?: driverProfile?.carDescription()
             if (carInfo != null) {
                 Text(
@@ -3152,7 +3084,6 @@ private fun DriverArrivedContent(
                 )
             }
 
-            // Driver name (first name only)
             driverProfile?.bestName()?.split(" ")?.firstOrNull()?.let { name ->
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
@@ -3161,58 +3092,13 @@ private fun DriverArrivedContent(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-
-            // Display pickup PIN prominently
+        },
+        body = {
             uiState.rideSession.pickupPin?.let { pin ->
-                Spacer(modifier = Modifier.height(16.dp))
-
-                Card(
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.secondaryContainer
-                    )
-                ) {
-                    Column(
-                        modifier = Modifier.padding(16.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                Icons.Default.Pin,
-                                contentDescription = null,
-                                modifier = Modifier.size(20.dp),
-                                tint = MaterialTheme.colorScheme.secondary
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "Your Pickup PIN",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSecondaryContainer
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = pin,
-                            style = MaterialTheme.typography.headlineLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer,
-                            letterSpacing = 8.sp
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "Tell this PIN to your driver",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer,
-                            textAlign = TextAlign.Center
-                        )
-                    }
-                }
+                RiderPinCard(pin = pin)
             }
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            // Chat button
+        },
+        actions = {
             OutlinedButton(
                 onClick = onOpenChat,
                 modifier = Modifier.fillMaxWidth()
@@ -3232,9 +3118,8 @@ private fun DriverArrivedContent(
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
-            // Cancel button
             TextButton(
                 onClick = onCancel,
                 colors = ButtonDefaults.textButtonColors(
@@ -3244,7 +3129,7 @@ private fun DriverArrivedContent(
                 Text("Cancel Ride")
             }
         }
-    }
+    )
 }
 
 @Composable
@@ -3258,25 +3143,14 @@ private fun RideInProgressContent(
     val geocodingService = remember { GeocodingService(context) }
     var destinationAddress by remember { mutableStateOf<String?>(null) }
 
-    // Reverse geocode destination to show address
     LaunchedEffect(uiState.destination) {
         uiState.destination?.let { dest ->
             destinationAddress = geocodingService.reverseGeocode(dest.lat, dest.lon)
         }
     }
 
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-        )
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
+    ActiveRideCard(
+        header = {
             Icon(
                 Icons.Default.DirectionsCar,
                 contentDescription = null,
@@ -3284,7 +3158,7 @@ private fun RideInProgressContent(
                 tint = MaterialTheme.colorScheme.primary
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
             Text(
                 text = "RIDE IN PROGRESS",
@@ -3292,59 +3166,21 @@ private fun RideInProgressContent(
                 fontWeight = FontWeight.Bold
             )
 
-            Spacer(modifier = Modifier.height(8.dp))
-
             destinationAddress?.let { address ->
+                Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = address,
                     style = MaterialTheme.typography.bodyMedium,
                     textAlign = TextAlign.Center
                 )
             }
-
-            // Show PIN from state (rider generated)
+        },
+        body = {
             uiState.rideSession.pickupPin?.let { pin ->
-                Spacer(modifier = Modifier.height(16.dp))
-
-                Card(
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.secondaryContainer
-                    )
-                ) {
-                    Column(
-                        modifier = Modifier.padding(12.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                Icons.Default.Pin,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp),
-                                tint = MaterialTheme.colorScheme.secondary
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = "Your PIN: ",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSecondaryContainer
-                            )
-                            Text(
-                                text = pin,
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                letterSpacing = 4.sp
-                            )
-                        }
-                    }
-                }
+                RiderPinCard(pin = pin)
             }
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            // Chat button
+        },
+        actions = {
             OutlinedButton(
                 onClick = onOpenChat,
                 modifier = Modifier.fillMaxWidth()
@@ -3362,7 +3198,7 @@ private fun RideInProgressContent(
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
             Text(
                 text = "Driver will complete the ride when you arrive at your destination",
@@ -3371,9 +3207,8 @@ private fun RideInProgressContent(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
-            // Cancel button (for emergencies/testing)
             TextButton(
                 onClick = onCancelRide,
                 colors = ButtonDefaults.textButtonColors(
@@ -3389,7 +3224,7 @@ private fun RideInProgressContent(
                 Text("Cancel Ride")
             }
         }
-    }
+    )
 }
 
 @Composable
