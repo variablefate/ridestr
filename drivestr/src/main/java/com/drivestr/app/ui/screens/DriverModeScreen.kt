@@ -1758,15 +1758,6 @@ private fun RideCompletedContent(
                 )
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = "Payment will be processed via Lightning",
-                style = MaterialTheme.typography.bodyMedium,
-                textAlign = TextAlign.Center,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
             Spacer(modifier = Modifier.height(24.dp))
 
             Button(
