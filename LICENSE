@@ -1,4 +1,5 @@
-MIT License with No-Shitcoin Addendum
+MIT License with No-Shitcoin Addendum (Restriction-Enforced)
+
 Copyright (c) 2025–2026 variablefate
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -8,25 +9,28 @@ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 copies of the Software, and to permit persons to whom the Software is
 furnished to do so, subject to the following conditions:
 
-This copyright notice shall be included in all copies or substantial
-portions of the Software to provide attribution.
-No-Shitcoin Restriction (Mandatory Preservation):
-The Software and any modification, derivative work, or distribution thereof
-must not incorporate, integrate, promote, facilitate, support, or include
-any functionality, code, dependencies, documentation, or references related
-to "shitcoins" or similar speculative, memetic, low-utility, or high-risk
-cryptocurrencies/tokens. This includes (without limitation) memecoins,
-pump-and-dump tokens, rug-pull prone assets, joke coins, wrapped tokens, or
-any non-Bitcoin cryptocurrency, token, or blockchain, as well as wallets,
-trading pairs, swaps, staking, airdrops, rewards, bridges, or promotions
-tied to such assets. Exception: This does not apply to Bitcoin-based
-functionality or fiat-based payment processing, fiat on-ramps/off-ramps, or
-traditional financial integrations (e.g., credit/debit cards, bank
-transfers, stable fiat currencies like USD, EUR).This restriction (including this entire clause 2 with its exception) must be
-imposed identically on all downstream recipients. Any license or distribution
-of a modified or derivative version must include this exact No-Shitcoin
-Restriction clause (including this sentence). Violation voids the permission
-granted herein for the violating party and all subsequent derivatives.
+1. This copyright notice shall be included in all copies or substantial
+   portions of the Software to provide attribution.
+
+2. No-Shitcoin Restriction (Mandatory Preservation):
+   The Software and any modification, derivative work, or distribution thereof
+   must not incorporate, integrate, promote, facilitate, support, or include
+   any functionality, code, dependencies, documentation, or references related
+   to "shitcoins" or similar speculative, memetic, low-utility, or high-risk
+   cryptocurrencies/tokens. This includes (without limitation) memecoins,
+   pump-and-dump tokens, rug-pull prone assets, joke coins, wrapped tokens, or
+   any non-Bitcoin cryptocurrency, token, or blockchain, as well as wallets,
+   trading pairs, swaps, staking, airdrops, rewards, bridges, or promotions
+   tied to such assets. Exception: This does not apply to Bitcoin-based
+   functionality or fiat-based payment processing, fiat on-ramps/off-ramps, or
+   traditional financial integrations (e.g., credit/debit cards, bank
+   transfers, stable fiat currencies like USD, EUR).
+
+   This restriction (including this entire clause 2 with its exception) must be
+   imposed identically on all downstream recipients. Any license or distribution
+   of a modified or derivative version must include this exact No-Shitcoin
+   Restriction clause (including this sentence). Violation voids the permission
+   granted herein for the violating party and all subsequent derivatives.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
