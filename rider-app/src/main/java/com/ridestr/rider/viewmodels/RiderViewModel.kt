@@ -3671,9 +3671,32 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 // Clear info message and error (mutual exclusivity)
                 _uiState.value = _uiState.value.copy(infoMessage = null, error = null)
 
+                // Encrypt preimage before publishing (matches PreimageShare pattern)
+                val rawPreimage = result.preimage
+                if (rawPreimage == null) {
+                    Log.e(TAG, "[BRIDGE_PUBLISH_FAIL] Bridge payment succeeded but no preimage returned")
+                    _uiState.update { current ->
+                        current.copy(rideSession = current.rideSession.copy(
+                            bridgeInProgress = false, bridgeComplete = true, bridgeCompletePublishFailed = true
+                        ))
+                    }
+                    return
+                }
+
+                val encryptedPreimage = nostrService.encryptForUser(rawPreimage, driverPubKey)
+                if (encryptedPreimage == null) {
+                    Log.e(TAG, "[BRIDGE_PUBLISH_FAIL] Failed to encrypt bridge preimage")
+                    _uiState.update { current ->
+                        current.copy(rideSession = current.rideSession.copy(
+                            bridgeInProgress = false, bridgeComplete = true, bridgeCompletePublishFailed = true
+                        ))
+                    }
+                    return
+                }
+
                 // Publish BridgeComplete action to rider ride state
                 val bridgeAction = RiderRideStateEvent.createBridgeCompleteAction(
-                    preimage = result.preimage ?: "",
+                    preimageEncrypted = encryptedPreimage,
                     amountSats = result.amountSats,
                     feesSats = result.feesSats
                 )
@@ -3868,9 +3891,31 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
         val confirmationId = _uiState.value.rideSession.confirmationEventId ?: return
 
+        // Encrypt preimage before publishing (matches PreimageShare pattern)
+        if (preimage == null) {
+            Log.e(TAG, "[BRIDGE_PUBLISH_FAIL] Poll bridge success but no preimage")
+            _uiState.update { current ->
+                current.copy(rideSession = current.rideSession.copy(
+                    bridgeInProgress = false, bridgeComplete = true, bridgeCompletePublishFailed = true
+                ))
+            }
+            return
+        }
+
+        val encryptedPreimage = nostrService.encryptForUser(preimage, driverPubKey)
+        if (encryptedPreimage == null) {
+            Log.e(TAG, "[BRIDGE_PUBLISH_FAIL] Failed to encrypt bridge preimage from poll")
+            _uiState.update { current ->
+                current.copy(rideSession = current.rideSession.copy(
+                    bridgeInProgress = false, bridgeComplete = true, bridgeCompletePublishFailed = true
+                ))
+            }
+            return
+        }
+
         // Publish BridgeComplete action (same as normal success path)
         val bridgeAction = RiderRideStateEvent.createBridgeCompleteAction(
-            preimage = preimage ?: "",
+            preimageEncrypted = encryptedPreimage,
             amountSats = payment?.amountSats ?: 0,
             feesSats = payment?.feeReserveSats ?: 0
         )
@@ -4734,6 +4779,7 @@ data class RiderRideSession(
     val driverDepositInvoice: String? = null,
     val bridgeInProgress: Boolean = false,
     val bridgeComplete: Boolean = false,
+    val bridgeCompletePublishFailed: Boolean = false,
 
     // Driver availability dialog
     val showDriverUnavailableDialog: Boolean = false,

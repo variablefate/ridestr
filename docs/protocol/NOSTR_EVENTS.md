@@ -1,7 +1,9 @@
 # Ridestr Nostr Event Protocol
 
-**Version**: 1.6
-**Last Updated**: 2026-02-03
+**Version**: 1.7
+**Last Updated**: 2026-02-17
+
+> **v1.7 Migration**: `bridge_complete` action in Kind 30181 now uses `preimage_encrypted` (NIP-44 encrypted to driver) instead of plaintext `preimage`. Writers must emit `preimage_encrypted` from v1.7 onward. Readers should accept both for backward compatibility.
 
 This document defines all Nostr event kinds used in the Ridestr rideshare application.
 
@@ -9,49 +11,46 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 
 ## Event Kind Summary
 
-### Ride Protocol Events
-| Kind | Name | Type | Author | Purpose |
-|------|------|------|--------|---------|
-| [30173](#kind-30173-driver-availability) | Driver Availability | Parameterized Replaceable | Driver | Broadcast driver availability and location |
-| [30180](#kind-30180-driver-ride-state) | Driver Ride State | Parameterized Replaceable | Driver | Consolidated ride status + PIN submissions |
-| [30181](#kind-30181-rider-ride-state) | Rider Ride State | Parameterized Replaceable | Rider | Location reveals + PIN verify + preimage share |
-| [3173](#kind-3173-ride-offer) | Ride Offer | Regular | Rider | Request a ride (direct or broadcast) |
-| [3174](#kind-3174-ride-acceptance) | Ride Acceptance | Regular | Driver | Accept ride with wallet pubkey for escrow |
-| [3175](#kind-3175-ride-confirmation) | Ride Confirmation | Regular | Rider | Confirm accepted ride with pickup details |
-| [3178](#kind-3178-chat-message) | Chat Message | Regular | Either | Encrypted chat during ride |
-| [3179](#kind-3179-ride-cancellation) | Ride Cancellation | Regular | Either | Cancel an active ride |
+| Kind | Name | Type | Layer | Author | Purpose |
+|------|------|------|-------|--------|---------|
+| [30173](#kind-30173-driver-availability) | Driver Availability | Param. Replaceable | Core | Driver | Broadcast availability + location + payment methods |
+| [3173](#kind-3173-ride-offer) | Ride Offer | Regular | Core | Rider | Request a ride (3 privacy tiers: direct, broadcast, roadflare) |
+| [3174](#kind-3174-ride-acceptance) | Ride Acceptance | Regular | Core | Driver | Accept ride with payment metadata |
+| [3175](#kind-3175-ride-confirmation) | Ride Confirmation | Regular | Core | Rider | Confirm ride with payment details |
+| [30180](#kind-30180-driver-ride-state) | Driver Ride State | Param. Replaceable | Core | Driver | Consolidated ride status + PIN submissions |
+| [30181](#kind-30181-rider-ride-state) | Rider Ride State | Param. Replaceable | Core | Rider | Location reveals + PIN verify + payment proof |
+| [3178](#kind-3178-chat-message) | Chat Message | Regular | Core | Either | NIP-44 encrypted chat during ride |
+| [3179](#kind-3179-ride-cancellation) | Ride Cancellation | Regular | Core | Either | Cancel an active ride |
+| [30174](#kind-30174-ride-history-backup) | Ride History | Param. Replaceable | Backup | Either | NIP-44 self-encrypted ride details |
+| [30177](#kind-30177-unified-profile-backup) | Unified Profile | Param. Replaceable | Backup | Either | Vehicles, locations, settings |
+| [7375](#kind-7375-wallet-proofs) | Wallet Proofs | Regular | Wallet | Owner | Cashu proofs backup (NIP-60) |
+| [17375](#kind-17375-wallet-metadata) | Wallet Metadata | Replaceable | Wallet | Owner | Wallet settings/mint URL (NIP-60) |
+| [30182](#kind-30182-admin-config) | Admin Config | Param. Replaceable | Admin | Admin | Platform settings (fare rates, mints, versions) |
+| [30011-30014, 3186-3188](#extension-roadflare-personal-driver-network) | RoadFlare | Various | Extension | Various | Personal driver network with encrypted location |
 
-### Profile Backup Events (NIP-44 encrypted to self)
-| Kind | Name | Type | d-tag | Purpose |
-|------|------|------|-------|---------|
-| [30174](#kind-30174-ride-history-backup) | Ride History | Parameterized Replaceable | `rideshare-history` | Encrypted backup of ride details |
-| [30177](#kind-30177-unified-profile-backup) | Unified Profile | Parameterized Replaceable | `rideshare-profile` | Vehicles, locations, settings |
+---
 
-### Wallet Events (NIP-60)
-| Kind | Name | Type | Purpose |
-|------|------|------|---------|
-| [7375](#kind-7375-wallet-proofs) | Wallet Proofs | Regular | Cashu proofs backup |
-| [17375](#kind-17375-wallet-metadata) | Wallet Metadata | Replaceable | Wallet settings/mint URL |
+## Core Integration Quickstart
 
-### Admin Configuration Events
-| Kind | Name | Type | Purpose |
-|------|------|------|---------|
-| [30182](#kind-30182-admin-config) | Admin Config | Parameterized Replaceable | Platform settings (fare rates, mints, versions) |
+Any app implementing these **8 event kinds** can fully participate in core ride coordination:
 
-### Discovery Events
-| Kind | Name | Type | Purpose |
-|------|------|------|---------|
-| [1063](#kind-1063-tile-availability-nip-94) | File Metadata | NIP-94 | Routing tile availability (from official pubkey) |
+| Step | Kind | Direction | What Happens |
+|------|------|-----------|-------------|
+| 1. Discovery | 30173 | Driver → All | Driver broadcasts availability + location + payment methods |
+| 2. Offer | 3173 | Rider → Driver | Rider sends ride request (direct, broadcast, or roadflare tier) |
+| 3. Acceptance | 3174 | Driver → Rider | Driver accepts with payment metadata (method-specific) |
+| 4. Confirmation | 3175 | Rider → Driver | Rider confirms with payment details (method-specific) |
+| 5. Ride State | 30180 | Driver → Rider | Driver updates status: en_route → arrived → in_progress → completed |
+| 6. Ride State | 30181 | Rider → Driver | Rider shares encrypted locations, verifies PIN, shares payment proof |
+| 7. Chat | 3178 | Either → Either | NIP-44 encrypted messages during ride |
+| 8. Cancellation | 3179 | Either → Either | Cancel at any stage with optional reason |
 
-### RoadFlare Events
-| Kind | Name | Type | Purpose |
-|------|------|------|---------|
-| [30011](#kind-30011-followed-drivers) | Followed Drivers | Parameterized Replaceable | Rider's favorite drivers + their RoadFlare keys (NIP-44 to self) |
-| [30012](#kind-30012-driver-roadflare-state) | Driver RoadFlare State | Parameterized Replaceable | Driver's RoadFlare keypair, followers, muted list (NIP-44 to self). Public `key_updated_at` tag. |
-| [30014](#kind-30014-roadflare-location) | RoadFlare Location | Parameterized Replaceable | Driver's real-time location, 2-min interval, 5-min expiry (NIP-44 to RoadFlare pubkey) |
-| [3186](#kind-3186-roadflare-key-share) | RoadFlare Key Share | Regular | DM sharing RoadFlare private key with follower, 5-min expiry (NIP-44 to follower) |
-| [3187](#kind-3187-roadflare-follow-notify) | Follow Notification | Regular | Real-time follow notification (short expiry); p-tag query is primary discovery |
-| [3188](#kind-3188-roadflare-key-ack) | Key Acknowledgement | Regular | Rider confirms key receipt to driver, 5-min expiry (NIP-44 to driver) |
+**Payment is pluggable.** The `payment_method` field supports any value (`"cashu"`, `"lightning"`, `"fiat_cash"`, `"venmo"`, etc.). Cashu HTLC escrow and cross-mint bridge are Ridestr-specific extensions — non-Cashu apps can ignore `preimage_share`, `bridge_complete`, and `deposit_invoice_share` actions in ride state events and still interoperate on core ride coordination.
+
+**Optional extensions** (not required for interop):
+- **RoadFlare** (Kinds 30011-30014, 3186-3188): Personal driver network with encrypted location sharing and key management.
+- **Backup** (Kinds 30174, 30177): NIP-44 self-encrypted ride history and profile sync.
+- **Admin** (Kind 30182): Platform-level fare config from a trusted admin pubkey.
 
 ---
 
@@ -65,21 +64,27 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 
 **Author**: Driver
 
-**d-tag**: Driver's public key hex
+**d-tag**: `rideshare-availability`
 
 **Tags**:
 ```
-["d", "<driver_pubkey>"]
-["g", "<geohash_precision_5>"]  // ~5km area for discovery
+["d", "rideshare-availability"]
+["t", "rideshare"]
+["g", "<geohash_precision_3>"]
+["g", "<geohash_precision_4>"]
+["g", "<geohash_precision_5>"]
 ["expiration", "<unix_timestamp>"]  // NIP-40, 30 minutes
 ```
 
-**Content** (JSON):
+**Content** (JSON, plaintext):
 ```json
 {
-  "status": "available" | "unavailable",
-  "geohash": "<precision_5_geohash>",
-  "timestamp": <unix_timestamp>,
+  "status": "available" | "offline",
+  "approx_location": { "lat": 36.12, "lon": -115.17 },
+  "car_make": "Toyota",
+  "car_model": "Camry",
+  "car_color": "Silver",
+  "car_year": 2022,
   "mint_url": "<cashu_mint_url>",
   "payment_methods": ["cashu", "fiat_cash"]
 }
@@ -92,7 +97,7 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 **Lifecycle**:
 1. Published when driver goes online (`goOnline()`)
 2. Republished every 5 minutes while online
-3. Replaced with `status: unavailable` when going offline
+3. Replaced with `status: offline` when going offline
 4. Auto-expires via NIP-40 after 30 minutes
 
 ---
@@ -110,38 +115,44 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 **Tags**:
 ```
 ["d", "<confirmation_event_id>"]
+["e", "<confirmation_event_id>"]
 ["p", "<rider_pubkey>"]
-["expiration", "<unix_timestamp>"]  // 8 hours from creation
+["t", "rideshare"]
+["expiration", "<unix_timestamp>"]  // 8 hours
+["transition", "<last_rider_state_event_id>"]  // Optional, AtoB chain integrity
 ```
 
-**Content** (JSON, encrypted with NIP-44 to rider):
+**Content** (JSON, plaintext envelope — sensitive fields use field-level NIP-44 encryption):
 ```json
 {
-  "confirmationEventId": "<confirmation_event_id>",
-  "driverPubKey": "<driver_pubkey>",
-  "riderPubKey": "<rider_pubkey>",
-  "currentStatus": "EN_ROUTE_PICKUP" | "ARRIVED" | "IN_PROGRESS" | "COMPLETED" | "CANCELLED",
-  "driverLocation": {
-    "lat": <latitude>,
-    "lon": <longitude>,
-    "geohash": "<geohash>"
-  },
+  "current_status": "en_route_pickup" | "arrived" | "in_progress" | "completed" | "cancelled",
+  "final_fare": 15000,
+  "invoice": "<bolt11_invoice>",
   "history": [
     {
-      "type": "status",
-      "status": "<status_type>",
-      "timestamp": <unix_timestamp>,
-      "location": { "lat": <lat>, "lon": <lon>, "geohash": "<geohash>" }
+      "action": "status",
+      "status": "en_route_pickup",
+      "at": 1234567890,
+      "approx_location": { "lat": 36.17, "lon": -115.14 },
+      "final_fare": 15000,
+      "invoice": "<bolt11>"
     },
     {
-      "type": "pin_submit",
-      "pin": "<4_digit_pin>",
-      "timestamp": <unix_timestamp>
+      "action": "pin_submit",
+      "pin_encrypted": "<nip44_encrypted_to_rider>",
+      "at": 1234567890
     },
     {
-      "type": "settlement",
-      "status": "claimed" | "refunded",
-      "timestamp": <unix_timestamp>
+      "action": "settlement",
+      "settlement_proof": "<claim_proof>",
+      "settled_amount": 15000,
+      "at": 1234567890
+    },
+    {
+      "action": "deposit_invoice_share",
+      "invoice": "<bolt11_invoice>",
+      "amount": 15000,
+      "at": 1234567890
     }
   ]
 }
@@ -149,8 +160,9 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 
 **History Action Types**:
 - `status`: Driver status change (en_route_pickup, arrived, in_progress, completed, cancelled)
-- `pin_submit`: Driver submitting PIN for verification
-- `settlement`: Escrow settlement result (claimed by driver or refunded to rider)
+- `pin_submit`: Driver submitting PIN for verification (`pin_encrypted` is NIP-44 encrypted to rider)
+- `settlement`: Escrow settlement result _(Cashu extension: escrow claim proof)_
+- `deposit_invoice_share`: Cross-mint driver shares deposit invoice _(Cashu extension: cross-mint bridge)_
 
 **Lifecycle**:
 1. Created when driver accepts ride
@@ -163,7 +175,7 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 
 ### Kind 30181: Rider Ride State
 
-**Purpose**: Consolidated event containing rider's location reveals, PIN verifications, and preimage sharing for payment.
+**Purpose**: Consolidated event containing rider's location reveals, PIN verifications, and payment proof sharing.
 
 **Type**: Parameterized Replaceable Event (NIP-33)
 
@@ -174,35 +186,42 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 **Tags**:
 ```
 ["d", "<confirmation_event_id>"]
+["e", "<confirmation_event_id>"]
 ["p", "<driver_pubkey>"]
-["expiration", "<unix_timestamp>"]  // 8 hours from creation
+["t", "rideshare"]
+["expiration", "<unix_timestamp>"]  // 8 hours
+["transition", "<last_driver_state_event_id>"]  // Optional, AtoB chain integrity
 ```
 
-**Content** (JSON, encrypted with NIP-44 to driver):
+**Content** (JSON, plaintext envelope — sensitive fields use field-level NIP-44 encryption):
 ```json
 {
-  "confirmationEventId": "<confirmation_event_id>",
-  "riderPubKey": "<rider_pubkey>",
-  "driverPubKey": "<driver_pubkey>",
-  "currentPhase": "AWAITING_DRIVER" | "AWAITING_PIN" | "VERIFIED" | "IN_RIDE",
+  "current_phase": "awaiting_driver" | "awaiting_pin" | "verified" | "in_ride",
   "history": [
     {
       "action": "location_reveal",
       "location_type": "pickup" | "destination",
-      "location_encrypted": "<nip44_encrypted_location>",
-      "at": <unix_timestamp>
+      "location_encrypted": "<nip44_encrypted_to_driver>",
+      "at": 1234567890
     },
     {
       "action": "pin_verify",
       "status": "verified" | "rejected",
-      "attempt": 1 | 2 | 3,
-      "at": <unix_timestamp>
+      "attempt": 1,
+      "at": 1234567890
     },
     {
       "action": "preimage_share",
-      "preimage_encrypted": "<nip44_encrypted_preimage>",
-      "escrow_token_encrypted": "<nip44_encrypted_htlc_token>",
-      "at": <unix_timestamp>
+      "preimage_encrypted": "<nip44_encrypted_to_driver>",
+      "escrow_token_encrypted": "<nip44_encrypted_to_driver>",
+      "at": 1234567890
+    },
+    {
+      "action": "bridge_complete",
+      "preimage_encrypted": "<nip44_encrypted_to_driver>",
+      "amount": 15000,
+      "fees": 150,
+      "at": 1234567890
     }
   ]
 }
@@ -211,7 +230,12 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 **History Action Types**:
 - `location_reveal`: Progressive location sharing (pickup when driver en route, destination after PIN)
 - `pin_verify`: Result of PIN verification attempt
-- `preimage_share`: **Payment rails** - shares HTLC preimage and escrow token with driver after successful PIN verification
+- `preimage_share`: Shares HTLC preimage and escrow token with driver after successful PIN verification _(Cashu extension: HTLC escrow proof)_
+- `bridge_complete`: Cross-mint Lightning bridge payment confirmation (preimage encrypted to driver, amount/fees plaintext) _(Cashu extension: cross-mint bridge)_
+
+_Legacy events may contain plaintext `preimage` field instead of `preimage_encrypted` in `bridge_complete` actions. Readers should accept both._
+
+Non-Cashu implementations can safely ignore `preimage_share` and `bridge_complete` actions. Core status actions (`location_reveal`, `pin_verify`) are payment-agnostic.
 
 **Lifecycle**:
 1. Created when rider confirms ride
@@ -246,11 +270,11 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
     "driverPubKey": "<driver_pubkey>",
     "riderName": "<rider_display_name>",
     "driverName": "<driver_display_name>",
-    "pickupLocation": { "lat": <lat>, "lon": <lon>, "address": "<address>" },
-    "destinationLocation": { "lat": <lat>, "lon": <lon>, "address": "<address>" },
-    "fareSats": <fare_in_sats>,
+    "pickupLocation": { "lat": 36.12, "lon": -115.17, "address": "<address>" },
+    "destinationLocation": { "lat": 36.17, "lon": -115.14, "address": "<address>" },
+    "fareSats": 15000,
     "status": "completed" | "cancelled" | "cancelled_claimed",
-    "timestamp": <unix_timestamp>
+    "timestamp": 1234567890
   }
 ]
 ```
@@ -311,7 +335,7 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
     "defaultPaymentMethod": "cashu",
     "mintUrl": "https://mint.example.com"
   },
-  "updated_at": <unix_timestamp>
+  "updated_at": 1234567890
 }
 ```
 
@@ -349,15 +373,25 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 
 ### Kind 3173: Ride Offer
 
-**Purpose**: Rider requests a ride from a specific driver (direct) or broadcasts to all nearby drivers.
+**Purpose**: Rider requests a ride from a specific driver (direct), broadcasts to all nearby drivers, or targets a RoadFlare driver.
 
 **Type**: Regular Event
 
 **Author**: Rider
 
+#### Privacy Tiers
+
+All three tiers use Kind 3173. Detection: broadcast = has `["t", "ride-request"]` tag; roadflare = has `["t", "roadflare"]` tag; direct = neither.
+
+| Tier | Encryption | Targeting | Key Tags |
+|------|-----------|-----------|----------|
+| **Direct** | Event-level NIP-44 to driver | `["p", "<driver_pubkey>"]` | `["t", "rideshare"]` |
+| **Broadcast** | Plaintext (~1km approx locations) | `["g", "<geohash>"]` (precision 3-5) | `["t", "ride-request"]` |
+| **RoadFlare** | Same as Direct | `["p", "<driver_pubkey>"]` | `["t", "roadflare"]` |
+
 **Tags** (Direct Offer):
 ```
-["e", "<driver_availability_event_id>"]
+["e", "<driver_availability_event_id>"]  // Optional, only when availability event ID is present
 ["p", "<driver_pubkey>"]
 ["t", "rideshare"]
 ["expiration", "<unix_timestamp>"]  // 15 minutes
@@ -373,26 +407,37 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 ["expiration", "<unix_timestamp>"]
 ```
 
-**Content** (JSON, encrypted to driver for direct, plaintext for broadcast):
+**RoadFlare variant**: When `isRoadflare=true`, adds `["t", "roadflare"]` tag to both direct and broadcast offers.
+
+**Direct Offer Content** (NIP-44 encrypted to driver):
 ```json
 {
-  "fare_estimate": <fare_sats>,
-  "destination": { "lat": <lat>, "lon": <lon>, "geohash": "<geohash>" },
-  "approx_pickup": { "lat": <lat>, "lon": <lon>, "geohash": "<geohash>" },
-  "pickup_route_km": <distance>,
-  "pickup_route_min": <duration>,
-  "ride_route_km": <distance>,
-  "ride_route_min": <duration>,
-  "destination_geohash": "<geohash_for_settlement>",
-  "mint_url": "<rider_cashu_mint_url>",
+  "fare_estimate": 15000,
+  "destination": { "lat": 36.17, "lon": -115.14 },
+  "approx_pickup": { "lat": 36.12, "lon": -115.17 },
+  "pickup_route_km": 5.2,
+  "pickup_route_min": 8,
+  "ride_route_km": 12.3,
+  "ride_route_min": 18,
+  "mint_url": "<cashu_mint_url>",
+  "payment_method": "cashu"
+}
+```
+
+**Broadcast Content** (plaintext, approximate locations ~1km):
+```json
+{
+  "fare_estimate": 15000,
+  "pickup_area": { "lat": 36.12, "lon": -115.17 },
+  "destination_area": { "lat": 36.17, "lon": -115.14 },
+  "route_distance_km": 12.3,
+  "route_duration_min": 18,
+  "mint_url": "<cashu_mint_url>",
   "payment_method": "cashu"
 }
 ```
 
 **Note (January 2026)**: `payment_hash` was removed from offers and moved to confirmation (Kind 3175). This ensures HTLC is locked with the correct driver wallet key AFTER acceptance.
-
-**Payment Fields** (implemented):
-- `destination_geohash`: Used for settlement location verification
 
 **Multi-Mint Fields** (Issue #13):
 - `mint_url`: Rider's Cashu mint URL for multi-mint payment routing
@@ -418,18 +463,20 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 ["expiration", "<unix_timestamp>"]  // 10 minutes
 ```
 
-**Content** (JSON, encrypted to rider):
+**Content** (JSON, plaintext):
 ```json
 {
   "status": "accepted",
   "wallet_pubkey": "<driver_wallet_pubkey_for_p2pk>",
   "escrow_type": "cashu_nut14",
   "escrow_invoice": "<htlc_token_if_provided>",
-  "escrow_expiry": <unix_timestamp>,
+  "escrow_expiry": 1234567890,
   "mint_url": "<driver_cashu_mint_url>",
   "payment_method": "cashu"
 }
 ```
+
+**Note**: `mint_url` is optional — nullable in code. Present only when driver has a configured mint.
 
 **Payment Fields** (implemented):
 - `wallet_pubkey`: Driver's **wallet key** (separate from Nostr key) for P2PK escrow claims. **CRITICAL**: Rider must use this key, not the driver's Nostr pubkey, when locking HTLC escrow.
@@ -462,7 +509,7 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 **Content** (JSON, encrypted to driver):
 ```json
 {
-  "precise_pickup": { "lat": <lat>, "lon": <lon>, "geohash": "<geohash>" },
+  "precise_pickup": { "lat": 36.12, "lon": -115.17, "geohash": "<geohash>" },
   "payment_hash": "<sha256_of_preimage>",
   "escrow_token": "<htlc_token_if_same_mint>"
 }
@@ -488,15 +535,14 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 ```
 ["p", "<recipient_pubkey>"]
 ["e", "<confirmation_event_id>"]  // Links to ride
+["t", "rideshare"]
 ["expiration", "<unix_timestamp>"]  // 8 hours
 ```
 
 **Content** (Encrypted with NIP-44):
 ```json
 {
-  "message": "<chat_message_text>",
-  "senderPubKey": "<sender_pubkey>",
-  "timestamp": <unix_timestamp>
+  "message": "<chat_message_text>"
 }
 ```
 
@@ -514,16 +560,15 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 ```
 ["p", "<other_party_pubkey>"]
 ["e", "<confirmation_event_id>"]  // Which ride is being cancelled
+["t", "rideshare"]
 ["expiration", "<unix_timestamp>"]  // 24 hours
 ```
 
-**Content** (JSON, encrypted to other party):
+**Content** (JSON, plaintext):
 ```json
 {
-  "confirmationEventId": "<confirmation_event_id>",
-  "cancelledByPubKey": "<canceller_pubkey>",
-  "reason": "<optional_reason_text>",
-  "timestamp": <unix_timestamp>
+  "status": "cancelled",
+  "reason": "<optional_reason_text>"
 }
 ```
 
@@ -555,6 +600,8 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 {
   "fare_rate_usd_per_mile": 1.85,
   "minimum_fare_usd": 5.0,
+  "roadflare_fare_rate_usd_per_mile": 1.20,
+  "roadflare_minimum_fare_usd": 5.0,
   "recommended_mints": [
     {
       "name": "Minibits",
@@ -573,6 +620,8 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 **Fields**:
 - `fare_rate_usd_per_mile`: Default fare rate in USD per mile
 - `minimum_fare_usd`: Minimum fare in USD
+- `roadflare_fare_rate_usd_per_mile`: RoadFlare fare rate (cheaper, uses precise location)
+- `roadflare_minimum_fare_usd`: RoadFlare minimum fare
 - `recommended_mints`: Array of Cashu mint recommendations with metadata
 - `latest_version`: Current app version info with SHA256 hashes for integrity verification
 
@@ -618,10 +667,12 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 ## Encryption Standards
 
 ### NIP-44 Usage
-All sensitive data (locations, PINs, chat messages, payment data) uses NIP-44 encryption:
-- Encrypts to recipient's public key
-- Decryptable only by recipient's private key
-- Used for: ride offers, acceptances, confirmations, chat, ride states, preimage sharing
+
+**Event-Level Encryption**: Ride offers (direct), confirmations, and chat messages encrypt the entire event content with NIP-44.
+
+**Field-Level Encryption**: Ride state events (30180, 30181) use plaintext JSON envelopes for status/phase metadata, with individual sensitive fields (locations, PINs, preimages, escrow tokens) NIP-44 encrypted within the JSON.
+
+**Plaintext Events**: Acceptances (3174) and cancellations (3179) publish content as plaintext JSON. These contain payment metadata (wallet pubkey, mint URL) but no location or identity-sensitive data.
 
 ### Self-Encryption
 For profile backups (ride history, vehicles, saved locations), the author encrypts to their own public key for secure storage and cross-device restoration.
@@ -660,19 +711,18 @@ All events include expiration tags to prevent relay bloat:
 
 ## NIP-44 Encryption Matrix
 
-Who encrypts to whom for each content type:
-
-| Content | Encrypted To | Decrypted By | Event Kind |
-|---------|--------------|--------------|------------|
-| Ride Offer details | Driver pubkey | Driver | 3173 |
-| Acceptance with wallet pubkey | Rider pubkey | Rider | 3174 |
-| PIN code | Rider pubkey | Rider | 30180 (pin_submit action) |
-| Precise pickup location | Driver pubkey | Driver | 30181 (location_reveal action) |
-| Precise destination | Driver pubkey | Driver | 30181 (location_reveal action) |
-| Preimage + escrow token | Driver pubkey | Driver | 30181 (preimage_share action) |
-| Chat messages | Recipient pubkey | Recipient | 3178 |
-| Ride history backup | Self (author) | Author on new device | 30174 |
-| Profile backup (vehicles, locations, settings) | Self (author) | Author on new device | 30177 |
+| Content | Encryption Level | Encrypted To | Event Kind |
+|---------|-----------------|--------------|------------|
+| Ride Offer (direct) | Event-level NIP-44 | Driver | 3173 |
+| Ride Offer (broadcast) | Plaintext (approx locations) | N/A | 3173 |
+| Ride Acceptance | Plaintext | N/A | 3174 |
+| Ride Confirmation | Event-level NIP-44 | Driver | 3175 |
+| Chat messages | Event-level NIP-44 | Recipient | 3178 |
+| Ride Cancellation | Plaintext | N/A | 3179 |
+| PIN code | Field-level NIP-44 | Rider | 30180 |
+| Precise locations | Field-level NIP-44 | Driver | 30181 |
+| Preimage + escrow token | Field-level NIP-44 | Driver | 30181 |
+| Bridge preimage | Field-level NIP-44 | Driver | 30181 |
 
 ---
 
@@ -790,7 +840,7 @@ RIDER                           NOSTR RELAY                         DRIVER
 |------------|-------------|-------------|
 | 30173 | `DriverAvailabilityEvent.kt` | `create()`, `parse()` |
 | 30180 | `DriverRideStateEvent.kt` | `create()`, `parse()` |
-| 30181 | `RiderRideStateEvent.kt` | `create()`, `parse()`, `createPreimageShareAction()` |
+| 30181 | `RiderRideStateEvent.kt` | `create()`, `parse()`, `createPreimageShareAction()`, `createBridgeCompleteAction()` |
 | 30174 | `RideHistoryEvent.kt` | `create()`, `parse()` |
 | 30177 | `ProfileBackupEvent.kt` | `create()`, `parseAndDecrypt()` |
 | 3173 | `RideOfferEvent.kt` | `create()`, `createBroadcast()`, `decrypt()` |
@@ -845,7 +895,7 @@ See [GitHub Issue #13](https://github.com/variablefate/ridestr/issues/13) for th
 |----------|-------------|--------|
 | P0 | `payment_methods` in profile, `payment_method` in offers | ✅ COMPLETE |
 | P0 | `mint_url` in availability, offers, acceptances | ✅ COMPLETE |
-| P1 | Multi-mint Lightning bridge | 🚧 IN PROGRESS |
+| P1 | Multi-mint Lightning bridge | ✅ COMPLETE |
 | P2 | `protocol_version`, `ext_*` convention documentation | Planned |
 | P3 | Public profile event (Kind 30178) | Planned |
 
@@ -864,7 +914,9 @@ New implementations should use Kind 30177 for all profile data.
 
 ---
 
-## RoadFlare Event Definitions
+## Extension: RoadFlare Personal Driver Network
+
+_These events are optional. Apps that don't implement RoadFlare can fully participate in the core ride protocol above._
 
 RoadFlare enables riders to build a personal rideshare network from drivers they've favorited. Drivers broadcast their location encrypted so only followers can decrypt.
 
@@ -882,6 +934,7 @@ RoadFlare enables riders to build a personal rideshare network from drivers they
 ```
 ["d", "roadflare-drivers"]
 ["t", "roadflare"]
+["p", "<driver_pubkey>"]  // One for each followed driver
 ```
 
 **Content** (NIP-44 encrypted to self):
@@ -890,7 +943,6 @@ RoadFlare enables riders to build a personal rideshare network from drivers they
   "drivers": [
     {
       "pubkey": "driver_hex_pubkey",
-      "name": "John",
       "addedAt": 1234567890,
       "note": "Toyota Camry, great driver",
       "roadflareKey": {
@@ -903,6 +955,8 @@ RoadFlare enables riders to build a personal rideshare network from drivers they
   "updated_at": 1234567890
 }
 ```
+
+**Note**: Driver name is fetched from their Nostr profile, not stored in this event.
 
 **Key Fields**:
 - `roadflareKey`: The shared keypair received from driver via Kind 3186. Allows decryption of driver's location broadcasts (Kind 30014).
@@ -924,6 +978,7 @@ RoadFlare enables riders to build a personal rideshare network from drivers they
 ["d", "roadflare-state"]
 ["t", "roadflare"]
 ["key_version", "3"]  // Quick staleness check without decryption
+["key_updated_at", "<unix_timestamp>"]
 ```
 
 **Content** (NIP-44 encrypted to self):
@@ -1055,6 +1110,7 @@ RoadFlare enables riders to build a personal rideshare network from drivers they
 ```
 ["p", "driver_pubkey"]
 ["t", "roadflare-follow"]
+["expiration", "<unix_timestamp>"]
 ```
 
 **Content** (NIP-44 encrypted to driver):
@@ -1109,6 +1165,8 @@ RoadFlare enables riders to build a personal rideshare network from drivers they
 3. Rider sends Kind 3188 with `status="stale"` and their stored `keyUpdatedAt`
 4. Driver verifies: pubkey matches claimed `riderPubKey`, follower is approved + not muted
 5. If valid, driver re-sends current key via Kind 3186
+
+_Kind 30013 (Shareable Driver List): Reserved for future use — not yet implemented._
 
 ---
 

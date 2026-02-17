@@ -161,7 +161,7 @@ object RideshareEventKinds {
      * Uses d-tag "roadflare-location" for identification.
      * Includes "status" tag: online, on_ride, offline.
      * Includes "key_version" tag for rotation tracking.
-     * Published every ~30 seconds when driver app is active.
+     * Published every ~2 minutes when driver app is active.
      */
     const val ROADFLARE_LOCATION = 30014
 

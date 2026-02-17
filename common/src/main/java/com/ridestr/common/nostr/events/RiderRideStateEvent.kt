@@ -218,17 +218,17 @@ object RiderRideStateEvent {
      * Helper to create a bridge complete action.
      * Called after successful cross-mint Lightning bridge payment.
      *
-     * @param preimage Lightning payment preimage (64-char hex, proves payment)
+     * @param preimageEncrypted NIP-44 encrypted Lightning payment preimage (encrypted to driver)
      * @param amountSats Amount paid in satoshis
      * @param feesSats Fees paid (melt fee + Lightning routing)
      */
     fun createBridgeCompleteAction(
-        preimage: String,
+        preimageEncrypted: String,
         amountSats: Long,
         feesSats: Long
     ): RiderRideAction.BridgeComplete {
         return RiderRideAction.BridgeComplete(
-            preimage = preimage,
+            preimageEncrypted = preimageEncrypted,
             amountSats = amountSats,
             feesSats = feesSats,
             at = System.currentTimeMillis() / 1000
@@ -303,16 +303,23 @@ sealed class RiderRideAction {
      * Bridge complete action (Cross-Mint).
      * Records successful Lightning bridge payment when rider and driver use different mints.
      * The preimage proves payment was made to driver's mint.
+     *
+     * @property preimageEncrypted NIP-44 encrypted preimage (new format, v1.7+)
+     * @property preimage Legacy plaintext preimage (backward compat, deprecated)
      */
     data class BridgeComplete(
-        val preimage: String,       // Lightning payment preimage (proof of payment)
+        val preimageEncrypted: String? = null,  // New: NIP-44 encrypted to driver
+        val preimage: String? = null,           // Legacy: plaintext (backward compat, deprecated)
         val amountSats: Long,       // Amount paid to driver's mint
         val feesSats: Long,         // Total fees (melt + routing)
         override val at: Long
     ) : RiderRideAction() {
+        /** True if this action carries an encrypted (non-legacy) preimage. */
+        val isEncrypted: Boolean get() = preimageEncrypted != null
+
         override fun toJson(): JSONObject = JSONObject().apply {
             put("action", RiderRideStateEvent.ActionType.BRIDGE_COMPLETE)
-            put("preimage", preimage)
+            preimageEncrypted?.let { put("preimage_encrypted", it) }
             put("amount", amountSats)
             put("fees", feesSats)
             put("at", at)
@@ -354,15 +361,22 @@ sealed class RiderRideAction {
                         )
                     }
                     RiderRideStateEvent.ActionType.BRIDGE_COMPLETE -> {
-                        val preimage = json.getString("preimage")
-                        val amount = json.getLong("amount")
-                        val fees = json.getLong("fees")
-                        BridgeComplete(
-                            preimage = preimage,
-                            amountSats = amount,
-                            feesSats = fees,
-                            at = at
-                        )
+                        val preimageEncrypted = json.optString("preimage_encrypted").takeIf { it.isNotEmpty() }
+                        val preimage = json.optString("preimage").takeIf { it.isNotEmpty() }
+                        if (preimageEncrypted == null && preimage == null) {
+                            android.util.Log.w("RiderRideStateEvent", "BridgeComplete missing both preimage fields — skipping")
+                            null
+                        } else {
+                            val amount = json.getLong("amount")
+                            val fees = json.getLong("fees")
+                            BridgeComplete(
+                                preimageEncrypted = preimageEncrypted,
+                                preimage = preimage,
+                                amountSats = amount,
+                                feesSats = fees,
+                                at = at
+                            )
+                        }
                     }
                     else -> null
                 }

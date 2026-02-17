@@ -2021,38 +2021,54 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      */
     private fun handleBridgeComplete(bridgeComplete: RiderRideAction.BridgeComplete) {
         Log.d(TAG, "=== HANDLING BRIDGE COMPLETE (CROSS-MINT) ===")
-        Log.d(TAG, "Amount: ${bridgeComplete.amountSats} sats")
-        Log.d(TAG, "Fees: ${bridgeComplete.feesSats} sats")
-        if (BuildConfig.DEBUG) Log.d(TAG, "Preimage: ${bridgeComplete.preimage.take(16)}...")
-
-        // The Lightning preimage proves the rider paid the deposit invoice.
-        // Now we need to claim the tokens from our mint using the stored quote ID.
+        Log.d(TAG, "Amount: ${bridgeComplete.amountSats} sats, Fees: ${bridgeComplete.feesSats} sats")
 
         val session = _uiState.value.rideSession
-        val quoteId = session.pendingDepositQuoteId
-        val amount = session.pendingDepositAmount
+        val riderPubKey = session.acceptedOffer?.riderPubKey
 
-        if (quoteId == null || amount == null) {
-            Log.e(TAG, "Cannot claim tokens: missing quote ID or amount")
-            Log.e(TAG, "  pendingDepositQuoteId: $quoteId")
-            Log.e(TAG, "  pendingDepositAmount: $amount")
-            // Still mark as complete so ride can proceed (best effort)
-            updateRideSession { copy(
-                activePreimage = bridgeComplete.preimage,
-                canSettleEscrow = false,
-                crossMintPaymentComplete = true
-            ) }
-            return
-        }
-
-        // Claim tokens from mint in background with retries
-        // Lightning settlement can take a few seconds, so we retry
         viewModelScope.launch {
+            // Step 1: Resolve preimage — decrypt if encrypted, use legacy plaintext directly
+            val resolvedPreimage: String? = if (bridgeComplete.isEncrypted) {
+                if (riderPubKey == null) {
+                    Log.e(TAG, "No rider pubkey for bridge preimage decryption")
+                    null
+                } else {
+                    nostrService.decryptFromUser(bridgeComplete.preimageEncrypted!!, riderPubKey).also {
+                        if (it == null) Log.e(TAG, "Failed to decrypt bridge preimage")
+                    }
+                }
+            } else {
+                // Legacy plaintext path (pre-1.7 riders)
+                Log.w(TAG, "Using legacy plaintext bridge preimage (pre-encryption format)")
+                bridgeComplete.preimage
+            }
+            // Note: resolvedPreimage may be null if decryption fails. Claim still proceeds
+            // (quote-based, doesn't strictly require preimage), but activePreimage will be null.
+
+            if (BuildConfig.DEBUG && resolvedPreimage != null) {
+                Log.d(TAG, "Preimage: ${resolvedPreimage.take(16)}...")
+            }
+
+            // Step 2: Claim tokens from mint using stored quote ID
+            val quoteId = session.pendingDepositQuoteId
+            val amount = session.pendingDepositAmount
+
+            if (quoteId == null || amount == null) {
+                Log.e(TAG, "Cannot claim tokens: missing quote ID or amount")
+                Log.e(TAG, "  pendingDepositQuoteId: $quoteId")
+                Log.e(TAG, "  pendingDepositAmount: $amount")
+                // Still mark as complete so ride can proceed (best effort)
+                updateRideSession { copy(
+                    activePreimage = resolvedPreimage,
+                    canSettleEscrow = false,
+                    crossMintPaymentComplete = true
+                ) }
+                return@launch
+            }
+
             try {
                 Log.d(TAG, "Claiming tokens from mint: quoteId=$quoteId, amount=$amount")
 
-                // Use claimDepositByQuoteId with retries - it has better error handling
-                // and waits for Lightning settlement
                 val delays = listOf(0L, 2000L, 4000L, 8000L) // Immediate, then 2s, 4s, 8s
                 var claimResult: com.ridestr.common.payment.ClaimResult? = null
 
@@ -2070,10 +2086,8 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                         break
                     } else if (claimResult?.error?.contains("not paid yet") == true) {
                         Log.d(TAG, "Quote not paid yet, will retry...")
-                        // Continue retrying - Lightning hasn't settled
                     } else if (claimResult?.error != null) {
                         Log.e(TAG, "Claim error: ${claimResult.error}")
-                        // If it's a permanent error (not found, already claimed), stop retrying
                         if (claimResult.error?.contains("not found") == true ||
                             claimResult.error?.contains("already issued") == true) {
                             break
@@ -2083,7 +2097,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
                 if (claimResult?.success == true && claimResult.claimedCount > 0) {
                     updateRideSession { copy(
-                        activePreimage = bridgeComplete.preimage,
+                        activePreimage = resolvedPreimage,
                         canSettleEscrow = false,
                         crossMintPaymentComplete = true,
                         pendingDepositQuoteId = null,
@@ -2097,7 +2111,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     // Still mark as complete to let ride proceed
                     // User can claim manually via Wallet Settings > Claim by Quote ID
                     updateRideSession { copy(
-                        activePreimage = bridgeComplete.preimage,
+                        activePreimage = resolvedPreimage,
                         canSettleEscrow = false,
                         crossMintPaymentComplete = true,
                         pendingDepositQuoteId = null,
@@ -2107,7 +2121,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             } catch (e: Exception) {
                 Log.e(TAG, "Exception claiming tokens: ${e.message}", e)
                 updateRideSession { copy(
-                    activePreimage = bridgeComplete.preimage,
+                    activePreimage = resolvedPreimage,
                     canSettleEscrow = false,
                     crossMintPaymentComplete = true,
                     pendingDepositQuoteId = null,
