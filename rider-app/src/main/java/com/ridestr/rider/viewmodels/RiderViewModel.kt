@@ -305,6 +305,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      */
     private fun closeAllRideSubscriptions() {
         subs.closeAll(*SubKeys.RIDE_BASE)
+        roadflareBatchJob?.cancel()
+        roadflareBatchJob = null
         subs.closeGroup(SubKeys.BATCH_ACCEPTANCE)
         Log.d(TAG, "Closed all ride subscriptions before new ride")
     }
@@ -537,7 +539,6 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      */
     private fun closeAllRideSubscriptionsAndJobs() {
         subs.closeAll(*SubKeys.RIDE_ALL)
-        subs.closeGroup(SubKeys.BATCH_ACCEPTANCE)
         selectedDriverLastAvailabilityTimestamp = 0L
 
         stopChatRefreshJob()
@@ -552,6 +553,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         roadflareBatchJob?.cancel()
         roadflareBatchJob = null
         contactedDrivers.clear()
+        subs.closeGroup(SubKeys.BATCH_ACCEPTANCE)
 
         Log.d(TAG, "Closed all ride subscriptions and jobs")
     }
@@ -1639,8 +1641,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
         // Clear previous state
         contactedDrivers.clear()
-        subs.closeGroup(SubKeys.BATCH_ACCEPTANCE)
         roadflareBatchJob?.cancel()
+        subs.closeGroup(SubKeys.BATCH_ACCEPTANCE)
 
         // Start batched sending (with route calculation)
         roadflareBatchJob = viewModelScope.launch {
@@ -2105,9 +2107,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
             // Close old acceptance subscription
             subs.close(SubKeys.ACCEPTANCE)
-            subs.closeGroup(SubKeys.BATCH_ACCEPTANCE)  // Clean up any batch subs
             roadflareBatchJob?.cancel()                // Stop batch from creating new subs
             roadflareBatchJob = null
+            subs.closeGroup(SubKeys.BATCH_ACCEPTANCE)  // Clean up any batch subs
 
             // Update fare in state - reset timeout flag since we're boosting
             val newFareWithFeesDouble = newFare * (1 + FEE_BUFFER_PERCENT)
