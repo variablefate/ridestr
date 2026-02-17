@@ -905,6 +905,7 @@ private fun AvailableContent(
     // Total requests count (filtered broadcast + direct)
     val totalRequests = freshBroadcastRequests.size + uiState.rideSession.pendingOffers.size
 
+    Column(modifier = Modifier.fillMaxSize()) {
     // Online status card
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -1026,7 +1027,10 @@ private fun AvailableContent(
             }
         }
     } else {
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        LazyColumn(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
             // Show broadcast requests first (sorted by fare, highest first)
             // Using freshBroadcastRequests which filters out stale requests
             items(freshBroadcastRequests) { request ->
@@ -1065,6 +1069,7 @@ private fun AvailableContent(
                 }
             }
         }
+    }
     }
 }
 
