@@ -63,9 +63,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
+import kotlin.coroutines.coroutineContext
 import org.json.JSONObject
 import com.ridestr.rider.BuildConfig
 
@@ -553,6 +555,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         roadflareBatchJob?.cancel()
         roadflareBatchJob = null
         contactedDrivers.clear()
+        pendingBatchDrivers = null
+        pendingBatchLocations = null
         subs.closeGroup(SubKeys.BATCH_ACCEPTANCE)
 
         Log.d(TAG, "Closed all ride subscriptions and jobs")
@@ -1597,8 +1601,20 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Track active RoadFlare batch job for cancellation */
     private var roadflareBatchJob: kotlinx.coroutines.Job? = null
-    /** Track which drivers have been contacted in current RoadFlare broadcast */
-    private val contactedDrivers = mutableSetOf<String>()
+    /** Track which drivers have been contacted in current RoadFlare broadcast (pubkey → offerEventId) */
+    private val contactedDrivers = mutableMapOf<String, String>()
+    /** Batch retry state for insufficient-funds fallback */
+    private var pendingBatchDrivers: List<com.ridestr.common.nostr.events.FollowedDriver>? = null
+    private var pendingBatchLocations: Map<String, Location>? = null
+
+    /**
+     * Frozen ride inputs for batch consistency — precheck and sends use the same values.
+     */
+    private data class FrozenRideInputs(
+        val pickup: Location,
+        val destination: Location,
+        val rideRoute: RouteResult?
+    )
 
     /**
      * Data class to hold driver info with pre-calculated route for sorting and sending.
@@ -1620,8 +1636,14 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun sendRoadflareToAll(
         drivers: List<com.ridestr.common.nostr.events.FollowedDriver>,
-        driverLocations: Map<String, Location>
+        driverLocations: Map<String, Location>,
+        paymentMethod: String
     ) {
+        val currentStage = _uiState.value.rideSession.rideStage
+        if (currentStage != RideStage.IDLE) {
+            Log.w(TAG, "sendRoadflareToAll: ignoring, stage=$currentStage")
+            return
+        }
         val state = _uiState.value
         val pickup = state.pickupLocation ?: return
         val destination = state.destination ?: return
@@ -1641,11 +1663,20 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
         // Clear previous state
         contactedDrivers.clear()
+        pendingBatchDrivers = null
+        pendingBatchLocations = null
         roadflareBatchJob?.cancel()
+        roadflareBatchJob = null
         subs.closeGroup(SubKeys.BATCH_ACCEPTANCE)
 
         // Start batched sending (with route calculation)
         roadflareBatchJob = viewModelScope.launch {
+            // Re-check stage at coroutine start — may have changed since synchronous entry guard
+            if (_uiState.value.rideSession.rideStage != RideStage.IDLE) {
+                Log.w(TAG, "sendRoadflareToAll coroutine: stage changed, aborting")
+                return@launch
+            }
+
             // Pre-calculate routes for all online drivers to get accurate sorting
             val driversWithRoutes = eligibleDrivers.map { driver ->
                 val location = driverLocations[driver.pubkey]
@@ -1734,7 +1765,33 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 Log.d(TAG, "Excluded $excluded drivers from batch (fare cap or no location)")
             }
 
-            sendRoadflareBatches(cappedDrivers, pickup)
+            // Balance precheck: find max fare across cappedDrivers for Cashu payments
+            if (paymentMethod == com.ridestr.common.nostr.events.PaymentMethod.CASHU.value) {
+                var maxFareSats = 0.0
+                for (dwr in cappedDrivers) {
+                    val loc = dwr.location ?: continue
+                    val fareSats = calculateRoadflareFareWithRoute(pickup, loc, rideRoute, dwr.pickupRoute)
+                    if (fareSats > maxFareSats) maxFareSats = fareSats
+                }
+                val fareWithBuffer = (maxFareSats * (1 + FEE_BUFFER_PERCENT)).toLong()
+                val currentBalance = walletService?.getBalance() ?: 0L
+                if (currentBalance < fareWithBuffer) {
+                    val shortfall = fareWithBuffer - currentBalance
+                    Log.w(TAG, "Insufficient funds for batch RoadFlare: need $fareWithBuffer, have $currentBalance")
+                    pendingBatchDrivers = drivers
+                    pendingBatchLocations = driverLocations
+                    _uiState.update { it.copy(
+                        showInsufficientFundsDialog = true,
+                        insufficientFundsAmount = shortfall,
+                        depositAmountNeeded = shortfall,
+                        insufficientFundsIsRoadflare = true,
+                        insufficientFundsIsBatch = true
+                    ) }
+                    return@launch
+                }
+            }
+
+            sendRoadflareBatches(cappedDrivers, pickup, destination, rideRoute, paymentMethod)
         }
     }
 
@@ -1743,7 +1800,10 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      */
     private suspend fun sendRoadflareBatches(
         sortedDrivers: List<DriverWithRoute>,
-        pickup: Location
+        pickup: Location,
+        destination: Location,
+        rideRoute: RouteResult?,
+        paymentMethod: String
     ) {
         val batches = sortedDrivers.chunked(ROADFLARE_BATCH_SIZE)
         var batchIndex = 0
@@ -1775,8 +1835,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
             // Send to all drivers in this batch
             for (dwr in batch) {
+                coroutineContext.ensureActive()  // Abort if batch job was cancelled
                 if (dwr.driver.pubkey in contactedDrivers) continue
-                contactedDrivers.add(dwr.driver.pubkey)
 
                 val distanceInfo = if (dwr.location != null) {
                     val distMiles = dwr.distanceKm * 0.621371
@@ -1784,7 +1844,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 } else "offline"
 
                 Log.d(TAG, "  -> Sending to ${dwr.driver.pubkey.take(12)} ($distanceInfo)")
-                sendRoadflareOfferSilent(dwr.driver.pubkey, dwr.location, dwr.pickupRoute)
+                sendRoadflareOfferSilent(dwr.driver.pubkey, dwr.location, dwr.pickupRoute, paymentMethod, FrozenRideInputs(pickup, destination, rideRoute))
             }
 
             // Wait for acceptance (unless this is the last batch)
@@ -1832,12 +1892,23 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun sendRoadflareOfferSilent(
         driverPubKey: String,
         driverLocation: Location?,
-        preCalculatedRoute: RouteResult? = null
+        preCalculatedRoute: RouteResult? = null,
+        paymentMethod: String = com.ridestr.common.nostr.events.PaymentMethod.CASHU.value,
+        frozenInputs: FrozenRideInputs? = null
     ) {
-        val state = _uiState.value
-        val pickup = state.pickupLocation ?: return
-        val destination = state.destination ?: return
-        val rideRoute = state.routeResult
+        val state = _uiState.value  // Still needed for session fields (activePreimage, pendingOfferEventId)
+        val pickup: Location
+        val destination: Location
+        val rideRoute: RouteResult?
+        if (frozenInputs != null) {
+            pickup = frozenInputs.pickup
+            destination = frozenInputs.destination
+            rideRoute = frozenInputs.rideRoute
+        } else {
+            pickup = state.pickupLocation ?: return
+            destination = state.destination ?: return
+            rideRoute = state.routeResult
+        }
 
         val fareEstimate = if (driverLocation != null) {
             calculateRoadflareFareWithRoute(pickup, driverLocation, rideRoute, preCalculatedRoute)
@@ -1845,9 +1916,12 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             state.fareEstimate ?: return
         }
 
-        // Reuse existing HTLC if this is part of a batch
-        val preimage = state.rideSession.activePreimage ?: PaymentCrypto.generatePreimage()
-        val paymentHash = state.rideSession.activePaymentHash ?: PaymentCrypto.computePaymentHash(preimage)
+        // Only generate HTLC for Bitcoin payment — alternates have no escrow
+        val (preimage, paymentHash) = if (paymentMethod == com.ridestr.common.nostr.events.PaymentMethod.CASHU.value) {
+            val pi = state.rideSession.activePreimage ?: PaymentCrypto.generatePreimage()
+            val ph = state.rideSession.activePaymentHash ?: PaymentCrypto.computePaymentHash(pi)
+            pi to ph
+        } else null to null
 
         // Use pre-calculated route or calculate via helper
         val pickupRoute = preCalculatedRoute ?: calculatePickupRoute(driverLocation, pickup)
@@ -1859,7 +1933,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             pickup = pickup, destination = destination,
             fareEstimate = fareEstimate, rideRoute = rideRoute,
             preimage = preimage, paymentHash = paymentHash,
-            paymentMethod = settingsManager.defaultPaymentMethod.value,
+            paymentMethod = paymentMethod,
             isRoadflare = true, isBroadcast = false,
             statusMessage = "",  // Batch doesn't set status per-offer
             roadflareTargetPubKey = driverPubKey, roadflareTargetLocation = driverLocation
@@ -1870,6 +1944,16 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         if (eventId != null) {
             Log.d(TAG, "Sent RoadFlare offer to ${driverPubKey.take(12)}: ${eventId.take(12)}")
             myRideEventIds.add(eventId)
+
+            // Post-publish cancellation check: if batch was cancelled during in-flight send,
+            // delete orphan and skip tracking/subscription
+            if (!coroutineContext.isActive) {
+                Log.w(TAG, "Batch cancelled during in-flight send — deleting orphan ${eventId.take(12)}")
+                viewModelScope.launch { nostrService.deleteEvents(listOf(eventId), "batch cancelled during send") }
+                return
+            }
+
+            contactedDrivers[driverPubKey] = eventId  // Track for batch cancellation
 
             // First offer in batch sets up subscriptions and UI state
             if (state.rideSession.pendingOfferEventId == null) {
@@ -1912,6 +1996,32 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Cancel non-accepted batch offers via NIP-09 deletion (Kind 5).
+     * Called inside CAS winner blocks only — INVARIANT: must stay inside if(shouldConfirm).
+     */
+    private fun cancelNonAcceptedBatchOffers(acceptedDriverPubKey: String) {
+        val nonAcceptedOfferIds = contactedDrivers
+            .filter { (pubkey, _) -> pubkey != acceptedDriverPubKey }
+            .values.toList()
+        if (nonAcceptedOfferIds.isNotEmpty()) {
+            viewModelScope.launch {
+                var deletedCount = 0
+                nonAcceptedOfferIds.chunked(50).forEach { chunk ->
+                    val result = nostrService.deleteEvents(chunk, "batch: rider chose another driver")
+                    if (result != null) {
+                        deletedCount += chunk.size
+                    } else {
+                        Log.w(TAG, "Failed to delete ${chunk.size} batch offers — will be cleaned up by backgroundCleanupRideshareEvents")
+                    }
+                }
+                Log.d(TAG, "Batch offer deletion complete: $deletedCount/${nonAcceptedOfferIds.size} deleted")
+            }
+            Log.d(TAG, "Cancelling ${nonAcceptedOfferIds.size} non-accepted batch offers")
+        }
+        contactedDrivers.clear()
+    }
+
+    /**
      * Handle acceptance from a batch RoadFlare offer.
      */
     private fun handleBatchAcceptance(acceptance: com.ridestr.common.nostr.events.RideAcceptanceData) {
@@ -1919,6 +2029,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
         // Cancel the batch job
         roadflareBatchJob?.cancel()
+        roadflareBatchJob = null
 
         // Cancel the acceptance timeout
         cancelAcceptanceTimeout()
@@ -1949,6 +2060,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         if (shouldConfirm) {
+            // INVARIANT: must stay inside if(shouldConfirm) CAS winner block
+            cancelNonAcceptedBatchOffers(acceptance.driverPubKey)
             autoConfirmRide(acceptance)
         } else {
             Log.d(TAG, "Ignoring batch acceptance - already in stage ${_uiState.value.rideSession.rideStage}")
@@ -2724,12 +2837,49 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      * Dismiss insufficient funds dialog.
      */
     fun dismissInsufficientFundsDialog() {
-        _uiState.value = _uiState.value.copy(
+        pendingBatchDrivers = null
+        pendingBatchLocations = null
+        _uiState.update { it.copy(
             showInsufficientFundsDialog = false,
             insufficientFundsIsRoadflare = false,
+            insufficientFundsIsBatch = false,
             pendingRoadflareDriverPubKey = null,
             pendingRoadflareDriverLocation = null
-        )
+        ) }
+    }
+
+    /**
+     * Retry batch RoadFlare send with an alternate (non-bitcoin) payment method.
+     * Called from insufficient-funds dialog when insufficientFundsIsBatch is true.
+     */
+    fun retryBatchWithAlternatePayment(paymentMethod: String) {
+        val currentStage = _uiState.value.rideSession.rideStage
+        if (currentStage != RideStage.IDLE) {
+            Log.w(TAG, "retryBatchWithAlternatePayment: ignoring, stage=$currentStage")
+        } else {
+            val drivers = pendingBatchDrivers
+            val locations = pendingBatchLocations
+            if (drivers != null && locations != null) {
+                pendingBatchDrivers = null
+                pendingBatchLocations = null
+                _uiState.update { it.copy(
+                    showInsufficientFundsDialog = false,
+                    insufficientFundsIsRoadflare = false,
+                    insufficientFundsIsBatch = false
+                ) }
+                sendRoadflareToAll(drivers, locations, paymentMethod)
+                return
+            }
+            Log.w(TAG, "retryBatchWithAlternatePayment: missing batch payload")
+        }
+        // All non-happy paths: clear everything to prevent stale dialog
+        pendingBatchDrivers = null
+        pendingBatchLocations = null
+        _uiState.update { it.copy(
+            showInsufficientFundsDialog = false,
+            insufficientFundsIsRoadflare = false,
+            insufficientFundsIsBatch = false
+        ) }
     }
 
     /**
@@ -2965,6 +3115,13 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
             if (shouldConfirm) {
                 subs.closeGroup(SubKeys.BATCH_ACCEPTANCE)  // Clean up batch subs — winner chosen
+                // Batch guard: only populated in batch flow (sendRoadflareOfferSilent)
+                if (contactedDrivers.isNotEmpty()) {
+                    roadflareBatchJob?.cancel()  // Stop batch loop before clearing map
+                    roadflareBatchJob = null
+                    // INVARIANT: must stay inside if(shouldConfirm) CAS winner block
+                    cancelNonAcceptedBatchOffers(acceptance.driverPubKey)
+                }
                 autoConfirmRide(acceptance)
             } else {
                 Log.d(TAG, "Ignoring duplicate acceptance - already in stage ${_uiState.value.rideSession.rideStage}")
@@ -4826,6 +4983,7 @@ data class RiderUiState(
     val insufficientFundsAmount: Long = 0,          // How many more sats needed (display only)
     val depositAmountNeeded: Long = 0,              // Amount to deposit (includes 2% fee buffer)
     val insufficientFundsIsRoadflare: Boolean = false, // True when from RoadFlare offer path
+    val insufficientFundsIsBatch: Boolean = false,       // True when from batch RoadFlare path
     val pendingRoadflareDriverPubKey: String? = null,   // Driver pubkey for deferred RoadFlare offer
     val pendingRoadflareDriverLocation: Location? = null, // Driver location for deferred RoadFlare offer
     val showAlternatePaymentSetupDialog: Boolean = false, // Show dialog to set alternate payment methods

@@ -80,6 +80,15 @@ import com.ridestr.rider.viewmodels.RiderViewModel
 private const val TAG = "RiderModeScreen"
 
 /**
+ * Batch action payload for payment method dialog.
+ * Stored as screen-level Compose state; survives sheet close.
+ */
+private data class PendingBatchAction(
+    val drivers: List<FollowedDriver>,
+    val locations: Map<String, Location>
+)
+
+/**
  * Mode for the unified RideWaitingContent component.
  * Determines text messaging and which ViewModel state to use.
  */
@@ -111,6 +120,10 @@ fun RiderModeScreen(
         val normalFareUsd = FareCalculator.calculateFareUsd(rideMiles, remoteConfig.fareRateUsdPerMile, remoteConfig.minimumFareUsd)
         normalFareUsd + FareCalculator.ROADFLARE_MAX_SURCHARGE_USD
     }
+    // Payment method selection for batch RoadFlare send
+    val roadflarePaymentMethods by settingsManager.roadflarePaymentMethods.collectAsState()
+    var pendingBatchAction by remember { mutableStateOf<PendingBatchAction?>(null) }
+
     var showChatSheet by remember { mutableStateOf(false) }
 
     // Driver selection sheet state - lifted to RiderModeScreen level
@@ -180,11 +193,45 @@ fun RiderModeScreen(
         }
     }
 
+    // Clear stale batch dialog data when leaving IDLE
+    LaunchedEffect(uiState.rideSession.rideStage) {
+        if (uiState.rideSession.rideStage != RideStage.IDLE) {
+            pendingBatchAction = null
+        }
+    }
+
+    // Batch payment method selection dialog (screen-level, survives sheet close)
+    if (uiState.rideSession.rideStage == RideStage.IDLE) pendingBatchAction?.let { action ->
+        AlertDialog(
+            onDismissRequest = { pendingBatchAction = null },
+            title = { Text("Payment Method") },
+            text = { Text("Choose payment method for batch ride request") },
+            confirmButton = {
+                Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = {
+                        viewModel.sendRoadflareToAll(action.drivers, action.locations, PaymentMethod.CASHU.value)
+                        pendingBatchAction = null
+                    }, modifier = Modifier.fillMaxWidth()) {
+                        Text("Bitcoin (Cashu)")
+                    }
+                    roadflarePaymentMethods.sorted().forEach { method ->
+                        OutlinedButton(onClick = {
+                            viewModel.sendRoadflareToAll(action.drivers, action.locations, method)
+                            pendingBatchAction = null
+                        }, modifier = Modifier.fillMaxWidth()) {
+                            Text(PaymentMethod.fromString(method)?.displayName ?: method)
+                        }
+                    }
+                }
+            },
+            dismissButton = {}
+        )
+    }
+
     // Insufficient funds dialog
     if (uiState.showInsufficientFundsDialog) {
-        val roadflarePaymentMethods = settingsManager.roadflarePaymentMethods.collectAsState()
         val hasAlternateMethods = uiState.insufficientFundsIsRoadflare &&
-            roadflarePaymentMethods.value.isNotEmpty()
+            roadflarePaymentMethods.isNotEmpty()
 
         AlertDialog(
             onDismissRequest = { viewModel.dismissInsufficientFundsDialog() },
@@ -223,8 +270,17 @@ fun RiderModeScreen(
                         if (hasAlternateMethods) {
                             Button(
                                 onClick = {
-                                    val method = roadflarePaymentMethods.value.first()
-                                    viewModel.sendRoadflareOfferWithAlternatePayment(method)
+                                    val method = roadflarePaymentMethods.sorted().firstOrNull()
+                                    if (method != null) {
+                                        if (uiState.insufficientFundsIsBatch) {
+                                            viewModel.retryBatchWithAlternatePayment(method)
+                                        } else {
+                                            viewModel.sendRoadflareOfferWithAlternatePayment(method)
+                                        }
+                                    } else {
+                                        Log.w(TAG, "No alternate payment methods available at click time")
+                                        viewModel.dismissInsufficientFundsDialog()
+                                    }
                                 },
                                 modifier = Modifier.fillMaxWidth()
                             ) {
@@ -550,7 +606,15 @@ fun RiderModeScreen(
                     maxRoadflareFareUsd = maxRoadflareFareUsd,
                     roadflareMinimumFareUsd = remoteConfig.roadflareMinimumFareUsd,
                     onSendRoadflareOffer = viewModel::sendRoadflareOffer,
-                    onSendRoadflareToAll = viewModel::sendRoadflareToAll
+                    onSendRoadflareToAll = { drivers, locations ->
+                        if (roadflarePaymentMethods.isEmpty()) {
+                            // No alternates configured — proceed with Bitcoin (Cashu)
+                            viewModel.sendRoadflareToAll(drivers, locations, PaymentMethod.CASHU.value)
+                        } else {
+                            // Show payment method dialog (at screen level, survives sheet close)
+                            pendingBatchAction = PendingBatchAction(drivers, locations)
+                        }
+                    }
                 )
             }
             RideStage.BROADCASTING_REQUEST -> {
