@@ -1,6 +1,6 @@
 MIT License with No-Shitcoin Addendum
 
-Copyright (c) 2025–2026 variablefate
+Copyright (c) 2026 variablefate
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -9,24 +9,35 @@ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 copies of the Software, and to permit persons to whom the Software is
 furnished to do so, subject to the following conditions:
 
-The above copyright notice and this permission notice (including this addendum)
-shall be included in all copies or substantial portions of the Software.
+1. The above copyright notice and this permission notice (including the full text
+   of this Addendum) must be included in all copies or substantial portions of
+   the Software, and must be preserved without alteration in any modification
+   or derivative work.
 
-ADDITIONAL RESTRICTION: The Software and any modifications or derivative works
-may not incorporate, integrate, promote, facilitate, support, or otherwise include
-any functionality, features, integrations, promotions, or marketing related to
-"shitcoins" or similar speculative, memetic, low-utility, or high-risk
-cryptocurrencies/tokens. This includes (without limitation):
+2. No-Shitcoin Restriction (Mandatory Preservation):
+   The Software, and any modification, derivative work, combined work, or
+   distribution thereof, may not incorporate, integrate, promote, facilitate,
+   support, or otherwise include any functionality, features, integrations,
+   promotions, marketing, code, dependencies, documentation, or references
+   related to "shitcoins" or similar speculative, memetic, low-utility, or
+   high-risk cryptocurrencies/tokens. This prohibition includes (without limitation):
 
-- Memecoins, pump-and-dump tokens, rug-pull prone assets, joke coins, wrapped 
-tokens representing assets, or any  other non-Bitcoin cryptocurrency or blockchain.
+   - Memecoins, pump-and-dump tokens, rug-pull prone assets, joke coins,
+     wrapped tokens representing assets, or any non-Bitcoin cryptocurrency,
+     token, or blockchain.
+   - Wallets, trading pairs, swaps, staking, airdrops, rewards, bridges,
+     or promotional materials tied to such assets.
 
-Prohibited examples include wallets, trading pairs, swaps, staking, airdrops,
-rewards, or promotional materials tied to such assets.
+   This restriction must be imposed identically on all downstream recipients,
+   and any license or distribution of a modified or derivative version of the
+   Software must include this exact No-Shitcoin Restriction clause (including
+   this sentence requiring its preservation). Violation of this restriction
+   voids the permission granted herein for the violating party and all
+   subsequent derivatives.
 
-EXCEPTION: This restriction does NOT apply to fiat-based payment processing,
-fiat on-ramps/off-ramps, traditional financial integrations (e.g., credit/debit
-cards, bank transfers, stable fiat currencies)
+Exception: This restriction does not apply to fiat-based payment processing,
+fiat on-ramps/off-ramps, or traditional financial integrations (e.g., credit/debit
+cards, bank transfers, stable fiat currencies such as USD, EUR).
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
