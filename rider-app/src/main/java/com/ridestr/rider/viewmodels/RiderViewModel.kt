@@ -53,6 +53,7 @@ import com.ridestr.common.state.RideStateMachine
 import com.ridestr.common.state.TransitionResult
 import com.ridestr.common.state.riderStageFromDriverStatus
 import com.ridestr.common.util.PeriodicRefreshJob
+import com.ridestr.common.util.FareCalculator
 import com.ridestr.common.util.RideHistoryBuilder
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
@@ -196,6 +197,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         const val CANCELLATION = "cancellation"
         const val DRIVER_RIDE_STATE = "driver_ride_state"
         const val SELECTED_DRIVER_AVAILABILITY = "selected_driver_availability"
+        const val BATCH_ACCEPTANCE = "batch_acceptance"  // group
 
         val RIDE_BASE = arrayOf(CANCELLATION, DRIVER_RIDE_STATE, CHAT, ACCEPTANCE)
         val RIDE_ALL = arrayOf(*RIDE_BASE, SELECTED_DRIVER_AVAILABILITY)
@@ -303,6 +305,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      */
     private fun closeAllRideSubscriptions() {
         subs.closeAll(*SubKeys.RIDE_BASE)
+        subs.closeGroup(SubKeys.BATCH_ACCEPTANCE)
         Log.d(TAG, "Closed all ride subscriptions before new ride")
     }
 
@@ -534,6 +537,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      */
     private fun closeAllRideSubscriptionsAndJobs() {
         subs.closeAll(*SubKeys.RIDE_ALL)
+        subs.closeGroup(SubKeys.BATCH_ACCEPTANCE)
         selectedDriverLastAvailabilityTimestamp = 0L
 
         stopChatRefreshJob()
@@ -1635,6 +1639,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
         // Clear previous state
         contactedDrivers.clear()
+        subs.closeGroup(SubKeys.BATCH_ACCEPTANCE)
         roadflareBatchJob?.cancel()
 
         // Start batched sending (with route calculation)
@@ -1680,7 +1685,54 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 Log.d(TAG, "  ${index + 1}. ${dwr.driver.pubkey.take(12)} - $distStr ($routeType)")
             }
 
-            sendRoadflareBatches(sortedDrivers, pickup)
+            // Filter out too-far drivers (safety net — UI already filters)
+            // Skip cap when no ride route — cap is meaningless without ride distance.
+            val rideRoute = state.routeResult
+            var tooFarCount = 0
+            var noLocationCount = 0
+            val cappedDrivers = if (rideRoute != null) {
+                val config = remoteConfigManager.config.value
+                val rideMiles = rideRoute.distanceKm * FareCalculator.KM_TO_MILES
+                val normalFareUsd = FareCalculator.calculateFareUsd(rideMiles, config.fareRateUsdPerMile, config.minimumFareUsd)
+
+                sortedDrivers.filter { dwr ->
+                    if (dwr.location == null) { noLocationCount++; false }
+                    else {
+                        val pickupMiles = dwr.distanceKm * FareCalculator.KM_TO_MILES
+                        val fareUsd = FareCalculator.calculateFareUsd(
+                            pickupMiles + rideMiles, config.roadflareFareRateUsdPerMile, config.roadflareMinimumFareUsd
+                        )
+                        val tooFar = FareCalculator.isTooFar(fareUsd, normalFareUsd)
+                        if (tooFar) { tooFarCount++; Log.d(TAG, "  Excluding ${dwr.driver.pubkey.take(12)} - fare ${"%.2f".format(fareUsd)} > max ${"%.2f".format(normalFareUsd + FareCalculator.ROADFLARE_MAX_SURCHARGE_USD)}") }
+                        !tooFar
+                    }
+                }
+            } else {
+                Log.d(TAG, "No ride route — skipping fare cap filter")
+                sortedDrivers.filter { dwr ->
+                    if (dwr.location == null) { noLocationCount++; false }
+                    else true
+                }
+            }
+
+            if (cappedDrivers.isEmpty()) {
+                val msg = when {
+                    rideRoute == null -> "No favorite drivers currently share location"
+                    tooFarCount > 0 -> "All favorite drivers are too far for this ride"
+                    else -> "No favorite drivers currently share location"
+                }
+                Log.w(TAG, "No eligible RoadFlare drivers: $msg (tooFar=$tooFarCount, noLocation=$noLocationCount)")
+                _uiState.value = state.copy(error = msg)
+                return@launch
+            }
+
+            // Log exclusions. Rider sees actual contacted count ("Contacting N drivers...").
+            if (cappedDrivers.size < sortedDrivers.size) {
+                val excluded = sortedDrivers.size - cappedDrivers.size
+                Log.d(TAG, "Excluded $excluded drivers from batch (fare cap or no location)")
+            }
+
+            sendRoadflareBatches(cappedDrivers, pickup)
         }
     }
 
@@ -1703,8 +1755,10 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 return
             }
 
-            // Check if cancelled
-            if (_uiState.value.rideSession.rideStage == RideStage.IDLE) {
+            // batchIndex > 0: First batch always proceeds (stage is still IDLE before first offer
+            // transitions to WAITING_FOR_ACCEPTANCE). Subsequent batches check IDLE as a proxy for
+            // user cancellation during the 15-second inter-batch delay.
+            if (batchIndex > 0 && _uiState.value.rideSession.rideStage == RideStage.IDLE) {
                 Log.d(TAG, "RoadFlare broadcast: Cancelled, stopping batch sending")
                 return
             }
@@ -1846,10 +1900,11 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             } else {
-                // Additional offer in batch - just subscribe to this one too
-                nostrService.subscribeToAcceptance(eventId, driverPubKey) { acceptance ->
+                // Additional offer in batch - track sub for cleanup
+                val batchSubId = nostrService.subscribeToAcceptance(eventId, driverPubKey) { acceptance ->
                     handleBatchAcceptance(acceptance)
                 }
+                subs.setInGroup(SubKeys.BATCH_ACCEPTANCE, eventId, batchSubId)
             }
         }
     }
@@ -1865,6 +1920,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
         // Cancel the acceptance timeout
         cancelAcceptanceTimeout()
+        subs.close(SubKeys.ACCEPTANCE)
+        subs.closeGroup(SubKeys.BATCH_ACCEPTANCE)
         // NOTE: Don't close availability subscription yet - keep monitoring through DRIVER_ACCEPTED
         // in case driver goes offline before we send confirmation (Kind 3179 won't work without confId)
 
@@ -2048,6 +2105,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
             // Close old acceptance subscription
             subs.close(SubKeys.ACCEPTANCE)
+            subs.closeGroup(SubKeys.BATCH_ACCEPTANCE)  // Clean up any batch subs
+            roadflareBatchJob?.cancel()                // Stop batch from creating new subs
+            roadflareBatchJob = null
 
             // Update fare in state - reset timeout flag since we're boosting
             val newFareWithFeesDouble = newFare * (1 + FEE_BUFFER_PERCENT)
@@ -2240,6 +2300,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
             // Close old acceptance subscription
             subs.close(SubKeys.ACCEPTANCE)
+            subs.closeGroup(SubKeys.BATCH_ACCEPTANCE)  // Defensive no-op (broadcast stage, not batch)
 
             // Update fare in state - store actual sats boosted (not count)
             // Reset broadcastTimedOut AND broadcastStartTimeMs to prevent race condition with UI
@@ -2901,6 +2962,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             if (shouldConfirm) {
+                subs.closeGroup(SubKeys.BATCH_ACCEPTANCE)  // Clean up batch subs — winner chosen
                 autoConfirmRide(acceptance)
             } else {
                 Log.d(TAG, "Ignoring duplicate acceptance - already in stage ${_uiState.value.rideSession.rideStage}")

@@ -48,6 +48,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.ridestr.common.nostr.events.AdminConfig
+import com.ridestr.common.util.FareCalculator
 import com.ridestr.common.nostr.events.DriverAvailabilityData
 import com.ridestr.common.nostr.events.PaymentMethod
 import com.ridestr.common.nostr.events.Location
@@ -104,6 +105,12 @@ fun RiderModeScreen(
     val scope = rememberCoroutineScope()
     val uiState by viewModel.uiState.collectAsState()
     val remoteConfig by viewModel.remoteConfig.collectAsState()
+    // Max RoadFlare fare for "too far" filtering (null = no route, skip cap)
+    val maxRoadflareFareUsd = uiState.routeResult?.let { route ->
+        val rideMiles = route.distanceKm * FareCalculator.KM_TO_MILES
+        val normalFareUsd = FareCalculator.calculateFareUsd(rideMiles, remoteConfig.fareRateUsdPerMile, remoteConfig.minimumFareUsd)
+        normalFareUsd + FareCalculator.ROADFLARE_MAX_SURCHARGE_USD
+    }
     var showChatSheet by remember { mutableStateOf(false) }
 
     // Driver selection sheet state - lifted to RiderModeScreen level
@@ -540,6 +547,8 @@ fun RiderModeScreen(
                     followedDriversRepository = followedDriversRepository,
                     nostrService = viewModel.getNostrService(),
                     roadflareRatePerMile = remoteConfig.roadflareFareRateUsdPerMile,
+                    maxRoadflareFareUsd = maxRoadflareFareUsd,
+                    roadflareMinimumFareUsd = remoteConfig.roadflareMinimumFareUsd,
                     onSendRoadflareOffer = viewModel::sendRoadflareOffer,
                     onSendRoadflareToAll = viewModel::sendRoadflareToAll
                 )
@@ -677,6 +686,8 @@ private fun IdleContent(
     followedDriversRepository: FollowedDriversRepository? = null,
     nostrService: com.ridestr.common.nostr.NostrService? = null,
     roadflareRatePerMile: Double = AdminConfig.DEFAULT_ROADFLARE_FARE_RATE,
+    maxRoadflareFareUsd: Double? = null,
+    roadflareMinimumFareUsd: Double = AdminConfig.DEFAULT_ROADFLARE_MINIMUM_FARE,
     onSendRoadflareOffer: (String, Location?) -> Unit = { _, _ -> },
     onSendRoadflareToAll: (List<FollowedDriver>, Map<String, Location>) -> Unit = { _, _ -> }
 ) {
@@ -733,6 +744,8 @@ private fun IdleContent(
                 settingsManager = settingsManager,
                 priceService = priceService,
                 roadflareRatePerMile = roadflareRatePerMile,
+                maxRoadflareFareUsd = maxRoadflareFareUsd,
+                roadflareMinimumFareUsd = roadflareMinimumFareUsd,
                 onSelectDriver = { driverPubKey, driverLocation ->
                     onSendRoadflareOffer(driverPubKey, driverLocation)
                     showRoadflareSheet = false
@@ -3356,6 +3369,8 @@ private fun RoadflareDriverSelectionSheet(
     settingsManager: SettingsManager,
     priceService: BitcoinPriceService,
     roadflareRatePerMile: Double = AdminConfig.DEFAULT_ROADFLARE_FARE_RATE,
+    maxRoadflareFareUsd: Double? = null,
+    roadflareMinimumFareUsd: Double = AdminConfig.DEFAULT_ROADFLARE_MINIMUM_FARE,
     onSelectDriver: (String, Location?) -> Unit,
     onSendToAll: (List<FollowedDriver>, Map<String, Location>) -> Unit,
     onDismiss: () -> Unit
@@ -3567,11 +3582,22 @@ private fun RoadflareDriverSelectionSheet(
                         formatFare(fareSats, settingsManager, priceService)
                     } else null
 
+                    // Only compute isTooFar for ONLINE drivers — offline drivers must show "Offline", not "Too far"
+                    val isTooFar = if (isOnline && maxRoadflareFareUsd != null && driverLocation != null && pickupLocation != null) {
+                        val pickupMiles = pickupLocation.distanceToKm(driverLocation) * FareCalculator.KM_TO_MILES
+                        val rideMiles = routeResult?.let { it.distanceKm * FareCalculator.KM_TO_MILES } ?: 0.0
+                        val fareUsd = FareCalculator.calculateFareUsd(
+                            pickupMiles + rideMiles, roadflareRatePerMile, roadflareMinimumFareUsd
+                        )
+                        fareUsd > maxRoadflareFareUsd
+                    } else false
+
                     RoadflareDriverCard(
                         driverName = driverName,
                         driverPubKey = driver.pubkey,
                         isOnline = isOnline,
                         hasKey = hasKey,
+                        isTooFar = isTooFar,
                         fare = fare,
                         note = driver.note,
                         enabled = hasKey && !isSending,
@@ -3612,7 +3638,17 @@ private fun RoadflareDriverSelectionSheet(
                 cachedLocations[driver.pubkey]?.let { state ->
                     val isOnline = state.status == com.ridestr.common.nostr.events.RoadflareLocationEvent.Status.ONLINE
                     val isFresh = (now - state.timestamp) < staleThreshold
-                    isOnline && isFresh
+                    // Exclude too-far drivers from batch
+                    val tooFar = if (maxRoadflareFareUsd != null && pickupLocation != null) {
+                        val loc = Location(lat = state.lat, lon = state.lon)
+                        val pickupMiles = pickupLocation.distanceToKm(loc) * FareCalculator.KM_TO_MILES
+                        val rideMiles = routeResult?.let { it.distanceKm * FareCalculator.KM_TO_MILES } ?: 0.0
+                        val fareUsd = FareCalculator.calculateFareUsd(
+                            pickupMiles + rideMiles, roadflareRatePerMile, roadflareMinimumFareUsd
+                        )
+                        fareUsd > maxRoadflareFareUsd
+                    } else false
+                    isOnline && isFresh && !tooFar
                 } ?: false  // Exclude drivers with no location data
             }
             // Convert CachedDriverLocation map to Location map for the callback
@@ -3658,6 +3694,7 @@ private fun RoadflareDriverCard(
     driverPubKey: String,
     isOnline: Boolean,
     hasKey: Boolean,
+    isTooFar: Boolean = false,
     fare: String?,
     note: String?,
     enabled: Boolean,
@@ -3691,9 +3728,10 @@ private fun RoadflareDriverCard(
                         .size(12.dp)
                         .background(
                             color = when {
-                                !hasKey -> MaterialTheme.colorScheme.outline
-                                isOnline -> MaterialTheme.colorScheme.primary
-                                else -> MaterialTheme.colorScheme.outline
+                                !hasKey -> MaterialTheme.colorScheme.outline          // Pending approval
+                                !isOnline -> MaterialTheme.colorScheme.outline        // Offline
+                                isTooFar -> Color(0xFFE65100)                         // Online but too far
+                                else -> MaterialTheme.colorScheme.primary             // Online and in range
                             },
                             shape = RoundedCornerShape(6.dp)
                         )
@@ -3713,16 +3751,25 @@ private fun RoadflareDriverCard(
                     Text(
                         text = when {
                             !hasKey -> "Pending approval"
-                            isOnline -> "Available"
-                            else -> "Offline"
+                            !isOnline -> "Offline"
+                            isTooFar -> "Too far"
+                            else -> "Available"
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = when {
                             !hasKey -> MaterialTheme.colorScheme.outline
-                            isOnline -> MaterialTheme.colorScheme.primary
-                            else -> MaterialTheme.colorScheme.onSurfaceVariant
+                            !isOnline -> MaterialTheme.colorScheme.onSurfaceVariant
+                            isTooFar -> Color(0xFFE65100)
+                            else -> MaterialTheme.colorScheme.primary
                         }
                     )
+                    if (isTooFar) {
+                        Text(
+                            text = "Excluded from batch. Request directly.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                     if (!note.isNullOrBlank()) {
                         Text(
                             text = note,
@@ -3735,8 +3782,8 @@ private fun RoadflareDriverCard(
                 }
             }
 
-            // Fare display
-            if (fare != null && isOnline) {
+            // Fare display — show when online or too-far (so rider sees why)
+            if (fare != null && (isOnline || isTooFar)) {
                 Column(horizontalAlignment = Alignment.End) {
                     Text(
                         text = fare,
