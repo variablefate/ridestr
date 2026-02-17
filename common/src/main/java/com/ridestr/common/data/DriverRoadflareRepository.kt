@@ -164,7 +164,12 @@ class DriverRoadflareRepository(context: Context) {
      * Called when a rider favorites this driver and we send them the key.
      */
     fun addFollower(follower: RoadflareFollower) {
-        val current = _state.value ?: return
+        val current = _state.value ?: DriverRoadflareState(
+            roadflareKey = null,
+            followers = emptyList(),
+            muted = emptyList(),
+            lastBroadcastAt = null
+        ).also { _state.value = it }
         if (current.followers.any { it.pubkey == follower.pubkey }) {
             // Update existing follower
             _state.value = current.copy(
