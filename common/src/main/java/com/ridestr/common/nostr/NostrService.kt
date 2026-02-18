@@ -884,8 +884,14 @@ class NostrService(
     fun subscribeToDrivers(
         location: Location? = null,
         expandSearch: Boolean = false,
+        onEose: ((String) -> Unit)? = null,
         onDriver: (DriverAvailabilityData) -> Unit
-    ): String = rideshareDomainService.subscribeToDrivers(location, expandSearch, onDriver)
+    ): String = rideshareDomainService.subscribeToDrivers(
+        location = location,
+        expandSearch = expandSearch,
+        onEose = onEose,
+        onDriver = onDriver
+    )
 
     /**
      * Subscribe to a specific driver's availability updates.

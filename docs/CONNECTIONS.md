@@ -1,6 +1,6 @@
 # Ridestr Module Connections
 
-**Last Updated**: 2026-02-13 (LogoutManager, ViewModel logout cleanup, UX redesigns)
+**Last Updated**: 2026-02-17 (Batch offer cancellation, payment method selection, FrozenRideInputs)
 
 This document provides a comprehensive view of how all modules connect in the Ridestr codebase. Use this as a reference when making changes to understand what might be affected.
 
@@ -37,6 +37,14 @@ This document provides a comprehensive view of how all modules connect in the Ri
 
 **Ride Flow Simplification Phase 5 (February 2026):**
 - Unified `acceptRide()` in DriverViewModel replaces duplicate `acceptOffer()` / `acceptBroadcastRequest()` flows
+
+**Batch Offer Cancellation + Payment Method Selection (February 2026):**
+- `sendRoadflareToAll()` now takes explicit `paymentMethod` param (3-arg)
+- Batch NIP-09 deletion of non-accepted offers via `cancelNonAcceptedBatchOffers()`
+- `FrozenRideInputs` data class ensures precheck and sends use identical ride inputs
+- Payment method dialog at screen level (survives bottom sheet close)
+- Balance precheck with alternate payment retry via `retryBatchWithAlternatePayment()`
+- `contactedDrivers` converted from `Set<String>` to `Map<String, String>` (pubkey → offerEventId)
 
 **Ride Flow Simplification Phase 6 (February 2026):**
 - AtomicBoolean CAS guards prevent double-confirmation from concurrent multi-relay callbacks
@@ -402,7 +410,8 @@ sequenceDiagram
 |------------|----------------------|---------------------|----------------------|
 | Direct | `sendRideOffer()` | `sendRideOffer()` | `create()` |
 | Broadcast | `broadcastRideRequest()` | `broadcastRideRequest()` | `createBroadcast()` |
-| RoadFlare | `sendRoadflareOffer()` | `sendRideOffer()` | `create()` (isRoadflare=true) |
+| RoadFlare (single) | `sendRoadflareOffer()` | `sendRideOffer()` | `create()` (isRoadflare=true) |
+| RoadFlare (batch) | `sendRoadflareToAll(drivers, locations, paymentMethod)` | `sendRideOffer()` | `create()` (isRoadflare=true, batched with NIP-09 cancellation) |
 
 ---
 

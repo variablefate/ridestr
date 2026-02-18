@@ -89,12 +89,14 @@ class RideshareDomainService(
      *
      * @param location The rider's current location for geohash filtering (optional)
      * @param expandSearch If true, always include neighboring cells for wider coverage
+     * @param onEose Called when EOSE received from a relay (relayUrl). Fires once per relay.
      * @param onDriver Called when a driver availability event is received
      * @return Subscription ID for closing later
      */
     fun subscribeToDrivers(
         location: Location? = null,
         expandSearch: Boolean = false,
+        onEose: ((String) -> Unit)? = null,
         onDriver: (DriverAvailabilityData) -> Unit
     ): String {
         val tags = mutableMapOf<String, List<String>>(
@@ -119,7 +121,8 @@ class RideshareDomainService(
         return relayManager.subscribe(
             kinds = listOf(RideshareEventKinds.DRIVER_AVAILABILITY),
             tags = tags,
-            since = fifteenMinutesAgo
+            since = fifteenMinutesAgo,
+            onEose = onEose
         ) { event, _ ->
             DriverAvailabilityEvent.parse(event)?.let { data ->
                 onDriver(data)

@@ -55,7 +55,9 @@ import com.ridestr.common.state.riderStageFromDriverStatus
 import com.ridestr.common.util.PeriodicRefreshJob
 import com.ridestr.common.util.FareCalculator
 import com.ridestr.common.util.RideHistoryBuilder
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -92,6 +94,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         private const val FEE_BUFFER_PERCENT = 0.02  // 2% buffer
         // Time after which a driver is considered stale (10 minutes)
         private const val STALE_DRIVER_TIMEOUT_MS = 10 * 60 * 1000L
+        // Delay after first EOSE before reconciling driver list (gives slower relays time)
+        private const val EOSE_RECONCILIATION_DELAY_MS = 2000L
         // How often to check for stale drivers (30 seconds)
         private const val STALE_CHECK_INTERVAL_MS = 30_000L
         // Refresh chat subscription every 15 seconds to ensure messages are received
@@ -213,6 +217,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     private var broadcastTimeoutJob: Job? = null
     private var bridgePendingPollJob: Job? = null
     private var currentSubscriptionGeohash: String? = null
+    // Generation counter for EOSE reconciliation — prevents stale reconciliation after resubscribe
+    private val driverSubscriptionGeneration = AtomicInteger(0)
     // First-acceptance-wins flag for broadcast mode (AtomicBoolean for thread safety)
     private val hasAcceptedDriver = AtomicBoolean(false)
     // Thread-safe guard: ensures exactly one confirmation per ride.
@@ -2921,74 +2927,171 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         currentSubscriptionGeohash = filterLocation?.geohash(precision = 4)
         Log.d(TAG, "Subscribing to drivers - geohash: $currentSubscriptionGeohash, expanded: $expandSearch")
 
-        subs.set(SubKeys.DRIVERS, nostrService.subscribeToDrivers(filterLocation, expandSearch) { driver ->
-            Log.d(TAG, "Found driver: ${driver.driverPubKey.take(8)}... status=${driver.status}, methods=${driver.paymentMethods}")
+        // EOSE reconciliation state for this subscription generation
+        val generation = driverSubscriptionGeneration.incrementAndGet()
+        val seenDriverPubkeys = ConcurrentHashMap.newKeySet<String>()
+        val eoseReceived = AtomicBoolean(false)
 
-            val currentDrivers = _uiState.value.availableDrivers.toMutableList()
-            val existingIndex = currentDrivers.indexOfFirst { it.driverPubKey == driver.driverPubKey }
-
-            if (driver.isOffline) {
-                // Driver went offline - remove from list
-                if (existingIndex >= 0) {
-                    Log.d(TAG, "Removing offline driver: ${driver.driverPubKey.take(8)}...")
-                    currentDrivers.removeAt(existingIndex)
-                    driverLastReceivedAt.remove(driver.driverPubKey)  // Cleanup tracking
-                    // Clean up profile subscription
-                    unsubscribeFromDriverProfile(driver.driverPubKey)
-                    // Clear selection if this driver was selected
-                    if (_uiState.value.rideSession.selectedDriver?.driverPubKey == driver.driverPubKey) {
-                        _uiState.update { current ->
-                            current.copy(
-                                availableDrivers = currentDrivers,
-                                rideSession = current.rideSession.copy(selectedDriver = null)
-                            )
+        val subId = nostrService.subscribeToDrivers(
+            location = filterLocation,
+            expandSearch = expandSearch,
+            // onEose: called on IO thread (RelayConnection dispatcher), once per relay.
+            // Reconciliation dispatches to Main via viewModelScope.launch.
+            onEose = { relayUrl ->
+                Log.d(TAG, "EOSE from $relayUrl for driver subscription (gen=$generation)")
+                if (eoseReceived.compareAndSet(false, true)) {
+                    // First EOSE: schedule delayed reconciliation.
+                    // Delay gives slower relays time to deliver their events.
+                    viewModelScope.launch {
+                        delay(EOSE_RECONCILIATION_DELAY_MS)
+                        // Guard: skip if subscription was replaced or closed during delay
+                        if (driverSubscriptionGeneration.get() == generation &&
+                            subs.get(SubKeys.DRIVERS) != null) {
+                            reconcileDriverList(seenDriverPubkeys.toSet())
                         }
-                        return@subscribeToDrivers
                     }
                 }
-            } else {
-                // Check payment method compatibility before showing driver
-                val riderMethods = settingsManager.paymentMethods.value
-                if (!isPaymentCompatible(riderMethods, driver.paymentMethods)) {
-                    Log.d(TAG, "Filtering out driver ${driver.driverPubKey.take(8)} - incompatible payment methods: rider=$riderMethods, driver=${driver.paymentMethods}")
-                    // Remove if they were already in the list (e.g., updated their methods)
+            }
+        ) onDriver@{ driver ->
+            // Always track seen drivers (no gating) — needed for EOSE reconciliation.
+            // Events from slow relays arriving after first EOSE are still captured.
+            seenDriverPubkeys.add(driver.driverPubKey)
+
+                Log.d(TAG, "Found driver: ${driver.driverPubKey.take(8)}... status=${driver.status}, methods=${driver.paymentMethods}")
+
+                val currentDrivers = _uiState.value.availableDrivers.toMutableList()
+                val existingIndex = currentDrivers.indexOfFirst { it.driverPubKey == driver.driverPubKey }
+
+                if (driver.isOffline) {
+                    // Driver went offline - remove from list
                     if (existingIndex >= 0) {
+                        Log.d(TAG, "Removing offline driver: ${driver.driverPubKey.take(8)}...")
                         currentDrivers.removeAt(existingIndex)
                         driverLastReceivedAt.remove(driver.driverPubKey)  // Cleanup tracking
+                        // Clean up profile subscription
                         unsubscribeFromDriverProfile(driver.driverPubKey)
+                        // Clear selection if this driver was selected
+                        if (_uiState.value.rideSession.selectedDriver?.driverPubKey == driver.driverPubKey) {
+                            _uiState.update { current ->
+                                current.copy(
+                                    availableDrivers = currentDrivers,
+                                    nearbyDriverCount = currentDrivers.size,
+                                    rideSession = current.rideSession.copy(selectedDriver = null)
+                                )
+                            }
+                            return@onDriver
+                        }
                     }
-                    return@subscribeToDrivers
-                }
-
-                // Driver is available and compatible - add or update
-                if (existingIndex >= 0) {
-                    // Update existing driver
-                    currentDrivers[existingIndex] = driver
                 } else {
-                    // Add new driver
-                    currentDrivers.add(driver)
-                    // Subscribe to their profile to get name
-                    subscribeToDriverProfile(driver.driverPubKey)
+                    // Check payment method compatibility before showing driver
+                    val riderMethods = settingsManager.paymentMethods.value
+                    if (!isPaymentCompatible(riderMethods, driver.paymentMethods)) {
+                        Log.d(TAG, "Filtering out driver ${driver.driverPubKey.take(8)} - incompatible payment methods: rider=$riderMethods, driver=${driver.paymentMethods}")
+                        // Remove if they were already in the list (e.g., updated their methods).
+                        // No existingIndex gate — handles race where another relay callback added
+                        // this driver between snapshot and here. Side effects are idempotent.
+                        driverLastReceivedAt.remove(driver.driverPubKey)
+                        subs.closeInGroup(SubKeys.DRIVER_PROFILES, driver.driverPubKey)
+                        _uiState.update { current ->
+                            val freshDrivers = current.availableDrivers.filter {
+                                it.driverPubKey != driver.driverPubKey
+                            }
+                            if (freshDrivers.size == current.availableDrivers.size) {
+                                return@update current  // Driver wasn't in list — no state change
+                            }
+                            val currentSelected = current.rideSession.selectedDriver
+                            val selectedStillValid = currentSelected == null ||
+                                freshDrivers.any { it.driverPubKey == currentSelected.driverPubKey }
+                            current.copy(
+                                availableDrivers = freshDrivers,
+                                nearbyDriverCount = freshDrivers.size,
+                                driverProfiles = current.driverProfiles - driver.driverPubKey,
+                                rideSession = current.rideSession.copy(
+                                    selectedDriver = if (selectedStillValid) currentSelected else null
+                                )
+                            )
+                        }
+                        return@onDriver
+                    }
+
+                    // Driver is available and compatible - add or update
+                    if (existingIndex >= 0) {
+                        // Update existing driver
+                        currentDrivers[existingIndex] = driver
+                    } else {
+                        // Add new driver
+                        currentDrivers.add(driver)
+                        // Subscribe to their profile to get name
+                        subscribeToDriverProfile(driver.driverPubKey)
+                    }
+                    // Track when we received this event (not when it was created)
+                    driverLastReceivedAt[driver.driverPubKey] = System.currentTimeMillis() / 1000
                 }
-                // Track when we received this event (not when it was created)
-                driverLastReceivedAt[driver.driverPubKey] = System.currentTimeMillis() / 1000
-            }
 
-            // Validate selectedDriver is still in the updated list
-            val currentSelected = _uiState.value.rideSession.selectedDriver
-            val selectedStillValid = currentSelected == null ||
-                currentDrivers.any { it.driverPubKey == currentSelected.driverPubKey }
+                // Validate selectedDriver is still in the updated list
+                val currentSelected = _uiState.value.rideSession.selectedDriver
+                val selectedStillValid = currentSelected == null ||
+                    currentDrivers.any { it.driverPubKey == currentSelected.driverPubKey }
 
-            _uiState.update { current ->
-                current.copy(
-                    availableDrivers = currentDrivers,
-                    nearbyDriverCount = currentDrivers.size,
-                    rideSession = current.rideSession.copy(
-                        selectedDriver = if (selectedStillValid) currentSelected else null
+                _uiState.update { current ->
+                    current.copy(
+                        availableDrivers = currentDrivers,
+                        nearbyDriverCount = currentDrivers.size,
+                        rideSession = current.rideSession.copy(
+                            selectedDriver = if (selectedStillValid) currentSelected else null
+                        )
                     )
-                )
+                }
             }
-        })
+        subs.set(SubKeys.DRIVERS, subId)
+    }
+
+    /**
+     * EOSE reconciliation: remove cached drivers not present in relay snapshot.
+     * Called after a short delay post-first-EOSE to allow slower relays to contribute.
+     * Handles: NIP-09 deletions, NIP-40 expiry, ROADFLARE_ONLY mode switches.
+     *
+     * Note: Transient remove-then-readd is possible if a valid driver only arrives
+     * from a very slow relay after the delay. The normal event callback re-adds them.
+     */
+    private fun reconcileDriverList(seenDriverPubkeys: Set<String>) {
+        val currentDrivers = _uiState.value.availableDrivers
+        val staleDriverPubkeys = currentDrivers
+            .filter { it.driverPubKey !in seenDriverPubkeys }
+            .map { it.driverPubKey }
+
+        if (staleDriverPubkeys.isEmpty()) {
+            Log.d(TAG, "EOSE reconciliation: all ${currentDrivers.size} drivers confirmed by relay")
+            return
+        }
+
+        Log.d(TAG, "EOSE reconciliation: seen=${seenDriverPubkeys.size}, " +
+            "cached=${currentDrivers.size}, removing=${staleDriverPubkeys.size}")
+
+        // Close profile subscriptions without writing _uiState (avoids N writes)
+        staleDriverPubkeys.forEach { pubKey ->
+            subs.closeInGroup(SubKeys.DRIVER_PROFILES, pubKey)
+            driverLastReceivedAt.remove(pubKey)
+        }
+
+        // Single batched state update: remove stale drivers + profiles + validate selection
+        val staleSet = staleDriverPubkeys.toSet()
+        _uiState.update { current ->
+            val freshDrivers = current.availableDrivers.filter { it.driverPubKey !in staleSet }
+            val freshProfiles = current.driverProfiles.filterKeys { it !in staleSet }
+            val selectedStillValid = current.rideSession.selectedDriver?.let {
+                it.driverPubKey !in staleSet
+            } ?: true
+
+            current.copy(
+                availableDrivers = freshDrivers,
+                nearbyDriverCount = freshDrivers.size,
+                driverProfiles = freshProfiles,
+                rideSession = current.rideSession.copy(
+                    selectedDriver = if (selectedStillValid) current.rideSession.selectedDriver else null
+                )
+            )
+        }
     }
 
     /**
@@ -3039,7 +3142,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         // Don't cleanup during active ride stages - prevents false removals
         // During rides, the UI shows ride progress instead of driver list anyway
         val stage = _uiState.value.rideSession.rideStage
-        if (stage != RideStage.IDLE) {
+        if (stage != RideStage.IDLE && stage != RideStage.COMPLETED) {
             return  // Silent skip - cleanup will resume when back to IDLE
         }
 

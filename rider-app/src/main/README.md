@@ -90,7 +90,7 @@ Any active state → cancelRide() or driverCancelled() → IDLE
 | `sendRoadflareOffer()` | IDLE | WAITING_FOR_ACCEPTANCE | Kind 3173 (RoadFlare, isRoadflare=true) |
 | `sendRoadflareOfferWithAlternatePayment()` | IDLE | WAITING_FOR_ACCEPTANCE | Kind 3173 (RoadFlare, alternate payment, no HTLC) |
 | `broadcastRideRequest()` | IDLE | BROADCASTING_REQUEST | Kind 3173 (broadcast) |
-| `sendRoadflareToAll()` | IDLE | WAITING_FOR_ACCEPTANCE | Kind 3173 (batch to all followed drivers, sorted by proximity, batches of 3) |
+| `sendRoadflareToAll()` | IDLE | WAITING_FOR_ACCEPTANCE | Kind 3173 (batch to all followed drivers, sorted by proximity, batches of 3, payment method selection, NIP-09 cancellation of non-accepted) |
 | `autoConfirmRide()` | DRIVER_ACCEPTED | RIDE_CONFIRMED | Kind 3175 |
 | `handleDriverRideState()` | Various | Various | Receives Kind 30180 |
 | `cancelOffer()` | WAITING_FOR_ACCEPTANCE / BROADCASTING_REQUEST | IDLE | Cancels pending offer or broadcast request |
@@ -270,6 +270,35 @@ For personal RoadFlare drivers, riders can offer non-bitcoin payment methods:
 - When insufficient bitcoin funds during a RoadFlare offer, modified dialog offers "Continue with Alternate Payment"
 - `sendRoadflareOfferWithAlternatePayment()` skips balance check and sends offer with alternate `paymentMethod`
 - UI state tracks `insufficientFundsIsRoadflare`, `pendingRoadflareDriverPubKey`, `pendingRoadflareDriverLocation`
+
+### Batch Offer Cancellation + Payment Method Selection (February 2026)
+When `sendRoadflareToAll()` sends offers to multiple drivers in batches:
+
+**Batch Cancellation (NIP-09):**
+- `contactedDrivers` is a `Map<String, String>` (pubkey → offerEventId) for tracking
+- When one driver accepts, `cancelNonAcceptedBatchOffers(acceptedPubKey)` deletes all other offers via Kind 5
+- Cancellation placed inside CAS winner blocks only (both `handleBatchAcceptance()` and `subscribeToAcceptance()`)
+- Post-publish orphan check: `coroutineContext.isActive` after `sendOfferToNostr()` catches cancellation during in-flight send
+- `coroutineContext.ensureActive()` in inner driver loop for cooperative batch cancellation
+
+**Payment Method Selection:**
+- `sendRoadflareToAll(drivers, locations, paymentMethod)` — 3-arg with explicit payment method
+- `PendingBatchAction` screen-level Compose state in RiderModeScreen (survives bottom sheet close)
+- If rider has alternate payment methods configured, shows payment dialog before batch send
+- If no alternates configured, proceeds directly with Cashu
+
+**Balance Precheck:**
+- Calculates max fare across all `cappedDrivers` using `calculateRoadflareFareWithRoute()`
+- Compares against wallet balance with `FEE_BUFFER_PERCENT`
+- If insufficient: stores `pendingBatchDrivers`/`pendingBatchLocations` for retry
+- `retryBatchWithAlternatePayment(paymentMethod)` replays batch with non-Cashu method
+- `insufficientFundsIsBatch` flag in UiState for dialog branching
+
+**FrozenRideInputs (Precheck/Send Consistency):**
+- `FrozenRideInputs(pickup, destination, rideRoute)` data class freezes ride inputs from captured state snapshot
+- Threaded through `sendRoadflareBatches()` → `sendRoadflareOfferSilent(frozenInputs)`
+- Ensures precheck and actual sends use identical values even if user changes destination during batch
+- Session fields (`activePreimage`, `pendingOfferEventId`) still read fresh from `_uiState.value`
 
 ### RoadFlare Offer Unification (January 2026)
 RoadFlare offers use the same `RideOfferEvent.create()` as normal offers with `isRoadflare=true`:
