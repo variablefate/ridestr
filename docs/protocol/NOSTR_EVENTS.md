@@ -3,8 +3,6 @@
 **Version**: 1.7
 **Last Updated**: 2026-02-17
 
-> **v1.7 Migration**: `bridge_complete` action in Kind 30181 now uses `preimage_encrypted` (NIP-44 encrypted to driver) instead of plaintext `preimage`. Writers must emit `preimage_encrypted` from v1.7 onward. Readers should accept both for backward compatibility.
-
 This document defines all Nostr event kinds used in the Ridestr rideshare application.
 
 ---
