@@ -6,13 +6,11 @@ description: |
     Built on Nostr for censorship-resistant, peer-to-peer ridesharing.
 
     Features:
-    - RoadFlare personal driver network - build your trusted driver list
-    - Request rides from nearby drivers or your favorites
-    - Pay with Cashu ecash (trustless HTLC escrow)
-    - Real-time ride tracking
+    - Build a network of your favorite trusted drivers
+    - Request rides from nearby drivers or send a RoadFlare to just your favorites
     - Encrypted chat with drivers
-    - Cross-device wallet sync via NIP-60
-summary: Nostr-based rideshare app for riders
+    - Take private rides, without companies collecting your location data.
+summary: Rideshare, without the middleman.
 tags:
     - bitcoin
     - nostr
@@ -20,7 +18,7 @@ tags:
     - cashu
     - ecash
     - transportation
-license: MIT
+license: MIT No-Shitcoin
 website: https://github.com/variablefate/ridestr
 icon: ./icon.png
 supported_nips:
