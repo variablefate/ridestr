@@ -1836,7 +1836,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
             // Update status message
             _uiState.value = _uiState.value.copy(
-                statusMessage = "Contacting drivers... (${contactedDrivers.size + batch.size}/${sortedDrivers.size})"
+                statusMessage = "Broadcasting to drivers... (${contactedDrivers.size + batch.size}/${sortedDrivers.size})"
             )
 
             // Send to all drivers in this batch
@@ -1882,7 +1882,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         // If still waiting after all batches, update message
         if (_uiState.value.rideSession.rideStage == RideStage.WAITING_FOR_ACCEPTANCE) {
             _uiState.value = _uiState.value.copy(
-                statusMessage = "Waiting for response from ${contactedDrivers.size} drivers..."
+                statusMessage = "Broadcast sent to ${contactedDrivers.size} drivers. Waiting for response..."
             )
         }
     }

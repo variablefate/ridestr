@@ -205,7 +205,7 @@ fun RiderModeScreen(
         AlertDialog(
             onDismissRequest = { pendingBatchAction = null },
             title = { Text("Payment Method") },
-            text = { Text("Choose payment method for batch ride request") },
+            text = { Text("Choose payment method for RoadFlare broadcast") },
             confirmButton = {
                 Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = {
@@ -3733,13 +3733,13 @@ private fun RoadflareDriverSelectionSheet(
                     modifier = Modifier.size(18.dp)
                 )
                 Spacer(modifier = Modifier.width(8.dp))
-                Text("Send to All Favorites (${eligibleDrivers.size})")
+                Text("Broadcast RoadFlare (${eligibleDrivers.size})")
             }
 
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-                text = "Sends your request to all favorite drivers at once",
+                text = "Broadcasts your ride request to all favorite drivers",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
@@ -3829,7 +3829,7 @@ private fun RoadflareDriverCard(
                     )
                     if (isTooFar) {
                         Text(
-                            text = "Excluded from batch. Request directly.",
+                            text = "Excluded from broadcast. Request directly.",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
