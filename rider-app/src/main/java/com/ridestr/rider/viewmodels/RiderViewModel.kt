@@ -141,6 +141,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         val statusMessage: String,
         val roadflareTargetPubKey: String?,
         val roadflareTargetLocation: Location?,
+        // Fiat payment methods in rider's priority order (Issue #46)
+        val fiatPaymentMethods: List<String> = emptyList(),
     )
 
     private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -1302,7 +1304,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             rideRouteMin = params.rideRoute?.let { it.durationSeconds / 60.0 },
             mintUrl = riderMintUrl,
             paymentMethod = params.paymentMethod,
-            isRoadflare = params.isRoadflare
+            isRoadflare = params.isRoadflare,
+            fiatPaymentMethods = params.fiatPaymentMethods
         )
     }
 
@@ -1585,7 +1588,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 paymentMethod = paymentMethod,
                 isRoadflare = true, isBroadcast = false,
                 statusMessage = "Waiting for driver to accept...",
-                roadflareTargetPubKey = driverPubKey, roadflareTargetLocation = driverLocation
+                roadflareTargetPubKey = driverPubKey, roadflareTargetLocation = driverLocation,
+                fiatPaymentMethods = settingsManager.roadflarePaymentMethods.value
             )
 
             val pickupRoute = calculatePickupRoute(driverLocation, pickup)
@@ -1932,6 +1936,11 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         // Use pre-calculated route or calculate via helper
         val pickupRoute = preCalculatedRoute ?: calculatePickupRoute(driverLocation, pickup)
 
+        // Include fiat methods for non-cashu offers (Issue #46)
+        val fiatMethods = if (paymentMethod != com.ridestr.common.nostr.events.PaymentMethod.CASHU.value) {
+            settingsManager.roadflarePaymentMethods.value
+        } else emptyList()
+
         val params = OfferParams(
             driverPubKey = driverPubKey,
             driverAvailabilityEventId = null,
@@ -1942,7 +1951,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             paymentMethod = paymentMethod,
             isRoadflare = true, isBroadcast = false,
             statusMessage = "",  // Batch doesn't set status per-offer
-            roadflareTargetPubKey = driverPubKey, roadflareTargetLocation = driverLocation
+            roadflareTargetPubKey = driverPubKey, roadflareTargetLocation = driverLocation,
+            fiatPaymentMethods = fiatMethods
         )
 
         val eventId = sendOfferToNostr(params, pickupRoute)

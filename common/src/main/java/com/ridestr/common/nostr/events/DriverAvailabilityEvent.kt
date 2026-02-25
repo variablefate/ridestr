@@ -45,7 +45,8 @@ object DriverAvailabilityEvent {
         status: String = STATUS_AVAILABLE,
         vehicle: Vehicle? = null,
         mintUrl: String? = null,
-        paymentMethods: List<String> = listOf("cashu")
+        paymentMethods: List<String> = listOf("cashu"),
+        fiatPaymentMethods: List<String> = emptyList()
     ): Event {
         val approxLocation = location?.approximate()
 
@@ -63,6 +64,9 @@ object DriverAvailabilityEvent {
             mintUrl?.let { put("mint_url", it) }
             if (paymentMethods.isNotEmpty()) {
                 put("payment_methods", JSONArray(paymentMethods))
+            }
+            if (fiatPaymentMethods.isNotEmpty()) {
+                put("fiat_payment_methods", JSONArray(fiatPaymentMethods))
             }
         }.toString()
 
@@ -134,6 +138,15 @@ object DriverAvailabilityEvent {
                 paymentMethods.add("cashu")
             }
 
+            // Parse fiat payment methods (Issue #46 - ordered priority list)
+            val fiatPaymentMethods = mutableListOf<String>()
+            val fiatMethodsArray = json.optJSONArray("fiat_payment_methods")
+            if (fiatMethodsArray != null) {
+                for (i in 0 until fiatMethodsArray.length()) {
+                    fiatPaymentMethods.add(fiatMethodsArray.getString(i))
+                }
+            }
+
             DriverAvailabilityData(
                 eventId = event.id,
                 driverPubKey = event.pubKey,
@@ -145,7 +158,8 @@ object DriverAvailabilityEvent {
                 carColor = carColor,
                 carYear = carYear,
                 mintUrl = mintUrl,
-                paymentMethods = paymentMethods
+                paymentMethods = paymentMethods,
+                fiatPaymentMethods = fiatPaymentMethods
             )
         } catch (e: Exception) {
             null
@@ -169,7 +183,9 @@ data class DriverAvailabilityData(
     val carYear: String? = null,
     // Payment info (Issue #13 - multi-mint support)
     val mintUrl: String? = null,
-    val paymentMethods: List<String> = listOf("cashu")
+    val paymentMethods: List<String> = listOf("cashu"),
+    // RoadFlare fiat payment methods in priority order (Issue #46)
+    val fiatPaymentMethods: List<String> = emptyList()
 ) {
     /** Returns true if the driver is available */
     val isAvailable: Boolean

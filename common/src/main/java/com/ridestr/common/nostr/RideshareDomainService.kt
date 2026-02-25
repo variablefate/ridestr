@@ -53,7 +53,8 @@ class RideshareDomainService(
         status: String = DriverAvailabilityEvent.STATUS_AVAILABLE,
         vehicle: Vehicle? = null,
         mintUrl: String? = null,
-        paymentMethods: List<String> = listOf("cashu")
+        paymentMethods: List<String> = listOf("cashu"),
+        fiatPaymentMethods: List<String> = emptyList()
     ): String? {
         val signer = keyManager.getSigner()
         if (signer == null) {
@@ -68,7 +69,8 @@ class RideshareDomainService(
                 status = status,
                 vehicle = vehicle,
                 mintUrl = mintUrl,
-                paymentMethods = paymentMethods
+                paymentMethods = paymentMethods,
+                fiatPaymentMethods = fiatPaymentMethods
             )
             relayManager.publish(event)
             Log.d(TAG, "Broadcast availability: status=$status, location=${location != null}, vehicle=${vehicle?.shortName() ?: "none"} (${event.id})")
@@ -198,7 +200,8 @@ class RideshareDomainService(
         rideRouteMin: Double? = null,
         mintUrl: String? = null,
         paymentMethod: String? = "cashu",
-        isRoadflare: Boolean = false
+        isRoadflare: Boolean = false,
+        fiatPaymentMethods: List<String> = emptyList()
     ): String? {
         val signer = keyManager.getSigner()
         if (signer == null) {
@@ -220,7 +223,8 @@ class RideshareDomainService(
                 rideRouteMin = rideRouteMin,
                 mintUrl = mintUrl,
                 paymentMethod = paymentMethod ?: "cashu",
-                isRoadflare = isRoadflare
+                isRoadflare = isRoadflare,
+                fiatPaymentMethods = fiatPaymentMethods
             )
             relayManager.publish(event)
             val offerType = if (isRoadflare) "RoadFlare" else "ride"

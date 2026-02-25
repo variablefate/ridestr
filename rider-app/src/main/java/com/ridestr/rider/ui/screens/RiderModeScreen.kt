@@ -214,7 +214,7 @@ fun RiderModeScreen(
                     }, modifier = Modifier.fillMaxWidth()) {
                         Text("Bitcoin (Cashu)")
                     }
-                    roadflarePaymentMethods.sorted().forEach { method ->
+                    roadflarePaymentMethods.forEach { method ->
                         OutlinedButton(onClick = {
                             viewModel.sendRoadflareToAll(action.drivers, action.locations, method)
                             pendingBatchAction = null
@@ -270,7 +270,7 @@ fun RiderModeScreen(
                         if (hasAlternateMethods) {
                             Button(
                                 onClick = {
-                                    val method = roadflarePaymentMethods.sorted().firstOrNull()
+                                    val method = roadflarePaymentMethods.firstOrNull()
                                     if (method != null) {
                                         if (uiState.insufficientFundsIsBatch) {
                                             viewModel.retryBatchWithAlternatePayment(method)
@@ -320,9 +320,14 @@ fun RiderModeScreen(
         )
     }
 
-    // Alternate payment setup dialog for RoadFlare
+    // Alternate payment setup dialog for RoadFlare (reorderable list, Issue #46)
     if (uiState.showAlternatePaymentSetupDialog) {
-        val currentMethods = settingsManager.roadflarePaymentMethods.collectAsState()
+        val currentMethods by settingsManager.roadflarePaymentMethods.collectAsState()
+
+        val allMethods = remember(currentMethods) {
+            val known = PaymentMethod.ROADFLARE_ALTERNATE_METHODS.map { it.value }
+            (known + currentMethods.filter { it !in known }).distinct()
+        }
 
         AlertDialog(
             onDismissRequest = { viewModel.dismissAlternatePaymentSetup() },
@@ -337,41 +342,32 @@ fun RiderModeScreen(
             text = {
                 Column {
                     Text(
-                        "Select payment methods you can use for RoadFlare rides when you don't have enough bitcoin.",
+                        "Select and order payment methods for RoadFlare rides when you don't have enough bitcoin.",
                         style = MaterialTheme.typography.bodyMedium
                     )
                     Spacer(modifier = Modifier.height(16.dp))
-                    PaymentMethod.ROADFLARE_ALTERNATE_METHODS.forEach { method ->
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 4.dp)
-                        ) {
-                            Checkbox(
-                                checked = method.value in currentMethods.value,
-                                onCheckedChange = { checked ->
-                                    val updated = if (checked) {
-                                        currentMethods.value + method.value
-                                    } else {
-                                        currentMethods.value - method.value
-                                    }
-                                    settingsManager.setRoadflarePaymentMethods(updated)
-                                }
-                            )
-                            Text(
-                                text = method.displayName,
-                                style = MaterialTheme.typography.bodyLarge,
-                                modifier = Modifier.padding(start = 8.dp)
-                            )
-                        }
-                    }
+                    com.ridestr.common.ui.components.ReorderablePaymentMethodList(
+                        allMethods = allMethods,
+                        enabledMethods = currentMethods,
+                        onOrderChanged = { reordered ->
+                            settingsManager.setRoadflarePaymentMethods(reordered)
+                        },
+                        onMethodToggled = { method, enabled ->
+                            val updated = if (enabled) {
+                                currentMethods + method
+                            } else {
+                                currentMethods - method
+                            }
+                            settingsManager.setRoadflarePaymentMethods(updated)
+                        },
+                        modifier = Modifier.heightIn(max = 350.dp)
+                    )
                 }
             },
             confirmButton = {
                 Button(
                     onClick = { viewModel.dismissAlternatePaymentSetup() },
-                    enabled = currentMethods.value.isNotEmpty()
+                    enabled = currentMethods.isNotEmpty()
                 ) {
                     Text("Done")
                 }

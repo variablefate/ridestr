@@ -150,8 +150,9 @@ class NostrService(
         status: String = DriverAvailabilityEvent.STATUS_AVAILABLE,
         vehicle: Vehicle? = null,
         mintUrl: String? = null,
-        paymentMethods: List<String> = listOf("cashu")
-    ): String? = rideshareDomainService.broadcastAvailability(location, status, vehicle, mintUrl, paymentMethods)
+        paymentMethods: List<String> = listOf("cashu"),
+        fiatPaymentMethods: List<String> = emptyList()
+    ): String? = rideshareDomainService.broadcastAvailability(location, status, vehicle, mintUrl, paymentMethods, fiatPaymentMethods)
 
     /**
      * Request deletion of events (NIP-09).
@@ -770,8 +771,9 @@ class NostrService(
         rideRouteMin: Double? = null,
         mintUrl: String? = null,
         paymentMethod: String? = "cashu",
-        isRoadflare: Boolean = false
-    ): String? = rideshareDomainService.sendRideOffer(driverPubKey, driverAvailabilityEventId, pickup, destination, fareEstimate, pickupRouteKm, pickupRouteMin, rideRouteKm, rideRouteMin, mintUrl, paymentMethod, isRoadflare)
+        isRoadflare: Boolean = false,
+        fiatPaymentMethods: List<String> = emptyList()
+    ): String? = rideshareDomainService.sendRideOffer(driverPubKey, driverAvailabilityEventId, pickup, destination, fareEstimate, pickupRouteKm, pickupRouteMin, rideRouteKm, rideRouteMin, mintUrl, paymentMethod, isRoadflare, fiatPaymentMethods)
 
     /**
      * Confirm a ride with precise pickup location (encrypted).
