@@ -17,6 +17,7 @@ import com.ridestr.common.location.GeocodingService
 import com.ridestr.common.nostr.NostrService
 import com.ridestr.common.nostr.SubscriptionManager
 import com.ridestr.common.nostr.events.DriverAvailabilityData
+import com.ridestr.common.nostr.events.RideshareExpiration
 import com.ridestr.common.nostr.events.DriverRideAction
 import com.ridestr.common.nostr.events.DriverRideStateData
 import com.ridestr.common.nostr.events.DriverStatusType
@@ -92,8 +93,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         private const val KM_TO_MILES = 0.621371
         // Fee buffer for cross-mint payments (Lightning routing + melt fees)
         private const val FEE_BUFFER_PERCENT = 0.02  // 2% buffer
-        // Time after which a driver is considered stale (10 minutes)
-        private const val STALE_DRIVER_TIMEOUT_MS = 10 * 60 * 1000L
+        // Time after which a driver is considered stale
+        private const val STALE_DRIVER_TIMEOUT_MS = RideshareExpiration.DRIVER_AVAILABILITY_LOOKBACK_SECONDS * 1000L
         // Delay after first EOSE before reconciling driver list (gives slower relays time)
         private const val EOSE_RECONCILIATION_DELAY_MS = 2000L
         // How often to check for stale drivers (30 seconds)
@@ -205,10 +206,11 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         const val CANCELLATION = "cancellation"
         const val DRIVER_RIDE_STATE = "driver_ride_state"
         const val SELECTED_DRIVER_AVAILABILITY = "selected_driver_availability"
+        const val SELECTED_DRIVER_AVAIL_DELETION = "selected_driver_avail_deletion"
         const val BATCH_ACCEPTANCE = "batch_acceptance"  // group
 
         val RIDE_BASE = arrayOf(CANCELLATION, DRIVER_RIDE_STATE, CHAT, ACCEPTANCE)
-        val RIDE_ALL = arrayOf(*RIDE_BASE, SELECTED_DRIVER_AVAILABILITY)
+        val RIDE_ALL = arrayOf(*RIDE_BASE, SELECTED_DRIVER_AVAILABILITY, SELECTED_DRIVER_AVAIL_DELETION)
     }
 
     // Track last seen timestamp for selected driver availability (reject out-of-order events)
@@ -1317,7 +1319,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     private fun setupOfferSubscriptions(
         eventId: String,
         driverPubKey: String,
-        isBroadcast: Boolean
+        isBroadcast: Boolean,
+        driverAvailabilityEventId: String? = null
     ) {
         myRideEventIds.add(eventId)
 
@@ -1328,7 +1331,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             RiderActiveService.startSearching(getApplication())
         } else {
             subscribeToAcceptance(eventId, driverPubKey)
-            subscribeToSelectedDriverAvailability(driverPubKey)
+            subscribeToSelectedDriverAvailability(driverPubKey, driverAvailabilityEventId)
             startAcceptanceTimeout()
         }
     }
@@ -1472,7 +1475,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             if (eventId != null) {
                 Log.d(TAG, "Sent ride offer: $eventId with payment hash")
                 clearRiderStateHistory()  // Direct: clear AFTER send, success-only
-                setupOfferSubscriptions(eventId, driver.driverPubKey, isBroadcast = false)
+                setupOfferSubscriptions(eventId, driver.driverPubKey, isBroadcast = false, driverAvailabilityEventId = driver.eventId)
                 applyOfferSuccessState(params, eventId)
             } else {
                 applyOfferFailureState("Failed to send ride offer")
@@ -3246,7 +3249,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      * Monitor the selected driver's availability while waiting for acceptance.
      * If driver goes offline (takes another ride, loses connection), notify rider.
      */
-    private fun subscribeToSelectedDriverAvailability(driverPubKey: String) {
+    private fun subscribeToSelectedDriverAvailability(driverPubKey: String, driverAvailabilityEventId: String? = null) {
         // Close any existing subscription AND reset timestamp
         closeDriverAvailabilitySubscription()
 
@@ -3290,6 +3293,42 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         })
+
+        // Subscribe to Kind 5 deletions of this driver's availability.
+        // Catches: driver accepts another ride and deletes availability without going offline first.
+        // Direct offers use precise e-tag + k-tag match; RoadFlare falls back to broad k-tag + timestamp guard.
+        subs.set(SubKeys.SELECTED_DRIVER_AVAIL_DELETION, nostrService.subscribeToAvailabilityDeletions(
+            driverPubKey = driverPubKey,
+            availabilityEventId = driverAvailabilityEventId,
+            since = (System.currentTimeMillis() / 1000) - RideshareExpiration.DRIVER_AVAILABILITY_LOOKBACK_SECONDS
+        ) { deletionTimestamp ->
+            // Timestamp guard: ignore deletions older than the latest availability event.
+            // Critical for RoadFlare (broad k-tag) path to prevent stale deletion replay.
+            // Harmless for direct offer (e-tag) path since the event ID already ensures precision.
+            if (deletionTimestamp < selectedDriverLastAvailabilityTimestamp) {
+                Log.d(TAG, "Ignoring stale availability deletion ($deletionTimestamp < $selectedDriverLastAvailabilityTimestamp)")
+                return@subscribeToAvailabilityDeletions
+            }
+
+            val currentStage = _uiState.value.rideSession.rideStage
+            if (currentStage !in listOf(RideStage.WAITING_FOR_ACCEPTANCE, RideStage.DRIVER_ACCEPTED)) {
+                Log.d(TAG, "Ignoring driver availability deletion - stage=$currentStage")
+                return@subscribeToAvailabilityDeletions
+            }
+
+            Log.w(TAG, "Selected driver ${driverPubKey.take(8)} deleted availability - treating as unavailable")
+
+            if (currentStage == RideStage.DRIVER_ACCEPTED) {
+                handleDriverCancellation("Driver is no longer available")
+            } else {
+                _uiState.update { current ->
+                    current.copy(
+                        statusMessage = "Driver is no longer available",
+                        rideSession = current.rideSession.copy(showDriverUnavailableDialog = true)
+                    )
+                }
+            }
+        })
     }
 
     /**
@@ -3298,6 +3337,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      */
     private fun closeDriverAvailabilitySubscription() {
         subs.close(SubKeys.SELECTED_DRIVER_AVAILABILITY)
+        subs.close(SubKeys.SELECTED_DRIVER_AVAIL_DELETION)
         // Reset timestamp when subscription closes - new subscription should accept fresh events
         selectedDriverLastAvailabilityTimestamp = 0L
     }

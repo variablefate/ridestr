@@ -145,9 +145,9 @@ class RideshareDomainService(
     ): String {
         Log.d(TAG, "Subscribing to availability for driver ${driverPubKey.take(8)}")
 
-        // Align with STALE_DRIVER_TIMEOUT_MS (10 min) - drivers broadcast every ~5 min
+        // Align with STALE_DRIVER_TIMEOUT_MS - drivers broadcast every ~5 min
         // Using shorter window might miss valid availability events
-        val tenMinutesAgo = (System.currentTimeMillis() / 1000) - (10 * 60)
+        val tenMinutesAgo = (System.currentTimeMillis() / 1000) - RideshareExpiration.DRIVER_AVAILABILITY_LOOKBACK_SECONDS
 
         return relayManager.subscribe(
             kinds = listOf(RideshareEventKinds.DRIVER_AVAILABILITY),
@@ -159,6 +159,55 @@ class RideshareDomainService(
                 Log.d(TAG, "Driver ${driverPubKey.take(8)} availability: ${data.status}")
                 onAvailability(data)
             }
+        }
+    }
+
+    /**
+     * Subscribe to NIP-09 deletion of a driver's availability events (Kind 30173).
+     * Detects when a driver deletes availability without broadcasting offline status
+     * first (e.g., when accepting another ride).
+     *
+     * Two filter strategies (both include #k=30173 to exclude supersede deletes):
+     * - If availabilityEventId is provided (direct offers): #e + #k=30173 + author
+     * - If null (RoadFlare offers): #k=30173 + author
+     *
+     * @param onDeletion Called with the deletion event's created_at timestamp,
+     *   so callers can compare against latest availability timestamp and ignore stale deletions.
+     */
+    fun subscribeToAvailabilityDeletions(
+        driverPubKey: String,
+        availabilityEventId: String?,
+        since: Long,
+        onDeletion: (deletionTimestamp: Long) -> Unit
+    ): String {
+        val filterDesc = if (availabilityEventId != null) "e-tag=${availabilityEventId.take(8)}" else "k-tag=30173"
+        Log.d(TAG, "Subscribing to availability deletions for driver ${driverPubKey.take(8)} ($filterDesc)")
+
+        // Both paths include #k=30173 to exclude supersede deletes (which omit the k-tag).
+        // Direct offers also add #e for precise event ID matching.
+        val kTag = RideshareEventKinds.DRIVER_AVAILABILITY.toString()
+        val tags = if (availabilityEventId != null) {
+            mapOf("e" to listOf(availabilityEventId), "k" to listOf(kTag))
+        } else {
+            mapOf("k" to listOf(kTag))
+        }
+        // Always include author filter — prevents malicious actors from faking deletions
+        val authors = listOf(driverPubKey)
+
+        return relayManager.subscribe(
+            kinds = listOf(DeletionEvent.KIND),        // Kind 5
+            authors = authors,
+            tags = tags,
+            since = since
+        ) { event, _ ->
+            // Verify the deletion actually targets Kind 30173.
+            // Relay-side #k filter should already ensure this, but not all relays support it.
+            // This is the first #k filter usage in the codebase — belt-and-suspenders check.
+            val targetsAvailability = event.tags.any { it.size >= 2 && it[0] == "k" && it[1] == kTag }
+            if (!targetsAvailability) return@subscribe
+
+            Log.w(TAG, "Driver ${driverPubKey.take(8)} deleted availability (Kind 5: ${event.id.take(8)})")
+            onDeletion(event.createdAt)
         }
     }
 

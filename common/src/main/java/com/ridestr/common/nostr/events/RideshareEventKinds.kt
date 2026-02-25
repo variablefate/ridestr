@@ -341,6 +341,9 @@ object RideshareTags {
  * Events include expiration tags to enable automatic relay cleanup.
  */
 object RideshareExpiration {
+    // Lookback window for driver availability subscriptions (matches broadcast interval)
+    const val DRIVER_AVAILABILITY_LOOKBACK_SECONDS = 10L * 60  // 10 min
+
     // Pre-ride events: short TTL (stale if not acted on quickly)
     const val DRIVER_AVAILABILITY_MINUTES = 30
     const val RIDE_OFFER_MINUTES = 15

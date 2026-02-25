@@ -908,6 +908,18 @@ class NostrService(
     ): String = rideshareDomainService.subscribeToDriverAvailability(driverPubKey, onAvailability)
 
     /**
+     * Subscribe to NIP-09 deletion of a driver's availability events (Kind 30173).
+     * Detects when a driver goes offline by deleting availability without
+     * broadcasting an offline status first (e.g., accepting another ride).
+     *
+     * @param availabilityEventId If provided, uses precise e-tag matching. If null, falls back to broad k-tag.
+     */
+    fun subscribeToAvailabilityDeletions(
+        driverPubKey: String, availabilityEventId: String?, since: Long,
+        onDeletion: (deletionTimestamp: Long) -> Unit
+    ): String = rideshareDomainService.subscribeToAvailabilityDeletions(driverPubKey, availabilityEventId, since, onDeletion)
+
+    /**
      * Subscribe to ride offers for the current user (as driver).
      * Direct offers are now NIP-44 encrypted for privacy.
      * Only returns offers from the last 10 minutes to avoid stale requests.
