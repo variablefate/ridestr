@@ -1,6 +1,17 @@
 # Issue #46: Reorderable Payment Method Priority List
 
-## Status: PLAN (no code changes yet)
+## Status: PARTIAL (February 2026)
+
+**Completed:**
+- Phase 1: ReorderablePaymentMethodList drag-to-reorder UI (full rewrite — Column+verticalScroll, pointerInput(Unit), graphicsLayer, auto-scroll, external mutation cancel)
+- Phase 2: SettingsManager normalization guard (`.filter { isNotBlank() }.distinct()`)
+- Phase 2: `fiat_payment_methods` field wired into Kind 30173 (DriverAvailabilityEvent) and Kind 3173 (RideOfferEvent)
+- Phase 2: `findBestCommonFiatMethod()` with case-insensitive + whitespace-tolerant matching
+- Phase 2: 12 unit tests in PaymentMethodPriorityTest (including case-insensitive and trim tests)
+
+**Remaining:**
+- Phase 3.7: Driver-side compatibility indicator (GREEN/AMBER/RED on offer cards)
+- Phase 1.4: `defaultPaymentMethod` restore-time migration guard
 
 ---
 

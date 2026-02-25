@@ -27,7 +27,7 @@ The driver Android app allows users to go online, receive ride offers, navigate 
 | `VehicleSetupScreen.kt` | New vehicle form |
 | `VehiclePickerDialog.kt` | Vehicle selection for going online |
 | `SettingsScreen.kt` | App settings, relay config, developer options, removed followers list |
-| `RoadflareTab.kt` | RoadFlare tab - QR code, pending/approved followers, accepted payment methods |
+| `RoadflareTab.kt` | RoadFlare tab - QR code, pending/approved followers, accepted payment methods (uses `ReorderablePaymentMethodList` for priority ordering) |
 | `OnboardingScreen.kt` | Login/signup flow |
 | `ProfileSetupScreen.kt` | Profile name and picture setup |
 | `KeyBackupScreen.kt` | nsec backup display |
@@ -124,6 +124,8 @@ Any state → cancelCurrentRide() → CANCELLED → goOnline() → AVAILABLE
 | `MainActivity` | `DriverRoadflareRepository` | RoadFlare state + removed followers | `driverRoadflareRepository.state` |
 | `MainActivity` | `RoadflareLocationBroadcaster` | Location broadcast lifecycle | `broadcaster.startBroadcasting()` |
 | `SettingsScreen` | `DriverRoadflareRepository` | Removed followers list | `roadflareState?.muted` |
+| `RoadflareTab` | `ReorderablePaymentMethodList` | Drag-to-reorder accepted payment methods | `ReorderablePaymentMethodList(allMethods, enabledMethods, ...)` |
+| `DriverModeScreen` | `PaymentMethod.findBestCommonFiatMethod()` | Match rider vs driver fiat methods | `PaymentMethod.findBestCommonFiatMethod(riderMethods, driverMethods)` |
 
 ---
 
@@ -262,8 +264,10 @@ Driver broadcasts availability every 5 minutes (`AVAILABILITY_BROADCAST_INTERVAL
 - Deposit and withdraw are **fully functional**
 - Only LN address resolution is broken (must paste BOLT11 directly)
 
-### RoadFlare Accepted Payment Methods (January 2026)
+### RoadFlare Accepted Payment Methods (January 2026, updated February 2026)
 Drivers can configure which alternate payment methods they accept from RoadFlare riders:
-- `AcceptedPaymentMethodsCard` in `RoadflareTab.kt` with checkboxes (Zelle, PayPal, Cash App, Venmo, Cash, Strike)
-- Stored in `SettingsManager.roadflarePaymentMethods` and backed up to Kind 30177
+- `AcceptedPaymentMethodsCard` in `RoadflareTab.kt` uses `ReorderablePaymentMethodList` for drag-to-reorder with checkboxes (Zelle, PayPal, Cash App, Venmo, Cash, Strike)
+- Order determines priority for `findBestCommonFiatMethod()` matching against rider's list
+- Stored as ordered list in `SettingsManager.roadflarePaymentMethods` and backed up to Kind 30177
 - RoadFlare offer cards in `DriverModeScreen.kt` display the rider's chosen payment method (e.g., "Payment: Zelle") for non-cashu methods
+- `findBestCommonFiatMethod()` uses case-insensitive + whitespace-tolerant matching for cross-client compatibility
