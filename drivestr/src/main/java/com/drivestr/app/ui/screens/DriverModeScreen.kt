@@ -569,6 +569,8 @@ fun DriverModeScreen(
                     onGoOffline = { viewModel.goOffline() },
                     onAcceptOffer = { viewModel.acceptOffer(it) },
                     onDeclineOffer = { viewModel.declineOffer(it) },
+                    onSetNoMatchWarning = { viewModel.setNoMatchWarningOffer(it) },
+                    onDismissNoMatchWarning = { viewModel.dismissNoMatchWarning() },
                     settingsManager = settingsManager,
                     priceService = viewModel.bitcoinPriceService
                 )
@@ -583,6 +585,8 @@ fun DriverModeScreen(
                     onDeclineBroadcastRequest = { viewModel.declineBroadcastRequest(it) },
                     onAcceptOffer = { viewModel.acceptOffer(it) },
                     onDeclineOffer = { viewModel.declineOffer(it) },
+                    onSetNoMatchWarning = { viewModel.setNoMatchWarningOffer(it) },
+                    onDismissNoMatchWarning = { viewModel.dismissNoMatchWarning() },
                     settingsManager = settingsManager,
                     priceService = viewModel.bitcoinPriceService
                 )
@@ -753,6 +757,8 @@ private fun RoadflareOnlyContent(
     onGoOffline: () -> Unit,
     onAcceptOffer: (RideOfferData) -> Unit,
     onDeclineOffer: (RideOfferData) -> Unit,
+    onSetNoMatchWarning: (String) -> Unit,
+    onDismissNoMatchWarning: () -> Unit,
     settingsManager: SettingsManager,
     priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
@@ -760,7 +766,6 @@ private fun RoadflareOnlyContent(
     val distanceUnit by settingsManager.distanceUnit.collectAsState()
     val btcPriceUsd by priceService.btcPriceUsd.collectAsState()
     val driverFiatMethods by settingsManager.roadflarePaymentMethods.collectAsState()
-    var noMatchWarningOffer by remember { mutableStateOf<RideOfferData?>(null) }
 
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -845,7 +850,7 @@ private fun RoadflareOnlyContent(
                                 offer.fiatPaymentMethods, driverFiatMethods
                             ) == null
                         ) {
-                            noMatchWarningOffer = offer
+                            onSetNoMatchWarning(offer.eventId)
                         } else {
                             onAcceptOffer(offer)
                         }
@@ -887,25 +892,25 @@ private fun RoadflareOnlyContent(
         }
 
         // Auto-dismiss dialog when underlying offer disappears from pendingOffers
-        LaunchedEffect(noMatchWarningOffer, uiState.rideSession.pendingOffers) {
-            noMatchWarningOffer?.let { warning ->
-                if (uiState.rideSession.pendingOffers.none { it.eventId == warning.eventId }) {
-                    noMatchWarningOffer = null
+        LaunchedEffect(uiState.rideSession.noMatchWarningOfferEventId, uiState.rideSession.pendingOffers) {
+            uiState.rideSession.noMatchWarningOfferEventId?.let { id ->
+                if (uiState.rideSession.pendingOffers.none { it.eventId == id }) {
+                    onDismissNoMatchWarning()
                 }
             }
         }
         // Resolve current offer by eventId for stable identity
-        val activeWarningOffer = noMatchWarningOffer?.let { warning ->
-            uiState.rideSession.pendingOffers.find { it.eventId == warning.eventId }
+        val activeWarningOffer = uiState.rideSession.noMatchWarningOfferEventId?.let { id ->
+            uiState.rideSession.pendingOffers.find { it.eventId == id }
         }
         activeWarningOffer?.let { warningOffer ->
             NoCommonPaymentMethodDialog(
                 riderFiatMethods = warningOffer.fiatPaymentMethods,
                 onAcceptAnyway = {
-                    noMatchWarningOffer = null
+                    onDismissNoMatchWarning()
                     onAcceptOffer(warningOffer)
                 },
-                onDecline = { noMatchWarningOffer = null }
+                onDecline = { onDismissNoMatchWarning() }
             )
         }
     }
@@ -920,11 +925,12 @@ private fun AvailableContent(
     onDeclineBroadcastRequest: (BroadcastRideOfferData) -> Unit,
     onAcceptOffer: (RideOfferData) -> Unit,
     onDeclineOffer: (RideOfferData) -> Unit,
+    onSetNoMatchWarning: (String) -> Unit,
+    onDismissNoMatchWarning: () -> Unit,
     settingsManager: SettingsManager,
     priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
     val driverFiatMethods by settingsManager.roadflarePaymentMethods.collectAsState()
-    var noMatchWarningOffer by remember { mutableStateOf<RideOfferData?>(null) }
 
     // Ticker for updating "time since last broadcast" display
     var currentTimeMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -1110,7 +1116,7 @@ private fun AvailableContent(
                                     offer.fiatPaymentMethods, driverFiatMethods
                                 ) == null
                             ) {
-                                noMatchWarningOffer = offer
+                                onSetNoMatchWarning(offer.eventId)
                             } else {
                                 onAcceptOffer(offer)
                             }
@@ -1126,25 +1132,25 @@ private fun AvailableContent(
     }
 
     // Auto-dismiss dialog when underlying offer disappears from pendingOffers
-    LaunchedEffect(noMatchWarningOffer, uiState.rideSession.pendingOffers) {
-        noMatchWarningOffer?.let { warning ->
-            if (uiState.rideSession.pendingOffers.none { it.eventId == warning.eventId }) {
-                noMatchWarningOffer = null
+    LaunchedEffect(uiState.rideSession.noMatchWarningOfferEventId, uiState.rideSession.pendingOffers) {
+        uiState.rideSession.noMatchWarningOfferEventId?.let { id ->
+            if (uiState.rideSession.pendingOffers.none { it.eventId == id }) {
+                onDismissNoMatchWarning()
             }
         }
     }
     // Resolve current offer by eventId for stable identity
-    val activeWarningOffer = noMatchWarningOffer?.let { warning ->
-        uiState.rideSession.pendingOffers.find { it.eventId == warning.eventId }
+    val activeWarningOffer = uiState.rideSession.noMatchWarningOfferEventId?.let { id ->
+        uiState.rideSession.pendingOffers.find { it.eventId == id }
     }
     activeWarningOffer?.let { warningOffer ->
         NoCommonPaymentMethodDialog(
             riderFiatMethods = warningOffer.fiatPaymentMethods,
             onAcceptAnyway = {
-                noMatchWarningOffer = null
+                onDismissNoMatchWarning()
                 onAcceptOffer(warningOffer)
             },
-            onDecline = { noMatchWarningOffer = null }
+            onDecline = { onDismissNoMatchWarning() }
         )
     }
     }

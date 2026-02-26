@@ -822,7 +822,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             // Clear any pending warning state
             showWalletNotSetupWarning = false,
             pendingGoOnlineLocation = null,
-            pendingGoOnlineVehicle = null
+            pendingGoOnlineVehicle = null,
+            // Clear stale warning dialog from ROADFLARE_ONLY mode (Issue #46)
+            rideSession = currentState.rideSession.copy(noMatchWarningOfferEventId = null)
         )
         // Start availability broadcasting and full offer subscriptions
         resumeOfferSubscriptions(location)
@@ -971,13 +973,20 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             // Note: driverOnlineStatus is now set by DriverOnlineService (authoritative)
             DriverOnlineService.stop(context)
 
-            // THEN update state after deletion completes
-            _uiState.value = _uiState.value.copy(
-                stage = DriverStage.OFFLINE,
-                currentLocation = null,
-                activeVehicle = null,
-                statusMessage = "You are now offline"
-            )
+            // THEN update state after deletion completes (atomic to prevent interleaving)
+            _uiState.update { current ->
+                current.copy(
+                    stage = DriverStage.OFFLINE,
+                    currentLocation = null,
+                    activeVehicle = null,
+                    statusMessage = "You are now offline",
+                    rideSession = current.rideSession.copy(
+                        pendingOffers = emptyList(),
+                        pendingBroadcastRequests = emptyList(),
+                        noMatchWarningOfferEventId = null
+                    )
+                )
+            }
 
             // Background sweep for any stragglers - doesn't block UI
             viewModelScope.launch {
@@ -3754,6 +3763,20 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         Log.d(TAG, "Declined request ${request.eventId.take(8)}, total declined: ${declinedOfferEventIds.size}")
     }
 
+    /**
+     * Set the no-common-payment-method warning offer (Issue #46).
+     */
+    fun setNoMatchWarningOffer(eventId: String?) {
+        updateRideSession { copy(noMatchWarningOfferEventId = eventId) }
+    }
+
+    /**
+     * Dismiss the no-common-payment-method warning dialog.
+     */
+    fun dismissNoMatchWarning() {
+        updateRideSession { copy(noMatchWarningOfferEventId = null) }
+    }
+
     // ========================================================================
     // RoadFlare Location Broadcasting
     // ========================================================================
@@ -4134,7 +4157,10 @@ data class DriverRideSession(
 
     // Availability-lifecycle fields — included in session for reset completeness
     val pendingOffers: List<RideOfferData> = emptyList(),
-    val pendingBroadcastRequests: List<BroadcastRideOfferData> = emptyList()
+    val pendingBroadcastRequests: List<BroadcastRideOfferData> = emptyList(),
+
+    // No-common-payment-method warning dialog (Issue #46)
+    val noMatchWarningOfferEventId: String? = null
 )
 
 /**

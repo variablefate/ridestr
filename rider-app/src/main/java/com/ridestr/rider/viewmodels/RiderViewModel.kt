@@ -106,6 +106,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         // SharedPreferences keys for ride state persistence
         private const val PREFS_NAME = "ridestr_ride_state"
         private const val KEY_RIDE_STATE = "active_ride"
+        private const val KEY_DRIVER_AVAIL_TIMESTAMP = "driverAvailTimestamp"
         // Maximum age of persisted ride state (2 hours)
         private const val MAX_RIDE_STATE_AGE_MS = 2 * 60 * 60 * 1000L
         // Time to wait for driver to accept direct offer before showing options (15 seconds)
@@ -706,6 +707,13 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 session.activePaymentHash?.let { put("activePaymentHash", it) }
                 session.escrowToken?.let { put("escrowToken", it) }
 
+                // Driver availability guard (for restore stale-deletion protection)
+                if (selectedDriverLastAvailabilityTimestamp > 0L) {
+                    put("driverAvailTimestamp", selectedDriverLastAvailabilityTimestamp)
+                }
+                // Availability event ID for precise deletion matching on restore (direct offers only)
+                session.driverAvailabilityEventId?.let { put("driverAvailabilityEventId", it) }
+
                 if (hasAcceptance) {
                     // Post-acceptance fields (always null/default pre-acceptance)
                     put("confirmationEventId", session.confirmationEventId)
@@ -954,7 +962,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     private fun restorePreAcceptanceState(data: JSONObject, stage: RideStage, savedTimestamp: Long) {
         // NIP-40 expiry check: offers expire in 15 min on relays
         val ageMs = System.currentTimeMillis() - savedTimestamp
-        val OFFER_EXPIRY_MS = 15 * 60 * 1000L
+        val OFFER_EXPIRY_MS = RideshareExpiration.RIDE_OFFER_MINUTES * 60 * 1000L
         if (ageMs > OFFER_EXPIRY_MS) {
             Log.d(TAG, "Pre-acceptance state expired (${ageMs / 1000}s > 15min), clearing")
             clearSavedRideState()
@@ -971,6 +979,11 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         // Use has()+getString() for all nullable String fields (Android optString(key,null) gotcha)
         val offerTargetDriverPubKey = if (data.has("offerTargetDriverPubKey")) data.getString("offerTargetDriverPubKey") else null
         val roadflareTargetDriverPubKey = if (data.has("roadflareTargetDriverPubKey")) data.getString("roadflareTargetDriverPubKey") else null
+        // Driver availability guard (stale deletion protection on restore)
+        val savedAvailTimestamp = prefs.getLong(KEY_DRIVER_AVAIL_TIMESTAMP, 0L)
+            .takeIf { it > 0L }
+            ?: data.optLong("driverAvailTimestamp", 0L)
+        val savedAvailEventId = if (data.has("driverAvailabilityEventId")) data.getString("driverAvailabilityEventId") else null
         val roadflareTargetDriverLocation = if (data.has("roadflareTargetDriverLat")) {
             Location(data.getDouble("roadflareTargetDriverLat"), data.getDouble("roadflareTargetDriverLon"))
         } else null
@@ -1031,7 +1044,11 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     subscribeToAcceptance(pendingOfferEventId, driverPubKey)
                     // Issue #22: monitor driver availability (offline detection)
                     if (!activeIsRoadflare) {
-                        subscribeToSelectedDriverAvailability(driverPubKey)
+                        subscribeToSelectedDriverAvailability(
+                            driverPubKey,
+                            driverAvailabilityEventId = savedAvailEventId,
+                            initialAvailabilityTimestamp = savedAvailTimestamp
+                        )
                     }
                 }
             }
@@ -1044,7 +1061,10 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      * Clear saved ride state from SharedPreferences.
      */
     private fun clearSavedRideState() {
-        prefs.edit().remove(KEY_RIDE_STATE).apply()
+        prefs.edit()
+            .remove(KEY_RIDE_STATE)
+            .remove(KEY_DRIVER_AVAIL_TIMESTAMP)
+            .apply()
     }
 
     /**
@@ -1489,7 +1509,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         eventId: String,
         driverPubKey: String,
         isBroadcast: Boolean,
-        driverAvailabilityEventId: String? = null
+        driverAvailabilityEventId: String? = null,
+        driverAvailabilityCreatedAt: Long = 0L
     ) {
         myRideEventIds.add(eventId)
 
@@ -1500,7 +1521,11 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             RiderActiveService.startSearching(getApplication())
         } else {
             subscribeToAcceptance(eventId, driverPubKey)
-            subscribeToSelectedDriverAvailability(driverPubKey, driverAvailabilityEventId)
+            subscribeToSelectedDriverAvailability(
+                driverPubKey,
+                driverAvailabilityEventId,
+                initialAvailabilityTimestamp = driverAvailabilityCreatedAt
+            )
             startAcceptanceTimeout()
         }
     }
@@ -1546,6 +1571,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     // Offer identity (for boost and persistence)
                     activeIsRoadflare = params.isRoadflare,
                     offerTargetDriverPubKey = params.driverPubKey.takeIf { it.isNotEmpty() },
+                    driverAvailabilityEventId = params.driverAvailabilityEventId,
                     // RoadFlare tracking (null for non-RoadFlare)
                     roadflareTargetDriverPubKey = params.roadflareTargetPubKey,
                     roadflareTargetDriverLocation = params.roadflareTargetLocation
@@ -1653,7 +1679,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             if (eventId != null) {
                 Log.d(TAG, "Sent ride offer: $eventId with payment hash")
                 clearRiderStateHistory()  // Direct: clear AFTER send, success-only
-                setupOfferSubscriptions(eventId, driver.driverPubKey, isBroadcast = false, driverAvailabilityEventId = driver.eventId)
+                setupOfferSubscriptions(eventId, driver.driverPubKey, isBroadcast = false, driverAvailabilityEventId = driver.eventId, driverAvailabilityCreatedAt = driver.createdAt)
                 applyOfferSuccessState(params, eventId)
             } else {
                 applyOfferFailureState("Failed to send ride offer")
@@ -3467,9 +3493,20 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      * Monitor the selected driver's availability while waiting for acceptance.
      * If driver goes offline (takes another ride, loses connection), notify rider.
      */
-    private fun subscribeToSelectedDriverAvailability(driverPubKey: String, driverAvailabilityEventId: String? = null) {
+    private fun subscribeToSelectedDriverAvailability(
+        driverPubKey: String,
+        driverAvailabilityEventId: String? = null,
+        initialAvailabilityTimestamp: Long = 0L
+    ) {
         // Close any existing subscription AND reset timestamp
         closeDriverAvailabilitySubscription()
+
+        // Restore timestamp guard AFTER close resets it to 0L
+        if (initialAvailabilityTimestamp > 0L) {
+            selectedDriverLastAvailabilityTimestamp = initialAvailabilityTimestamp
+            // Also persist seed value so it's available even if app killed before callback
+            prefs.edit().putLong(KEY_DRIVER_AVAIL_TIMESTAMP, initialAvailabilityTimestamp).apply()
+        }
 
         Log.d(TAG, "Monitoring availability for selected driver ${driverPubKey.take(8)}")
 
@@ -3480,6 +3517,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 return@subscribeToDriverAvailability
             }
             selectedDriverLastAvailabilityTimestamp = availability.createdAt
+            // Persist for app restart recovery
+            prefs.edit().putLong(KEY_DRIVER_AVAIL_TIMESTAMP, availability.createdAt).apply()
 
             val currentStage = _uiState.value.rideSession.rideStage
 
@@ -5263,6 +5302,8 @@ data class RiderRideSession(
     val acceptance: RideAcceptanceData? = null,
     val confirmationEventId: String? = null,
     val selectedDriver: DriverAvailabilityData? = null,
+    // Driver availability event ID for precise deletion matching on restore (null for RoadFlare)
+    val driverAvailabilityEventId: String? = null,
 
     // Offer state
     val isSendingOffer: Boolean = false,
