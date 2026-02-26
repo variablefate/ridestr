@@ -508,6 +508,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      *
      * Fields NOT reset (persist across rides): everything in outer RiderUiState
      * (availableDrivers, route, identity, dialog state, etc.)
+     * EXCEPT fareEstimate/fareEstimateWithFees which are recalculated from route (Issue #51).
      */
     private fun resetRideUiState(
         stage: RideStage,
@@ -516,11 +517,29 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         confirmationInFlight.set(false)  // Allow confirmation for next ride
         _uiState.update { current ->
+            // Recalculate fare from route at current BTC price (Issue #51)
+            val freshFare = if (current.routeResult != null) {
+                calculateFare(current.routeResult)
+            } else {
+                null  // No route = no fare (addresses were cleared)
+            }
+            val freshFareWithFees = freshFare?.let { it * (1 + FEE_BUFFER_PERCENT) }
+
             current.copy(
                 rideSession = RiderRideSession(rideStage = stage),
+                fareEstimate = freshFare,
+                fareEstimateWithFees = freshFareWithFees,
                 statusMessage = statusMessage,
                 error = error
             )
+        }
+
+        // Auto-recalculate route+fare if addresses exist but route is missing (Issue #51)
+        // Handles app-restart edge case where routeResult isn't persisted
+        // Skip when error is set — avoids route failure overwriting security/cancellation errors
+        val state = _uiState.value
+        if (state.error == null && state.routeResult == null && state.pickupLocation != null && state.destination != null) {
+            calculateRouteIfReady()
         }
     }
 
