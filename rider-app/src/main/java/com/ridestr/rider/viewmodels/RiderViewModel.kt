@@ -648,27 +648,31 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         val pickup = state.pickupLocation
         val destination = state.destination
 
-        if (acceptance == null || pickup == null || destination == null) return
+        if (pickup == null || destination == null) return
 
         try {
             val json = JSONObject().apply {
                 put("timestamp", System.currentTimeMillis())
                 put("stage", session.rideStage.name)
                 put("pendingOfferEventId", session.pendingOfferEventId)
-                put("confirmationEventId", session.confirmationEventId)
-                put("pickupPin", session.pickupPin)
-                put("pinAttempts", session.pinAttempts)
-                put("pinVerified", session.pinVerified)
-                put("lastProcessedDriverActionCount", lastProcessedDriverActionCount)
                 put("fareEstimate", state.fareEstimate)
 
-                // Acceptance data
-                put("acceptance_eventId", acceptance.eventId)
-                put("acceptance_driverPubKey", acceptance.driverPubKey)
-                put("acceptance_offerEventId", acceptance.offerEventId)
-                put("acceptance_riderPubKey", acceptance.riderPubKey)
-                put("acceptance_status", acceptance.status)
-                put("acceptance_createdAt", acceptance.createdAt)
+                // Discriminator for pre-acceptance vs post-acceptance restore
+                val hasAcceptance = acceptance != null
+                put("hasAcceptance", hasAcceptance)
+
+                // Offer identity (pre-acceptance + post-acceptance)
+                put("activeIsRoadflare", session.activeIsRoadflare)
+                session.activePaymentMethod?.let { put("activePaymentMethod", it) }
+                if (session.activeFiatPaymentMethods.isNotEmpty()) {
+                    put("activeFiatPaymentMethods", org.json.JSONArray(session.activeFiatPaymentMethods))
+                }
+                session.offerTargetDriverPubKey?.let { put("offerTargetDriverPubKey", it) }
+                session.roadflareTargetDriverPubKey?.let { put("roadflareTargetDriverPubKey", it) }
+                session.roadflareTargetDriverLocation?.let {
+                    put("roadflareTargetDriverLat", it.lat)
+                    put("roadflareTargetDriverLon", it.lon)
+                }
 
                 // Locations
                 put("pickupLat", pickup.lat)
@@ -678,29 +682,46 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 put("destLon", destination.lon)
                 put("destAddressLabel", destination.addressLabel ?: "")
 
-                // HTLC Escrow state (critical for payment settlement)
+                // HTLC Escrow state (set pre-acceptance, needed for deferred locking)
                 session.activePreimage?.let { put("activePreimage", it) }
                 session.activePaymentHash?.let { put("activePaymentHash", it) }
                 session.escrowToken?.let { put("escrowToken", it) }
 
-                // Chat messages
-                val messagesArray = org.json.JSONArray()
-                for (msg in session.chatMessages) {
-                    val msgJson = JSONObject().apply {
-                        put("eventId", msg.eventId)
-                        put("senderPubKey", msg.senderPubKey)
-                        put("confirmationEventId", msg.confirmationEventId)
-                        put("recipientPubKey", msg.recipientPubKey)
-                        put("message", msg.message)
-                        put("createdAt", msg.createdAt)
+                if (hasAcceptance) {
+                    // Post-acceptance fields (always null/default pre-acceptance)
+                    put("confirmationEventId", session.confirmationEventId)
+                    put("pickupPin", session.pickupPin)
+                    put("pinAttempts", session.pinAttempts)
+                    put("pinVerified", session.pinVerified)
+                    put("lastProcessedDriverActionCount", lastProcessedDriverActionCount)
+
+                    // Acceptance data
+                    put("acceptance_eventId", acceptance!!.eventId)
+                    put("acceptance_driverPubKey", acceptance.driverPubKey)
+                    put("acceptance_offerEventId", acceptance.offerEventId)
+                    put("acceptance_riderPubKey", acceptance.riderPubKey)
+                    put("acceptance_status", acceptance.status)
+                    put("acceptance_createdAt", acceptance.createdAt)
+
+                    // Chat messages
+                    val messagesArray = org.json.JSONArray()
+                    for (msg in session.chatMessages) {
+                        val msgJson = JSONObject().apply {
+                            put("eventId", msg.eventId)
+                            put("senderPubKey", msg.senderPubKey)
+                            put("confirmationEventId", msg.confirmationEventId)
+                            put("recipientPubKey", msg.recipientPubKey)
+                            put("message", msg.message)
+                            put("createdAt", msg.createdAt)
+                        }
+                        messagesArray.put(msgJson)
                     }
-                    messagesArray.put(msgJson)
+                    put("chatMessages", messagesArray)
                 }
-                put("chatMessages", messagesArray)
             }
 
             prefs.edit().putString(KEY_RIDE_STATE, json.toString()).apply()
-            Log.d(TAG, "Saved ride state: stage=${session.rideStage}, messages=${session.chatMessages.size}")
+            Log.d(TAG, "Saved ride state: stage=${session.rideStage}, hasAcceptance=${acceptance != null}, messages=${session.chatMessages.size}")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to save ride state", e)
         }
@@ -732,142 +753,271 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 return
             }
 
-            // Reconstruct acceptance
-            val acceptance = RideAcceptanceData(
-                eventId = data.getString("acceptance_eventId"),
-                driverPubKey = data.getString("acceptance_driverPubKey"),
-                offerEventId = data.getString("acceptance_offerEventId"),
-                riderPubKey = data.getString("acceptance_riderPubKey"),
-                status = data.getString("acceptance_status"),
-                createdAt = data.getLong("acceptance_createdAt")
-            )
+            // Dispatch: pre-acceptance or post-acceptance restore
+            val hasAcceptance = data.optBoolean("hasAcceptance", false)
+                || data.has("acceptance_eventId")  // Backward compat with old saves
 
-            // Reconstruct locations (with address labels if available)
-            val pickupAddressLabel: String? = if (data.has("pickupAddressLabel"))
-                data.getString("pickupAddressLabel").takeIf { it.isNotEmpty() } else null
-            val destAddressLabel: String? = if (data.has("destAddressLabel"))
-                data.getString("destAddressLabel").takeIf { it.isNotEmpty() } else null
-
-            val pickup = Location(
-                lat = data.getDouble("pickupLat"),
-                lon = data.getDouble("pickupLon"),
-                addressLabel = pickupAddressLabel
-            )
-            val destination = Location(
-                lat = data.getDouble("destLat"),
-                lon = data.getDouble("destLon"),
-                addressLabel = destAddressLabel
-            )
-
-            val pendingOfferEventId: String? = if (data.has("pendingOfferEventId")) data.getString("pendingOfferEventId") else null
-            val confirmationEventId: String? = if (data.has("confirmationEventId")) data.getString("confirmationEventId") else null
-            val pickupPin: String? = if (data.has("pickupPin")) data.getString("pickupPin") else null
-            val pinAttempts = data.optInt("pinAttempts", 0)
-            val pinVerified = data.optBoolean("pinVerified", false)
-            // Restore action count to prevent re-processing events on app restart
-            lastProcessedDriverActionCount = data.optInt("lastProcessedDriverActionCount", 0)
-            val fareEstimate = if (data.has("fareEstimate")) data.getDouble("fareEstimate") else null
-
-            // Restore chat messages
-            val chatMessages = mutableListOf<RideshareChatData>()
-            if (data.has("chatMessages")) {
-                val messagesArray = data.getJSONArray("chatMessages")
-                for (i in 0 until messagesArray.length()) {
-                    val msgJson = messagesArray.getJSONObject(i)
-                    chatMessages.add(RideshareChatData(
-                        eventId = msgJson.getString("eventId"),
-                        senderPubKey = msgJson.getString("senderPubKey"),
-                        confirmationEventId = msgJson.getString("confirmationEventId"),
-                        recipientPubKey = msgJson.optString("recipientPubKey", ""),
-                        message = msgJson.getString("message"),
-                        createdAt = msgJson.getLong("createdAt")
-                    ))
-                }
-            }
-
-            // Restore HTLC escrow state (critical for payment settlement)
-            val activePreimage = data.optString("activePreimage", null)
-            val activePaymentHash = data.optString("activePaymentHash", null)
-            val escrowToken = data.optString("escrowToken", null)
-
-            Log.d(TAG, "Restoring ride state: stage=$stage, confirmationId=$confirmationEventId, messages=${chatMessages.size}, escrow=${escrowToken != null}")
-
-            // Restore state
-            val fareEstimateWithFees = fareEstimate?.let { it * (1 + FEE_BUFFER_PERCENT) }
-            _uiState.update { current ->
-                current.copy(
-                    pickupLocation = pickup,
-                    destination = destination,
-                    fareEstimate = fareEstimate,
-                    fareEstimateWithFees = fareEstimateWithFees,
-                    statusMessage = getStatusMessageForStage(stage, pickupPin),
-                    rideSession = RiderRideSession(
-                        rideStage = stage,
-                        pendingOfferEventId = pendingOfferEventId,
-                        acceptance = acceptance,
-                        confirmationEventId = confirmationEventId,
-                        pickupPin = pickupPin,
-                        pinAttempts = pinAttempts,
-                        pinVerified = pinVerified,
-                        chatMessages = chatMessages,
-                        activePreimage = activePreimage,
-                        activePaymentHash = activePaymentHash,
-                        escrowToken = escrowToken
-                    )
-                )
-            }
-
-            // Re-subscribe to relevant events
-            if (confirmationEventId != null) {
-                subscribeToChatMessages(confirmationEventId)
-                subscribeToCancellation(confirmationEventId)
-                subscribeToDriverRideState(confirmationEventId, acceptance.driverPubKey)
-                // Start periodic chat refresh
-                startChatRefreshJob(confirmationEventId)
-            }
-
-            // Start foreground service with appropriate status for restored ride
-            // This ensures notification appears when app is reopened with active ride
-            val context = getApplication<Application>()
-            val driverName = _uiState.value.driverProfiles[acceptance.driverPubKey]?.bestName()?.split(" ")?.firstOrNull()
-
-            when (stage) {
-                RideStage.RIDE_CONFIRMED -> {
-                    RiderActiveService.updateStatus(context, RiderStatus.DriverEnRoute(driverName))
-                }
-                RideStage.DRIVER_ARRIVED -> {
-                    RiderActiveService.updateStatus(context, RiderStatus.DriverArrived(driverName))
-                }
-                RideStage.IN_PROGRESS -> {
-                    RiderActiveService.updateStatus(context, RiderStatus.RideInProgress(driverName))
-                }
-                else -> { /* No service needed for other stages */ }
-            }
-
-            // Check for pending bridge payments for this ride (app restart recovery)
-            if (confirmationEventId != null) {
-                viewModelScope.launch {
-                    val pendingBridge = walletService?.getInProgressBridgePayments()
-                        ?.find { it.rideId == confirmationEventId }
-
-                    if (pendingBridge != null && pendingBridge.status == BridgePaymentStatus.MELT_EXECUTED) {
-                        Log.d(TAG, "Restoring pending bridge payment UI for ride $confirmationEventId")
-                        _uiState.update { current ->
-                            current.copy(
-                                infoMessage = "Payment routing... Lightning may take a few minutes.",
-                                rideSession = current.rideSession.copy(bridgeInProgress = true)
-                            )
-                        }
-
-                        // Start polling to resolve the pending state
-                        startBridgePendingPoll(pendingBridge.id, confirmationEventId, acceptance.driverPubKey)
-                    }
-                }
+            if (hasAcceptance) {
+                restorePostAcceptanceState(data, stage)
+            } else {
+                restorePreAcceptanceState(data, stage, timestamp)
             }
 
         } catch (e: Exception) {
             Log.e(TAG, "Failed to restore ride state", e)
             clearSavedRideState()
+        }
+    }
+
+    /**
+     * Restore post-acceptance ride state (driver accepted, ride in progress).
+     * This is the original restore path — handles confirmed rides, active rides, etc.
+     */
+    private fun restorePostAcceptanceState(data: JSONObject, stage: RideStage) {
+        // Reconstruct acceptance
+        val acceptance = RideAcceptanceData(
+            eventId = data.getString("acceptance_eventId"),
+            driverPubKey = data.getString("acceptance_driverPubKey"),
+            offerEventId = data.getString("acceptance_offerEventId"),
+            riderPubKey = data.getString("acceptance_riderPubKey"),
+            status = data.getString("acceptance_status"),
+            createdAt = data.getLong("acceptance_createdAt")
+        )
+
+        // Reconstruct locations (with address labels if available)
+        val pickupAddressLabel: String? = if (data.has("pickupAddressLabel"))
+            data.getString("pickupAddressLabel").takeIf { it.isNotEmpty() } else null
+        val destAddressLabel: String? = if (data.has("destAddressLabel"))
+            data.getString("destAddressLabel").takeIf { it.isNotEmpty() } else null
+
+        val pickup = Location(
+            lat = data.getDouble("pickupLat"),
+            lon = data.getDouble("pickupLon"),
+            addressLabel = pickupAddressLabel
+        )
+        val destination = Location(
+            lat = data.getDouble("destLat"),
+            lon = data.getDouble("destLon"),
+            addressLabel = destAddressLabel
+        )
+
+        val pendingOfferEventId: String? = if (data.has("pendingOfferEventId")) data.getString("pendingOfferEventId") else null
+        val confirmationEventId: String? = if (data.has("confirmationEventId")) data.getString("confirmationEventId") else null
+        val pickupPin: String? = if (data.has("pickupPin")) data.getString("pickupPin") else null
+        val pinAttempts = data.optInt("pinAttempts", 0)
+        val pinVerified = data.optBoolean("pinVerified", false)
+        // Restore action count to prevent re-processing events on app restart
+        lastProcessedDriverActionCount = data.optInt("lastProcessedDriverActionCount", 0)
+        val fareEstimate = if (data.has("fareEstimate")) data.getDouble("fareEstimate") else null
+
+        // Restore chat messages
+        val chatMessages = mutableListOf<RideshareChatData>()
+        if (data.has("chatMessages")) {
+            val messagesArray = data.getJSONArray("chatMessages")
+            for (i in 0 until messagesArray.length()) {
+                val msgJson = messagesArray.getJSONObject(i)
+                chatMessages.add(RideshareChatData(
+                    eventId = msgJson.getString("eventId"),
+                    senderPubKey = msgJson.getString("senderPubKey"),
+                    confirmationEventId = msgJson.getString("confirmationEventId"),
+                    recipientPubKey = msgJson.optString("recipientPubKey", ""),
+                    message = msgJson.getString("message"),
+                    createdAt = msgJson.getLong("createdAt")
+                ))
+            }
+        }
+
+        // Restore HTLC escrow state (critical for payment settlement)
+        val activePreimage = if (data.has("activePreimage")) data.getString("activePreimage") else null
+        val activePaymentHash = if (data.has("activePaymentHash")) data.getString("activePaymentHash") else null
+        val escrowToken = if (data.has("escrowToken")) data.getString("escrowToken") else null
+
+        // Restore offer identity fields
+        val activeIsRoadflare = data.optBoolean("activeIsRoadflare", false)
+        val activePaymentMethod = if (data.has("activePaymentMethod")) data.getString("activePaymentMethod") else null
+        val activeFiatPaymentMethods = mutableListOf<String>()
+        if (data.has("activeFiatPaymentMethods")) {
+            val arr = data.getJSONArray("activeFiatPaymentMethods")
+            for (i in 0 until arr.length()) activeFiatPaymentMethods.add(arr.getString(i))
+        }
+        val offerTargetDriverPubKey = if (data.has("offerTargetDriverPubKey")) data.getString("offerTargetDriverPubKey") else null
+        val roadflareTargetDriverPubKey = if (data.has("roadflareTargetDriverPubKey")) data.getString("roadflareTargetDriverPubKey") else null
+        val roadflareTargetDriverLocation = if (data.has("roadflareTargetDriverLat"))
+            Location(data.getDouble("roadflareTargetDriverLat"), data.getDouble("roadflareTargetDriverLon"))
+        else null
+
+        Log.d(TAG, "Restoring post-acceptance state: stage=$stage, confirmationId=$confirmationEventId, messages=${chatMessages.size}, escrow=${escrowToken != null}")
+
+        // Restore state
+        val fareEstimateWithFees = fareEstimate?.let { it * (1 + FEE_BUFFER_PERCENT) }
+        _uiState.update { current ->
+            current.copy(
+                pickupLocation = pickup,
+                destination = destination,
+                fareEstimate = fareEstimate,
+                fareEstimateWithFees = fareEstimateWithFees,
+                statusMessage = getStatusMessageForStage(stage, pickupPin),
+                rideSession = RiderRideSession(
+                    rideStage = stage,
+                    pendingOfferEventId = pendingOfferEventId,
+                    acceptance = acceptance,
+                    confirmationEventId = confirmationEventId,
+                    pickupPin = pickupPin,
+                    pinAttempts = pinAttempts,
+                    pinVerified = pinVerified,
+                    chatMessages = chatMessages,
+                    activePreimage = activePreimage,
+                    activePaymentHash = activePaymentHash,
+                    escrowToken = escrowToken,
+                    activeIsRoadflare = activeIsRoadflare,
+                    activePaymentMethod = activePaymentMethod,
+                    activeFiatPaymentMethods = activeFiatPaymentMethods,
+                    offerTargetDriverPubKey = offerTargetDriverPubKey,
+                    roadflareTargetDriverPubKey = roadflareTargetDriverPubKey,
+                    roadflareTargetDriverLocation = roadflareTargetDriverLocation
+                )
+            )
+        }
+
+        // Re-subscribe to relevant events
+        if (confirmationEventId != null) {
+            subscribeToChatMessages(confirmationEventId)
+            subscribeToCancellation(confirmationEventId)
+            subscribeToDriverRideState(confirmationEventId, acceptance.driverPubKey)
+            // Start periodic chat refresh
+            startChatRefreshJob(confirmationEventId)
+        }
+
+        // Start foreground service with appropriate status for restored ride
+        val context = getApplication<Application>()
+        val driverName = _uiState.value.driverProfiles[acceptance.driverPubKey]?.bestName()?.split(" ")?.firstOrNull()
+
+        when (stage) {
+            RideStage.RIDE_CONFIRMED -> {
+                RiderActiveService.updateStatus(context, RiderStatus.DriverEnRoute(driverName))
+            }
+            RideStage.DRIVER_ARRIVED -> {
+                RiderActiveService.updateStatus(context, RiderStatus.DriverArrived(driverName))
+            }
+            RideStage.IN_PROGRESS -> {
+                RiderActiveService.updateStatus(context, RiderStatus.RideInProgress(driverName))
+            }
+            else -> { /* No service needed for other stages */ }
+        }
+
+        // Check for pending bridge payments for this ride (app restart recovery)
+        if (confirmationEventId != null) {
+            viewModelScope.launch {
+                val pendingBridge = walletService?.getInProgressBridgePayments()
+                    ?.find { it.rideId == confirmationEventId }
+
+                if (pendingBridge != null && pendingBridge.status == BridgePaymentStatus.MELT_EXECUTED) {
+                    Log.d(TAG, "Restoring pending bridge payment UI for ride $confirmationEventId")
+                    _uiState.update { current ->
+                        current.copy(
+                            infoMessage = "Payment routing... Lightning may take a few minutes.",
+                            rideSession = current.rideSession.copy(bridgeInProgress = true)
+                        )
+                    }
+
+                    // Start polling to resolve the pending state
+                    startBridgePendingPoll(pendingBridge.id, confirmationEventId, acceptance.driverPubKey)
+                }
+            }
+        }
+    }
+
+    /**
+     * Restore pre-acceptance ride state (offer sent, waiting for driver response).
+     * Restored as timed-out so user can immediately Boost or Cancel.
+     * Re-subscribes to acceptance events in case driver accepted while app was killed.
+     */
+    private fun restorePreAcceptanceState(data: JSONObject, stage: RideStage, savedTimestamp: Long) {
+        // NIP-40 expiry check: offers expire in 15 min on relays
+        val ageMs = System.currentTimeMillis() - savedTimestamp
+        val OFFER_EXPIRY_MS = 15 * 60 * 1000L
+        if (ageMs > OFFER_EXPIRY_MS) {
+            Log.d(TAG, "Pre-acceptance state expired (${ageMs / 1000}s > 15min), clearing")
+            clearSavedRideState()
+            return
+        }
+
+        // Read saved fields
+        val pendingOfferEventId = if (data.has("pendingOfferEventId")) data.getString("pendingOfferEventId") else null
+        val fareEstimate = if (data.has("fareEstimate")) data.getDouble("fareEstimate") else null
+        val activePreimage = if (data.has("activePreimage")) data.getString("activePreimage") else null
+        val activePaymentHash = if (data.has("activePaymentHash")) data.getString("activePaymentHash") else null
+        val activeIsRoadflare = data.optBoolean("activeIsRoadflare", false)
+        val activePaymentMethod = if (data.has("activePaymentMethod")) data.getString("activePaymentMethod") else null
+        // Use has()+getString() for all nullable String fields (Android optString(key,null) gotcha)
+        val offerTargetDriverPubKey = if (data.has("offerTargetDriverPubKey")) data.getString("offerTargetDriverPubKey") else null
+        val roadflareTargetDriverPubKey = if (data.has("roadflareTargetDriverPubKey")) data.getString("roadflareTargetDriverPubKey") else null
+        val roadflareTargetDriverLocation = if (data.has("roadflareTargetDriverLat")) {
+            Location(data.getDouble("roadflareTargetDriverLat"), data.getDouble("roadflareTargetDriverLon"))
+        } else null
+        val activeFiatPaymentMethods = mutableListOf<String>()
+        if (data.has("activeFiatPaymentMethods")) {
+            val arr = data.getJSONArray("activeFiatPaymentMethods")
+            for (i in 0 until arr.length()) activeFiatPaymentMethods.add(arr.getString(i))
+        }
+
+        // Reconstruct locations
+        val pickupAddressLabel = if (data.has("pickupAddressLabel"))
+            data.getString("pickupAddressLabel").takeIf { it.isNotEmpty() } else null
+        val destAddressLabel = if (data.has("destAddressLabel"))
+            data.getString("destAddressLabel").takeIf { it.isNotEmpty() } else null
+        val pickup = Location(data.getDouble("pickupLat"), data.getDouble("pickupLon"), pickupAddressLabel)
+        val destination = Location(data.getDouble("destLat"), data.getDouble("destLon"), destAddressLabel)
+
+        val isBroadcast = stage == RideStage.BROADCASTING_REQUEST
+        val fareWithFees = fareEstimate?.let { it * (1 + FEE_BUFFER_PERCENT) }
+
+        Log.d(TAG, "Restoring pre-acceptance state: stage=$stage, roadflare=$activeIsRoadflare, broadcast=$isBroadcast, offer=$pendingOfferEventId")
+
+        _uiState.update { current ->
+            current.copy(
+                pickupLocation = pickup,
+                destination = destination,
+                fareEstimate = fareEstimate,
+                fareEstimateWithFees = fareWithFees,
+                statusMessage = if (isBroadcast) "Searching for drivers..." else "Waiting for driver to accept...",
+                rideSession = RiderRideSession(
+                    rideStage = stage,
+                    pendingOfferEventId = pendingOfferEventId,
+                    // Show as timed out — user can Boost or Cancel immediately
+                    directOfferTimedOut = !isBroadcast,
+                    broadcastTimedOut = isBroadcast,
+                    // HTLC (needed if driver accepts after restart)
+                    activePreimage = activePreimage,
+                    activePaymentHash = activePaymentHash,
+                    // Offer identity
+                    activeIsRoadflare = activeIsRoadflare,
+                    activePaymentMethod = activePaymentMethod,
+                    activeFiatPaymentMethods = activeFiatPaymentMethods,
+                    offerTargetDriverPubKey = offerTargetDriverPubKey,
+                    roadflareTargetDriverPubKey = roadflareTargetDriverPubKey,
+                    roadflareTargetDriverLocation = roadflareTargetDriverLocation
+                )
+            )
+        }
+
+        // Re-subscribe to acceptance events (driver may have accepted while app was killed)
+        if (pendingOfferEventId != null) {
+            if (isBroadcast) {
+                hasAcceptedDriver.set(false)  // Match setupOfferSubscriptions() pattern
+                subscribeToAcceptancesForBroadcast(pendingOfferEventId)
+            } else {
+                val driverPubKey = offerTargetDriverPubKey ?: roadflareTargetDriverPubKey
+                if (driverPubKey != null) {
+                    subscribeToAcceptance(pendingOfferEventId, driverPubKey)
+                    // Issue #22: monitor driver availability (offline detection)
+                    if (!activeIsRoadflare) {
+                        subscribeToSelectedDriverAvailability(driverPubKey)
+                    }
+                }
+            }
+            // Foreground service notification for all pre-acceptance restores
+            RiderActiveService.startSearching(getApplication())
         }
     }
 
@@ -1374,6 +1524,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     // Payment method tracking (for boost)
                     activePaymentMethod = params.paymentMethod,
                     activeFiatPaymentMethods = params.fiatPaymentMethods,
+                    // Offer identity (for boost and persistence)
+                    activeIsRoadflare = params.isRoadflare,
+                    offerTargetDriverPubKey = params.driverPubKey.takeIf { it.isNotEmpty() },
                     // RoadFlare tracking (null for non-RoadFlare)
                     roadflareTargetDriverPubKey = params.roadflareTargetPubKey,
                     roadflareTargetDriverLocation = params.roadflareTargetLocation
@@ -1393,6 +1546,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             paymentMethod = params.paymentMethod
         )
         updateStateMachineState(RideState.CREATED, newContext)
+
+        // Persist pre-acceptance state for app restart recovery (Issue #50)
+        saveRideState()
     }
 
     /**
@@ -2019,11 +2175,15 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                             activePaymentHash = paymentHash,
                             activePaymentMethod = params.paymentMethod,
                             activeFiatPaymentMethods = params.fiatPaymentMethods,
+                            activeIsRoadflare = true,
+                            offerTargetDriverPubKey = driverPubKey,
                             roadflareTargetDriverPubKey = driverPubKey,
                             roadflareTargetDriverLocation = driverLocation
                         )
                     )
                 }
+                // Persist pre-acceptance state for app restart recovery (Issue #50)
+                saveRideState()
             } else {
                 // Additional offer in batch - track sub for cleanup
                 val batchSubId = nostrService.subscribeToAcceptance(eventId, driverPubKey) { acceptance ->
@@ -2212,16 +2372,25 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        // Support both regular offers (selectedDriver) and RoadFlare (tracked pubkey)
-        val driverPubKey = session.selectedDriver?.driverPubKey
-            ?: session.roadflareTargetDriverPubKey
-            ?: return
+        // Read RoadFlare identity from session (not inferred from selectedDriver)
+        val isRoadflare = session.activeIsRoadflare
 
-        val driverAvailabilityEventId = session.selectedDriver?.eventId  // null for RoadFlare
-        val driverLocation = session.selectedDriver?.approxLocation
-            ?: session.roadflareTargetDriverLocation
-
-        val isRoadflare = session.selectedDriver == null  // True if using RoadFlare target
+        // Resolve driver: RoadFlare uses session-tracked target, direct uses selectedDriver
+        val driverPubKey: String
+        val driverAvailabilityEventId: String?
+        val driverLocation: Location?
+        if (isRoadflare) {
+            driverPubKey = session.roadflareTargetDriverPubKey ?: return
+            driverAvailabilityEventId = null
+            driverLocation = session.roadflareTargetDriverLocation
+        } else {
+            val driver = session.selectedDriver
+            driverPubKey = driver?.driverPubKey
+                ?: session.offerTargetDriverPubKey  // Fallback for post-restore
+                ?: return
+            driverAvailabilityEventId = driver?.eventId  // null after restore
+            driverLocation = driver?.approxLocation  // null after restore
+        }
 
         val currentFare = state.fareEstimate ?: return
         val pickup = state.pickupLocation ?: return
@@ -2318,6 +2487,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                         )
                     )
                 }
+                // Persist updated pre-acceptance state (Issue #50)
+                saveRideState()
             } else {
                 applyOfferFailureState("Failed to resend boosted offer")
             }
@@ -2344,6 +2515,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         Log.d(TAG, "Continue waiting for direct offer acceptance")
+        saveRideState()
     }
 
     // ==================== Broadcast Ride Request (New Flow) ====================
@@ -2505,6 +2677,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 )
             )
         }
+        saveRideState()
     }
 
     /**
@@ -3402,7 +3575,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         val driverAlreadyClose = driverLocation?.let { pickup.isWithinMile(it) } == true
 
         // RoadFlare rides always get precise pickup - it's a trusted driver network
-        val isRoadflareRide = _uiState.value.rideSession.roadflareTargetDriverPubKey != null
+        val isRoadflareRide = _uiState.value.rideSession.activeIsRoadflare
 
         viewModelScope.launch {
             try {
@@ -5112,6 +5285,10 @@ data class RiderRideSession(
     // Payment method tracking (for faithful boost re-sends)
     val activePaymentMethod: String? = null,
     val activeFiatPaymentMethods: List<String> = emptyList(),
+
+    // Offer identity (for faithful boost re-sends and persistence)
+    val activeIsRoadflare: Boolean = false,
+    val offerTargetDriverPubKey: String? = null,
 
     // Multi-mint payment
     val paymentPath: PaymentPath = PaymentPath.NO_PAYMENT,
