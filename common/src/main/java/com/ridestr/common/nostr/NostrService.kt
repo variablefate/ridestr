@@ -150,9 +150,8 @@ class NostrService(
         status: String = DriverAvailabilityEvent.STATUS_AVAILABLE,
         vehicle: Vehicle? = null,
         mintUrl: String? = null,
-        paymentMethods: List<String> = listOf("cashu"),
-        fiatPaymentMethods: List<String> = emptyList()
-    ): String? = rideshareDomainService.broadcastAvailability(location, status, vehicle, mintUrl, paymentMethods, fiatPaymentMethods)
+        paymentMethods: List<String> = listOf("cashu")
+    ): String? = rideshareDomainService.broadcastAvailability(location, status, vehicle, mintUrl, paymentMethods)
 
     /**
      * Request deletion of events (NIP-09).

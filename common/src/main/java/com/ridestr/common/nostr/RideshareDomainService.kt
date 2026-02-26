@@ -53,8 +53,7 @@ class RideshareDomainService(
         status: String = DriverAvailabilityEvent.STATUS_AVAILABLE,
         vehicle: Vehicle? = null,
         mintUrl: String? = null,
-        paymentMethods: List<String> = listOf("cashu"),
-        fiatPaymentMethods: List<String> = emptyList()
+        paymentMethods: List<String> = listOf("cashu")
     ): String? {
         val signer = keyManager.getSigner()
         if (signer == null) {
@@ -69,8 +68,7 @@ class RideshareDomainService(
                 status = status,
                 vehicle = vehicle,
                 mintUrl = mintUrl,
-                paymentMethods = paymentMethods,
-                fiatPaymentMethods = fiatPaymentMethods
+                paymentMethods = paymentMethods
             )
             relayManager.publish(event)
             Log.d(TAG, "Broadcast availability: status=$status, location=${location != null}, vehicle=${vehicle?.shortName() ?: "none"} (${event.id})")

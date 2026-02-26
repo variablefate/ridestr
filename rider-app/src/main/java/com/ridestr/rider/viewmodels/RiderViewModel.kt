@@ -1371,6 +1371,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     // HTLC (null for alternate payment)
                     activePreimage = params.preimage,
                     activePaymentHash = params.paymentHash,
+                    // Payment method tracking (for boost)
+                    activePaymentMethod = params.paymentMethod,
+                    activeFiatPaymentMethods = params.fiatPaymentMethods,
                     // RoadFlare tracking (null for non-RoadFlare)
                     roadflareTargetDriverPubKey = params.roadflareTargetPubKey,
                     roadflareTargetDriverLocation = params.roadflareTargetLocation
@@ -1499,21 +1502,28 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             calculateRoadflareFare(pickup, driverLocation, rideRoute)
         } else { state.fareEstimate ?: return }
 
-        // Sync balance check (RoadFlare-specific — can show dialog without coroutine)
-        val fareWithBuffer = (fareEstimate * (1 + FEE_BUFFER_PERCENT)).toLong()
-        val currentBalance = walletService?.getBalance() ?: 0L
-        if (currentBalance < fareWithBuffer) {
-            val shortfall = fareWithBuffer - currentBalance
-            Log.w(TAG, "Insufficient funds for RoadFlare: need $fareWithBuffer, have $currentBalance")
-            _uiState.value = state.copy(
-                showInsufficientFundsDialog = true,
-                insufficientFundsAmount = shortfall,
-                depositAmountNeeded = shortfall,
-                insufficientFundsIsRoadflare = true,
-                pendingRoadflareDriverPubKey = driverPubKey,
-                pendingRoadflareDriverLocation = driverLocation
-            )
-            return
+        val paymentMethod = settingsManager.defaultPaymentMethod.value
+        val fiatMethods = if (paymentMethod != com.ridestr.common.nostr.events.PaymentMethod.CASHU.value) {
+            settingsManager.roadflarePaymentMethods.value
+        } else emptyList()
+
+        // Sync balance check — only meaningful for cashu (non-cashu skips HTLC escrow)
+        if (paymentMethod == com.ridestr.common.nostr.events.PaymentMethod.CASHU.value) {
+            val fareWithBuffer = (fareEstimate * (1 + FEE_BUFFER_PERCENT)).toLong()
+            val currentBalance = walletService?.getBalance() ?: 0L
+            if (currentBalance < fareWithBuffer) {
+                val shortfall = fareWithBuffer - currentBalance
+                Log.w(TAG, "Insufficient funds for RoadFlare: need $fareWithBuffer, have $currentBalance")
+                _uiState.value = state.copy(
+                    showInsufficientFundsDialog = true,
+                    insufficientFundsAmount = shortfall,
+                    depositAmountNeeded = shortfall,
+                    insufficientFundsIsRoadflare = true,
+                    pendingRoadflareDriverPubKey = driverPubKey,
+                    pendingRoadflareDriverLocation = driverLocation
+                )
+                return
+            }
         }
 
         viewModelScope.launch {
@@ -1521,9 +1531,16 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             rideState = RideState.CANCELLED
             clearRiderStateHistory()  // RoadFlare: clear BEFORE send
 
-            val preimage = PaymentCrypto.generatePreimage()
-            val paymentHash = PaymentCrypto.computePaymentHash(preimage)
-            if (BuildConfig.DEBUG) Log.d(TAG, "Generated RoadFlare HTLC payment hash: ${paymentHash.take(16)}...")
+            val preimage: String?
+            val paymentHash: String?
+            if (paymentMethod == com.ridestr.common.nostr.events.PaymentMethod.CASHU.value) {
+                preimage = PaymentCrypto.generatePreimage()
+                paymentHash = PaymentCrypto.computePaymentHash(preimage)
+                if (BuildConfig.DEBUG) Log.d(TAG, "Generated RoadFlare HTLC payment hash: ${paymentHash.take(16)}...")
+            } else {
+                preimage = null
+                paymentHash = null
+            }
 
             val params = OfferParams(
                 driverPubKey = driverPubKey,
@@ -1532,10 +1549,11 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 pickup = pickup, destination = destination,
                 fareEstimate = fareEstimate, rideRoute = rideRoute,
                 preimage = preimage, paymentHash = paymentHash,
-                paymentMethod = settingsManager.defaultPaymentMethod.value,
+                paymentMethod = paymentMethod,
                 isRoadflare = true, isBroadcast = false,
                 statusMessage = "Waiting for driver to accept...",
-                roadflareTargetPubKey = driverPubKey, roadflareTargetLocation = driverLocation
+                roadflareTargetPubKey = driverPubKey, roadflareTargetLocation = driverLocation,
+                fiatPaymentMethods = fiatMethods
             )
 
             val pickupRoute = calculatePickupRoute(driverLocation, pickup)
@@ -1999,6 +2017,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                             escrowToken = null,
                             activePreimage = preimage,
                             activePaymentHash = paymentHash,
+                            activePaymentMethod = params.paymentMethod,
+                            activeFiatPaymentMethods = params.fiatPaymentMethods,
                             roadflareTargetDriverPubKey = driverPubKey,
                             roadflareTargetDriverLocation = driverLocation
                         )
@@ -2210,19 +2230,24 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         val boostAmount = getBoostAmount()
         val newFare = currentFare + boostAmount
 
-        // Check wallet balance before boosting (includes fee buffer for cross-mint)
-        val newFareWithFees = (newFare * (1 + FEE_BUFFER_PERCENT)).toLong()
-        val currentBalance = walletService?.getBalance() ?: 0L
+        // Read payment method from session (preserves original offer's payment rail)
+        val paymentMethod = session.activePaymentMethod ?: settingsManager.defaultPaymentMethod.value
 
-        if (currentBalance < newFareWithFees) {
-            val shortfall = newFareWithFees - currentBalance
-            Log.w(TAG, "Insufficient funds for boost: need $newFareWithFees sats, have $currentBalance sats")
-            _uiState.value = state.copy(
-                showInsufficientFundsDialog = true,
-                insufficientFundsAmount = shortfall,
-                depositAmountNeeded = shortfall
-            )
-            return
+        // Check wallet balance before boosting — only meaningful for cashu
+        if (paymentMethod == com.ridestr.common.nostr.events.PaymentMethod.CASHU.value) {
+            val newFareWithFees = (newFare * (1 + FEE_BUFFER_PERCENT)).toLong()
+            val currentBalance = walletService?.getBalance() ?: 0L
+
+            if (currentBalance < newFareWithFees) {
+                val shortfall = newFareWithFees - currentBalance
+                Log.w(TAG, "Insufficient funds for boost: need $newFareWithFees sats, have $currentBalance sats")
+                _uiState.value = state.copy(
+                    showInsufficientFundsDialog = true,
+                    insufficientFundsAmount = shortfall,
+                    depositAmountNeeded = shortfall
+                )
+                return
+            }
         }
 
         // Set flag BEFORE coroutine to close race window
@@ -2270,10 +2295,11 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 pickup = pickup, destination = destination,
                 fareEstimate = newFare, rideRoute = rideRoute,
                 preimage = null, paymentHash = null,  // Boost reuses existing HTLC
-                paymentMethod = settingsManager.defaultPaymentMethod.value,
+                paymentMethod = paymentMethod,
                 isRoadflare = isRoadflare, isBroadcast = false,
                 statusMessage = "Waiting for driver to accept boosted offer...",
-                roadflareTargetPubKey = null, roadflareTargetLocation = null
+                roadflareTargetPubKey = null, roadflareTargetLocation = null,
+                fiatPaymentMethods = session.activeFiatPaymentMethods
             )
 
             val eventId = sendOfferToNostr(params, pickupRoute)
@@ -5082,6 +5108,10 @@ data class RiderRideSession(
     val activePaymentHash: String? = null,
     val escrowToken: String? = null,
     val preimageShared: Boolean = false,
+
+    // Payment method tracking (for faithful boost re-sends)
+    val activePaymentMethod: String? = null,
+    val activeFiatPaymentMethods: List<String> = emptyList(),
 
     // Multi-mint payment
     val paymentPath: PaymentPath = PaymentPath.NO_PAYMENT,

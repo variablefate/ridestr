@@ -2,6 +2,7 @@ package com.ridestr.common.settings
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Log
 import com.ridestr.common.nostr.events.SettingsBackup
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -506,17 +507,31 @@ class SettingsManager(context: Context) {
     }
 
     // Default payment method for new rides (default: cashu)
+    // Phase 1.4 coercion: non-cashu values are coerced at startup (upgrade safety)
     private val _defaultPaymentMethod = MutableStateFlow(
-        prefs.getString(KEY_DEFAULT_PAYMENT_METHOD, "cashu") ?: "cashu"
+        (prefs.getString(KEY_DEFAULT_PAYMENT_METHOD, "cashu") ?: "cashu").let { method ->
+            if (method != com.ridestr.common.nostr.events.PaymentMethod.CASHU.value && method.isNotBlank()) {
+                Log.w("SettingsManager", "Non-cashu defaultPaymentMethod '$method' coerced to cashu at startup")
+                prefs.edit().putString(KEY_DEFAULT_PAYMENT_METHOD, com.ridestr.common.nostr.events.PaymentMethod.CASHU.value).apply()
+                com.ridestr.common.nostr.events.PaymentMethod.CASHU.value
+            } else method.ifBlank { com.ridestr.common.nostr.events.PaymentMethod.CASHU.value }
+        }
     )
     val defaultPaymentMethod: StateFlow<String> = _defaultPaymentMethod.asStateFlow()
 
     /**
      * Set the default payment method for new rides.
+     * Phase 1.4 coercion: non-cashu values are not routable at runtime, coerced to cashu.
      */
     fun setDefaultPaymentMethod(method: String) {
-        prefs.edit().putString(KEY_DEFAULT_PAYMENT_METHOD, method).apply()
-        _defaultPaymentMethod.value = method
+        val safeMethod = if (method == com.ridestr.common.nostr.events.PaymentMethod.CASHU.value || method.isBlank()) {
+            method.ifBlank { com.ridestr.common.nostr.events.PaymentMethod.CASHU.value }
+        } else {
+            Log.w("SettingsManager", "Non-cashu defaultPaymentMethod '$method' coerced to cashu (runtime cannot route non-cashu)")
+            com.ridestr.common.nostr.events.PaymentMethod.CASHU.value
+        }
+        prefs.edit().putString(KEY_DEFAULT_PAYMENT_METHOD, safeMethod).apply()
+        _defaultPaymentMethod.value = safeMethod
     }
 
     // RoadFlare alternate payment methods (e.g., "zelle", "venmo", "cash") — ordered by user priority

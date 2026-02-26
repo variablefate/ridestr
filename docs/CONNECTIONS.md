@@ -806,7 +806,7 @@ PaymentMethod enum (RideshareEventKinds.kt)
     └── STRIKE - Strike
 
 Fields added to events:
-├── Kind 30173 (Availability): mint_url, payment_methods[], fiat_payment_methods[]
+├── Kind 30173 (Availability): mint_url, payment_methods[]
 ├── Kind 3173 (Offer): mint_url, payment_method, fiat_payment_methods[]
 ├── Kind 3174 (Acceptance): mint_url, payment_method
 └── Kind 30177 (Profile): settings.paymentMethods[], settings.defaultPaymentMethod, settings.mintUrl, settings.roadflarePaymentMethods[]
@@ -898,7 +898,7 @@ These bypass wallet balance checks and HTLC escrow entirely - payment handled ou
 - Order determines priority for `PaymentMethod.findBestCommonFiatMethod()` — walks rider's list, returns first match in driver's list
 - Matching is case-insensitive and whitespace-tolerant (`.trim().lowercase()`) for cross-client compatibility
 - `ReorderablePaymentMethodList` composable provides drag-to-reorder with checkboxes (used in 3 call sites across both apps)
-- `fiat_payment_methods` field added to Kind 30173 (driver availability) and Kind 3173 (ride offer) for wire-level method exchange
+- `fiat_payment_methods` field added to Kind 3173 (ride offer) for wire-level method exchange
 - `SettingsManager.setRoadflarePaymentMethods()` normalizes input with `.filter { isNotBlank() }.distinct()`
 
 ### Payment Path Detection

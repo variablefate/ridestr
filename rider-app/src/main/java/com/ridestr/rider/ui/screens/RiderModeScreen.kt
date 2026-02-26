@@ -130,6 +130,25 @@ fun RiderModeScreen(
     // so it can be opened from WAITING_FOR_ACCEPTANCE stage
     var showDriverSelectionSheet by remember { mutableStateOf(false) }
 
+    // Hoisted from alternate payment dialog (was inside conditional)
+    val allMethods = remember(roadflarePaymentMethods) {
+        val known = PaymentMethod.ROADFLARE_ALTERNATE_METHODS.map { it.value }
+        (known + roadflarePaymentMethods.filter { it !in known }).distinct()
+    }
+
+    // Hoisted from Crossfade IDLE branch (was inside when block)
+    val pickupSearchResults by viewModel.pickupSearchResults.collectAsState()
+    val destSearchResults by viewModel.destSearchResults.collectAsState()
+    val isSearchingPickup by viewModel.isSearchingPickup.collectAsState()
+    val isSearchingDest by viewModel.isSearchingDest.collectAsState()
+    val useGeocodingSearch by settingsManager.useGeocodingSearch.collectAsState()
+    val usingCurrentLocationForPickup by viewModel.usingCurrentLocationForPickup.collectAsState()
+    val isFetchingLocation by viewModel.isFetchingLocation.collectAsState()
+
+    // Hoisted from Crossfade COMPLETED branch (was inside when block)
+    val followedDrivers by followedDriversRepository?.drivers?.collectAsState()
+        ?: remember { mutableStateOf(emptyList<FollowedDriver>()) }
+
     // Notification permission launcher (Android 13+)
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -322,13 +341,6 @@ fun RiderModeScreen(
 
     // Alternate payment setup dialog for RoadFlare (reorderable list, Issue #46)
     if (uiState.showAlternatePaymentSetupDialog) {
-        val currentMethods by settingsManager.roadflarePaymentMethods.collectAsState()
-
-        val allMethods = remember(currentMethods) {
-            val known = PaymentMethod.ROADFLARE_ALTERNATE_METHODS.map { it.value }
-            (known + currentMethods.filter { it !in known }).distinct()
-        }
-
         AlertDialog(
             onDismissRequest = { viewModel.dismissAlternatePaymentSetup() },
             icon = {
@@ -348,15 +360,15 @@ fun RiderModeScreen(
                     Spacer(modifier = Modifier.height(16.dp))
                     com.ridestr.common.ui.components.ReorderablePaymentMethodList(
                         allMethods = allMethods,
-                        enabledMethods = currentMethods,
+                        enabledMethods = roadflarePaymentMethods,
                         onOrderChanged = { reordered ->
                             settingsManager.setRoadflarePaymentMethods(reordered)
                         },
                         onMethodToggled = { method, enabled ->
                             val updated = if (enabled) {
-                                currentMethods + method
+                                roadflarePaymentMethods + method
                             } else {
-                                currentMethods - method
+                                roadflarePaymentMethods - method
                             }
                             settingsManager.setRoadflarePaymentMethods(updated)
                         },
@@ -367,7 +379,7 @@ fun RiderModeScreen(
             confirmButton = {
                 Button(
                     onClick = { viewModel.dismissAlternatePaymentSetup() },
-                    enabled = currentMethods.isNotEmpty()
+                    enabled = roadflarePaymentMethods.isNotEmpty()
                 ) {
                     Text("Done")
                 }
@@ -547,15 +559,6 @@ fun RiderModeScreen(
         ) { stage ->
         when (stage) {
             RideStage.IDLE -> {
-                // Collect geocoding state
-                val pickupSearchResults by viewModel.pickupSearchResults.collectAsState()
-                val destSearchResults by viewModel.destSearchResults.collectAsState()
-                val isSearchingPickup by viewModel.isSearchingPickup.collectAsState()
-                val isSearchingDest by viewModel.isSearchingDest.collectAsState()
-                val useGeocodingSearch by settingsManager.useGeocodingSearch.collectAsState()
-                val usingCurrentLocationForPickup by viewModel.usingCurrentLocationForPickup.collectAsState()
-                val isFetchingLocation by viewModel.isFetchingLocation.collectAsState()
-
                 // Location input and driver list
                 IdleContent(
                     uiState = uiState,
@@ -681,9 +684,7 @@ fun RiderModeScreen(
                 val driverProfile = driverPubKey?.let { uiState.driverProfiles[it] }
                 val driverName = driverProfile?.bestName()?.split(" ")?.firstOrNull()
 
-                // Check if driver is already in favorites
-                val followedDrivers by followedDriversRepository?.drivers?.collectAsState()
-                    ?: remember { mutableStateOf(emptyList<FollowedDriver>()) }
+                // Check if driver is already in favorites (followedDrivers hoisted to top)
                 val isAlreadyFavorite = driverPubKey?.let { pubkey ->
                     followedDrivers.any { it.pubkey == pubkey }
                 } ?: true // Treat as favorite if no pubkey (don't show prompt)
@@ -763,6 +764,9 @@ private fun IdleContent(
     // RoadFlare driver data
     val roadflareDrivers by followedDriversRepository?.drivers?.collectAsState() ?: remember { mutableStateOf(emptyList()) }
     val hasRoadflareDrivers = roadflareDrivers.isNotEmpty()
+
+    // Note: distanceUnit hoisted to top of GeocodingLocationInputCard + RouteInfoCard (separate composable scopes)
+    // isRefreshing hoisted to top of GeocodingLocationInputCard
 
     // Driver Selection Bottom Sheet
     if (showDriverSelectionSheet) {
@@ -958,6 +962,10 @@ private fun GeocodingLocationInputCard(
     onRefreshSavedLocations: (suspend () -> Unit)? = null
 ) {
     val context = LocalContext.current
+    // Hoisted from inside conditionals (was inside if blocks)
+    val distanceUnit by settingsManager.distanceUnit.collectAsState()
+    var isRefreshing by remember { mutableStateOf(false) }
+
     var pickupQuery by rememberSaveable { mutableStateOf("") }
     var destQuery by rememberSaveable { mutableStateOf("") }
 
@@ -1267,7 +1275,6 @@ private fun GeocodingLocationInputCard(
                 Spacer(modifier = Modifier.height(12.dp))
 
                 // Saved Locations header with refresh button
-                var isRefreshing by remember { mutableStateOf(false) }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -1360,7 +1367,6 @@ private fun GeocodingLocationInputCard(
 
                 // Show route info summary if available
                 if (routeResult != null && fareEstimate != null) {
-                    val distanceUnit by settingsManager.distanceUnit.collectAsState()
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceEvenly
@@ -1648,6 +1654,8 @@ private fun RouteInfoCard(
     settingsManager: SettingsManager,
     priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
+    val distanceUnit by settingsManager.distanceUnit.collectAsState()
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -1667,8 +1675,6 @@ private fun RouteInfoCard(
                 Text("Calculating route...")
             }
         } else if (routeResult != null) {
-            val distanceUnit by settingsManager.distanceUnit.collectAsState()
-
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -2347,6 +2353,8 @@ private fun RideWaitingContent(
     settingsManager: SettingsManager,
     priceService: BitcoinPriceService
 ) {
+    var dotCount by remember { mutableIntStateOf(0) }
+
     // Mode-specific values
     val startTime = when (mode) {
         WaitingMode.BROADCAST -> uiState.rideSession.broadcastStartTimeMs
@@ -2635,7 +2643,6 @@ private fun RideWaitingContent(
                     Spacer(modifier = Modifier.height(20.dp))
 
                     // Animated dots for status text
-                    var dotCount by remember { mutableIntStateOf(0) }
                     LaunchedEffect(Unit) {
                         while (true) {
                             delay(500)

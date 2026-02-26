@@ -84,17 +84,13 @@ Any app implementing these **8 event kinds** can fully participate in core ride 
   "car_color": "Silver",
   "car_year": 2022,
   "mint_url": "<cashu_mint_url>",
-  "payment_methods": ["cashu", "fiat_cash"],
-  "fiat_payment_methods": ["zelle", "venmo", "paypal"]
+  "payment_methods": ["cashu", "fiat_cash"]
 }
 ```
 
 **Multi-Mint Fields** (Issue #13):
 - `mint_url`: Driver's Cashu mint URL for multi-mint payment routing
 - `payment_methods`: Array of supported payment methods (`cashu`, `lightning`, `fiat_cash`)
-
-**RoadFlare Payment Priority Fields** (Issue #46):
-- `fiat_payment_methods`: Ordered array of accepted RoadFlare alternate payment method strings (e.g., `["zelle", "venmo", "paypal"]`). Order = priority. Used by `findBestCommonFiatMethod()` for rider-driver matching. Omitted when empty. Forward-compatible: unknown strings preserved and matched.
 
 **Lifecycle**:
 1. Published when driver goes online (`goOnline()`)

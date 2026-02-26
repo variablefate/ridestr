@@ -901,11 +901,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
             // Publish locationless Kind 30173 so availability subscription works
             // (Driver is trackable by pubkey but invisible to geographic searches)
-            // Include fiat payment methods — ROADFLARE_ONLY drivers are primary fiat users (Issue #46)
             nostrService.broadcastAvailability(
                 location = null,
-                status = DriverAvailabilityEvent.STATUS_AVAILABLE,
-                fiatPaymentMethods = settingsManager.roadflarePaymentMethods.value
+                status = DriverAvailabilityEvent.STATUS_AVAILABLE
             )
         }
     }
@@ -2968,13 +2966,11 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 Log.d(TAG, "Broadcasting availability at ${currentLocation.lat}, ${currentLocation.lon}")
                 val mintUrl = walletService?.getSavedMintUrl()
                 val paymentMethods = settingsManager.paymentMethods.value
-                val fiatPaymentMethods = settingsManager.roadflarePaymentMethods.value
                 val eventId = nostrService.broadcastAvailability(
                     location = currentLocation,
                     vehicle = activeVehicle,
                     mintUrl = mintUrl,
-                    paymentMethods = paymentMethods,
-                    fiatPaymentMethods = fiatPaymentMethods
+                    paymentMethods = paymentMethods
                 )
 
                 if (eventId != null) {

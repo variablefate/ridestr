@@ -45,7 +45,7 @@ The `common` module contains all shared code used by both rider and driver apps:
 
 | File | Kind | Purpose |
 |------|------|---------|
-| `DriverAvailabilityEvent.kt` | 30173 | Driver broadcasts availability with geohash + `fiatPaymentMethods` list |
+| `DriverAvailabilityEvent.kt` | 30173 | Driver broadcasts availability with geohash |
 | `RideOfferEvent.kt` | 3173 | Rider sends offer to driver (NIP-44 encrypted). `isRoadflare` flag detected from `["t","roadflare"]` tag. `fiatPaymentMethods` list for driver-side matching. |
 | `RideAcceptanceEvent.kt` | 3174 | Driver accepts ride offer (includes `wallet_pubkey`) |
 | `RideConfirmationEvent.kt` | 3175 | Rider confirms with paymentHash + escrowToken (moved from offer in Jan 2026) |
@@ -415,7 +415,7 @@ Protocol events now include payment method fields for multi-mint compatibility:
 - `PaymentMethod` enum: `CASHU`, `LIGHTNING`, `FIAT_CASH` + RoadFlare alternate methods (`ZELLE`, `PAYPAL`, `CASH_APP`, `VENMO`, `CASH`, `STRIKE`) in `RideshareEventKinds.kt`
 - `PaymentMethod.findBestCommonFiatMethod()`: Case-insensitive + whitespace-tolerant matching. Returns rider's first method that appears in driver's list, preserving rider's original string.
 - `mint_url` and `payment_methods` in Driver Availability (Kind 30173)
-- `fiat_payment_methods` in Driver Availability (Kind 30173) and Ride Offer (Kind 3173) — ordered list of RoadFlare alternate methods for driver-side compatibility matching
+- `fiat_payment_methods` in Ride Offer (Kind 3173) — ordered list of RoadFlare alternate methods for driver-side compatibility matching
 - `mint_url` and `payment_method` in Ride Offer (Kind 3173) and Acceptance (Kind 3174)
 - `paymentMethods`, `defaultPaymentMethod`, `mintUrl`, `roadflarePaymentMethods` in SettingsBackup (Kind 30177)
 

@@ -759,6 +759,8 @@ private fun RoadflareOnlyContent(
     val displayCurrency by settingsManager.displayCurrency.collectAsState()
     val distanceUnit by settingsManager.distanceUnit.collectAsState()
     val btcPriceUsd by priceService.btcPriceUsd.collectAsState()
+    val driverFiatMethods by settingsManager.roadflarePaymentMethods.collectAsState()
+    var noMatchWarningOffer by remember { mutableStateOf<RideOfferData?>(null) }
 
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -824,15 +826,11 @@ private fun RoadflareOnlyContent(
 
         // Pending RoadFlare offers
         if (uiState.rideSession.pendingOffers.isNotEmpty()) {
-            // Warning dialog state for fiat offers with no common payment method (Issue #46)
-            var noMatchWarningOffer by remember { mutableStateOf<RideOfferData?>(null) }
-
             Text(
                 text = "RoadFlare Requests",
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.padding(top = 8.dp)
             )
-            val driverFiatMethods by settingsManager.roadflarePaymentMethods.collectAsState()
             uiState.rideSession.pendingOffers.forEach { offer ->
                 RideOfferCard(
                     offer = offer,
@@ -854,19 +852,8 @@ private fun RoadflareOnlyContent(
                     },
                     onDecline = { onDeclineOffer(offer) },
                     settingsManager = settingsManager,
-                    priceService = priceService
-                )
-            }
-
-            // No common payment method warning dialog
-            noMatchWarningOffer?.let { warningOffer ->
-                NoCommonPaymentMethodDialog(
-                    riderFiatMethods = warningOffer.fiatPaymentMethods,
-                    onAcceptAnyway = {
-                        noMatchWarningOffer = null
-                        onAcceptOffer(warningOffer)
-                    },
-                    onDecline = { noMatchWarningOffer = null }
+                    priceService = priceService,
+                    driverFiatMethods = driverFiatMethods
                 )
             }
         } else {
@@ -898,6 +885,29 @@ private fun RoadflareOnlyContent(
                 }
             }
         }
+
+        // Auto-dismiss dialog when underlying offer disappears from pendingOffers
+        LaunchedEffect(noMatchWarningOffer, uiState.rideSession.pendingOffers) {
+            noMatchWarningOffer?.let { warning ->
+                if (uiState.rideSession.pendingOffers.none { it.eventId == warning.eventId }) {
+                    noMatchWarningOffer = null
+                }
+            }
+        }
+        // Resolve current offer by eventId for stable identity
+        val activeWarningOffer = noMatchWarningOffer?.let { warning ->
+            uiState.rideSession.pendingOffers.find { it.eventId == warning.eventId }
+        }
+        activeWarningOffer?.let { warningOffer ->
+            NoCommonPaymentMethodDialog(
+                riderFiatMethods = warningOffer.fiatPaymentMethods,
+                onAcceptAnyway = {
+                    noMatchWarningOffer = null
+                    onAcceptOffer(warningOffer)
+                },
+                onDecline = { noMatchWarningOffer = null }
+            )
+        }
     }
 }
 
@@ -913,6 +923,9 @@ private fun AvailableContent(
     settingsManager: SettingsManager,
     priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
+    val driverFiatMethods by settingsManager.roadflarePaymentMethods.collectAsState()
+    var noMatchWarningOffer by remember { mutableStateOf<RideOfferData?>(null) }
+
     // Ticker for updating "time since last broadcast" display
     var currentTimeMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) {
@@ -1055,10 +1068,6 @@ private fun AvailableContent(
             }
         }
     } else {
-        // Warning dialog state for fiat offers with no common payment method (Issue #46)
-        var noMatchWarningOffer by remember { mutableStateOf<RideOfferData?>(null) }
-        val driverFiatMethods by settingsManager.roadflarePaymentMethods.collectAsState()
-
         LazyColumn(
             modifier = Modifier.weight(1f),
             verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -1108,23 +1117,35 @@ private fun AvailableContent(
                         },
                         onDecline = { onDeclineOffer(offer) },
                         settingsManager = settingsManager,
-                        priceService = priceService
+                        priceService = priceService,
+                        driverFiatMethods = driverFiatMethods
                     )
                 }
             }
         }
+    }
 
-        // No common payment method warning dialog
-        noMatchWarningOffer?.let { warningOffer ->
-            NoCommonPaymentMethodDialog(
-                riderFiatMethods = warningOffer.fiatPaymentMethods,
-                onAcceptAnyway = {
-                    noMatchWarningOffer = null
-                    onAcceptOffer(warningOffer)
-                },
-                onDecline = { noMatchWarningOffer = null }
-            )
+    // Auto-dismiss dialog when underlying offer disappears from pendingOffers
+    LaunchedEffect(noMatchWarningOffer, uiState.rideSession.pendingOffers) {
+        noMatchWarningOffer?.let { warning ->
+            if (uiState.rideSession.pendingOffers.none { it.eventId == warning.eventId }) {
+                noMatchWarningOffer = null
+            }
         }
+    }
+    // Resolve current offer by eventId for stable identity
+    val activeWarningOffer = noMatchWarningOffer?.let { warning ->
+        uiState.rideSession.pendingOffers.find { it.eventId == warning.eventId }
+    }
+    activeWarningOffer?.let { warningOffer ->
+        NoCommonPaymentMethodDialog(
+            riderFiatMethods = warningOffer.fiatPaymentMethods,
+            onAcceptAnyway = {
+                noMatchWarningOffer = null
+                onAcceptOffer(warningOffer)
+            },
+            onDecline = { noMatchWarningOffer = null }
+        )
     }
     }
 }
@@ -1859,7 +1880,8 @@ private fun RideOfferCard(
     onAccept: () -> Unit,
     onDecline: () -> Unit,
     settingsManager: SettingsManager,
-    priceService: com.ridestr.common.bitcoin.BitcoinPriceService
+    priceService: com.ridestr.common.bitcoin.BitcoinPriceService,
+    driverFiatMethods: List<String>
 ) {
     val context = LocalContext.current
     val geocodingService = remember { GeocodingService(context) }
@@ -1948,7 +1970,6 @@ private fun RideOfferCard(
                     )
                     // Show fiat payment match status for RoadFlare offers (Issue #46)
                     if (offer.isRoadflare && offer.paymentMethod != "cashu") {
-                        val driverFiatMethods by settingsManager.roadflarePaymentMethods.collectAsState()
                         val bestMatch = if (offer.fiatPaymentMethods.isNotEmpty()) {
                             com.ridestr.common.nostr.events.PaymentMethod.findBestCommonFiatMethod(
                                 offer.fiatPaymentMethods, driverFiatMethods

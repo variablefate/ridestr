@@ -92,7 +92,9 @@ class PaymentMethodPriorityTest {
     }
 
     @Test
-    fun `DriverAvailabilityData defaults fiatPaymentMethods to empty list`() {
+    fun `DriverAvailabilityData no longer contains fiatPaymentMethods field`() {
+        // After Fix 9: fiat_payment_methods removed from Kind 30173 (was dead data, privacy concern)
+        // Verify the data class doesn't have the field — it should only have paymentMethods
         val data = DriverAvailabilityData(
             eventId = "test",
             driverPubKey = "driver",
@@ -100,7 +102,8 @@ class PaymentMethodPriorityTest {
             createdAt = System.currentTimeMillis() / 1000
         )
 
-        assertTrue(data.fiatPaymentMethods.isEmpty())
+        // paymentMethods defaults to ["cashu"]
+        assertEquals(listOf("cashu"), data.paymentMethods)
     }
 
     @Test
