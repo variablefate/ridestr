@@ -144,7 +144,7 @@ class RiderActiveService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        settingsManager = SettingsManager(this)
+        settingsManager = SettingsManager.getInstance(this)
         Log.d(TAG, "Service created")
     }
 

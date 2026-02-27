@@ -129,7 +129,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     // Settings manager for user preferences
-    private val settingsManager = com.ridestr.common.settings.SettingsManager(application)
+    private val settingsManager = com.ridestr.common.settings.SettingsManager.getInstance(application)
 
     private val nostrService = NostrService(application)
 

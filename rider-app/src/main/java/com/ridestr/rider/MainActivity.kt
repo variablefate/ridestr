@@ -160,7 +160,7 @@ fun RidestrApp() {
     }
 
     // Settings manager (created first to get custom relays)
-    val settingsManager = remember { SettingsManager(context) }
+    val settingsManager = remember { SettingsManager.getInstance(context) }
 
     // NostrService for relay connections (uses custom relays from settings)
     val nostrService = remember { NostrService(context, settingsManager.getEffectiveRelays()) }

@@ -165,7 +165,7 @@ class DriverOnlineService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        settingsManager = SettingsManager(this)
+        settingsManager = SettingsManager.getInstance(this)
         // Clear any stale status from previous process death (handles force-kill)
         // Will be set correctly in onStartCommand
         settingsManager?.setDriverOnlineStatus(null)

@@ -84,7 +84,7 @@ class RoadflareListenerService : Service() {
          * Check if the service should be running based on settings.
          */
         fun isEnabled(context: Context): Boolean {
-            val settings = SettingsManager(context)
+            val settings = SettingsManager.getInstance(context)
             return settings.roadflareAlertsEnabled.value
         }
     }
@@ -110,7 +110,7 @@ class RoadflareListenerService : Service() {
         Log.d(TAG, "Service created")
 
         // Initialize services
-        settingsManager = SettingsManager(this)
+        settingsManager = SettingsManager.getInstance(this)
         driverRoadflareRepo = DriverRoadflareRepository.getInstance(this)
         nostrService = NostrService(this, settingsManager!!.getEffectiveRelays())
     }

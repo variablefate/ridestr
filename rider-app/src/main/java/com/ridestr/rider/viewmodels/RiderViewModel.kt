@@ -169,7 +169,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     private var currentTileRegion: String? = null
 
     // Settings manager for user preferences
-    val settingsManager = SettingsManager(application)
+    val settingsManager = SettingsManager.getInstance(application)
 
     // Geocoding state
     private val _pickupSearchResults = MutableStateFlow<List<GeocodingResult>>(emptyList())

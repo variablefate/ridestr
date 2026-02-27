@@ -28,7 +28,7 @@ enum class DistanceUnit {
 /**
  * Manages app settings using SharedPreferences with StateFlow for reactive UI updates.
  */
-class SettingsManager(context: Context) {
+class SettingsManager internal constructor(context: Context) {
 
     companion object {
         private const val PREFS_NAME = "ridestr_settings"
@@ -101,6 +101,20 @@ class SettingsManager(context: Context) {
 
         // Maximum number of relays allowed
         const val MAX_RELAYS = 10
+
+        @Volatile
+        private var INSTANCE: SettingsManager? = null
+
+        fun getInstance(context: Context): SettingsManager {
+            return INSTANCE ?: synchronized(this) {
+                INSTANCE ?: SettingsManager(context.applicationContext).also { INSTANCE = it }
+            }
+        }
+
+        @androidx.annotation.VisibleForTesting
+        fun clearInstance() {
+            INSTANCE = null
+        }
     }
 
     private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
