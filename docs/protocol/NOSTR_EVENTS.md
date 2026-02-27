@@ -1,7 +1,7 @@
 # Ridestr Nostr Event Protocol
 
-**Version**: 1.7
-**Last Updated**: 2026-02-17
+**Version**: 1.8
+**Last Updated**: 2026-02-25
 
 This document defines all Nostr event kinds used in the Ridestr rideshare application.
 
@@ -331,7 +331,8 @@ Non-Cashu implementations can safely ignore `preimage_share` and `bridge_complet
     "customRelays": ["wss://relay.example.com"],
     "paymentMethods": ["cashu", "fiat_cash"],
     "defaultPaymentMethod": "cashu",
-    "mintUrl": "https://mint.example.com"
+    "mintUrl": "https://mint.example.com",
+    "roadflarePaymentMethods": ["zelle", "venmo", "paypal"]
   },
   "updated_at": 1234567890
 }
@@ -418,7 +419,8 @@ All three tiers use Kind 3173. Detection: broadcast = has `["t", "ride-request"]
   "ride_route_km": 12.3,
   "ride_route_min": 18,
   "mint_url": "<cashu_mint_url>",
-  "payment_method": "cashu"
+  "payment_method": "cashu",
+  "fiat_payment_methods": ["zelle", "venmo", "paypal"]
 }
 ```
 
@@ -440,6 +442,9 @@ All three tiers use Kind 3173. Detection: broadcast = has `["t", "ride-request"]
 **Multi-Mint Fields** (Issue #13):
 - `mint_url`: Rider's Cashu mint URL for multi-mint payment routing
 - `payment_method`: Payment method for this ride (`cashu`, `lightning`, `fiat_cash`)
+
+**RoadFlare Payment Priority Fields** (Issue #46):
+- `fiat_payment_methods`: Rider's ordered RoadFlare alternate payment methods (e.g., `["zelle", "venmo"]`). Driver uses `findBestCommonFiatMethod()` to select best common method. Omitted when empty. Not included in broadcast offers (privacy — broadcast content is plaintext).
 
 **Note**: Precise coordinates are NOT shared in the offer. Only revealed progressively after confirmation.
 

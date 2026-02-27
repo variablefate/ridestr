@@ -785,10 +785,17 @@ private fun generateQrCode(content: String, size: Int): Bitmap? {
 
 /**
  * Payment methods content (displayed inside AnimatedVisibility).
+ * Uses reorderable list for priority ordering (Issue #46).
  */
 @Composable
 private fun PaymentMethodsContent(settingsManager: SettingsManager) {
     val currentMethods by settingsManager.roadflarePaymentMethods.collectAsState()
+
+    // All known methods + any unknown stored strings
+    val allMethods = remember(currentMethods) {
+        val known = PaymentMethod.ROADFLARE_ALTERNATE_METHODS.map { it.value }
+        (known + currentMethods.filter { it !in known }).distinct()
+    }
 
     Card(
         modifier = Modifier
@@ -799,29 +806,28 @@ private fun PaymentMethodsContent(settingsManager: SettingsManager) {
         )
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            PaymentMethod.ROADFLARE_ALTERNATE_METHODS.forEach { method ->
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Checkbox(
-                        checked = method.value in currentMethods,
-                        onCheckedChange = { checked ->
-                            val updated = if (checked) {
-                                currentMethods + method.value
-                            } else {
-                                currentMethods - method.value
-                            }
-                            settingsManager.setRoadflarePaymentMethods(updated)
-                        }
-                    )
-                    Text(
-                        text = method.displayName,
-                        style = MaterialTheme.typography.bodyLarge,
-                        modifier = Modifier.padding(start = 4.dp)
-                    )
-                }
-            }
+            Text(
+                text = "Drag to set priority order",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            com.ridestr.common.ui.components.ReorderablePaymentMethodList(
+                allMethods = allMethods,
+                enabledMethods = currentMethods,
+                onOrderChanged = { reordered ->
+                    settingsManager.setRoadflarePaymentMethods(reordered)
+                },
+                onMethodToggled = { method, enabled ->
+                    val updated = if (enabled) {
+                        currentMethods + method
+                    } else {
+                        currentMethods - method
+                    }
+                    settingsManager.setRoadflarePaymentMethods(updated)
+                },
+                modifier = Modifier.heightIn(max = 350.dp)
+            )
         }
     }
 }

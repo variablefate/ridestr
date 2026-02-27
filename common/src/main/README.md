@@ -46,7 +46,7 @@ The `common` module contains all shared code used by both rider and driver apps:
 | File | Kind | Purpose |
 |------|------|---------|
 | `DriverAvailabilityEvent.kt` | 30173 | Driver broadcasts availability with geohash |
-| `RideOfferEvent.kt` | 3173 | Rider sends offer to driver (NIP-44 encrypted). `isRoadflare` flag detected from `["t","roadflare"]` tag. |
+| `RideOfferEvent.kt` | 3173 | Rider sends offer to driver (NIP-44 encrypted). `isRoadflare` flag detected from `["t","roadflare"]` tag. `fiatPaymentMethods` list for driver-side matching. |
 | `RideAcceptanceEvent.kt` | 3174 | Driver accepts ride offer (includes `wallet_pubkey`) |
 | `RideConfirmationEvent.kt` | 3175 | Rider confirms with paymentHash + escrowToken (moved from offer in Jan 2026) |
 | `DriverRideStateEvent.kt` | 30180 | Driver status updates (history-based) |
@@ -62,7 +62,7 @@ The `common` module contains all shared code used by both rider and driver apps:
 | `RoadflareKeyShareEvent.kt` | 3186 | RoadFlare private key distribution (driver → follower, 5-min expiry) |
 | `RoadflareKeyAckEvent.kt` | 3188 | RoadFlare key acknowledgement (follower → driver, 5-min expiry) |
 | `RoadflareFollowNotifyEvent.kt` | 3187 | RoadFlare follow notification (rider → driver, real-time UX) |
-| `RideshareEventKinds.kt` | - | Kind constants, expiration times, `PaymentMethod` enum (incl. RoadFlare alternate methods) |
+| `RideshareEventKinds.kt` | - | Kind constants, expiration times, `PaymentMethod` enum (incl. RoadFlare alternate methods), `findBestCommonFiatMethod()` (case-insensitive + trim matching) |
 
 ### Sync System (`java/com/ridestr/common/sync/`)
 
@@ -172,6 +172,7 @@ Reusable composables extracted from both apps' SettingsScreen files.
 | File | Components | Notes |
 |------|------------|-------|
 | `SettingsComponents.kt` | `SettingsSwitchRow`, `SettingsNavigationRow`, `SettingsActionRow` | SwitchRow has `enabled: Boolean = true` param with alpha styling |
+| `ReorderablePaymentMethodList.kt` | `ReorderablePaymentMethodList` | Drag-to-reorder with checkboxes. Column + verticalScroll, pointerInput(Unit) + rememberUpdatedState, graphicsLayer for draw-only transforms. Auto-scroll, external mutation cancel, persist on drag end only. |
 
 ### Logout (`java/com/ridestr/common/`)
 
@@ -187,7 +188,7 @@ Reusable composables extracted from both apps' SettingsScreen files.
 | `location/GeocodingService.kt` | Address search/reverse geocoding |
 | `notification/NotificationHelper.kt` | Push notification management |
 | `notification/SoundManager.kt` | Sound effects for ride events |
-| `settings/SettingsManager.kt` | App settings persistence + `syncableSettingsHash` for auto-backup + `roadflarePaymentMethods` |
+| `settings/SettingsManager.kt` | App settings persistence + `syncableSettingsHash` for auto-backup + `roadflarePaymentMethods` (ordered priority list, setter normalizes with `.filter { isNotBlank() }.distinct()`) |
 | `settings/RemoteConfigManager.kt` | Platform config from admin pubkey (fare rates, mints) - one-time fetch on startup |
 
 ---
@@ -412,7 +413,9 @@ When ANY setting changes, the hash changes, triggering auto-backup to Nostr.
 ### Multi-Mint Support (Issue #13 - Phase 1)
 Protocol events now include payment method fields for multi-mint compatibility:
 - `PaymentMethod` enum: `CASHU`, `LIGHTNING`, `FIAT_CASH` + RoadFlare alternate methods (`ZELLE`, `PAYPAL`, `CASH_APP`, `VENMO`, `CASH`, `STRIKE`) in `RideshareEventKinds.kt`
+- `PaymentMethod.findBestCommonFiatMethod()`: Case-insensitive + whitespace-tolerant matching. Returns rider's first method that appears in driver's list, preserving rider's original string.
 - `mint_url` and `payment_methods` in Driver Availability (Kind 30173)
+- `fiat_payment_methods` in Ride Offer (Kind 3173) — ordered list of RoadFlare alternate methods for driver-side compatibility matching
 - `mint_url` and `payment_method` in Ride Offer (Kind 3173) and Acceptance (Kind 3174)
 - `paymentMethods`, `defaultPaymentMethod`, `mintUrl`, `roadflarePaymentMethods` in SettingsBackup (Kind 30177)
 
@@ -440,6 +443,7 @@ The payment module includes **204 unit tests** covering all error paths and proo
 | `FakeNip60StoreTest.kt` | 32 | Mock NIP-60 API behavior |
 | `ProofConservationTest.kt` | 10 | Proof safety invariants |
 | `SubscriptionManagerTest.kt` | 23 | Subscription lifecycle, auto-close, groups |
+| `PaymentMethodPriorityTest.kt` | 12 | Payment method priority ordering, case-insensitive matching, `findBestCommonFiatMethod()` |
 
 **Running Tests:**
 ```bash

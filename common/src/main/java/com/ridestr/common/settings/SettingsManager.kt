@@ -2,6 +2,7 @@ package com.ridestr.common.settings
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Log
 import com.ridestr.common.nostr.events.SettingsBackup
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -27,7 +28,7 @@ enum class DistanceUnit {
 /**
  * Manages app settings using SharedPreferences with StateFlow for reactive UI updates.
  */
-class SettingsManager(context: Context) {
+class SettingsManager internal constructor(context: Context) {
 
     companion object {
         private const val PREFS_NAME = "ridestr_settings"
@@ -100,6 +101,20 @@ class SettingsManager(context: Context) {
 
         // Maximum number of relays allowed
         const val MAX_RELAYS = 10
+
+        @Volatile
+        private var INSTANCE: SettingsManager? = null
+
+        fun getInstance(context: Context): SettingsManager {
+            return INSTANCE ?: synchronized(this) {
+                INSTANCE ?: SettingsManager(context.applicationContext).also { INSTANCE = it }
+            }
+        }
+
+        @androidx.annotation.VisibleForTesting
+        fun clearInstance() {
+            INSTANCE = null
+        }
     }
 
     private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -506,36 +521,51 @@ class SettingsManager(context: Context) {
     }
 
     // Default payment method for new rides (default: cashu)
+    // Phase 1.4 coercion: non-cashu values are coerced at startup (upgrade safety)
     private val _defaultPaymentMethod = MutableStateFlow(
-        prefs.getString(KEY_DEFAULT_PAYMENT_METHOD, "cashu") ?: "cashu"
+        (prefs.getString(KEY_DEFAULT_PAYMENT_METHOD, "cashu") ?: "cashu").let { method ->
+            if (method != com.ridestr.common.nostr.events.PaymentMethod.CASHU.value && method.isNotBlank()) {
+                Log.w("SettingsManager", "Non-cashu defaultPaymentMethod '$method' coerced to cashu at startup")
+                prefs.edit().putString(KEY_DEFAULT_PAYMENT_METHOD, com.ridestr.common.nostr.events.PaymentMethod.CASHU.value).apply()
+                com.ridestr.common.nostr.events.PaymentMethod.CASHU.value
+            } else method.ifBlank { com.ridestr.common.nostr.events.PaymentMethod.CASHU.value }
+        }
     )
     val defaultPaymentMethod: StateFlow<String> = _defaultPaymentMethod.asStateFlow()
 
     /**
      * Set the default payment method for new rides.
+     * Phase 1.4 coercion: non-cashu values are not routable at runtime, coerced to cashu.
      */
     fun setDefaultPaymentMethod(method: String) {
-        prefs.edit().putString(KEY_DEFAULT_PAYMENT_METHOD, method).apply()
-        _defaultPaymentMethod.value = method
+        val safeMethod = if (method == com.ridestr.common.nostr.events.PaymentMethod.CASHU.value || method.isBlank()) {
+            method.ifBlank { com.ridestr.common.nostr.events.PaymentMethod.CASHU.value }
+        } else {
+            Log.w("SettingsManager", "Non-cashu defaultPaymentMethod '$method' coerced to cashu (runtime cannot route non-cashu)")
+            com.ridestr.common.nostr.events.PaymentMethod.CASHU.value
+        }
+        prefs.edit().putString(KEY_DEFAULT_PAYMENT_METHOD, safeMethod).apply()
+        _defaultPaymentMethod.value = safeMethod
     }
 
-    // RoadFlare alternate payment methods (e.g., "zelle", "venmo", "cash")
+    // RoadFlare alternate payment methods (e.g., "zelle", "venmo", "cash") — ordered by user priority
     private val _roadflarePaymentMethods = MutableStateFlow(loadRoadflarePaymentMethods())
-    val roadflarePaymentMethods: StateFlow<Set<String>> = _roadflarePaymentMethods.asStateFlow()
+    val roadflarePaymentMethods: StateFlow<List<String>> = _roadflarePaymentMethods.asStateFlow()
 
-    private fun loadRoadflarePaymentMethods(): Set<String> {
+    private fun loadRoadflarePaymentMethods(): List<String> {
         val stored = prefs.getString(KEY_ROADFLARE_PAYMENT_METHODS, null)
-        return if (stored.isNullOrBlank()) emptySet()
-        else stored.split(",").filter { it.isNotBlank() }.toSet()
+        return if (stored.isNullOrBlank()) emptyList()
+        else stored.split(",").filter { it.isNotBlank() }.distinct()
     }
 
-    fun setRoadflarePaymentMethods(methods: Set<String>) {
-        if (methods.isEmpty()) {
+    fun setRoadflarePaymentMethods(methods: List<String>) {
+        val normalized = methods.filter { it.isNotBlank() }.distinct()
+        if (normalized.isEmpty()) {
             prefs.edit().remove(KEY_ROADFLARE_PAYMENT_METHODS).apply()
         } else {
-            prefs.edit().putString(KEY_ROADFLARE_PAYMENT_METHODS, methods.joinToString(",")).apply()
+            prefs.edit().putString(KEY_ROADFLARE_PAYMENT_METHODS, normalized.joinToString(",")).apply()
         }
-        _roadflarePaymentMethods.value = methods
+        _roadflarePaymentMethods.value = normalized
     }
 
     // Current Cashu mint URL (for backup/restore purposes)
@@ -678,6 +708,8 @@ class SettingsManager(context: Context) {
         listOf(aav, cr, pm, dpm, mu).hashCode()
     }) { hash1, hash2 ->
         hash1 * 31 + hash2
+    }.combine(_roadflarePaymentMethods) { hash, rpm ->
+        hash * 31 + rpm.hashCode()
     }
 
     // ===================
@@ -701,8 +733,8 @@ class SettingsManager(context: Context) {
             paymentMethods = _paymentMethods.value,
             defaultPaymentMethod = _defaultPaymentMethod.value,
             mintUrl = _mintUrl.value,
-            // RoadFlare alternate payment methods
-            roadflarePaymentMethods = _roadflarePaymentMethods.value.toList()
+            // RoadFlare alternate payment methods (priority-ordered)
+            roadflarePaymentMethods = _roadflarePaymentMethods.value
         )
     }
 
@@ -730,8 +762,8 @@ class SettingsManager(context: Context) {
         setPaymentMethods(backup.paymentMethods)
         setDefaultPaymentMethod(backup.defaultPaymentMethod)
         setMintUrl(backup.mintUrl)
-        // Restore RoadFlare alternate payment methods
-        setRoadflarePaymentMethods(backup.roadflarePaymentMethods.toSet())
+        // Restore RoadFlare alternate payment methods (priority-ordered)
+        setRoadflarePaymentMethods(backup.roadflarePaymentMethods)
     }
 
     /**
@@ -762,7 +794,7 @@ class SettingsManager(context: Context) {
         _paymentMethods.value = listOf("cashu")
         _defaultPaymentMethod.value = "cashu"
         _mintUrl.value = null
-        _roadflarePaymentMethods.value = emptySet()
+        _roadflarePaymentMethods.value = emptyList()
         // Favorite LN addresses (Issue #14)
         _favoriteLnAddresses.value = emptyList()
         // RoadFlare + coordination state

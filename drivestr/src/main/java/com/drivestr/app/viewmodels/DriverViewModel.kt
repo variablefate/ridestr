@@ -129,7 +129,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     // Settings manager for user preferences
-    private val settingsManager = com.ridestr.common.settings.SettingsManager(application)
+    private val settingsManager = com.ridestr.common.settings.SettingsManager.getInstance(application)
 
     private val nostrService = NostrService(application)
 
@@ -822,7 +822,9 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             // Clear any pending warning state
             showWalletNotSetupWarning = false,
             pendingGoOnlineLocation = null,
-            pendingGoOnlineVehicle = null
+            pendingGoOnlineVehicle = null,
+            // Clear stale warning dialog from ROADFLARE_ONLY mode (Issue #46)
+            rideSession = currentState.rideSession.copy(noMatchWarningOfferEventId = null)
         )
         // Start availability broadcasting and full offer subscriptions
         resumeOfferSubscriptions(location)
@@ -971,13 +973,20 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             // Note: driverOnlineStatus is now set by DriverOnlineService (authoritative)
             DriverOnlineService.stop(context)
 
-            // THEN update state after deletion completes
-            _uiState.value = _uiState.value.copy(
-                stage = DriverStage.OFFLINE,
-                currentLocation = null,
-                activeVehicle = null,
-                statusMessage = "You are now offline"
-            )
+            // THEN update state after deletion completes (atomic to prevent interleaving)
+            _uiState.update { current ->
+                current.copy(
+                    stage = DriverStage.OFFLINE,
+                    currentLocation = null,
+                    activeVehicle = null,
+                    statusMessage = "You are now offline",
+                    rideSession = current.rideSession.copy(
+                        pendingOffers = emptyList(),
+                        pendingBroadcastRequests = emptyList(),
+                        noMatchWarningOfferEventId = null
+                    )
+                )
+            }
 
             // Background sweep for any stragglers - doesn't block UI
             viewModelScope.launch {
@@ -3076,6 +3085,15 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Check if this is a fare boost (same rider, different event)
         val isFareBoost = currentOffers.any { it.riderPubKey == offer.riderPubKey }
 
+        // Guard: if same rider already has a newer offer, skip stale relay delivery
+        if (isFareBoost) {
+            val existingFromSameRider = currentOffers.firstOrNull { it.riderPubKey == offer.riderPubKey }
+            if (existingFromSameRider != null && existingFromSameRider.createdAt >= offer.createdAt) {
+                Log.d(TAG, "Ignoring stale offer from same rider (existing: ${existingFromSameRider.createdAt}, incoming: ${offer.createdAt})")
+                return
+            }
+        }
+
         if (isNewOffer) {
             // Filter out stale offers AND any existing offer from same rider (fare boost case)
             val freshOffers = currentOffers.filter { existing ->
@@ -3435,6 +3453,15 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
             // Check if this is a fare boost (same rider, new event with higher fare)
             val isFareBoost = currentRequests.any { it.riderPubKey == request.riderPubKey }
 
+            // Guard: if same rider already has a newer broadcast request, skip stale relay delivery
+            if (isFareBoost) {
+                val existingFromSameRider = currentRequests.firstOrNull { it.riderPubKey == request.riderPubKey }
+                if (existingFromSameRider != null && existingFromSameRider.createdAt >= request.createdAt) {
+                    Log.d(TAG, "Ignoring stale broadcast request from same rider (existing: ${existingFromSameRider.createdAt}, incoming: ${request.createdAt})")
+                    return@subscribeToBroadcastRideRequests
+                }
+            }
+
             if (isNewRequest) {
                 val context = getApplication<Application>()
 
@@ -3752,6 +3779,20 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Add to declined set to prevent it from showing again on refresh
         declinedOfferEventIds.add(request.eventId)
         Log.d(TAG, "Declined request ${request.eventId.take(8)}, total declined: ${declinedOfferEventIds.size}")
+    }
+
+    /**
+     * Set the no-common-payment-method warning offer (Issue #46).
+     */
+    fun setNoMatchWarningOffer(eventId: String?) {
+        updateRideSession { copy(noMatchWarningOfferEventId = eventId) }
+    }
+
+    /**
+     * Dismiss the no-common-payment-method warning dialog.
+     */
+    fun dismissNoMatchWarning() {
+        updateRideSession { copy(noMatchWarningOfferEventId = null) }
     }
 
     // ========================================================================
@@ -4134,7 +4175,10 @@ data class DriverRideSession(
 
     // Availability-lifecycle fields — included in session for reset completeness
     val pendingOffers: List<RideOfferData> = emptyList(),
-    val pendingBroadcastRequests: List<BroadcastRideOfferData> = emptyList()
+    val pendingBroadcastRequests: List<BroadcastRideOfferData> = emptyList(),
+
+    // No-common-payment-method warning dialog (Issue #46)
+    val noMatchWarningOfferEventId: String? = null
 )
 
 /**

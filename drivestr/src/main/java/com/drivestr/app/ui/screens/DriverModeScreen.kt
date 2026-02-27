@@ -569,6 +569,8 @@ fun DriverModeScreen(
                     onGoOffline = { viewModel.goOffline() },
                     onAcceptOffer = { viewModel.acceptOffer(it) },
                     onDeclineOffer = { viewModel.declineOffer(it) },
+                    onSetNoMatchWarning = { viewModel.setNoMatchWarningOffer(it) },
+                    onDismissNoMatchWarning = { viewModel.dismissNoMatchWarning() },
                     settingsManager = settingsManager,
                     priceService = viewModel.bitcoinPriceService
                 )
@@ -583,6 +585,8 @@ fun DriverModeScreen(
                     onDeclineBroadcastRequest = { viewModel.declineBroadcastRequest(it) },
                     onAcceptOffer = { viewModel.acceptOffer(it) },
                     onDeclineOffer = { viewModel.declineOffer(it) },
+                    onSetNoMatchWarning = { viewModel.setNoMatchWarningOffer(it) },
+                    onDismissNoMatchWarning = { viewModel.dismissNoMatchWarning() },
                     settingsManager = settingsManager,
                     priceService = viewModel.bitcoinPriceService
                 )
@@ -753,12 +757,15 @@ private fun RoadflareOnlyContent(
     onGoOffline: () -> Unit,
     onAcceptOffer: (RideOfferData) -> Unit,
     onDeclineOffer: (RideOfferData) -> Unit,
+    onSetNoMatchWarning: (String) -> Unit,
+    onDismissNoMatchWarning: () -> Unit,
     settingsManager: SettingsManager,
     priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
     val displayCurrency by settingsManager.displayCurrency.collectAsState()
     val distanceUnit by settingsManager.distanceUnit.collectAsState()
     val btcPriceUsd by priceService.btcPriceUsd.collectAsState()
+    val driverFiatMethods by settingsManager.roadflarePaymentMethods.collectAsState()
 
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -835,10 +842,23 @@ private fun RoadflareOnlyContent(
                     pickupRoute = uiState.directOfferPickupRoutes[offer.eventId],
                     rideRoute = uiState.directOfferRideRoutes[offer.eventId],
                     isProcessing = uiState.rideSession.isProcessingOffer,
-                    onAccept = { onAcceptOffer(offer) },
+                    onAccept = {
+                        // Intercept fiat offers with no common method (Issue #46)
+                        if (offer.isRoadflare && offer.paymentMethod != "cashu" &&
+                            offer.fiatPaymentMethods.isNotEmpty() &&
+                            com.ridestr.common.nostr.events.PaymentMethod.findBestCommonFiatMethod(
+                                offer.fiatPaymentMethods, driverFiatMethods
+                            ) == null
+                        ) {
+                            onSetNoMatchWarning(offer.eventId)
+                        } else {
+                            onAcceptOffer(offer)
+                        }
+                    },
                     onDecline = { onDeclineOffer(offer) },
                     settingsManager = settingsManager,
-                    priceService = priceService
+                    priceService = priceService,
+                    driverFiatMethods = driverFiatMethods
                 )
             }
         } else {
@@ -870,6 +890,29 @@ private fun RoadflareOnlyContent(
                 }
             }
         }
+
+        // Auto-dismiss dialog when underlying offer disappears from pendingOffers
+        LaunchedEffect(uiState.rideSession.noMatchWarningOfferEventId, uiState.rideSession.pendingOffers) {
+            uiState.rideSession.noMatchWarningOfferEventId?.let { id ->
+                if (uiState.rideSession.pendingOffers.none { it.eventId == id }) {
+                    onDismissNoMatchWarning()
+                }
+            }
+        }
+        // Resolve current offer by eventId for stable identity
+        val activeWarningOffer = uiState.rideSession.noMatchWarningOfferEventId?.let { id ->
+            uiState.rideSession.pendingOffers.find { it.eventId == id }
+        }
+        activeWarningOffer?.let { warningOffer ->
+            NoCommonPaymentMethodDialog(
+                riderFiatMethods = warningOffer.fiatPaymentMethods,
+                onAcceptAnyway = {
+                    onDismissNoMatchWarning()
+                    onAcceptOffer(warningOffer)
+                },
+                onDecline = { onDismissNoMatchWarning() }
+            )
+        }
     }
 }
 
@@ -882,9 +925,13 @@ private fun AvailableContent(
     onDeclineBroadcastRequest: (BroadcastRideOfferData) -> Unit,
     onAcceptOffer: (RideOfferData) -> Unit,
     onDeclineOffer: (RideOfferData) -> Unit,
+    onSetNoMatchWarning: (String) -> Unit,
+    onDismissNoMatchWarning: () -> Unit,
     settingsManager: SettingsManager,
     priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
+    val driverFiatMethods by settingsManager.roadflarePaymentMethods.collectAsState()
+
     // Ticker for updating "time since last broadcast" display
     var currentTimeMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) {
@@ -1061,14 +1108,50 @@ private fun AvailableContent(
                         pickupRoute = uiState.directOfferPickupRoutes[offer.eventId],
                         rideRoute = uiState.directOfferRideRoutes[offer.eventId],
                         isProcessing = uiState.rideSession.isProcessingOffer,
-                        onAccept = { onAcceptOffer(offer) },
+                        onAccept = {
+                            // Intercept fiat offers with no common method (Issue #46)
+                            if (offer.isRoadflare && offer.paymentMethod != "cashu" &&
+                                offer.fiatPaymentMethods.isNotEmpty() &&
+                                com.ridestr.common.nostr.events.PaymentMethod.findBestCommonFiatMethod(
+                                    offer.fiatPaymentMethods, driverFiatMethods
+                                ) == null
+                            ) {
+                                onSetNoMatchWarning(offer.eventId)
+                            } else {
+                                onAcceptOffer(offer)
+                            }
+                        },
                         onDecline = { onDeclineOffer(offer) },
                         settingsManager = settingsManager,
-                        priceService = priceService
+                        priceService = priceService,
+                        driverFiatMethods = driverFiatMethods
                     )
                 }
             }
         }
+    }
+
+    // Auto-dismiss dialog when underlying offer disappears from pendingOffers
+    LaunchedEffect(uiState.rideSession.noMatchWarningOfferEventId, uiState.rideSession.pendingOffers) {
+        uiState.rideSession.noMatchWarningOfferEventId?.let { id ->
+            if (uiState.rideSession.pendingOffers.none { it.eventId == id }) {
+                onDismissNoMatchWarning()
+            }
+        }
+    }
+    // Resolve current offer by eventId for stable identity
+    val activeWarningOffer = uiState.rideSession.noMatchWarningOfferEventId?.let { id ->
+        uiState.rideSession.pendingOffers.find { it.eventId == id }
+    }
+    activeWarningOffer?.let { warningOffer ->
+        NoCommonPaymentMethodDialog(
+            riderFiatMethods = warningOffer.fiatPaymentMethods,
+            onAcceptAnyway = {
+                onDismissNoMatchWarning()
+                onAcceptOffer(warningOffer)
+            },
+            onDecline = { onDismissNoMatchWarning() }
+        )
     }
     }
 }
@@ -1803,7 +1886,8 @@ private fun RideOfferCard(
     onAccept: () -> Unit,
     onDecline: () -> Unit,
     settingsManager: SettingsManager,
-    priceService: com.ridestr.common.bitcoin.BitcoinPriceService
+    priceService: com.ridestr.common.bitcoin.BitcoinPriceService,
+    driverFiatMethods: List<String>
 ) {
     val context = LocalContext.current
     val geocodingService = remember { GeocodingService(context) }
@@ -1890,14 +1974,36 @@ private fun RideOfferCard(
                         style = MaterialTheme.typography.labelSmall,
                         color = if (offer.isRoadflare) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary
                     )
-                    // Show non-bitcoin payment method for RoadFlare offers
+                    // Show fiat payment match status for RoadFlare offers (Issue #46)
                     if (offer.isRoadflare && offer.paymentMethod != "cashu") {
+                        val bestMatch = if (offer.fiatPaymentMethods.isNotEmpty()) {
+                            com.ridestr.common.nostr.events.PaymentMethod.findBestCommonFiatMethod(
+                                offer.fiatPaymentMethods, driverFiatMethods
+                            )
+                        } else null
                         val methodDisplay = com.ridestr.common.nostr.events.PaymentMethod.fromString(offer.paymentMethod)?.displayName ?: offer.paymentMethod
-                        Text(
-                            text = "Payment: $methodDisplay",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.tertiary
-                        )
+
+                        if (bestMatch != null) {
+                            val matchDisplay = com.ridestr.common.nostr.events.PaymentMethod.fromString(bestMatch)?.displayName ?: bestMatch
+                            Text(
+                                text = "Pay via: $matchDisplay",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = androidx.compose.ui.graphics.Color(0xFF2E7D32) // Green
+                            )
+                        } else if (offer.fiatPaymentMethods.isNotEmpty()) {
+                            Text(
+                                text = "No Common Payment Method",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        } else {
+                            // Legacy offer without fiat_payment_methods field
+                            Text(
+                                text = "Payment: $methodDisplay",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.tertiary
+                            )
+                        }
                     }
                 }
                 Text(
@@ -2333,4 +2439,65 @@ private fun formatEarnings(
             }
         }
     }
+}
+
+/**
+ * Warning dialog shown when driver accepts a fiat offer with no common payment method.
+ * Shows rider's top preferences; "Decline Ride" closes dialog but keeps offer visible.
+ */
+@Composable
+private fun NoCommonPaymentMethodDialog(
+    riderFiatMethods: List<String>,
+    onAcceptAnyway: () -> Unit,
+    onDecline: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDecline,
+        icon = {
+            Icon(
+                Icons.Default.Warning,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.error
+            )
+        },
+        title = { Text("No Common Payment Method") },
+        text = {
+            Column {
+                Text(
+                    "You and this rider don't share a payment method.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    "Rider's preferred methods:",
+                    style = MaterialTheme.typography.labelLarge
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                riderFiatMethods.take(3).forEach { method ->
+                    val displayName = com.ridestr.common.nostr.events.PaymentMethod.fromString(method)?.displayName ?: method
+                    Text(
+                        text = "  \u2022 $displayName",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+                if (riderFiatMethods.size > 3) {
+                    Text(
+                        text = "  + ${riderFiatMethods.size - 3} more",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onAcceptAnyway) {
+                Text("Accept Anyway")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDecline) {
+                Text("Decline Ride")
+            }
+        }
+    )
 }

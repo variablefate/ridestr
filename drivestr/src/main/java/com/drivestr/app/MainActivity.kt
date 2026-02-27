@@ -167,7 +167,7 @@ fun DrivestrApp() {
     }
 
     // Settings manager (created first to get custom relays)
-    val settingsManager = remember { SettingsManager(context) }
+    val settingsManager = remember { SettingsManager.getInstance(context) }
 
     // Notification permission launcher for RoadFlare alerts (Finding 5)
     val notificationPermissionLauncher = rememberLauncherForActivityResult(

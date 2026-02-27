@@ -28,7 +28,7 @@ The rider Android app allows users to request rides, track driver location in re
 | `ProfileSetupScreen.kt` | Profile name and picture setup |
 | `KeyBackupScreen.kt` | nsec backup display |
 | `TipScreen.kt` | Post-ride tipping UI |
-| `RoadflareTab.kt` | RoadFlare tab - favorite drivers list, driver status badges, fare estimates, payment methods dialog |
+| `RoadflareTab.kt` | RoadFlare tab - favorite drivers list, driver status badges, fare estimates, payment methods dialog (uses `ReorderablePaymentMethodList` for priority ordering) |
 | `AddDriverScreen.kt` | Add driver via QR scan (Quickie) or manual npub/hex entry |
 
 ### Services (`java/com/ridestr/rider/service/`)
@@ -150,6 +150,8 @@ Fixes for driver status bouncing between offline/online:
 | `RiderViewModel` | `NostrService` | Send RoadFlare to all drivers | `sendRoadflareToAll()` |
 | `MainActivity` | `FollowedDriversRepository` | Followed drivers for RoadFlare tab | `followedDriversRepo.drivers` |
 | `MainActivity` | `NostrService` | Subscribe to key shares (Kind 3186) | `nostrService.subscribeToRoadflareKeyShares()` |
+| `RoadflareTab` | `ReorderablePaymentMethodList` | Drag-to-reorder payment methods in dialog | `ReorderablePaymentMethodList(allMethods, enabledMethods, ...)` |
+| `RiderModeScreen` | `ReorderablePaymentMethodList` | Payment methods in insufficient funds dialog | `ReorderablePaymentMethodList(allMethods, enabledMethods, ...)` |
 
 ---
 
@@ -263,10 +265,12 @@ If rider cancels after preimage was shared with driver:
 - Deposit and withdraw are **fully functional**
 - Only LN address resolution is broken (must paste BOLT11 directly)
 
-### RoadFlare Alternate Payment Methods (January 2026)
+### RoadFlare Alternate Payment Methods (January 2026, updated February 2026)
 For personal RoadFlare drivers, riders can offer non-bitcoin payment methods:
-- Payment methods configured in RoadflareTab via `RoadflarePaymentMethodsDialog` (Zelle, PayPal, Cash App, Venmo, Cash, Strike)
-- Stored in `SettingsManager.roadflarePaymentMethods` and backed up to Kind 30177
+- Payment methods configured in RoadflareTab via `RoadflarePaymentMethodsDialog` using `ReorderablePaymentMethodList` (drag-to-reorder with checkboxes)
+- Methods: Zelle, PayPal, Cash App, Venmo, Cash, Strike — order determines priority for matching
+- Stored as ordered list in `SettingsManager.roadflarePaymentMethods` and backed up to Kind 30177
+- Setter normalizes with `.filter { isNotBlank() }.distinct()` to protect `key()` identity in reorderable list
 - When insufficient bitcoin funds during a RoadFlare offer, modified dialog offers "Continue with Alternate Payment"
 - `sendRoadflareOfferWithAlternatePayment()` skips balance check and sends offer with alternate `paymentMethod`
 - UI state tracks `insufficientFundsIsRoadflare`, `pendingRoadflareDriverPubKey`, `pendingRoadflareDriverLocation`

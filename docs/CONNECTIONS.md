@@ -1,6 +1,6 @@
 # Ridestr Module Connections
 
-**Last Updated**: 2026-02-17 (Batch offer cancellation, payment method selection, FrozenRideInputs)
+**Last Updated**: 2026-02-25 (Issue #46: Payment method priority ordering, fiat_payment_methods wiring, ReorderablePaymentMethodList)
 
 This document provides a comprehensive view of how all modules connect in the Ridestr codebase. Use this as a reference when making changes to understand what might be affected.
 
@@ -807,9 +807,9 @@ PaymentMethod enum (RideshareEventKinds.kt)
 
 Fields added to events:
 ├── Kind 30173 (Availability): mint_url, payment_methods[]
-├── Kind 3173 (Offer): mint_url, payment_method
+├── Kind 3173 (Offer): mint_url, payment_method, fiat_payment_methods[]
 ├── Kind 3174 (Acceptance): mint_url, payment_method
-└── Kind 30177 (Profile): settings.paymentMethods[], settings.defaultPaymentMethod, settings.mintUrl
+└── Kind 30177 (Profile): settings.paymentMethods[], settings.defaultPaymentMethod, settings.mintUrl, settings.roadflarePaymentMethods[]
 ```
 
 ---
@@ -892,6 +892,14 @@ RoadFlare rides support non-HTLC payment methods for trusted relationships:
 | Strike | `STRIKE` | Lightning via Strike |
 
 These bypass wallet balance checks and HTLC escrow entirely - payment handled outside the app.
+
+**Priority Ordering (Issue #46, February 2026):**
+- Both rider and driver store payment methods as an **ordered list** (not Set) in `SettingsManager.roadflarePaymentMethods`
+- Order determines priority for `PaymentMethod.findBestCommonFiatMethod()` — walks rider's list, returns first match in driver's list
+- Matching is case-insensitive and whitespace-tolerant (`.trim().lowercase()`) for cross-client compatibility
+- `ReorderablePaymentMethodList` composable provides drag-to-reorder with checkboxes (used in 3 call sites across both apps)
+- `fiat_payment_methods` field added to Kind 3173 (ride offer) for wire-level method exchange
+- `SettingsManager.setRoadflarePaymentMethods()` normalizes input with `.filter { isNotBlank() }.distinct()`
 
 ### Payment Path Detection
 

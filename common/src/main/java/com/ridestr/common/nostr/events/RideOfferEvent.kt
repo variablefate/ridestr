@@ -3,6 +3,7 @@ package com.ridestr.common.nostr.events
 import android.util.Log
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
+import org.json.JSONArray
 import org.json.JSONObject
 
 private const val TAG = "RideOfferEvent"
@@ -125,7 +126,8 @@ object RideOfferEvent {
         // Multi-mint support (Issue #13)
         mintUrl: String? = null,
         paymentMethod: String = "cashu",
-        isRoadflare: Boolean = false
+        isRoadflare: Boolean = false,
+        fiatPaymentMethods: List<String> = emptyList()
     ): Event {
         // Build plaintext content
         val plaintext = JSONObject().apply {
@@ -142,6 +144,10 @@ object RideOfferEvent {
             // Multi-mint support (Issue #13)
             mintUrl?.let { put("mint_url", it) }
             put("payment_method", paymentMethod)
+            // Fiat payment methods in priority order (Issue #46)
+            if (fiatPaymentMethods.isNotEmpty()) {
+                put("fiat_payment_methods", JSONArray(fiatPaymentMethods))
+            }
         }.toString()
 
         // Encrypt using NIP-44 so only the target driver can read it
@@ -306,6 +312,15 @@ object RideOfferEvent {
             val mintUrl = json.optString("mint_url", null).takeIf { !it.isNullOrBlank() }
             val paymentMethod = json.optString("payment_method", "cashu")
 
+            // Parse fiat payment methods (Issue #46 - ordered priority list)
+            val fiatPaymentMethods = mutableListOf<String>()
+            val fiatMethodsArray = json.optJSONArray("fiat_payment_methods")
+            if (fiatMethodsArray != null) {
+                for (i in 0 until fiatMethodsArray.length()) {
+                    fiatPaymentMethods.add(fiatMethodsArray.getString(i))
+                }
+            }
+
             RideOfferData(
                 eventId = encryptedData.eventId,
                 riderPubKey = encryptedData.riderPubKey,
@@ -323,7 +338,8 @@ object RideOfferEvent {
                 destinationGeohash = destinationGeohash,
                 mintUrl = mintUrl,
                 paymentMethod = paymentMethod,
-                isRoadflare = encryptedData.isRoadflare
+                isRoadflare = encryptedData.isRoadflare,
+                fiatPaymentMethods = fiatPaymentMethods
             )
         } catch (e: Exception) {
             Log.e(TAG, "Failed to decrypt direct offer", e)
@@ -444,7 +460,9 @@ data class RideOfferData(
     val mintUrl: String? = null,
     val paymentMethod: String = "cashu",
     // RoadFlare flag - true if from rider's favorite driver network
-    val isRoadflare: Boolean = false
+    val isRoadflare: Boolean = false,
+    // RoadFlare fiat payment methods in rider's priority order (Issue #46)
+    val fiatPaymentMethods: List<String> = emptyList()
 )
 
 /**

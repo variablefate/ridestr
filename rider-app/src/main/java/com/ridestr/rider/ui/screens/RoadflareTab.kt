@@ -859,13 +859,14 @@ fun RoadflarePaymentMethodsDialog(
     onDismiss: () -> Unit
 ) {
     val currentMethods by settingsManager.roadflarePaymentMethods.collectAsState()
-    val selectedMethods = remember { mutableStateMapOf<String, Boolean>() }
 
-    // Initialize from saved state
-    LaunchedEffect(currentMethods) {
-        PaymentMethod.ROADFLARE_ALTERNATE_METHODS.forEach { method ->
-            selectedMethods[method.value] = method.value in currentMethods
-        }
+    // Local state for Save/Cancel pattern
+    var localMethods by remember(currentMethods) { mutableStateOf(currentMethods) }
+
+    // All known methods + any unknown stored strings
+    val allMethods = remember(localMethods) {
+        val known = PaymentMethod.ROADFLARE_ALTERNATE_METHODS.map { it.value }
+        (known + localMethods.filter { it !in known }).distinct()
     }
 
     AlertDialog(
@@ -888,34 +889,28 @@ fun RoadflarePaymentMethodsDialog(
                 )
                 Spacer(modifier = Modifier.height(12.dp))
                 Text(
-                    "Select your available payment methods:",
+                    "Select and drag to set priority order:",
                     style = MaterialTheme.typography.labelLarge
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-                PaymentMethod.ROADFLARE_ALTERNATE_METHODS.forEach { method ->
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Checkbox(
-                            checked = selectedMethods[method.value] == true,
-                            onCheckedChange = { checked ->
-                                selectedMethods[method.value] = checked
-                            }
-                        )
-                        Text(
-                            text = method.displayName,
-                            style = MaterialTheme.typography.bodyLarge,
-                            modifier = Modifier.padding(start = 4.dp)
-                        )
-                    }
-                }
+                com.ridestr.common.ui.components.ReorderablePaymentMethodList(
+                    allMethods = allMethods,
+                    enabledMethods = localMethods,
+                    onOrderChanged = { reordered -> localMethods = reordered },
+                    onMethodToggled = { method, enabled ->
+                        localMethods = if (enabled) {
+                            localMethods + method
+                        } else {
+                            localMethods - method
+                        }
+                    },
+                    modifier = Modifier.heightIn(max = 350.dp)
+                )
             }
         },
         confirmButton = {
             Button(onClick = {
-                val methods = selectedMethods.filter { it.value }.keys
-                settingsManager.setRoadflarePaymentMethods(methods)
+                settingsManager.setRoadflarePaymentMethods(localMethods)
                 onDismiss()
             }) {
                 Text("Save")

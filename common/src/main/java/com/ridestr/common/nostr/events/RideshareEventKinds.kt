@@ -250,6 +250,20 @@ enum class PaymentMethod(val value: String, val displayName: String = value) {
 
         fun toStringList(methods: List<PaymentMethod>): List<String> =
             methods.map { it.value }
+
+        /**
+         * Find the best common fiat payment method by walking the rider's priority list.
+         * Returns the first rider method that also appears in the driver's list, or null.
+         * Comparison is case-insensitive and whitespace-tolerant for cross-client compatibility.
+         * Returns the rider's original string (preserving their casing/format).
+         */
+        fun findBestCommonFiatMethod(
+            riderMethods: List<String>,
+            driverMethods: List<String>
+        ): String? {
+            val driverSet = driverMethods.map { it.trim().lowercase() }.toSet()
+            return riderMethods.firstOrNull { it.trim().lowercase() in driverSet }
+        }
     }
 }
 
@@ -327,6 +341,9 @@ object RideshareTags {
  * Events include expiration tags to enable automatic relay cleanup.
  */
 object RideshareExpiration {
+    // Lookback window for driver availability subscriptions (matches broadcast interval)
+    const val DRIVER_AVAILABILITY_LOOKBACK_SECONDS = 10L * 60  // 10 min
+
     // Pre-ride events: short TTL (stale if not acted on quickly)
     const val DRIVER_AVAILABILITY_MINUTES = 30
     const val RIDE_OFFER_MINUTES = 15
