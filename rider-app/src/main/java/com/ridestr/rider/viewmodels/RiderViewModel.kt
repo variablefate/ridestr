@@ -714,6 +714,15 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 // Availability event ID for precise deletion matching on restore (direct offers only)
                 session.driverAvailabilityEventId?.let { put("driverAvailabilityEventId", it) }
 
+                // Batch RoadFlare tracking (pubkey → offerEventId)
+                if (contactedDrivers.isNotEmpty()) {
+                    val cdJson = JSONObject()
+                    for ((pubkey, eid) in contactedDrivers) {
+                        cdJson.put(pubkey, eid)
+                    }
+                    put("contactedDrivers", cdJson)
+                }
+
                 if (hasAcceptance) {
                     // Post-acceptance fields (always null/default pre-acceptance)
                     put("confirmationEventId", session.confirmationEventId)
@@ -993,6 +1002,17 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             for (i in 0 until arr.length()) activeFiatPaymentMethods.add(arr.getString(i))
         }
 
+        // Batch RoadFlare tracking (pubkey → offerEventId)
+        val restoredContactedDrivers = mutableMapOf<String, String>()
+        if (data.has("contactedDrivers")) {
+            val cdJson = data.getJSONObject("contactedDrivers")
+            val keys = cdJson.keys()
+            while (keys.hasNext()) {
+                val pubkey = keys.next()
+                restoredContactedDrivers[pubkey] = cdJson.getString(pubkey)
+            }
+        }
+
         // Reconstruct locations
         val pickupAddressLabel = if (data.has("pickupAddressLabel"))
             data.getString("pickupAddressLabel").takeIf { it.isNotEmpty() } else null
@@ -1033,25 +1053,50 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
 
+        // Restore batch RoadFlare state (unconditional clear makes restore authoritative)
+        contactedDrivers.clear()
+        contactedDrivers.putAll(restoredContactedDrivers)
+
         // Re-subscribe to acceptance events (driver may have accepted while app was killed)
         if (pendingOfferEventId != null) {
             if (isBroadcast) {
-                hasAcceptedDriver.set(false)  // Match setupOfferSubscriptions() pattern
-                subscribeToAcceptancesForBroadcast(pendingOfferEventId)
+                setupOfferSubscriptions(
+                    eventId = pendingOfferEventId,
+                    driverPubKey = "",
+                    isBroadcast = true,
+                    fromRestore = true
+                )
             } else {
                 val driverPubKey = offerTargetDriverPubKey ?: roadflareTargetDriverPubKey
                 if (driverPubKey != null) {
-                    subscribeToAcceptance(pendingOfferEventId, driverPubKey)
-                    // Issue #22: monitor driver availability (offline detection)
-                    if (!activeIsRoadflare) {
-                        subscribeToSelectedDriverAvailability(
-                            driverPubKey,
-                            driverAvailabilityEventId = savedAvailEventId,
-                            initialAvailabilityTimestamp = savedAvailTimestamp
-                        )
-                    }
+                    setupOfferSubscriptions(
+                        eventId = pendingOfferEventId,
+                        driverPubKey = driverPubKey,
+                        isBroadcast = false,
+                        driverAvailabilityEventId = savedAvailEventId,
+                        driverAvailabilityCreatedAt = savedAvailTimestamp,
+                        fromRestore = true
+                    )
                 }
             }
+
+            // Restore batch acceptance subscriptions for drivers 2-N
+            if (restoredContactedDrivers.size > 1
+                && stage == RideStage.WAITING_FOR_ACCEPTANCE
+                && !isBroadcast
+                && activeIsRoadflare
+            ) {
+                for ((pubkey, eventId) in restoredContactedDrivers) {
+                    if (eventId == pendingOfferEventId) continue  // First driver already has ACCEPTANCE sub
+                    myRideEventIds.add(eventId)  // Track for cleanup
+                    val batchSubId = nostrService.subscribeToAcceptance(eventId, pubkey) { acceptance ->
+                        handleBatchAcceptance(acceptance)
+                    }
+                    subs.setInGroup(SubKeys.BATCH_ACCEPTANCE, eventId, batchSubId)
+                }
+                Log.d(TAG, "Restored ${restoredContactedDrivers.size - 1} batch acceptance subscriptions")
+            }
+
             // Foreground service notification for all pre-acceptance restores
             RiderActiveService.startSearching(getApplication())
         }
@@ -1510,15 +1555,18 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         driverPubKey: String,
         isBroadcast: Boolean,
         driverAvailabilityEventId: String? = null,
-        driverAvailabilityCreatedAt: Long = 0L
+        driverAvailabilityCreatedAt: Long = 0L,
+        fromRestore: Boolean = false
     ) {
         myRideEventIds.add(eventId)
 
         if (isBroadcast) {
             hasAcceptedDriver.set(false)
             subscribeToAcceptancesForBroadcast(eventId)
-            startBroadcastTimeout()
-            RiderActiveService.startSearching(getApplication())
+            if (!fromRestore) {
+                startBroadcastTimeout()
+                RiderActiveService.startSearching(getApplication())
+            }
         } else {
             subscribeToAcceptance(eventId, driverPubKey)
             subscribeToSelectedDriverAvailability(
@@ -1526,7 +1574,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 driverAvailabilityEventId,
                 initialAvailabilityTimestamp = driverAvailabilityCreatedAt
             )
-            startAcceptanceTimeout()
+            if (!fromRestore) {
+                startAcceptanceTimeout()
+            }
         }
     }
 
@@ -1652,8 +1702,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         val fareEstimate = state.fareEstimate ?: return
         val fareWithBuffer = (fareEstimate * (1 + FEE_BUFFER_PERCENT)).toLong()
 
+        updateRideSession { copy(isSendingOffer = true) }
         viewModelScope.launch {
-            updateRideSession { copy(isSendingOffer = true) }
             if (!verifyWalletBalance(fareWithBuffer)) return@launch
 
             rideState = RideState.CANCELLED
@@ -1727,8 +1777,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
+        updateRideSession { copy(isSendingOffer = true) }
         viewModelScope.launch {
-            updateRideSession { copy(isSendingOffer = true) }
             rideState = RideState.CANCELLED
             clearRiderStateHistory()  // RoadFlare: clear BEFORE send
 
@@ -2235,6 +2285,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     handleBatchAcceptance(acceptance)
                 }
                 subs.setInGroup(SubKeys.BATCH_ACCEPTANCE, eventId, batchSubId)
+                saveRideState()  // Persist updated contactedDrivers for app restart recovery
             }
         }
     }
@@ -2579,8 +2630,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         val routeResult = state.routeResult ?: return
         val fareWithBuffer = (fareEstimate * (1 + FEE_BUFFER_PERCENT)).toLong()
 
+        updateRideSession { copy(isSendingOffer = true) }
         viewModelScope.launch {
-            updateRideSession { copy(isSendingOffer = true) }
             if (!verifyWalletBalance(fareWithBuffer)) return@launch
 
             val preimage = PaymentCrypto.generatePreimage()
