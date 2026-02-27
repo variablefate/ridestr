@@ -3085,6 +3085,15 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Check if this is a fare boost (same rider, different event)
         val isFareBoost = currentOffers.any { it.riderPubKey == offer.riderPubKey }
 
+        // Guard: if same rider already has a newer offer, skip stale relay delivery
+        if (isFareBoost) {
+            val existingFromSameRider = currentOffers.firstOrNull { it.riderPubKey == offer.riderPubKey }
+            if (existingFromSameRider != null && existingFromSameRider.createdAt >= offer.createdAt) {
+                Log.d(TAG, "Ignoring stale offer from same rider (existing: ${existingFromSameRider.createdAt}, incoming: ${offer.createdAt})")
+                return
+            }
+        }
+
         if (isNewOffer) {
             // Filter out stale offers AND any existing offer from same rider (fare boost case)
             val freshOffers = currentOffers.filter { existing ->
@@ -3443,6 +3452,15 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
             // Check if this is a fare boost (same rider, new event with higher fare)
             val isFareBoost = currentRequests.any { it.riderPubKey == request.riderPubKey }
+
+            // Guard: if same rider already has a newer broadcast request, skip stale relay delivery
+            if (isFareBoost) {
+                val existingFromSameRider = currentRequests.firstOrNull { it.riderPubKey == request.riderPubKey }
+                if (existingFromSameRider != null && existingFromSameRider.createdAt >= request.createdAt) {
+                    Log.d(TAG, "Ignoring stale broadcast request from same rider (existing: ${existingFromSameRider.createdAt}, incoming: ${request.createdAt})")
+                    return@subscribeToBroadcastRideRequests
+                }
+            }
 
             if (isNewRequest) {
                 val context = getApplication<Application>()

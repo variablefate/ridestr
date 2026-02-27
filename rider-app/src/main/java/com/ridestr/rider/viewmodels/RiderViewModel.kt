@@ -2513,7 +2513,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 isRoadflare = isRoadflare, isBroadcast = false,
                 statusMessage = "Waiting for driver to accept boosted offer...",
                 roadflareTargetPubKey = null, roadflareTargetLocation = null,
-                fiatPaymentMethods = session.activeFiatPaymentMethods
+                fiatPaymentMethods = if (isRoadflare && paymentMethod != com.ridestr.common.nostr.events.PaymentMethod.CASHU.value) {
+                    settingsManager.roadflarePaymentMethods.value
+                } else emptyList()
             )
 
             val eventId = sendOfferToNostr(params, pickupRoute)
