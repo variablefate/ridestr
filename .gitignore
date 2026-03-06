@@ -85,3 +85,7 @@ keystore.properties
 
 # Environment files (contain secrets)
 .env
+
+# Local development artifacts
+.config/
+commonMain/
