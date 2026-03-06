@@ -78,8 +78,8 @@ android {
 }
 
 dependencies {
-    // Common module
-    implementation(project(":common"))
+    // RoadFlare common module
+    implementation(project(":roadflare-common"))
 
     // Core Android
     implementation(libs.androidx.core.ktx)
