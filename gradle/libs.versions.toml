@@ -1,6 +1,8 @@
 [versions]
 agp = "8.13.2"
 kotlin = "2.3.0"
+ksp = "2.3.6"
+hilt = "2.58"
 composeDesktop = "1.7.3"
 coreKtx = "1.10.1"
 junit = "4.13.2"
@@ -9,6 +11,7 @@ espressoCore = "3.5.1"
 lifecycleRuntimeKtx = "2.6.1"
 activityCompose = "1.8.0"
 composeBom = "2024.09.00"
+datastorePreferences = "1.1.4"
 
 # Valhalla Mobile - Offline routing engine
 valhallaMobile = "0.3.0"
@@ -71,6 +74,14 @@ okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhtt
 # Image Loading
 coil-compose = { group = "io.coil-kt", name = "coil-compose", version.ref = "coil" }
 
+# Hilt - Dependency Injection
+hilt-android = { group = "com.google.dagger", name = "hilt-android", version.ref = "hilt" }
+hilt-compiler = { group = "com.google.dagger", name = "hilt-compiler", version.ref = "hilt" }
+hilt-navigation-compose = { group = "androidx.hilt", name = "hilt-navigation-compose", version = "1.2.0" }
+
+# DataStore
+datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastorePreferences" }
+
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 android-library = { id = "com.android.library", version.ref = "agp" }
@@ -78,4 +89,6 @@ kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
 compose-desktop = { id = "org.jetbrains.compose", version.ref = "composeDesktop" }
+ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
+hilt = { id = "com.google.dagger.hilt.android", version.ref = "hilt" }
 
