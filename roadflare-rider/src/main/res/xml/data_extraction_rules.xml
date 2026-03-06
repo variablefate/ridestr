@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="roadflare_secure_keys.xml" />
+        <exclude domain="sharedpref" path="roadflare_ride_session.xml" />
+        <exclude domain="sharedpref" path="roadflare_settings.xml" />
+        <exclude domain="sharedpref" path="__androidx_security_crypto_encrypted_file_pref__.xml" />
+        <exclude domain="sharedpref" path="roadflare_ride_history.xml" />
+        <exclude domain="sharedpref" path="roadflare_saved_locations.xml" />
+        <exclude domain="sharedpref" path="roadflare_vehicles.xml" />
+        <exclude domain="sharedpref" path="roadflare_followed_drivers.xml" />
+        <exclude domain="sharedpref" path="roadflare_driver_state.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="roadflare_secure_keys.xml" />
+        <exclude domain="sharedpref" path="roadflare_ride_session.xml" />
+        <exclude domain="sharedpref" path="roadflare_settings.xml" />
+        <exclude domain="sharedpref" path="__androidx_security_crypto_encrypted_file_pref__.xml" />
+        <exclude domain="sharedpref" path="roadflare_ride_history.xml" />
+        <exclude domain="sharedpref" path="roadflare_saved_locations.xml" />
+        <exclude domain="sharedpref" path="roadflare_vehicles.xml" />
+        <exclude domain="sharedpref" path="roadflare_followed_drivers.xml" />
+        <exclude domain="sharedpref" path="roadflare_driver_state.xml" />
+    </device-transfer>
+</data-extraction-rules>
