@@ -16,7 +16,7 @@ import kotlinx.coroutines.launch
  */
 class ProfileViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val nostrService = NostrService(application)
+    private val nostrService = NostrService.getInstance(application)
 
     private val _uiState = MutableStateFlow(ProfileUiState())
     val uiState: StateFlow<ProfileUiState> = _uiState.asStateFlow()

@@ -112,7 +112,7 @@ class RoadflareListenerService : Service() {
         // Initialize services
         settingsManager = SettingsManager.getInstance(this)
         driverRoadflareRepo = DriverRoadflareRepository.getInstance(this)
-        nostrService = NostrService(this, settingsManager!!.getEffectiveRelays())
+        nostrService = NostrService.getInstance(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -308,7 +308,7 @@ class RoadflareListenerService : Service() {
             nostrService?.relayManager?.closeSubscription(id)
         }
         subscriptionId = null
-        nostrService?.disconnect()
+        // Don't disconnect the singleton — other components share relay connections
         seenRequests.clear()
         riderNameCache.clear()
     }

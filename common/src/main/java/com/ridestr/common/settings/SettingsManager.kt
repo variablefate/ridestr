@@ -38,6 +38,7 @@ class SettingsManager internal constructor(context: Context) {
 
         // Onboarding
         private const val KEY_ONBOARDING_COMPLETED = "onboarding_completed"
+        private const val KEY_TILES_SETUP_COMPLETED = "tiles_setup_completed"
 
         // Debug settings
         private const val KEY_USE_GEOCODING_SEARCH = "use_geocoding_search"
@@ -384,6 +385,7 @@ class SettingsManager internal constructor(context: Context) {
      */
     fun setOnboardingCompleted(completed: Boolean) {
         prefs.edit().putBoolean(KEY_ONBOARDING_COMPLETED, completed).apply()
+        _onboardingCompleted.value = completed
     }
 
     /**
@@ -391,7 +393,25 @@ class SettingsManager internal constructor(context: Context) {
      */
     fun resetOnboarding() {
         prefs.edit().putBoolean(KEY_ONBOARDING_COMPLETED, false).apply()
+        _onboardingCompleted.value = false
     }
+
+    // Reactive StateFlow for onboarding completion (wraps existing getter)
+    private val _onboardingCompleted = MutableStateFlow(prefs.getBoolean(KEY_ONBOARDING_COMPLETED, false))
+    val onboardingCompleted: StateFlow<Boolean> = _onboardingCompleted.asStateFlow()
+
+    // Tile setup completion (separate from onboarding — tracks offline routing tile download)
+    private val _tilesSetupCompleted = MutableStateFlow(prefs.getBoolean(KEY_TILES_SETUP_COMPLETED, false))
+    val tilesSetupCompleted: StateFlow<Boolean> = _tilesSetupCompleted.asStateFlow()
+
+    fun setTilesSetupCompleted(completed: Boolean) {
+        prefs.edit().putBoolean(KEY_TILES_SETUP_COMPLETED, completed).apply()
+        _tilesSetupCompleted.value = completed
+    }
+
+    // Aliases for roadflare-rider compatibility
+    val notificationSound: StateFlow<Boolean> get() = notificationSoundEnabled
+    val notificationVibration: StateFlow<Boolean> get() = notificationVibrationEnabled
 
     // ===================
     // WALLET SETUP
@@ -797,6 +817,9 @@ class SettingsManager internal constructor(context: Context) {
         _roadflarePaymentMethods.value = emptyList()
         // Favorite LN addresses (Issue #14)
         _favoriteLnAddresses.value = emptyList()
+        // Onboarding + tile setup
+        _onboardingCompleted.value = false
+        _tilesSetupCompleted.value = false
         // RoadFlare + coordination state
         _ignoreFollowNotifications.value = false
         _roadflareAlertsEnabled.value = false

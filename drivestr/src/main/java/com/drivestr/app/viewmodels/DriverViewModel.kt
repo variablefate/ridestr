@@ -131,7 +131,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
     // Settings manager for user preferences
     private val settingsManager = com.ridestr.common.settings.SettingsManager.getInstance(application)
 
-    private val nostrService = NostrService(application)
+    private val nostrService = NostrService.getInstance(application)
 
     // Remote config for platform settings (fetched from admin pubkey Kind 30182)
     private val remoteConfigManager = com.ridestr.common.settings.RemoteConfigManager(application, nostrService.relayManager)
