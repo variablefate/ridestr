@@ -463,19 +463,15 @@ fun DrivestrApp() {
         }
     }
 
-    // Track if we're doing a key import (vs new key generation) for sync flow
-    var isKeyImport by remember { mutableStateOf(false) }
-
     // Note: Profile sync is now handled by the PROFILE_SYNC screen during onboarding,
     // not by a background LaunchedEffect. This ensures the sync completes before
     // the user sees onboarding screens that depend on synced data (like vehicles).
 
     // Auto-backup vehicles to Nostr when they change (with debounce)
     val vehicles by vehicleRepository.vehicles.collectAsState()
-    var lastVehicleBackupHash by remember { mutableStateOf(0) }
+    var lastVehicleBackupHash by remember { mutableStateOf(emptyList<Any>().hashCode()) }
     LaunchedEffect(vehicles, uiState.isLoggedIn) {
         if (!uiState.isLoggedIn) return@LaunchedEffect
-        if (vehicles.isEmpty()) return@LaunchedEffect
 
         // Use hash to detect actual changes (not just recomposition)
         val currentHash = vehicles.hashCode()
@@ -488,36 +484,53 @@ fun DrivestrApp() {
         if (vehicles.hashCode() == currentHash) {
             lastVehicleBackupHash = currentHash
             android.util.Log.d("MainActivity", "Auto-backing up vehicles to Nostr...")
-            profileSyncManager.backupProfileData()
+            profileSyncManager.backupProfileData(force = true)
         }
     }
 
     // Auto-backup settings to Nostr when they change (with debounce)
     val settingsHash by settingsManager.syncableSettingsHash.collectAsState(initial = 0)
-    var lastSettingsBackupHash by remember { mutableStateOf(0) }
+    var lastSettingsBackupHash by remember { mutableStateOf<Int?>(null) }
     LaunchedEffect(settingsHash, uiState.isLoggedIn) {
         if (!uiState.isLoggedIn) return@LaunchedEffect
         if (settingsHash == 0) return@LaunchedEffect
-        val currentHash = settingsHash
-        if (currentHash == lastSettingsBackupHash) return@LaunchedEffect
+        if (lastSettingsBackupHash == null) {
+            lastSettingsBackupHash = settingsHash
+            return@LaunchedEffect
+        }
+        if (settingsHash == lastSettingsBackupHash) return@LaunchedEffect
         // Debounce: wait 2 seconds before backing up
         kotlinx.coroutines.delay(2000)
         // After debounce, check if settingsHash changed (would trigger new LaunchedEffect)
         // If we get here and weren't cancelled, proceed with backup
-        lastSettingsBackupHash = currentHash
+        lastSettingsBackupHash = settingsHash
         android.util.Log.d("MainActivity", "Auto-backing up settings to Nostr...")
-        profileSyncManager.backupProfileData()
+        profileSyncManager.backupProfileData(force = true)
+    }
+
+    val customRelays by settingsManager.customRelays.collectAsState()
+    LaunchedEffect(customRelays, uiState.isLoggedIn) {
+        if (!uiState.isLoggedIn) return@LaunchedEffect
+        val effectiveRelays = settingsManager.getEffectiveRelays()
+        profileSyncManager.updateRelays(effectiveRelays)
+        val currentNostr = nostrService.relayManager.getRelayUrls().toSet()
+        val target = effectiveRelays.toSet()
+        (currentNostr - target).forEach { nostrService.relayManager.removeRelay(it) }
+        (target - currentNostr).forEach { nostrService.relayManager.addRelay(it) }
+        if (currentNostr != target) nostrService.relayManager.ensureConnected()
     }
 
     // Check if already logged in on first composition (only if not already at MAIN)
     // IMPORTANT: Don't navigate if showBackupReminder is true - let OnboardingScreen handle that
-    LaunchedEffect(uiState.isLoggedIn, uiState.isProfileCompleted, uiState.showBackupReminder) {
+    LaunchedEffect(uiState.isLoggedIn, uiState.isProfileCompleted, uiState.showBackupReminder, uiState.needsProfileSync) {
         if (uiState.isLoggedIn && !uiState.showBackupReminder && currentScreen == Screen.ONBOARDING) {
             nostrService.connect()
             nostrService.fetchAndCacheUserDisplayName()
 
             // Determine next screen based on completion status
             currentScreen = when {
+                // If profile sync needed, go to sync screen
+                uiState.needsProfileSync -> Screen.PROFILE_SYNC
                 // If onboarding fully completed, go to main
                 onboardingCompleted -> Screen.MAIN
                 // If profile not complete, go to profile setup
@@ -540,29 +553,26 @@ fun DrivestrApp() {
     Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
         when (currentScreen) {
             Screen.ONBOARDING -> {
-                val hasVehicles = vehicleRepository.vehicles.collectAsState().value.isNotEmpty()
-
                 OnboardingScreen(
                     viewModel = onboardingViewModel,
-                    onComplete = { wasKeyImport ->
+                    onComplete = {
                         nostrService.connect()
+                        nostrService.keyManager.refreshFromStorage()
+                        profileSyncManager.keyManager.refreshFromStorage()
 
-                        if (wasKeyImport) {
-                            // Key import - need to sync profile from Nostr first
-                            // CRITICAL: Refresh KeyManagers so they can read the imported key
-                            nostrService.keyManager.refreshFromStorage()
-                            profileSyncManager.keyManager.refreshFromStorage()
-                            isKeyImport = true
-                            currentScreen = Screen.PROFILE_SYNC
-                        } else {
-                            // New key generation - no profile to sync, go straight to setup
-                            isKeyImport = false
-                            currentScreen = when {
-                                !uiState.isProfileCompleted -> Screen.PROFILE_SETUP
-                                !hasVehicles -> Screen.VEHICLE_SETUP
-                                !settingsManager.isWalletSetupDone() -> Screen.WALLET_SETUP
-                                else -> Screen.LOCATION_PERMISSION
+                        val hasVehicles = vehicleRepository.vehicles.value.isNotEmpty()
+                        currentScreen = when {
+                            uiState.needsProfileSync -> Screen.PROFILE_SYNC
+                            onboardingCompleted -> Screen.MAIN
+                            !uiState.isProfileCompleted -> Screen.PROFILE_SETUP
+                            !hasVehicles -> Screen.VEHICLE_SETUP
+                            !settingsManager.isWalletSetupDone() -> Screen.WALLET_SETUP
+                            !hasLocationPermission -> Screen.LOCATION_PERMISSION
+                            hasTilesDownloaded.isNotEmpty() -> {
+                                settingsManager.setOnboardingCompleted(true)
+                                Screen.MAIN
                             }
+                            else -> Screen.TILE_SETUP
                         }
                     },
                     modifier = Modifier.padding(innerPadding)
@@ -580,6 +590,7 @@ fun DrivestrApp() {
                     isDriverApp = true,
                     onComplete = { restoredData ->
                         profileSyncManager.resetSyncState()
+                        onboardingViewModel.markProfileSyncCompleted()
                         // After sync, check what was restored and navigate appropriately
                         val hasVehicles = restoredData.vehicleCount > 0 ||
                                 vehicleRepository.vehicles.value.isNotEmpty()
@@ -593,6 +604,7 @@ fun DrivestrApp() {
                     },
                     onSkip = {
                         profileSyncManager.resetSyncState()
+                        onboardingViewModel.markProfileSyncCompleted()
                         // Skip sync, proceed with normal onboarding
                         val hasVehicles = vehicleRepository.vehicles.value.isNotEmpty()
                         currentScreen = when {
@@ -612,7 +624,7 @@ fun DrivestrApp() {
 
                 ProfileSetupScreen(
                     viewModel = profileViewModel,
-                    canSkip = isKeyImport,
+                    canSkip = uiState.needsProfileSync,
                     onComplete = {
                         // Start tile discovery early (before location permission)
                         tileDiscoveryService.startDiscovery()

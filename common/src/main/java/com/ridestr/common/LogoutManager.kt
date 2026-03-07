@@ -62,7 +62,11 @@ object LogoutManager {
         context.getSharedPreferences("profile_picture_prefs", Context.MODE_PRIVATE)
             .edit().clear().apply()
 
-        // 16. Reset ProfileSyncManager singleton (last — disconnects relays)
-        ProfileSyncManager.clearInstance()
+        // 16. Clean up ProfileSyncManager (don't null singleton — composables hold references)
+        ProfileSyncManager.getInstanceOrNull()?.let { syncManager ->
+            syncManager.keyManager.logout()
+            syncManager.disconnect()
+            syncManager.resetSyncState()
+        }
     }
 }

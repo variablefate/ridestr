@@ -11,43 +11,30 @@ import com.ridestr.common.ui.screens.BackupReminderScreen
 import com.ridestr.common.ui.screens.KeySetupScreen
 import com.roadflare.rider.R
 import com.roadflare.rider.viewmodels.OnboardingViewModel
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
 
-/**
- * @param onComplete Called when onboarding completes. The boolean indicates if the
- *                   user imported an existing key (true) vs generated a new one (false).
- */
 @Composable
 fun OnboardingScreen(
     viewModel: OnboardingViewModel,
-    onComplete: (wasKeyImport: Boolean) -> Unit,
+    onComplete: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val uiState by viewModel.uiState.collectAsState()
 
-    // Track whether this was a key import (for profile sync)
-    var wasKeyImport by remember { mutableStateOf(false) }
-
-    // Use snapshotFlow to ensure we read current state values, not stale ones
+    // One-shot: route to caller when login completes and backup reminder is dismissed.
     LaunchedEffect(Unit) {
         snapshotFlow { uiState.isLoggedIn to uiState.showBackupReminder }
-            .collect { (isLoggedIn, showBackupReminder) ->
-                if (isLoggedIn && !showBackupReminder) {
-                    // If no backup reminder shown, this was a key import (imports skip the reminder)
-                    // Note: wasKeyImport is set in KeySetupScreen when import button is clicked
-                    onComplete(wasKeyImport)
-                }
-            }
+            .filter { (isLoggedIn, showBackupReminder) -> isLoggedIn && !showBackupReminder }
+            .first()
+        onComplete()
     }
 
     when {
         uiState.showBackupReminder -> {
-            // New key generation - backup reminder is shown
             BackupReminderScreen(
                 nsec = viewModel.getNsecForBackup() ?: "",
-                onDismiss = {
-                    wasKeyImport = false  // This was a new key, not import
-                    viewModel.dismissBackupReminder()
-                }
+                onDismiss = { viewModel.dismissBackupReminder() }
             )
         }
         uiState.isLoggedIn -> {
@@ -65,14 +52,8 @@ fun OnboardingScreen(
                 headlineText = "Welcome to RoadFlare",
                 appLogoRes = R.drawable.ic_app_logo,
                 appLogoDescription = "RoadFlare logo",
-                onGenerateKey = {
-                    wasKeyImport = false
-                    viewModel.generateNewKey()
-                },
-                onImportKey = {
-                    wasKeyImport = true  // This IS an import
-                    viewModel.importKey(it)
-                },
+                onGenerateKey = { viewModel.generateNewKey() },
+                onImportKey = { viewModel.importKey(it) },
                 modifier = modifier
             )
         }

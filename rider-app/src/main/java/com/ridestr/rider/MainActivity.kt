@@ -229,73 +229,47 @@ fun RidestrApp() {
 
     // Subscribe to RoadFlare key share events (Kind 3186)
     // When a driver sends us their RoadFlare key, we store it and send back an acknowledgement
-    LaunchedEffect(Unit) {
-        // Wait for Nostr connection
-        kotlinx.coroutines.delay(2000)
+    LaunchedEffect(uiState.isLoggedIn) {
+        if (!uiState.isLoggedIn) return@LaunchedEffect
+        nostrService.keyManager.refreshFromStorage()
+        nostrService.ensureConnected()
+        nostrService.relayManager.awaitConnected(tag = "keyShareSub")
+
+        val asyncScope = this
 
         val subId = nostrService.subscribeToRoadflareKeyShares { event, relayUrl ->
-            android.util.Log.d("MainActivity", "Kind 3186 received: from=${event.pubKey.take(8)}, eventId=${event.id.take(8)}, relay=$relayUrl")
-
-            val signer = nostrService.keyManager.getSigner()
-            if (signer == null) {
-                android.util.Log.e("MainActivity", "Kind 3186: No signer available - cannot decrypt")
-                return@subscribeToRoadflareKeyShares
-            }
-
-            kotlinx.coroutines.runBlocking {
+            asyncScope.launch {
                 try {
-                    val keyShareData = RoadflareKeyShareEvent.parseAndDecrypt(signer, event)
-                    if (keyShareData != null) {
-                        android.util.Log.d("MainActivity", "Kind 3186 parsed OK: driver=${keyShareData.driverPubKey.take(8)}, version=${keyShareData.roadflareKey.version}")
+                    val signer = nostrService.keyManager.getSigner() ?: return@launch
+                    val data = RoadflareKeyShareEvent.parseAndDecrypt(signer, event) ?: return@launch
 
-                        // Update or add the driver with the new key
-                        val existingDriver = followedDriversRepo.drivers.value.find { it.pubkey == keyShareData.driverPubKey }
-                        if (existingDriver != null) {
-                            // Update existing driver with new key (including keyUpdatedAt)
-                            val updatedKey = keyShareData.roadflareKey.copy(keyUpdatedAt = keyShareData.keyUpdatedAt)
-                            followedDriversRepo.updateDriverKey(keyShareData.driverPubKey, updatedKey)
-                            android.util.Log.d("MainActivity", "Updated key for driver ${keyShareData.driverPubKey.take(16)} to v${keyShareData.roadflareKey.version}")
-                        } else {
-                            // Driver not in our list - they must have added us first
-                            // Add them with the key
-                            val newDriver = FollowedDriver(
-                                pubkey = keyShareData.driverPubKey,
-                                addedAt = System.currentTimeMillis() / 1000,
-                                note = "",
-                                roadflareKey = keyShareData.roadflareKey.copy(keyUpdatedAt = keyShareData.keyUpdatedAt)
-                            )
-                            followedDriversRepo.addDriver(newDriver)
-                            android.util.Log.d("MainActivity", "Added new driver ${keyShareData.driverPubKey.take(16)} with key v${keyShareData.roadflareKey.version}")
-                        }
-
-                        // Send acknowledgement back to driver (Kind 3188)
-                        val ackEventId = nostrService.publishRoadflareKeyAck(
-                            driverPubKey = keyShareData.driverPubKey,
-                            keyVersion = keyShareData.roadflareKey.version,
-                            keyUpdatedAt = keyShareData.keyUpdatedAt
-                        )
-                        if (ackEventId != null) {
-                            android.util.Log.d("MainActivity", "Sent key ack to driver ${keyShareData.driverPubKey.take(16)}")
-                        }
-
-                        // Backup updated state to Nostr
-                        profileSyncManager.backupProfileData()
-                    } else {
-                        android.util.Log.w("MainActivity", "Kind 3186 parse FAILED: from=${event.pubKey.take(8)}, eventId=${event.id.take(8)} (expired or wrong recipient)")
+                    if (data.driverPubKey != event.pubKey) {
+                        android.util.Log.w("MainActivity", "Kind 3186 driverPubKey mismatch: payload=${data.driverPubKey.take(8)} != event=${event.pubKey.take(8)}")
+                        return@launch
                     }
+
+                    val existingDriver = followedDriversRepo.drivers.value.find { it.pubkey == data.driverPubKey }
+                    if (existingDriver == null) {
+                        android.util.Log.d("MainActivity", "Kind 3186 from unknown driver ${data.driverPubKey.take(8)}, ignoring")
+                        return@launch
+                    }
+
+                    val updatedKey = data.roadflareKey.copy(keyUpdatedAt = data.keyUpdatedAt)
+                    followedDriversRepo.updateDriverKey(data.driverPubKey, updatedKey)
+
+                    nostrService.publishRoadflareKeyAck(
+                        driverPubKey = data.driverPubKey,
+                        keyVersion = data.roadflareKey.version,
+                        keyUpdatedAt = data.keyUpdatedAt
+                    )
+                    profileSyncManager.backupFollowedDrivers()
                 } catch (e: Exception) {
-                    android.util.Log.e("MainActivity", "Kind 3186 processing error: from=${event.pubKey.take(8)}", e)
+                    android.util.Log.e("MainActivity", "Kind 3186 processing error", e)
                 }
             }
         }
-        android.util.Log.d("MainActivity", "Subscribed to RoadFlare key shares: $subId")
 
-        try {
-            kotlinx.coroutines.awaitCancellation()
-        } finally {
-            subId?.let { nostrService.closeSubscription(it) }
-            android.util.Log.d("MainActivity", "Closed RoadFlare key share subscription: $subId")
-        }
+        try { kotlinx.coroutines.awaitCancellation() } finally { subId?.let { nostrService.closeSubscription(it) } }
     }
 
     // Observable sync state for potential UI feedback
@@ -303,10 +277,9 @@ fun RidestrApp() {
 
     // Auto-backup saved locations when they change (debounced)
     val savedLocations by savedLocationRepo.savedLocations.collectAsState()
-    var lastLocationBackupHash by remember { mutableStateOf(0) }
+    var lastLocationBackupHash by remember { mutableStateOf(emptyList<Any>().hashCode()) }
     LaunchedEffect(savedLocations, uiState.isLoggedIn) {
         if (!uiState.isLoggedIn) return@LaunchedEffect
-        if (savedLocations.isEmpty()) return@LaunchedEffect
         val currentHash = savedLocations.hashCode()
         if (currentHash == lastLocationBackupHash) return@LaunchedEffect
         // Debounce: wait 2 seconds before backing up
@@ -314,25 +287,40 @@ fun RidestrApp() {
         // Verify data hasn't changed during debounce
         if (savedLocations.hashCode() == currentHash) {
             lastLocationBackupHash = currentHash
-            profileSyncManager.backupProfileData()
+            profileSyncManager.backupProfileData(force = true)
         }
     }
 
     // Auto-backup settings to Nostr when they change (with debounce)
     val settingsHash by settingsManager.syncableSettingsHash.collectAsState(initial = 0)
-    var lastSettingsBackupHash by remember { mutableStateOf(0) }
+    var lastSettingsBackupHash by remember { mutableStateOf<Int?>(null) }
     LaunchedEffect(settingsHash, uiState.isLoggedIn) {
         if (!uiState.isLoggedIn) return@LaunchedEffect
         if (settingsHash == 0) return@LaunchedEffect
-        val currentHash = settingsHash
-        if (currentHash == lastSettingsBackupHash) return@LaunchedEffect
+        if (lastSettingsBackupHash == null) {
+            lastSettingsBackupHash = settingsHash
+            return@LaunchedEffect
+        }
+        if (settingsHash == lastSettingsBackupHash) return@LaunchedEffect
         // Debounce: wait 2 seconds before backing up
         kotlinx.coroutines.delay(2000)
         // After debounce, check if settingsHash changed (would trigger new LaunchedEffect)
         // If we get here and weren't cancelled, proceed with backup
-        lastSettingsBackupHash = currentHash
+        lastSettingsBackupHash = settingsHash
         android.util.Log.d("MainActivity", "Auto-backing up settings to Nostr...")
-        profileSyncManager.backupProfileData()
+        profileSyncManager.backupProfileData(force = true)
+    }
+
+    val customRelays by settingsManager.customRelays.collectAsState()
+    LaunchedEffect(customRelays, uiState.isLoggedIn) {
+        if (!uiState.isLoggedIn) return@LaunchedEffect
+        val effectiveRelays = settingsManager.getEffectiveRelays()
+        profileSyncManager.updateRelays(effectiveRelays)
+        val currentNostr = nostrService.relayManager.getRelayUrls().toSet()
+        val target = effectiveRelays.toSet()
+        (currentNostr - target).forEach { nostrService.relayManager.removeRelay(it) }
+        (target - currentNostr).forEach { nostrService.relayManager.addRelay(it) }
+        if (currentNostr != target) nostrService.relayManager.ensureConnected()
     }
 
     // Start Bitcoin price auto-refresh for USD display
@@ -407,21 +395,19 @@ fun RidestrApp() {
         }
     }
 
-    // Track if we're doing a key import (vs new key generation) for sync flow
-    var isKeyImport by remember { mutableStateOf(false) }
-
     // Note: Profile sync is now handled by the PROFILE_SYNC screen during onboarding,
     // not by a background LaunchedEffect. This ensures the sync completes before
     // the user sees onboarding screens that depend on synced data (like saved locations).
 
     // Check if already logged in on first composition (only if not already at MAIN)
     // IMPORTANT: Don't navigate if showBackupReminder is true - let OnboardingScreen handle that
-    LaunchedEffect(uiState.isLoggedIn, uiState.isProfileCompleted, uiState.showBackupReminder) {
+    LaunchedEffect(uiState.isLoggedIn, uiState.isProfileCompleted, uiState.showBackupReminder, uiState.needsProfileSync) {
         if (uiState.isLoggedIn && !uiState.showBackupReminder && currentScreen == Screen.ONBOARDING) {
             nostrService.connect()
 
             // Determine next screen based on completion status
             currentScreen = when {
+                uiState.needsProfileSync -> Screen.PROFILE_SYNC
                 // If onboarding fully completed, go to main
                 onboardingCompleted -> Screen.MAIN
                 // If profile not complete, go to profile setup
@@ -446,24 +432,22 @@ fun RidestrApp() {
             Screen.ONBOARDING -> {
                 OnboardingScreen(
                     viewModel = onboardingViewModel,
-                    onComplete = { wasKeyImport ->
+                    onComplete = {
                         nostrService.connect()
+                        nostrService.keyManager.refreshFromStorage()
+                        profileSyncManager.keyManager.refreshFromStorage()
 
-                        if (wasKeyImport) {
-                            // Key import - need to sync profile from Nostr first
-                            // CRITICAL: Refresh KeyManagers so they can read the imported key
-                            nostrService.keyManager.refreshFromStorage()
-                            profileSyncManager.keyManager.refreshFromStorage()
-                            isKeyImport = true
-                            currentScreen = Screen.PROFILE_SYNC
-                        } else {
-                            // New key generation - no profile to sync, go straight to setup
-                            isKeyImport = false
-                            currentScreen = if (uiState.isProfileCompleted) {
-                                Screen.LOCATION_PERMISSION
-                            } else {
-                                Screen.PROFILE_SETUP
+                        currentScreen = when {
+                            uiState.needsProfileSync -> Screen.PROFILE_SYNC
+                            onboardingCompleted -> Screen.MAIN
+                            !uiState.isProfileCompleted -> Screen.PROFILE_SETUP
+                            !settingsManager.isWalletSetupDone() -> Screen.WALLET_SETUP
+                            !hasLocationPermission -> Screen.LOCATION_PERMISSION
+                            hasTilesDownloaded.isNotEmpty() -> {
+                                settingsManager.setOnboardingCompleted(true)
+                                Screen.MAIN
                             }
+                            else -> Screen.TILE_SETUP
                         }
                     },
                     modifier = Modifier.padding(innerPadding)
@@ -481,6 +465,7 @@ fun RidestrApp() {
                     isDriverApp = false,  // Rider app
                     onComplete = { restoredData ->
                         profileSyncManager.resetSyncState()
+                        onboardingViewModel.markProfileSyncCompleted()
                         // After sync, navigate to next onboarding step
                         currentScreen = if (uiState.isProfileCompleted) {
                             if (settingsManager.isWalletSetupDone()) {
@@ -494,6 +479,7 @@ fun RidestrApp() {
                     },
                     onSkip = {
                         profileSyncManager.resetSyncState()
+                        onboardingViewModel.markProfileSyncCompleted()
                         // Skip sync, proceed with normal onboarding
                         currentScreen = if (uiState.isProfileCompleted) {
                             Screen.LOCATION_PERMISSION
@@ -509,7 +495,7 @@ fun RidestrApp() {
                 val profileViewModel: ProfileViewModel = viewModel()
                 ProfileSetupScreen(
                     viewModel = profileViewModel,
-                    canSkip = isKeyImport,
+                    canSkip = uiState.needsProfileSync,
                     onComplete = {
                         // Start tile discovery early (before location permission)
                         tileDiscoveryService.startDiscovery()

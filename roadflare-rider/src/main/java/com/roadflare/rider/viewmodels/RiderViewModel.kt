@@ -17,6 +17,7 @@ import com.ridestr.common.routing.TileDownloadService
 import com.ridestr.common.routing.TileManager
 import com.ridestr.common.routing.ValhallaRoutingService
 import com.ridestr.common.settings.SettingsManager
+import com.ridestr.common.sync.ProfileSyncManager
 import com.ridestr.common.util.FareCalculator
 import com.roadflare.rider.state.RideStage
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -181,6 +182,21 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         _fareEstimate.value = null
     }
 
+    fun swapLocations() {
+        val tempPickup = _pickupLocation.value
+        val tempDest = _destLocation.value
+        _pickupLocation.value = tempDest
+        _destLocation.value = tempPickup
+        _pickupSearchResults.value = emptyList()
+        _destSearchResults.value = emptyList()
+        _fareEstimate.value = null
+        recalculateFare()
+    }
+
+    fun pinWithNickname(id: String, nickname: String?) = savedLocationRepository.pinAsFavorite(id, nickname)
+    fun unpinFavorite(id: String) = savedLocationRepository.unpinFavorite(id)
+    fun removeSavedLocation(id: String) = savedLocationRepository.removeLocation(id)
+
     fun setPickupFromGps(lat: Double, lon: Double) {
         lastGpsLat = lat
         lastGpsLon = lon
@@ -292,5 +308,11 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         } catch (e: Exception) {
             android.util.Log.e("RiderViewModel", "Failed to clear settings on logout", e)
         }
+
+        // Clean up ProfileSyncManager (don't null singleton — composables hold references)
+        val syncManager = ProfileSyncManager.getInstance(getApplication())
+        syncManager.keyManager.logout()
+        syncManager.disconnect()
+        syncManager.resetSyncState()
     }
 }

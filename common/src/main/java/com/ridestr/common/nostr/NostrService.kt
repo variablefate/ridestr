@@ -1140,6 +1140,9 @@ class NostrService internal constructor(
      */
     suspend fun fetchProfileBackup(): ProfileBackupData? = profileBackupService.fetchProfileBackup()
 
+    suspend fun fetchProfileBackupResult(): ProfileFetchResult =
+        profileBackupService.fetchProfileBackupResult()
+
     // ==================== Vehicle Backup (DEPRECATED) ====================
 
     /**

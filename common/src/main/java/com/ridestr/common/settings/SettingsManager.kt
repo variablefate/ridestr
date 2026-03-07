@@ -737,6 +737,12 @@ class SettingsManager internal constructor(context: Context) {
     // ===================
 
     /**
+     * Returns true if any syncable setting differs from defaults.
+     * Used by ProfileSyncAdapter.hasLocalData() and publishToNostr() guards.
+     */
+    fun hasCustomSettings(): Boolean = toBackupData() != SettingsBackup()
+
+    /**
      * Export current settings to a backup data object for Nostr sync.
      * Only includes user-facing settings, not internal state.
      */

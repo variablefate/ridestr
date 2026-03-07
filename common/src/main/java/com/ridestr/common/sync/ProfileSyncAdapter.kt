@@ -6,8 +6,10 @@ import com.ridestr.common.data.SavedLocationRepository
 import com.ridestr.common.data.Vehicle
 import com.ridestr.common.data.VehicleRepository
 import com.ridestr.common.nostr.NostrService
+import com.ridestr.common.nostr.ProfileFetchResult
 import com.ridestr.common.nostr.events.ProfileBackupEvent
 import com.ridestr.common.nostr.events.RideshareEventKinds
+import com.ridestr.common.nostr.events.SettingsBackup
 import com.ridestr.common.nostr.relay.RelayManager
 import com.ridestr.common.settings.SettingsManager
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
@@ -79,7 +81,7 @@ class ProfileSyncAdapter(
                 }
 
                 // Restore settings
-                val hadSettings = profileData.settings != null
+                val hadSettings = profileData.settings != SettingsBackup()
                 settingsManager.restoreFromBackup(profileData.settings)
                 Log.d(TAG, "Restored settings")
 
@@ -159,8 +161,25 @@ class ProfileSyncAdapter(
         return try {
             Log.d(TAG, "Backing up profile to Nostr...")
 
-            // Fetch existing profile to preserve data from other app (rider/driver)
-            val existingProfile = nostrService.fetchProfileBackup()
+            // Typed fetch — distinguishes "not found" from transient errors
+            val fetchResult = nostrService.fetchProfileBackupResult()
+            val hasNullRepo = vehicleRepository == null || savedLocationRepository == null
+
+            // Cross-app safety: if we can't merge safely, skip publish
+            val existingProfile = when (fetchResult) {
+                is ProfileFetchResult.Found -> fetchResult.data
+                is ProfileFetchResult.NotFound -> null  // Safe: no prior data to overwrite
+                is ProfileFetchResult.FetchFailed -> {
+                    if (hasNullRepo) {
+                        // Can't safely merge — the other app's data might exist but
+                        // we can't see it due to transient failure. Skip to prevent overwrite.
+                        Log.w(TAG, "Skipping profile backup: fetch failed (${fetchResult.reason}) and null repo(s) prevent safe merge")
+                        return null
+                    }
+                    // Both repos present — all data is local, safe to publish
+                    null
+                }
+            }
 
             // Use local data if we have the repository, otherwise preserve existing Nostr data
             val vehicles = vehicleRepository?.vehicles?.value
@@ -170,12 +189,6 @@ class ProfileSyncAdapter(
                 ?: existingProfile?.savedLocations
                 ?: emptyList()
             val settings = settingsManager.toBackupData()
-
-            // Only publish if there's something to backup
-            if (vehicles.isEmpty() && savedLocations.isEmpty()) {
-                Log.d(TAG, "No profile data to backup (no vehicles or locations)")
-                return null
-            }
 
             val eventId = nostrService.publishProfileBackup(vehicles, savedLocations, settings)
             if (eventId != null) {
@@ -193,7 +206,8 @@ class ProfileSyncAdapter(
     override fun hasLocalData(): Boolean {
         val hasVehicles = vehicleRepository?.hasVehicles() == true
         val hasLocations = savedLocationRepository?.hasLocations() == true
-        return hasVehicles || hasLocations
+        val hasSettings = settingsManager.hasCustomSettings()
+        return hasVehicles || hasLocations || hasSettings
     }
 
     override fun clearLocalData() {
@@ -210,7 +224,9 @@ class ProfileSyncAdapter(
         return try {
             val backup = nostrService.fetchProfileBackup()
             if (backup != null) {
-                return backup.vehicles.isNotEmpty() || backup.savedLocations.isNotEmpty()
+                return backup.vehicles.isNotEmpty() ||
+                        backup.savedLocations.isNotEmpty() ||
+                        backup.settings != SettingsBackup()
             }
 
             // Check legacy backups

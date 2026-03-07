@@ -1,6 +1,7 @@
 package com.drivestr.app.viewmodels
 
 import android.app.Application
+import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import com.ridestr.common.nostr.keys.KeyManager
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -13,6 +14,7 @@ import kotlinx.coroutines.flow.asStateFlow
 class OnboardingViewModel(application: Application) : AndroidViewModel(application) {
 
     private val keyManager = KeyManager(application)
+    private val syncPrefs = application.getSharedPreferences("drivestr_sync", Context.MODE_PRIVATE)
 
     private val _uiState = MutableStateFlow(OnboardingUiState())
     val uiState: StateFlow<OnboardingUiState> = _uiState.asStateFlow()
@@ -23,7 +25,8 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
             _uiState.value = OnboardingUiState(
                 isLoggedIn = true,
                 isProfileCompleted = keyManager.isProfileCompleted(),
-                npub = keyManager.getNpub()
+                npub = keyManager.getNpub(),
+                needsProfileSync = syncPrefs.getBoolean("needs_profile_sync", false)
             )
         }
     }
@@ -63,10 +66,12 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         val success = keyManager.importKey(keyInput)
         if (success) {
             keyManager.markProfileCompleted()
+            syncPrefs.edit().putBoolean("needs_profile_sync", true).apply()
             _uiState.value = OnboardingUiState(
                 isLoggedIn = true,
                 isProfileCompleted = true,
-                npub = keyManager.getNpub()
+                npub = keyManager.getNpub(),
+                needsProfileSync = true
             )
         } else {
             _uiState.value = _uiState.value.copy(
@@ -89,9 +94,18 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     /**
+     * Mark profile sync as completed (clears both persisted and in-memory).
+     */
+    fun markProfileSyncCompleted() {
+        syncPrefs.edit().putBoolean("needs_profile_sync", false).apply()
+        _uiState.value = _uiState.value.copy(needsProfileSync = false)
+    }
+
+    /**
      * Log out and clear the stored key.
      */
     fun logout() {
+        syncPrefs.edit().putBoolean("needs_profile_sync", false).apply()
         keyManager.logout()
         _uiState.value = OnboardingUiState()
     }
@@ -111,5 +125,6 @@ data class OnboardingUiState(
     val isLoading: Boolean = false,
     val npub: String? = null,
     val error: String? = null,
-    val showBackupReminder: Boolean = false
+    val showBackupReminder: Boolean = false,
+    val needsProfileSync: Boolean = false
 )

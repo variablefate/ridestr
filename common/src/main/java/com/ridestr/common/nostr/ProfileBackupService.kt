@@ -15,6 +15,13 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
+/** Typed result for profile backup fetch — distinguishes "not found" from transient errors. */
+sealed class ProfileFetchResult {
+    data class Found(val data: ProfileBackupData) : ProfileFetchResult()
+    data object NotFound : ProfileFetchResult()
+    data class FetchFailed(val reason: String) : ProfileFetchResult()
+}
+
 /**
  * Service for managing user profile data backup and sync via Nostr relays.
  *
@@ -346,6 +353,91 @@ class ProfileBackupService(
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to fetch profile backup", e)
                 null
+            }
+        }
+    }
+
+    /**
+     * Typed variant of fetchProfileBackup() that distinguishes "not found" from transient errors.
+     * Used by publishToNostr() to safely decide whether to publish empty data.
+     *
+     * Returns NotFound when a strict majority of connected relays sent EOSE and no event
+     * was received. After first event arrives, waits a short settle window for fresher copies.
+     */
+    suspend fun fetchProfileBackupResult(): ProfileFetchResult {
+        val signer = keyManager.getSigner()
+        val myPubKey = keyManager.getPubKeyHex()
+        if (signer == null || myPubKey == null) {
+            return ProfileFetchResult.FetchFailed("Not logged in")
+        }
+
+        return withContext(Dispatchers.IO) {
+            if (!relayManager.awaitConnected(tag = "fetchProfileBackup")) {
+                return@withContext ProfileFetchResult.FetchFailed("No relays connected")
+            }
+
+            try {
+                val totalConfigured = relayManager.getRelayUrls().size
+                val connectedNow = relayManager.connectedCount()
+                val minConnected = totalConfigured / 2 + 1
+                if (connectedNow < minConnected) {
+                    return@withContext ProfileFetchResult.FetchFailed(
+                        "Insufficient relay connectivity ($connectedNow/$totalConfigured connected, need $minConnected)"
+                    )
+                }
+
+                val expectedEose = connectedNow
+                val majorityThreshold = expectedEose / 2 + 1
+                val eoseRelays = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+                val receivedEvents = java.util.concurrent.ConcurrentLinkedQueue<com.vitorpamplona.quartz.nip01Core.core.Event>()
+                val firstEventReceived = CompletableDeferred<Unit>()
+                val majorityEose = CompletableDeferred<Unit>()
+
+                val subscriptionId = relayManager.subscribe(
+                    kinds = listOf(RideshareEventKinds.PROFILE_BACKUP),
+                    authors = listOf(myPubKey),
+                    tags = mapOf("d" to listOf(ProfileBackupEvent.D_TAG)),
+                    limit = 1,
+                    onEose = { relayUrl ->
+                        eoseRelays.add(relayUrl)
+                        if (eoseRelays.size >= majorityThreshold) majorityEose.complete(Unit)
+                    }
+                ) { event, relayUrl ->
+                    receivedEvents.add(event)
+                    firstEventReceived.complete(Unit)
+                }
+
+                // Wait for first event, majority EOSEs, or timeout
+                withTimeoutOrNull(8000L) {
+                    kotlinx.coroutines.selects.select<Unit> {
+                        firstEventReceived.onAwait {}
+                        majorityEose.onAwait {}
+                    }
+                }
+
+                // Settle window: after first event, wait for fresher copies from slower relays
+                if (receivedEvents.isNotEmpty() && !majorityEose.isCompleted) {
+                    withTimeoutOrNull(500L) { majorityEose.await() }
+                }
+                if (receivedEvents.isEmpty() && majorityEose.isCompleted) delay(200)
+
+                relayManager.closeSubscription(subscriptionId)
+
+                if (receivedEvents.isNotEmpty()) {
+                    for (event in receivedEvents.sortedByDescending { it.createdAt }) {
+                        val parsed = ProfileBackupEvent.parseAndDecrypt(signer, event)
+                        if (parsed != null) return@withContext ProfileFetchResult.Found(parsed)
+                    }
+                    return@withContext ProfileFetchResult.FetchFailed("All ${receivedEvents.size} event(s) failed parse/decrypt")
+                }
+
+                when {
+                    eoseRelays.size >= majorityThreshold -> ProfileFetchResult.NotFound
+                    else -> ProfileFetchResult.FetchFailed("Timeout before majority EOSE (${eoseRelays.size}/$expectedEose relays responded, need $majorityThreshold)")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to fetch profile backup", e)
+                ProfileFetchResult.FetchFailed(e.message ?: "Unknown error")
             }
         }
     }

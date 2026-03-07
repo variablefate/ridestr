@@ -84,6 +84,12 @@ class ProfileSyncManager private constructor(
             INSTANCE?.disconnect()
             INSTANCE = null
         }
+
+        /**
+         * Returns the existing singleton without force-creating.
+         * Used by LogoutManager to avoid allocating resources during cleanup.
+         */
+        fun getInstanceOrNull(): ProfileSyncManager? = INSTANCE
     }
 
     /**
@@ -483,7 +489,7 @@ class ProfileSyncManager private constructor(
      * This is a lightweight backup that only syncs the Profile adapter,
      * not all syncables like backupAll() does.
      */
-    suspend fun backupProfileData() = withContext(Dispatchers.IO) {
+    suspend fun backupProfileData(force: Boolean = false) = withContext(Dispatchers.IO) {
         val signer = keyManager.getSigner()
         if (signer == null) {
             Log.d(TAG, "backupProfileData: No signer available - skipping")
@@ -497,7 +503,7 @@ class ProfileSyncManager private constructor(
             return@withContext
         }
 
-        if (!profileAdapter.hasLocalData()) {
+        if (!force && !profileAdapter.hasLocalData()) {
             Log.d(TAG, "backupProfileData: No local data to backup")
             return@withContext
         }
@@ -573,6 +579,22 @@ class ProfileSyncManager private constructor(
             } else {
                 Log.e(TAG, "backupFollowedDrivers: Failed to publish")
             }
+        }
+    }
+
+    /**
+     * Update relay URLs to match current settings.
+     * Diffs against current relays and adds/removes as needed.
+     */
+    fun updateRelays(newUrls: List<String>) {
+        val currentUrls = relayManager.getRelayUrls().toSet()
+        val targetUrls = newUrls.toSet()
+        val toRemove = currentUrls - targetUrls
+        val toAdd = targetUrls - currentUrls
+        toRemove.forEach { relayManager.removeRelay(it) }
+        toAdd.forEach { relayManager.addRelay(it) }
+        if (toRemove.isNotEmpty() || toAdd.isNotEmpty()) {
+            relayManager.ensureConnected()
         }
     }
 

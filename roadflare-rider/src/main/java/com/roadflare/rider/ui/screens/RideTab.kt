@@ -10,6 +10,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Flare
+import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -22,8 +24,10 @@ import androidx.core.content.ContextCompat
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.ridestr.common.nostr.events.Location
-import com.roadflare.rider.state.RideStage
+import com.ridestr.common.ui.FavoritesSection
 import com.ridestr.common.ui.LocationSearchField
+import com.ridestr.common.ui.RecentsSection
+import com.roadflare.rider.state.RideStage
 import com.roadflare.rider.viewmodels.ChatMessage
 import com.roadflare.rider.viewmodels.DriverInfo
 import com.roadflare.rider.viewmodels.RideSession
@@ -144,173 +148,257 @@ private fun IdleContent(
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text(
-            text = "Send a RoadFlare",
-            style = MaterialTheme.typography.headlineMedium,
-            fontWeight = FontWeight.Bold
-        )
-
-        Text(
-            text = "Set your pickup and destination, then light the flare to request a ride from your driver network.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-
-        Spacer(modifier = Modifier.height(4.dp))
-
-        // Pickup location search
-        LocationSearchField(
-            value = pickupQuery,
-            onValueChange = { newValue ->
-                pickupQuery = newValue
-                if (newValue.isEmpty()) viewModel.clearPickup()
-            },
-            selectedLocation = pickupLocation,
-            onLocationSelected = { result ->
-                viewModel.selectPickupFromSearch(result)
-                pickupQuery = ""
-            },
-            searchResults = pickupSearchResults,
-            isSearching = isSearchingPickup,
-            onSearch = { viewModel.searchPickupLocations(it) },
-            placeholder = "Search pickup address...",
-            label = "Pickup",
-            showMyLocation = true,
-            onUseMyLocation = {
-                if (hasLocationPermission) {
-                    scope.launch {
-                        try {
-                            val client = LocationServices.getFusedLocationProviderClient(context)
-                            val location = client.getCurrentLocation(
-                                Priority.PRIORITY_HIGH_ACCURACY, null
-                            ).await()
-                            if (location != null) {
-                                viewModel.setPickupFromGps(location.latitude, location.longitude)
-                                pickupQuery = ""
-                            }
-                        } catch (_: Exception) { }
-                    }
-                } else {
-                    locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
-                }
-            },
-            modifier = Modifier.fillMaxWidth()
-        )
-
-        // Swap button
-        if (pickupLocation != null || destLocation != null) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center
+        // Main card
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
             ) {
-                IconButton(onClick = {
-                    val tempPickup = pickupLocation
-                    val tempDest = destLocation
-                    if (tempDest != null) {
-                        viewModel.clearPickup()
-                        viewModel.clearDest()
-                        // Swap by setting each to the other's value
-                        viewModel.setPickupFromGps(tempDest.lat, tempDest.lon)
-                    }
-                    // Note: full swap would need setDestFromGps which we could add
-                }) {
-                    Icon(
-                        Icons.Default.SwapVert,
-                        contentDescription = "Swap pickup and destination"
-                    )
-                }
-            }
-        }
-
-        // Destination location search
-        LocationSearchField(
-            value = destQuery,
-            onValueChange = { newValue ->
-                destQuery = newValue
-                if (newValue.isEmpty()) viewModel.clearDest()
-            },
-            selectedLocation = destLocation,
-            onLocationSelected = { result ->
-                viewModel.selectDestFromSearch(result)
-                destQuery = ""
-            },
-            searchResults = destSearchResults,
-            isSearching = isSearchingDest,
-            onSearch = { viewModel.searchDestLocations(it) },
-            placeholder = "Search destination...",
-            label = "Destination",
-            modifier = Modifier.fillMaxWidth()
-        )
-
-        // Route estimate display (fare hidden until driver list)
-        fareEstimate?.let { route ->
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.secondaryContainer
-                )
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "Route Estimate",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onSecondaryContainer
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceEvenly
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(
-                                text = "${String.format("%.1f", route.distanceMiles)} mi",
-                                style = MaterialTheme.typography.headlineSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSecondaryContainer
-                            )
-                            Text(
-                                text = "Distance",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSecondaryContainer
-                            )
-                        }
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(
-                                text = "${route.durationMinutes} min",
-                                style = MaterialTheme.typography.headlineSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSecondaryContainer
-                            )
-                            Text(
-                                text = "Duration",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSecondaryContainer
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        if (isCalculatingFare) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "Calculating fare...",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    text = "Where are you going?",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
                 )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Pickup section
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Default.Place,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Pickup",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                LocationSearchField(
+                    value = pickupQuery,
+                    onValueChange = { newValue ->
+                        pickupQuery = newValue
+                        if (newValue.isEmpty()) viewModel.clearPickup()
+                    },
+                    selectedLocation = pickupLocation,
+                    onLocationSelected = { result ->
+                        viewModel.selectPickupFromSearch(result)
+                        pickupQuery = ""
+                    },
+                    searchResults = pickupSearchResults,
+                    isSearching = isSearchingPickup,
+                    onSearch = { viewModel.searchPickupLocations(it) },
+                    placeholder = "Search pickup address...",
+                    showMyLocation = true,
+                    onUseMyLocation = {
+                        if (hasLocationPermission) {
+                            scope.launch {
+                                try {
+                                    val client = LocationServices.getFusedLocationProviderClient(context)
+                                    val location = client.getCurrentLocation(
+                                        Priority.PRIORITY_HIGH_ACCURACY, null
+                                    ).await()
+                                    if (location != null) {
+                                        viewModel.setPickupFromGps(location.latitude, location.longitude)
+                                        pickupQuery = ""
+                                    }
+                                } catch (_: Exception) { }
+                            }
+                        } else {
+                            locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                // Swap button
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    if (pickupLocation != null || destLocation != null) {
+                        IconButton(onClick = { viewModel.swapLocations() }) {
+                            Icon(
+                                Icons.Default.SwapVert,
+                                contentDescription = "Swap pickup and destination",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    } else {
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+                }
+
+                // Destination section
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Default.LocationOn,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Destination",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                LocationSearchField(
+                    value = destQuery,
+                    onValueChange = { newValue ->
+                        destQuery = newValue
+                        if (newValue.isEmpty()) viewModel.clearDest()
+                    },
+                    selectedLocation = destLocation,
+                    onLocationSelected = { result ->
+                        viewModel.selectDestFromSearch(result)
+                        destQuery = ""
+                    },
+                    searchResults = destSearchResults,
+                    isSearching = isSearchingDest,
+                    onSearch = { viewModel.searchDestLocations(it) },
+                    placeholder = "Search destination...",
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                // Saved locations (when either field is empty)
+                if (pickupLocation == null || destLocation == null) {
+                    val allSaved by viewModel.savedLocations.collectAsState()
+                    val favorites = allSaved.filter { it.isPinned }.sortedBy { it.nickname ?: it.displayName }
+                    val recents = allSaved.filter { !it.isPinned }.sortedByDescending { it.timestampMs }
+
+                    if (favorites.isNotEmpty() || recents.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = "Saved Places",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        val populatePickup = pickupLocation == null
+
+                        FavoritesSection(
+                            favorites = favorites,
+                            onLocationSelected = { loc ->
+                                val result = loc.toGeocodingResult()
+                                if (populatePickup) {
+                                    viewModel.selectPickupFromSearch(result)
+                                    pickupQuery = ""
+                                } else {
+                                    viewModel.selectDestFromSearch(result)
+                                    destQuery = ""
+                                }
+                            },
+                            onUpdateNickname = { id, nick -> viewModel.pinWithNickname(id, nick) },
+                            onUnpin = { id -> viewModel.unpinFavorite(id) },
+                            onDelete = { id -> viewModel.removeSavedLocation(id) }
+                        )
+
+                        RecentsSection(
+                            recents = recents,
+                            onLocationSelected = { loc ->
+                                val result = loc.toGeocodingResult()
+                                if (populatePickup) {
+                                    viewModel.selectPickupFromSearch(result)
+                                    pickupQuery = ""
+                                } else {
+                                    viewModel.selectDestFromSearch(result)
+                                    destQuery = ""
+                                }
+                            },
+                            onPinWithNickname = { id, nick -> viewModel.pinWithNickname(id, nick) },
+                            onDelete = { id -> viewModel.removeSavedLocation(id) }
+                        )
+                    }
+                }
+
+                // Route info (when both locations are set)
+                if (pickupLocation != null && destLocation != null) {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    HorizontalDivider()
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    fareEstimate?.let { route ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceEvenly
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    text = "${String.format("%.1f", route.distanceMiles)} mi",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Distance",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    text = "${route.durationMinutes} min",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Duration",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    text = "$${String.format("%.2f", route.fareUsd)}",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Est. Fare",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+
+                    if (isCalculatingFare) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Calculating route...",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
             }
         }
 
-        Spacer(modifier = Modifier.weight(1f))
-
-        // Driver count info
+        // Driver count warning
         if (drivers.isEmpty()) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -326,6 +414,8 @@ private fun IdleContent(
                 )
             }
         }
+
+        Spacer(modifier = Modifier.weight(1f))
 
         // Send RoadFlare button
         Button(
