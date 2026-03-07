@@ -124,7 +124,6 @@ class ProfileViewModel(application: Application) : AndroidViewModel(application)
     override fun onCleared() {
         super.onCleared()
         profileSubscriptionId?.let { nostrService.closeSubscription(it) }
-        nostrService.disconnect()
     }
 }
 

@@ -1,6 +1,10 @@
 package com.ridestr.common
 
 import com.ridestr.common.nostr.events.*
+import com.vitorpamplona.quartz.nip01Core.core.Event
+import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
+import io.mockk.*
+import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
@@ -208,5 +212,91 @@ class RoadflareWiringTest {
             createdAt = 0
         )
         assertNull(data.paymentMethod)
+    }
+
+    // ==================
+    // Event creation tag verification (MockK-based)
+    // Verifies createBroadcast() produces the actual tags that
+    // drivestr's RoadflareListenerService subscribes to.
+    // ==================
+
+    private fun createMockSigner(): Pair<NostrSigner, CapturingSlot<Array<Array<String>>>> {
+        val tagsSlot = slot<Array<Array<String>>>()
+        val mockSigner = mockk<NostrSigner>(relaxed = true)
+        val mockEvent = mockk<Event>(relaxed = true)
+
+        coEvery {
+            mockSigner.sign<Event>(
+                createdAt = any(),
+                kind = any(),
+                tags = capture(tagsSlot),
+                content = any()
+            )
+        } returns mockEvent
+
+        return Pair(mockSigner, tagsSlot)
+    }
+
+    @Test
+    fun `createBroadcast with isRoadflare=true produces roadflare t-tag`() = runBlocking {
+        val (mockSigner, tagsSlot) = createMockSigner()
+
+        RideOfferEvent.createBroadcast(
+            signer = mockSigner,
+            pickup = Location(36.0, -115.0),
+            destination = Location(36.1, -115.1),
+            fareEstimate = 10.0,
+            routeDistanceKm = 12.0,
+            routeDurationMin = 15.0,
+            isRoadflare = true
+        )
+
+        val tags = tagsSlot.captured
+        val tTags = tags.filter { it[0] == "t" }.map { it[1] }
+        assertTrue("Expected 'roadflare' in t-tags: $tTags", tTags.contains("roadflare"))
+        assertTrue("Expected 'rideshare' in t-tags: $tTags", tTags.contains("rideshare"))
+        assertTrue("Expected 'ride-request' in t-tags: $tTags", tTags.contains("ride-request"))
+    }
+
+    @Test
+    fun `createBroadcast with isRoadflare=false has no roadflare t-tag`() = runBlocking {
+        val (mockSigner, tagsSlot) = createMockSigner()
+
+        RideOfferEvent.createBroadcast(
+            signer = mockSigner,
+            pickup = Location(36.0, -115.0),
+            destination = Location(36.1, -115.1),
+            fareEstimate = 10.0,
+            routeDistanceKm = 12.0,
+            routeDurationMin = 15.0,
+            isRoadflare = false
+        )
+
+        val tags = tagsSlot.captured
+        val tTags = tags.filter { it[0] == "t" }.map { it[1] }
+        assertFalse("Unexpected 'roadflare' in t-tags", tTags.contains("roadflare"))
+        // rideshare and ride-request should still be present
+        assertTrue("Expected 'rideshare' in t-tags: $tTags", tTags.contains("rideshare"))
+        assertTrue("Expected 'ride-request' in t-tags: $tTags", tTags.contains("ride-request"))
+    }
+
+    @Test
+    fun `createBroadcast includes geohash tags for pickup location`() = runBlocking {
+        val (mockSigner, tagsSlot) = createMockSigner()
+
+        RideOfferEvent.createBroadcast(
+            signer = mockSigner,
+            pickup = Location(36.0, -115.0),
+            destination = Location(36.1, -115.1),
+            fareEstimate = 10.0,
+            routeDistanceKm = 12.0,
+            routeDurationMin = 15.0
+        )
+
+        val tags = tagsSlot.captured
+        val gTags = tags.filter { it[0] == "g" }
+        // Should have geohash tags at precision 3, 4, and 5
+        assertTrue("Expected geohash tags, got none", gTags.isNotEmpty())
+        assertTrue("Expected at least 3 geohash tags (precision 3-5)", gTags.size >= 3)
     }
 }

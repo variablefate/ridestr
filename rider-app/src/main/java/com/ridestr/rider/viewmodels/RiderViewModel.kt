@@ -5248,7 +5248,6 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         bridgePendingPollJob?.cancel()
         roadflareBatchJob?.cancel()
         subs.closeAll()
-        nostrService.disconnect()
         bitcoinPriceService.cleanup()
     }
 

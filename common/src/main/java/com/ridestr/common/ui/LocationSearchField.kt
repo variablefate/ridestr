@@ -73,7 +73,7 @@ fun LocationSearchField(
     }
 
     // Show dropdown when we have results and field is focused
-    showDropdown = isFocused && (searchResults.isNotEmpty() || isSearching) && selectedLocation == null
+    showDropdown = isFocused && selectedLocation == null && (value.isNotEmpty() || showMyLocation)
 
     Column(modifier = modifier) {
         // Label if provided

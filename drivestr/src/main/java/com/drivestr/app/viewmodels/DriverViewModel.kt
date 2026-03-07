@@ -4097,7 +4097,6 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         confirmationTimeoutJob?.cancel()
         pinVerificationTimeoutJob?.cancel()
         subs.closeAll()
-        nostrService.disconnect()
         bitcoinPriceService.cleanup()
         roadflareLocationBroadcaster?.destroy()
     }
