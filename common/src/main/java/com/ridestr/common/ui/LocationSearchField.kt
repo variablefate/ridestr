@@ -27,6 +27,18 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
+ * Determines whether the location search dropdown should be visible.
+ * Extracted for testability — the 3-char threshold matches the debounce
+ * trigger (LaunchedEffect requires value.length >= 3 before calling onSearch).
+ */
+internal fun shouldShowLocationDropdown(
+    isFocused: Boolean,
+    selectedLocation: Location?,
+    valueLength: Int,
+    showMyLocation: Boolean
+): Boolean = isFocused && selectedLocation == null && (valueLength >= 3 || showMyLocation)
+
+/**
  * Search field for location input with autocomplete suggestions.
  *
  * @param value Current text value
@@ -73,7 +85,7 @@ fun LocationSearchField(
     }
 
     // Show dropdown when we have results and field is focused
-    showDropdown = isFocused && selectedLocation == null && (value.isNotEmpty() || showMyLocation)
+    showDropdown = shouldShowLocationDropdown(isFocused, selectedLocation, value.length, showMyLocation)
 
     Column(modifier = modifier) {
         // Label if provided

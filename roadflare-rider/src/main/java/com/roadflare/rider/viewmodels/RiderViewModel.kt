@@ -251,11 +251,19 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      * Full logout cleanup. Clears all in-memory and persisted state
      * except routing tiles.
      */
+    override fun onCleared() {
+        super.onCleared()
+        rideSessionManager.destroy()
+        chatCoordinator.destroy()
+    }
+
     suspend fun performLogout() {
         // Clear in-memory state (all synchronous)
         rideSessionManager.clearRide()
         chatCoordinator.clearMessages()
         nostrService.clearAllSubscriptions()
+        // Intentional: tear down relay connections on logout.
+        // Equivalent to LogoutManager.performFullCleanup() in ridestr/drivestr.
         nostrService.disconnect()
 
         // Clear persisted local data (synchronous SharedPreferences)

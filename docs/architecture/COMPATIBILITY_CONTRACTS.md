@@ -68,7 +68,6 @@ class NostrService internal constructor(context: Context, relays: List<String>) 
 ```
 
 **Known Exceptions**:
-- `RoadflareListenerService.kt:308` - Has its own NostrService lifecycle
 - `RemoteConfigManager.kt:111` - Pre-dates domain service pattern
 
 ---

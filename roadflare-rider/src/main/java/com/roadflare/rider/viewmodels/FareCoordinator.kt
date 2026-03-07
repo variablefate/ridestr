@@ -25,8 +25,7 @@ data class RouteResult(
  * optional sats conversion. Valhalla routing will be integrated for
  * road-distance calculations; until then, haversine is used as fallback.
  *
- * This is a singleton coordinator — the RiderViewModel delegates
- * fare/route operations here.
+ * The RiderViewModel delegates fare/route operations here.
  */
 class FareCoordinator(
     private val fareCalculator: FareCalculator,

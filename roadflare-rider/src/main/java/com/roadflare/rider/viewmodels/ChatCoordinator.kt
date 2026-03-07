@@ -16,8 +16,7 @@ import kotlinx.coroutines.withContext
  * Chat messages are sent as NIP-44 encrypted DMs tagged with the
  * ride's confirmation event ID so both sides can filter them.
  *
- * This is a singleton coordinator — the RiderViewModel delegates
- * chat state management here.
+ * The RiderViewModel delegates chat state management here.
  */
 class ChatCoordinator(
     private val nostrService: NostrService
@@ -107,5 +106,13 @@ class ChatCoordinator(
             Log.d(TAG, "Closed chat subscription")
         }
         subscriptionId = null
+    }
+
+    /**
+     * Permanently tear down this coordinator. Closes any active subscription
+     * and clears message state. Called from RiderViewModel.onCleared().
+     */
+    fun destroy() {
+        clearMessages()
     }
 }
