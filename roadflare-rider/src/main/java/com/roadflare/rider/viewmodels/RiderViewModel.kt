@@ -15,7 +15,7 @@ import com.roadflare.common.routing.TileDownloadService
 import com.roadflare.common.routing.TileManager
 import com.roadflare.common.settings.AppSettings
 import com.roadflare.common.settings.SettingsRepository
-import com.roadflare.common.state.RideStage
+import com.roadflare.rider.state.RideStage
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted

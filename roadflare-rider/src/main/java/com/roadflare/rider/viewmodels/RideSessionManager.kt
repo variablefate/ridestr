@@ -5,7 +5,9 @@ import com.roadflare.common.nostr.NostrService
 import com.roadflare.common.nostr.events.Location
 import com.roadflare.common.nostr.events.PaymentMethod
 import com.roadflare.common.nostr.events.RideAcceptanceData
-import com.roadflare.common.state.*
+import com.roadflare.common.state.RideState
+import com.roadflare.common.state.RideStateMachine
+import com.roadflare.rider.state.RideStage
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow

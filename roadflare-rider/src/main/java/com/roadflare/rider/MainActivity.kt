@@ -27,7 +27,7 @@ import com.roadflare.common.ui.RelaySignalIndicator
 import com.roadflare.common.ui.TileManagementScreen
 import com.roadflare.common.ui.TileSetupScreen
 import com.roadflare.common.ui.screens.KeyBackupScreen
-import com.roadflare.common.ui.theme.RoadFlareTheme
+import com.roadflare.rider.ui.theme.RoadFlareTheme
 import com.roadflare.rider.ui.screens.AddDriverScreen
 import com.roadflare.rider.ui.screens.DriverNetworkTab
 import com.roadflare.rider.ui.screens.HistoryScreen
