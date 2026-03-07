@@ -251,16 +251,21 @@ private fun SuggestionItem(
         Spacer(modifier = Modifier.width(12.dp))
 
         Column(modifier = Modifier.weight(1f)) {
-            // Feature name or first line of address
+            // Filter out street-number-only featureNames (e.g. "123") that Geocoder returns
+            val titleFromFeatureName = result.featureName?.takeIf { name ->
+                name.length >= 2 && name.any { it.isLetter() }
+            }
             Text(
-                text = result.featureName ?: result.addressLine.split(",").firstOrNull() ?: result.addressLine,
+                text = titleFromFeatureName
+                    ?: result.addressLine.split(",").firstOrNull()?.trim()
+                    ?: result.addressLine,
                 style = MaterialTheme.typography.bodyMedium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
 
             // Full address as secondary text
-            if (result.featureName != null || result.addressLine.contains(",")) {
+            if (titleFromFeatureName != null || result.addressLine.contains(",")) {
                 Text(
                     text = result.addressLine,
                     style = MaterialTheme.typography.bodySmall,
