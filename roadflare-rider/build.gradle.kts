@@ -5,8 +5,6 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
-    alias(libs.plugins.ksp)
-    alias(libs.plugins.hilt)
 }
 
 // Load keystore properties
@@ -78,8 +76,8 @@ android {
 }
 
 dependencies {
-    // RoadFlare common module
-    implementation(project(":roadflare-common"))
+    // Shared common module (ridestr protocol + RoadFlare support)
+    implementation(project(":common"))
 
     // Core Android
     implementation(libs.androidx.core.ktx)
@@ -94,11 +92,6 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
     implementation("androidx.compose.material:material-icons-extended:1.7.6")
-
-    // Hilt - Dependency Injection
-    implementation(libs.hilt.android)
-    ksp(libs.hilt.compiler)
-    implementation(libs.hilt.navigation.compose)
 
     // Google Play Services Location
     implementation("com.google.android.gms:play-services-location:21.3.0")

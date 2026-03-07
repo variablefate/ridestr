@@ -7,8 +7,8 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import com.roadflare.common.ui.screens.BackupReminderScreen
-import com.roadflare.common.ui.screens.KeySetupScreen
+import com.ridestr.common.ui.screens.BackupReminderScreen
+import com.ridestr.common.ui.screens.KeySetupScreen
 import com.roadflare.rider.R
 import com.roadflare.rider.viewmodels.OnboardingViewModel
 

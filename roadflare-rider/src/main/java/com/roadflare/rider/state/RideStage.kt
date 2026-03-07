@@ -1,6 +1,6 @@
 package com.roadflare.rider.state
 
-import com.roadflare.common.state.RideState
+import com.ridestr.common.state.RideState
 
 /**
  * UI projection enum derived from RideState + session metadata.

@@ -1,13 +1,11 @@
 package com.roadflare.rider.viewmodels
 
-import com.roadflare.common.bitcoin.BitcoinPriceService
-import com.roadflare.common.nostr.events.Location
-import com.roadflare.common.routing.ValhallaRoutingService
-import com.roadflare.common.util.FareCalculator
+import com.ridestr.common.bitcoin.BitcoinPriceService
+import com.ridestr.common.nostr.events.Location
+import com.ridestr.common.routing.ValhallaRoutingService
+import com.ridestr.common.util.FareCalculator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import javax.inject.Inject
-import javax.inject.Singleton
 
 /**
  * Result of a route calculation between two locations.
@@ -30,8 +28,7 @@ data class RouteResult(
  * This is a singleton coordinator — the RiderViewModel delegates
  * fare/route operations here.
  */
-@Singleton
-class FareCoordinator @Inject constructor(
+class FareCoordinator(
     private val fareCalculator: FareCalculator,
     private val bitcoinPriceService: BitcoinPriceService,
     private val valhallaRoutingService: ValhallaRoutingService

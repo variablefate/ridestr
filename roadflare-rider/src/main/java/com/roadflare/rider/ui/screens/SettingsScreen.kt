@@ -14,11 +14,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.roadflare.common.settings.DistanceUnit
-import com.roadflare.common.settings.SettingsRepository
-import com.roadflare.common.ui.components.SettingsActionRow
-import com.roadflare.common.ui.components.SettingsNavigationRow
-import com.roadflare.common.ui.components.SettingsSwitchRow
+import com.ridestr.common.settings.DistanceUnit
+import com.ridestr.common.settings.SettingsManager
+import com.ridestr.common.ui.components.SettingsActionRow
+import com.ridestr.common.ui.components.SettingsNavigationRow
+import com.ridestr.common.ui.components.SettingsSwitchRow
 import kotlinx.coroutines.launch
 
 /**
@@ -27,7 +27,7 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
-    settingsRepository: SettingsRepository,
+    settingsManager: SettingsManager,
     onBack: () -> Unit,
     onOpenTiles: () -> Unit,
     onOpenDevOptions: () -> Unit,
@@ -52,7 +52,7 @@ fun SettingsScreen(
         modifier = modifier
     ) { padding ->
         SettingsContent(
-            settingsRepository = settingsRepository,
+            settingsManager = settingsManager,
             onOpenTiles = onOpenTiles,
             onOpenDevOptions = onOpenDevOptions,
             modifier = Modifier.padding(padding)
@@ -65,15 +65,15 @@ fun SettingsScreen(
  */
 @Composable
 fun SettingsContent(
-    settingsRepository: SettingsRepository,
+    settingsManager: SettingsManager,
     onOpenTiles: () -> Unit,
     onOpenDevOptions: () -> Unit,
     onSyncProfile: (suspend () -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    val distanceUnit by settingsRepository.distanceUnit.collectAsState(initial = DistanceUnit.MILES)
-    val notificationSoundEnabled by settingsRepository.notificationSound.collectAsState(initial = true)
-    val notificationVibrationEnabled by settingsRepository.notificationVibration.collectAsState(initial = true)
+    val distanceUnit by settingsManager.distanceUnit.collectAsState()
+    val notificationSoundEnabled by settingsManager.notificationSound.collectAsState()
+    val notificationVibrationEnabled by settingsManager.notificationVibration.collectAsState()
 
     // Sync state
     var isSyncing by remember { mutableStateOf(false) }
@@ -97,7 +97,7 @@ fun SettingsContent(
                 onCheckedChange = {
                     coroutineScope.launch {
                         val newUnit = if (distanceUnit == DistanceUnit.MILES) DistanceUnit.KILOMETERS else DistanceUnit.MILES
-                        settingsRepository.setDistanceUnit(newUnit)
+                        settingsManager.setDistanceUnit(newUnit)
                     }
                 },
                 checkedLabel = "Miles",
@@ -120,7 +120,7 @@ fun SettingsContent(
                 description = "Play sound for ride updates",
                 checked = notificationSoundEnabled,
                 onCheckedChange = { enabled ->
-                    coroutineScope.launch { settingsRepository.setNotificationSound(enabled) }
+                    coroutineScope.launch { settingsManager.setNotificationSoundEnabled(enabled) }
                 }
             )
 
@@ -130,7 +130,7 @@ fun SettingsContent(
                 description = "Vibrate for ride updates",
                 checked = notificationVibrationEnabled,
                 onCheckedChange = { enabled ->
-                    coroutineScope.launch { settingsRepository.setNotificationVibration(enabled) }
+                    coroutineScope.launch { settingsManager.setNotificationVibrationEnabled(enabled) }
                 }
             )
 

@@ -1,18 +1,17 @@
 package com.roadflare.rider.viewmodels
 
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.viewModelScope
-import com.roadflare.common.routing.NostrTileDiscoveryService
-import com.roadflare.common.routing.TileDownloadService
-import com.roadflare.common.routing.TileManager
-import com.roadflare.common.settings.SettingsRepository
-import dagger.hilt.android.lifecycle.HiltViewModel
-import kotlinx.coroutines.flow.SharingStarted
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
+import com.ridestr.common.nostr.NostrService
+import com.ridestr.common.routing.NostrTileDiscoveryService
+import com.ridestr.common.routing.TileDownloadService
+import com.ridestr.common.routing.TileManager
+import com.ridestr.common.settings.SettingsManager
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.launch
-import javax.inject.Inject
+import kotlinx.coroutines.flow.SharingStarted
+import androidx.lifecycle.viewModelScope
 
 /**
  * Root app state ViewModel for onboarding + tile setup gating.
@@ -21,16 +20,18 @@ import javax.inject.Inject
  * "still loading" (null) from "loaded with value" (true/false),
  * preventing flash of wrong screen during initialization.
  */
-@HiltViewModel
-class AppStateViewModel @Inject constructor(
-    val settingsRepository: SettingsRepository,
-    val tileManager: TileManager,
-    val tileDownloadService: TileDownloadService,
-    val nostrTileDiscoveryService: NostrTileDiscoveryService
-) : ViewModel() {
+class AppStateViewModel(application: Application) : AndroidViewModel(application) {
 
-    /** null = still loading from DataStore */
-    val tilesSetupCompleted: StateFlow<Boolean?> = settingsRepository.tilesSetupCompleted
+    private val settingsManager = SettingsManager.getInstance(application)
+    val tileManager = TileManager.getInstance(application)
+    val tileDownloadService = TileDownloadService(application, tileManager)
+    val nostrTileDiscoveryService = NostrTileDiscoveryService(
+        application,
+        NostrService.getInstance(application).relayManager
+    )
+
+    /** null = stateIn initial value (resolves on first collection frame) */
+    val tilesSetupCompleted: StateFlow<Boolean?> = settingsManager.tilesSetupCompleted
         .map<Boolean, Boolean?> { it }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
@@ -40,6 +41,6 @@ class AppStateViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
     fun markTilesSetupCompleted() {
-        viewModelScope.launch { settingsRepository.setTilesSetupCompleted(true) }
+        settingsManager.setTilesSetupCompleted(true)
     }
 }

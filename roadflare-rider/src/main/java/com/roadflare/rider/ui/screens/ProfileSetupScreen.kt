@@ -9,7 +9,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
-import com.roadflare.common.ui.screens.ProfileSetupContent
+import com.ridestr.common.ui.screens.ProfileSetupContent
 import com.roadflare.rider.viewmodels.ProfileViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -60,8 +60,7 @@ fun ProfileSetupScreen(
             picture = uiState.picture,
             isSaving = uiState.isSaving,
             error = uiState.error,
-            onUploadImage = viewModel.getUploadHandler(),
-            canUpload = viewModel.canUpload(),
+            signer = viewModel.getSigner(),
             onDisplayNameChange = viewModel::updateDisplayName,
             onPictureChange = viewModel::updatePicture,
             onSave = { viewModel.saveProfile(onComplete) },

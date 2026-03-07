@@ -1,37 +1,35 @@
 package com.roadflare.rider.viewmodels
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.roadflare.common.data.FollowedDriversRepository
-import com.roadflare.common.data.RideHistoryRepository
-import com.roadflare.common.data.SavedLocationRepository
-import com.roadflare.common.location.GeocodingResult
-import com.roadflare.common.location.GeocodingService
-import com.roadflare.common.nostr.NostrService
-import com.roadflare.common.nostr.events.Location
-import com.roadflare.common.nostr.events.PaymentMethod
-import com.roadflare.common.routing.NostrTileDiscoveryService
-import com.roadflare.common.routing.TileDownloadService
-import com.roadflare.common.routing.TileManager
-import com.roadflare.common.settings.AppSettings
-import com.roadflare.common.settings.SettingsRepository
+import com.ridestr.common.bitcoin.BitcoinPriceService
+import com.ridestr.common.data.FollowedDriversRepository
+import com.ridestr.common.data.RideHistoryRepository
+import com.ridestr.common.data.SavedLocationRepository
+import com.ridestr.common.location.GeocodingResult
+import com.ridestr.common.location.GeocodingService
+import com.ridestr.common.nostr.NostrService
+import com.ridestr.common.nostr.events.Location
+import com.ridestr.common.nostr.events.PaymentMethod
+import com.ridestr.common.routing.NostrTileDiscoveryService
+import com.ridestr.common.routing.TileDownloadService
+import com.ridestr.common.routing.TileManager
+import com.ridestr.common.routing.ValhallaRoutingService
+import com.ridestr.common.settings.SettingsManager
+import com.ridestr.common.util.FareCalculator
 import com.roadflare.rider.state.RideStage
-import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
-import javax.inject.Inject
 
 /**
  * Thin ViewModel projector for the rider's main screen.
  *
- * Unlike the original monolithic ridestr RiderViewModel (~5400 lines),
- * this class delegates domain logic to focused coordinators:
+ * Delegates domain logic to focused coordinators:
  * - [RideSessionManager] — ride lifecycle, batched offers, NIP-09 cleanup
  * - [ChatCoordinator] — in-ride encrypted chat
  * - [FareCoordinator] — fare calculation and route estimation
@@ -39,21 +37,27 @@ import javax.inject.Inject
  * This ViewModel exposes combined state flows for the UI and acts as
  * the integration point between coordinators.
  */
-@HiltViewModel
-class RiderViewModel @Inject constructor(
-    val nostrService: NostrService,
-    val rideSessionManager: RideSessionManager,
-    val chatCoordinator: ChatCoordinator,
-    val fareCoordinator: FareCoordinator,
-    val followedDriversRepository: FollowedDriversRepository,
-    val rideHistoryRepository: RideHistoryRepository,
-    val savedLocationRepository: SavedLocationRepository,
-    val settingsRepository: SettingsRepository,
-    val geocodingService: GeocodingService,
-    val tileManager: TileManager,
-    val tileDownloadService: TileDownloadService,
-    val nostrTileDiscoveryService: NostrTileDiscoveryService
-) : ViewModel() {
+class RiderViewModel(application: Application) : AndroidViewModel(application) {
+
+    // Shared singletons
+    val nostrService = NostrService.getInstance(application)
+    val settingsManager = SettingsManager.getInstance(application)
+    val followedDriversRepository = FollowedDriversRepository.getInstance(application)
+    val rideHistoryRepository = RideHistoryRepository.getInstance(application)
+    val savedLocationRepository = SavedLocationRepository.getInstance(application)
+    val geocodingService = GeocodingService(application)
+    val tileManager = TileManager.getInstance(application)
+    val tileDownloadService = TileDownloadService(application, tileManager)
+    val nostrTileDiscoveryService = NostrTileDiscoveryService(application, nostrService.relayManager)
+
+    // Coordinators — constructed with shared services
+    val rideSessionManager = RideSessionManager(nostrService)
+    val chatCoordinator = ChatCoordinator(nostrService)
+    val fareCoordinator = FareCoordinator(
+        fareCalculator = FareCalculator,
+        bitcoinPriceService = BitcoinPriceService.getInstance(),
+        valhallaRoutingService = ValhallaRoutingService(application)
+    )
 
     init {
         nostrService.ensureConnected()
@@ -76,13 +80,6 @@ class RiderViewModel @Inject constructor(
 
     /** Last-known locations for followed drivers. */
     val driverLocations = followedDriversRepository.driverLocations
-
-    /** User settings, collected as a StateFlow with default null until loaded. */
-    val settings: StateFlow<AppSettings?> = settingsRepository.settings.stateIn(
-        viewModelScope,
-        SharingStarted.WhileSubscribed(5000),
-        null
-    )
 
     // --- Geocoding search state ---
 
@@ -112,16 +109,6 @@ class RiderViewModel @Inject constructor(
 
     /** Saved/favorite locations for quick selection. */
     val savedLocations = savedLocationRepository.savedLocations
-
-    // --- Developer options StateFlow wrappers ---
-    val useGeocodingSearchState: StateFlow<Boolean> = settingsRepository.useGeocodingSearch
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
-    val useManualDriverLocationState: StateFlow<Boolean> = settingsRepository.useManualDriverLocation
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
-    val manualDriverLatState: StateFlow<Double> = settingsRepository.manualDriverLat
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0.0)
-    val manualDriverLonState: StateFlow<Double> = settingsRepository.manualDriverLon
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0.0)
 
     fun searchPickupLocations(query: String) {
         if (query.length < 3) {
@@ -245,7 +232,7 @@ class RiderViewModel @Inject constructor(
 
             val fareUsd = route?.fareUsd ?: fareCoordinator.calculateRoute(pickup, dest).fareUsd
             val fareSats = route?.fareSats
-            val fiatPaymentMethods = settingsRepository.fiatPaymentMethods.first()
+            val fiatPaymentMethods = settingsManager.roadflarePaymentMethods.value
 
             rideSessionManager.sendRoadflareToAll(
                 drivers = driversWithDistance,
@@ -262,8 +249,7 @@ class RiderViewModel @Inject constructor(
 
     /**
      * Full logout cleanup. Clears all in-memory and persisted state
-     * except routing tiles. Must be awaited before OnboardingViewModel.logout()
-     * to prevent race with DataStore I/O.
+     * except routing tiles.
      */
     suspend fun performLogout() {
         // Clear in-memory state (all synchronous)
@@ -277,9 +263,9 @@ class RiderViewModel @Inject constructor(
         savedLocationRepository.clearAll()
         rideHistoryRepository.clearAllHistory()
 
-        // Clear settings (suspend — DataStore I/O, must complete before logout)
+        // Clear settings (synchronous SharedPreferences via SettingsManager)
         try {
-            settingsRepository.clearAll()
+            settingsManager.clearAllData()
         } catch (ce: CancellationException) {
             throw ce
         } catch (e: Exception) {

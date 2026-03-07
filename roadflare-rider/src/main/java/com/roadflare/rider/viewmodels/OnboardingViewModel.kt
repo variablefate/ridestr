@@ -1,12 +1,11 @@
 package com.roadflare.rider.viewmodels
 
-import androidx.lifecycle.ViewModel
-import com.roadflare.common.nostr.keys.KeyManager
-import dagger.hilt.android.lifecycle.HiltViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
+import com.ridestr.common.nostr.keys.KeyManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import javax.inject.Inject
 
 /**
  * UI state for the onboarding screen.
@@ -22,16 +21,10 @@ data class OnboardingUiState(
 
 /**
  * ViewModel for the onboarding / key setup screen.
- *
- * Port from ridestr OnboardingViewModel with:
- * - Package rename com.ridestr -> com.roadflare
- * - AndroidViewModel -> ViewModel + Hilt injection
- * - KeyManager injected via constructor instead of manual instantiation
  */
-@HiltViewModel
-class OnboardingViewModel @Inject constructor(
-    private val keyManager: KeyManager
-) : ViewModel() {
+class OnboardingViewModel(application: Application) : AndroidViewModel(application) {
+
+    private val keyManager = KeyManager(application)
 
     private val _uiState = MutableStateFlow(OnboardingUiState())
     val uiState: StateFlow<OnboardingUiState> = _uiState.asStateFlow()

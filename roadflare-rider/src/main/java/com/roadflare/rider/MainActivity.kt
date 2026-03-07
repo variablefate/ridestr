@@ -17,16 +17,16 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.hilt.navigation.compose.hiltViewModel
-import com.roadflare.common.nostr.relay.RelayConnectionState
-import com.roadflare.common.ui.AccountBottomSheet
-import com.roadflare.common.ui.AccountSafetyScreen
-import com.roadflare.common.ui.DeveloperOptionsScreen
-import com.roadflare.common.ui.RelayManagementScreen
-import com.roadflare.common.ui.RelaySignalIndicator
-import com.roadflare.common.ui.TileManagementScreen
-import com.roadflare.common.ui.TileSetupScreen
-import com.roadflare.common.ui.screens.KeyBackupScreen
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.ridestr.common.nostr.relay.RelayConnectionState
+import com.ridestr.common.ui.AccountBottomSheet
+import com.ridestr.common.ui.AccountSafetyScreen
+import com.ridestr.common.ui.DeveloperOptionsScreen
+import com.ridestr.common.ui.RelayManagementScreen
+import com.ridestr.common.ui.RelaySignalIndicator
+import com.ridestr.common.ui.TileManagementScreen
+import com.ridestr.common.ui.TileSetupScreen
+import com.ridestr.common.ui.screens.KeyBackupScreen
 import com.roadflare.rider.ui.theme.RoadFlareTheme
 import com.roadflare.rider.ui.screens.AddDriverScreen
 import com.roadflare.rider.ui.screens.DriverNetworkTab
@@ -39,11 +39,8 @@ import com.roadflare.rider.viewmodels.AppStateViewModel
 import com.roadflare.rider.viewmodels.OnboardingViewModel
 import com.roadflare.rider.viewmodels.ProfileViewModel
 import com.roadflare.rider.viewmodels.RiderViewModel
-import dagger.hilt.android.AndroidEntryPoint
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
-@AndroidEntryPoint
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -71,9 +68,9 @@ private enum class AppScreen {
 
 @Composable
 fun RoadFlareApp() {
-    val onboardingViewModel: OnboardingViewModel = hiltViewModel()
+    val onboardingViewModel: OnboardingViewModel = viewModel()
     val onboardingState by onboardingViewModel.uiState.collectAsState()
-    val appStateViewModel: AppStateViewModel = hiltViewModel()
+    val appStateViewModel: AppStateViewModel = viewModel()
     val tilesSetupCompleted by appStateViewModel.tilesSetupCompleted.collectAsState()
     val hasAnyTileLoaded by appStateViewModel.hasAnyTileLoaded.collectAsState()
 
@@ -99,7 +96,7 @@ fun RoadFlareApp() {
             )
         }
         AppScreen.PROFILE_SETUP -> {
-            val profileViewModel: ProfileViewModel = hiltViewModel()
+            val profileViewModel: ProfileViewModel = viewModel()
             ProfileSetupScreen(
                 viewModel = profileViewModel,
                 onComplete = { onboardingViewModel.refreshState() }
@@ -135,8 +132,8 @@ private sealed class SecondaryScreen {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MainTabScreen() {
-    val viewModel: RiderViewModel = hiltViewModel()
-    val onboardingViewModel: OnboardingViewModel = hiltViewModel()
+    val viewModel: RiderViewModel = viewModel()
+    val onboardingViewModel: OnboardingViewModel = viewModel()
     val onboardingState by onboardingViewModel.uiState.collectAsState()
     var selectedTab by remember { mutableIntStateOf(0) }
     var secondaryScreen by remember { mutableStateOf<SecondaryScreen>(SecondaryScreen.None) }
@@ -170,15 +167,7 @@ private fun MainTabScreen() {
         is SecondaryScreen.RelayManagement -> {
             val connectionStates by viewModel.nostrService.relayManager.connectionStates.collectAsState()
             RelayManagementScreen(
-                customRelays = viewModel.settingsRepository.relayUrls.let { flow ->
-                    val state = flow.collectAsState(initial = emptyList())
-                    remember { MutableStateFlow(state.value) }.also { sf ->
-                        LaunchedEffect(state.value) { sf.value = state.value }
-                    }
-                },
-                onAddRelay = { url -> scope.launch { viewModel.settingsRepository.addRelayUrl(url) } },
-                onRemoveRelay = { url -> scope.launch { viewModel.settingsRepository.removeRelayUrl(url) } },
-                onResetRelaysToDefault = { scope.launch { viewModel.settingsRepository.resetRelaysToDefault() } },
+                settingsManager = viewModel.settingsManager,
                 connectedCount = connectionStates.count { it.value == RelayConnectionState.CONNECTED },
                 totalRelays = connectionStates.size,
                 connectionStates = connectionStates,
@@ -189,27 +178,7 @@ private fun MainTabScreen() {
         }
         is SecondaryScreen.DeveloperOptions -> {
             DeveloperOptionsScreen(
-                useGeocodingSearch = viewModel.useGeocodingSearchState,
-                ignoreFollowNotifications = remember { MutableStateFlow(false) },
-                useManualDriverLocation = viewModel.useManualDriverLocationState,
-                manualDriverLat = viewModel.manualDriverLatState,
-                manualDriverLon = viewModel.manualDriverLonState,
-                onToggleGeocodingSearch = {
-                    scope.launch {
-                        val current = viewModel.useGeocodingSearchState.value
-                        viewModel.settingsRepository.setUseGeocodingSearch(!current)
-                    }
-                },
-                onSetIgnoreFollowNotifications = { },
-                onSetUseManualDriverLocation = { enabled ->
-                    scope.launch { viewModel.settingsRepository.setUseManualDriverLocation(enabled) }
-                },
-                onSetManualDriverLocation = { lat, lon ->
-                    scope.launch {
-                        viewModel.settingsRepository.setManualDriverLat(lat)
-                        viewModel.settingsRepository.setManualDriverLon(lon)
-                    }
-                },
+                settingsManager = viewModel.settingsManager,
                 isDriverApp = false,
                 nostrService = viewModel.nostrService,
                 onOpenRelaySettings = { secondaryScreen = SecondaryScreen.RelayManagement },
@@ -227,7 +196,7 @@ private fun MainTabScreen() {
             return
         }
         is SecondaryScreen.ProfileEdit -> {
-            val profileViewModel: ProfileViewModel = hiltViewModel()
+            val profileViewModel: ProfileViewModel = viewModel()
             ProfileSetupScreen(
                 viewModel = profileViewModel,
                 onComplete = { secondaryScreen = SecondaryScreen.None },
@@ -292,7 +261,7 @@ private fun MainTabScreen() {
             0 -> DriverNetworkTab(
                 followedDriversRepository = viewModel.followedDriversRepository,
                 nostrService = viewModel.nostrService,
-                settingsRepository = viewModel.settingsRepository,
+                settingsManager = viewModel.settingsManager,
                 onAddDriver = { secondaryScreen = SecondaryScreen.AddDriver },
                 modifier = Modifier.padding(innerPadding)
             )
@@ -302,11 +271,11 @@ private fun MainTabScreen() {
             )
             2 -> HistoryScreen(
                 rideHistoryRepository = viewModel.rideHistoryRepository,
-                settingsRepository = viewModel.settingsRepository,
+                settingsManager = viewModel.settingsManager,
                 modifier = Modifier.padding(innerPadding)
             )
             3 -> SettingsContent(
-                settingsRepository = viewModel.settingsRepository,
+                settingsManager = viewModel.settingsManager,
                 onOpenTiles = { secondaryScreen = SecondaryScreen.TileManagement },
                 onOpenDevOptions = { secondaryScreen = SecondaryScreen.DeveloperOptions },
                 modifier = Modifier.padding(innerPadding)

@@ -18,17 +18,14 @@ import android.os.VibratorManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
-import com.roadflare.common.settings.SettingsRepository
+import com.ridestr.common.settings.SettingsManager
 import com.roadflare.rider.MainActivity
-import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.launch
 import java.io.Serializable
-import javax.inject.Inject
 
 private const val TAG = "RiderActiveService"
 
@@ -95,7 +92,6 @@ sealed class RiderStatus : Serializable {
  * Alerts (chat messages, driver arrived) are stacked and persist until
  * the user brings the app to foreground via clearAlerts().
  */
-@AndroidEntryPoint
 class RiderActiveService : Service() {
 
     companion object {
@@ -184,7 +180,7 @@ class RiderActiveService : Service() {
         }
     }
 
-    @Inject lateinit var settingsRepository: SettingsRepository
+    private lateinit var settingsManager: SettingsManager
 
     // Coroutine scope for async work (reading settings, etc.)
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
@@ -199,6 +195,7 @@ class RiderActiveService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        settingsManager = SettingsManager.getInstance(this)
         ensureNotificationChannels()
         Log.d(TAG, "Service created")
     }
@@ -492,13 +489,11 @@ class RiderActiveService : Service() {
      * and the device ringer mode.
      */
     private fun playSoundAndVibrate(vibrationPattern: LongArray) {
-        serviceScope.launch {
-            val soundEnabled = settingsRepository.notificationSound.firstOrNull() ?: true
-            val vibrationEnabled = settingsRepository.notificationVibration.firstOrNull() ?: true
+        val soundEnabled = settingsManager.notificationSound.value
+        val vibrationEnabled = settingsManager.notificationVibration.value
 
-            if (soundEnabled) playNotificationSoundIfAllowed()
-            if (vibrationEnabled) vibrateIfAllowed(vibrationPattern)
-        }
+        if (soundEnabled) playNotificationSoundIfAllowed()
+        if (vibrationEnabled) vibrateIfAllowed(vibrationPattern)
     }
 
     private fun playNotificationSoundIfAllowed() {
