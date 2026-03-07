@@ -110,6 +110,10 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     /** Saved/favorite locations for quick selection. */
     val savedLocations = savedLocationRepository.savedLocations
 
+    // Last known GPS position for biasing geocoding results nearby
+    private var lastGpsLat: Double? = null
+    private var lastGpsLon: Double? = null
+
     fun searchPickupLocations(query: String) {
         if (query.length < 3) {
             _pickupSearchResults.value = emptyList()
@@ -118,7 +122,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _isSearchingPickup.value = true
             try {
-                _pickupSearchResults.value = geocodingService.searchAddress(query)
+                _pickupSearchResults.value = geocodingService.searchAddress(
+                    query, biasLat = lastGpsLat, biasLon = lastGpsLon
+                )
             } catch (_: Exception) {
                 _pickupSearchResults.value = emptyList()
             } finally {
@@ -132,10 +138,15 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             _destSearchResults.value = emptyList()
             return
         }
+        // Bias destination search toward pickup location if set, else GPS
+        val biasLat = _pickupLocation.value?.lat ?: lastGpsLat
+        val biasLon = _pickupLocation.value?.lon ?: lastGpsLon
         viewModelScope.launch {
             _isSearchingDest.value = true
             try {
-                _destSearchResults.value = geocodingService.searchAddress(query)
+                _destSearchResults.value = geocodingService.searchAddress(
+                    query, biasLat = biasLat, biasLon = biasLon
+                )
             } catch (_: Exception) {
                 _destSearchResults.value = emptyList()
             } finally {
@@ -171,11 +182,13 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setPickupFromGps(lat: Double, lon: Double) {
+        lastGpsLat = lat
+        lastGpsLon = lon
         _pickupLocation.value = Location(lat, lon)
         recalculateFare()
         // Async reverse geocode to fill in the address label
         viewModelScope.launch {
-            val label = geocodingService.reverseGeocode(lat, lon)
+            val label = geocodingService.reverseGeocode(lat, lon, localOnly = true)
             if (label != null && _pickupLocation.value?.lat == lat && _pickupLocation.value?.lon == lon) {
                 _pickupLocation.value = Location(lat, lon, addressLabel = label)
             }

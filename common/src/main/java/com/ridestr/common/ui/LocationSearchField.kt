@@ -263,23 +263,36 @@ private fun SuggestionItem(
         Spacer(modifier = Modifier.width(12.dp))
 
         Column(modifier = Modifier.weight(1f)) {
-            // Filter out street-number-only featureNames (e.g. "123") that Geocoder returns
+            // Filter out featureNames that are just street addresses rather than place names.
+            // Android's Geocoder returns the street number or street address as featureName
+            // (e.g. "123" or "123 Main St") — only keep it if it's an actual place name
+            // (i.e. doesn't match the start of the address line).
             val titleFromFeatureName = result.featureName?.takeIf { name ->
-                name.length >= 2 && name.any { it.isLetter() }
+                name.any { it.isLetter() } &&
+                    !result.addressLine.startsWith(name, ignoreCase = true)
             }
+            val addressParts = result.addressLine.split(",")
+            val primaryText = titleFromFeatureName
+                ?: addressParts.firstOrNull()?.trim()
+                ?: result.addressLine
+            // Subtitle: when title is a place name, show full address;
+            // when title is the street address, show city/state/zip only.
+            val secondaryText = if (titleFromFeatureName != null) {
+                result.addressLine
+            } else if (addressParts.size > 1) {
+                addressParts.drop(1).joinToString(",").trim()
+            } else null
+
             Text(
-                text = titleFromFeatureName
-                    ?: result.addressLine.split(",").firstOrNull()?.trim()
-                    ?: result.addressLine,
+                text = primaryText,
                 style = MaterialTheme.typography.bodyMedium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
 
-            // Full address as secondary text
-            if (titleFromFeatureName != null || result.addressLine.contains(",")) {
+            if (secondaryText != null) {
                 Text(
-                    text = result.addressLine,
+                    text = secondaryText,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
