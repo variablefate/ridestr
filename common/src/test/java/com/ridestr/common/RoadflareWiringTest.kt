@@ -237,6 +237,65 @@ class RoadflareWiringTest {
         return Pair(mockSigner, tagsSlot)
     }
 
+    // ==================
+    // Direct offer path (production RoadFlare path)
+    // RideSessionManager → RideshareDomainService.sendRideOffer() → RideOfferEvent.create()
+    // RoadflareListenerService filters on p=<driverPubKey> + t=roadflare
+    // ==================
+
+    @Test
+    fun `create direct offer with isRoadflare=true produces both p-tag and roadflare t-tag`() = runBlocking {
+        val (mockSigner, tagsSlot) = createMockSigner()
+        // create() calls nip44Encrypt before sign
+        coEvery { mockSigner.nip44Encrypt(any(), any()) } returns "encrypted_content"
+
+        val driverPubKey = "abc123driver"
+        RideOfferEvent.create(
+            signer = mockSigner,
+            driverPubKey = driverPubKey,
+            pickup = Location(36.0, -115.0),
+            destination = Location(36.1, -115.1),
+            fareEstimate = 10.0,
+            isRoadflare = true
+        )
+
+        val tags = tagsSlot.captured
+        // Verify p-tag targeting the driver (RoadflareListenerService filters on this)
+        val pTags = tags.filter { it[0] == "p" }.map { it[1] }
+        assertTrue("Expected driver pubkey in p-tags", pTags.contains(driverPubKey))
+        // Verify roadflare t-tag (RoadflareListenerService filters on this)
+        val tTags = tags.filter { it[0] == "t" }.map { it[1] }
+        assertTrue("Expected 'roadflare' in t-tags: $tTags", tTags.contains("roadflare"))
+        assertTrue("Expected 'rideshare' in t-tags: $tTags", tTags.contains("rideshare"))
+    }
+
+    @Test
+    fun `create direct offer with isRoadflare=false has no roadflare t-tag`() = runBlocking {
+        val (mockSigner, tagsSlot) = createMockSigner()
+        coEvery { mockSigner.nip44Encrypt(any(), any()) } returns "encrypted_content"
+
+        RideOfferEvent.create(
+            signer = mockSigner,
+            driverPubKey = "abc123driver",
+            pickup = Location(36.0, -115.0),
+            destination = Location(36.1, -115.1),
+            fareEstimate = 10.0,
+            isRoadflare = false
+        )
+
+        val tags = tagsSlot.captured
+        val tTags = tags.filter { it[0] == "t" }.map { it[1] }
+        assertFalse("Unexpected 'roadflare' in t-tags", tTags.contains("roadflare"))
+        // p-tag and rideshare should still be present
+        assertTrue("Expected 'rideshare' in t-tags", tTags.contains("rideshare"))
+        val pTags = tags.filter { it[0] == "p" }
+        assertTrue("Expected p-tag for driver", pTags.isNotEmpty())
+    }
+
+    // ==================
+    // Broadcast offer path (geographic discovery)
+    // ==================
+
     @Test
     fun `createBroadcast with isRoadflare=true produces roadflare t-tag`() = runBlocking {
         val (mockSigner, tagsSlot) = createMockSigner()
