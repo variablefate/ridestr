@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Road converging to horizon -->
+    <path
+        android:fillColor="#1A1A1A"
+        android:pathData="M54,28 L34,90 L42,90 L54,42 L66,90 L74,90 Z"/>
+    <!-- Road center line dashes -->
+    <path
+        android:fillColor="#F57C00"
+        android:pathData="M53,48 L55,48 L55,54 L53,54 Z"/>
+    <path
+        android:fillColor="#F57C00"
+        android:pathData="M52.5,58 L55.5,58 L55.5,65 L52.5,65 Z"/>
+    <path
+        android:fillColor="#F57C00"
+        android:pathData="M52,69 L56,69 L56,77 L52,77 Z"/>
+    <!-- Flare burst at top -->
+    <path
+        android:fillColor="#FFB74D"
+        android:pathData="M54,20 L56,26 L54,24 L52,26 Z"/>
+    <path
+        android:fillColor="#FFB74D"
+        android:pathData="M48,22 L52,25 L50,25 L48,24 Z"/>
+    <path
+        android:fillColor="#FFB74D"
+        android:pathData="M60,22 L56,25 L58,25 L60,24 Z"/>
+    <path
+        android:fillColor="#FFB74D"
+        android:pathData="M54,16 L55,22 L54,20 L53,22 Z"/>
+    <!-- Mountain silhouettes -->
+    <path
+        android:fillColor="#2E2E2E"
+        android:pathData="M18,65 L36,42 L54,65 Z"/>
+    <path
+        android:fillColor="#2E2E2E"
+        android:pathData="M54,65 L72,42 L90,65 Z"/>
+</vector>
