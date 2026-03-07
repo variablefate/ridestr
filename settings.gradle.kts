@@ -25,5 +25,4 @@ rootProject.name = "Ridestr"
 include(":common")
 include(":drivestr")
 include(":rider-app")
-include(":roadflare-common")
 include(":roadflare-rider")

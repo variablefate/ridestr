@@ -51,7 +51,11 @@ val userDisplayName = profileBackupService.userDisplayName.value  // WRONG
 
 **Correct Pattern**:
 ```kotlin
-class NostrService(context: Context, relays: List<String>) {
+// Use getInstance() — constructor is internal to :common module
+val nostrService = NostrService.getInstance(context)
+
+// Internal structure (for reference):
+class NostrService internal constructor(context: Context, relays: List<String>) {
     val keyManager = KeyManager(context)
     val relayManager = RelayManager(relays)
 
@@ -64,7 +68,6 @@ class NostrService(context: Context, relays: List<String>) {
 ```
 
 **Known Exceptions**:
-- `RoadflareListenerService.kt:308` - Has its own NostrService lifecycle
 - `RemoteConfigManager.kt:111` - Pre-dates domain service pattern
 
 ---

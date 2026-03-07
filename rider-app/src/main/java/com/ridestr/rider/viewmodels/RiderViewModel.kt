@@ -148,7 +148,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     )
 
     private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    private val nostrService = NostrService(application)
+    private val nostrService = NostrService.getInstance(application)
 
     /** Expose NostrService for RoadFlare location subscriptions */
     fun getNostrService(): NostrService = nostrService
@@ -5248,7 +5248,6 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         bridgePendingPollJob?.cancel()
         roadflareBatchJob?.cancel()
         subs.closeAll()
-        nostrService.disconnect()
         bitcoinPriceService.cleanup()
     }
 

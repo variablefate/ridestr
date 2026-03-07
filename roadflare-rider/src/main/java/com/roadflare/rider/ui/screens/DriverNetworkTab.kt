@@ -9,7 +9,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
-import com.roadflare.common.nostr.events.PaymentMethod
+import com.ridestr.common.nostr.events.PaymentMethod
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -22,12 +22,12 @@ import androidx.compose.ui.unit.dp
 import com.roadflare.rider.R
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import com.roadflare.common.data.FollowedDriversRepository
-import com.roadflare.common.nostr.NostrService
-import com.roadflare.common.nostr.events.FollowedDriver
-import com.roadflare.common.nostr.events.Location
-import com.roadflare.common.nostr.events.RoadflareLocationData
-import com.roadflare.common.nostr.events.RoadflareLocationEvent
+import com.ridestr.common.data.FollowedDriversRepository
+import com.ridestr.common.nostr.NostrService
+import com.ridestr.common.nostr.events.FollowedDriver
+import com.ridestr.common.nostr.events.Location
+import com.ridestr.common.nostr.events.RoadflareLocationData
+import com.ridestr.common.nostr.events.RoadflareLocationEvent
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
@@ -84,7 +84,7 @@ fun calculateRoadflareFare(
     destination: Location,
     driverLocation: DriverLocationState?,
     ratePerMile: Double = DEFAULT_ROADFLARE_FARE_RATE,
-    priceService: com.roadflare.common.bitcoin.BitcoinPriceService? = null
+    priceService: com.ridestr.common.bitcoin.BitcoinPriceService? = null
 ): RoadflareFareEstimate {
     // Calculate ride distance (pickup to destination)
     val rideDistanceKm = riderLocation.distanceToKm(destination)
@@ -130,7 +130,7 @@ fun calculateRoadflareFare(
 fun DriverNetworkTab(
     followedDriversRepository: FollowedDriversRepository,
     nostrService: NostrService?,
-    settingsRepository: com.roadflare.common.settings.SettingsRepository? = null,
+    settingsManager: com.ridestr.common.settings.SettingsManager? = null,
     riderLocation: Location? = null,
     onAddDriver: () -> Unit = {},
     onDriverClick: (FollowedDriver) -> Unit = {},
@@ -414,9 +414,9 @@ fun DriverNetworkTab(
     }
 
     // Payment methods dialog
-    if (showPaymentMethodsDialog && settingsRepository != null) {
+    if (showPaymentMethodsDialog && settingsManager != null) {
         RoadflarePaymentMethodsDialog(
-            settingsRepository = settingsRepository,
+            settingsManager = settingsManager,
             onDismiss = { showPaymentMethodsDialog = false }
         )
     }
@@ -856,10 +856,10 @@ internal fun decryptRoadflareLocation(
  */
 @Composable
 fun RoadflarePaymentMethodsDialog(
-    settingsRepository: com.roadflare.common.settings.SettingsRepository,
+    settingsManager: com.ridestr.common.settings.SettingsManager,
     onDismiss: () -> Unit
 ) {
-    val currentMethods by settingsRepository.fiatPaymentMethods.collectAsState(initial = listOf("fiat_cash"))
+    val currentMethods by settingsManager.roadflarePaymentMethods.collectAsState()
     val scope = rememberCoroutineScope()
 
     // Local state for Save/Cancel pattern
@@ -894,7 +894,7 @@ fun RoadflarePaymentMethodsDialog(
                     style = MaterialTheme.typography.labelLarge
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-                com.roadflare.common.ui.components.ReorderablePaymentMethodList(
+                com.ridestr.common.ui.components.ReorderablePaymentMethodList(
                     allMethods = allMethods,
                     enabledMethods = localMethods,
                     onOrderChanged = { reordered -> localMethods = reordered },
@@ -911,7 +911,7 @@ fun RoadflarePaymentMethodsDialog(
         },
         confirmButton = {
             Button(onClick = {
-                scope.launch { settingsRepository.setFiatPaymentMethods(localMethods) }
+                settingsManager.setRoadflarePaymentMethods(localMethods)
                 onDismiss()
             }) {
                 Text("Save")

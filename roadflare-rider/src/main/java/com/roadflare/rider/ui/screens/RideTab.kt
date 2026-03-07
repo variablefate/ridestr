@@ -21,9 +21,9 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
-import com.roadflare.common.nostr.events.Location
-import com.roadflare.common.state.RideStage
-import com.roadflare.common.ui.LocationSearchField
+import com.ridestr.common.nostr.events.Location
+import com.roadflare.rider.state.RideStage
+import com.ridestr.common.ui.LocationSearchField
 import com.roadflare.rider.viewmodels.ChatMessage
 import com.roadflare.rider.viewmodels.DriverInfo
 import com.roadflare.rider.viewmodels.RideSession

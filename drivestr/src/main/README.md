@@ -132,8 +132,8 @@ Any state → cancelCurrentRide() → CANCELLED → goOnline() → AVAILABLE
 ## MainActivity Initialization Flow
 
 ```kotlin
-// Line 131: NostrService with custom relays
-val nostrService = NostrService(context, settingsManager.getEffectiveRelays())
+// Line 131: NostrService singleton (reads relays from SettingsManager internally)
+val nostrService = NostrService.getInstance(context)
 
 // Line 148-149: WalletService initialization
 val walletService = WalletService(context, walletKeyManager)

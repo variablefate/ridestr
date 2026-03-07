@@ -1,17 +1,16 @@
 package com.roadflare.rider.viewmodels
 
+import android.app.Application
 import android.net.Uri
-import androidx.lifecycle.ViewModel
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.roadflare.common.nostr.NostrService
-import com.roadflare.common.nostr.events.UserProfile
+import com.ridestr.common.nostr.NostrService
+import com.ridestr.common.nostr.events.UserProfile
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
-import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import javax.inject.Inject
 
 /**
  * UI state for profile setup.
@@ -31,17 +30,10 @@ data class ProfileUiState(
 
 /**
  * ViewModel for profile setup and editing.
- *
- * Port from ridestr ProfileViewModel with:
- * - Package rename com.ridestr -> com.roadflare
- * - AndroidViewModel -> ViewModel + Hilt injection
- * - NostrService injected via constructor instead of manual instantiation
- * - Relay connect/disconnect managed externally (Application-level)
  */
-@HiltViewModel
-class ProfileViewModel @Inject constructor(
-    private val nostrService: NostrService
-) : ViewModel() {
+class ProfileViewModel(application: Application) : AndroidViewModel(application) {
+
+    private val nostrService = NostrService.getInstance(application)
 
     private val _uiState = MutableStateFlow(ProfileUiState())
     val uiState: StateFlow<ProfileUiState> = _uiState.asStateFlow()
@@ -159,6 +151,6 @@ class ProfileViewModel @Inject constructor(
     override fun onCleared() {
         super.onCleared()
         profileSubscriptionId?.let { nostrService.closeSubscription(it) }
-        nostrService.disconnect()
+        // Don't disconnect the singleton — other components share relay connections
     }
 }

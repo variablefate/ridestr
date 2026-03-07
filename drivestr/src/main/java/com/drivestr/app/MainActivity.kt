@@ -179,8 +179,8 @@ fun DrivestrApp() {
         }
     }
 
-    // NostrService for relay connections (uses custom relays from settings)
-    val nostrService = remember { NostrService(context, settingsManager.getEffectiveRelays()) }
+    // NostrService for relay connections (singleton, reads custom relays from settings)
+    val nostrService = remember { NostrService.getInstance(context) }
 
     // Vehicle repository for multi-vehicle support
     val vehicleRepository = remember { VehicleRepository.getInstance(context) }

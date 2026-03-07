@@ -11,6 +11,7 @@ import com.ridestr.common.nostr.keys.KeyManager
 import com.ridestr.common.nostr.relay.RelayConfig
 import com.ridestr.common.nostr.relay.RelayConnectionState
 import com.ridestr.common.nostr.relay.RelayManager
+import androidx.annotation.VisibleForTesting
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -34,13 +35,34 @@ import kotlinx.coroutines.withTimeoutOrNull
  * @param context Android context for key management
  * @param relays Custom relay list (defaults to RelayConfig.DEFAULT_RELAYS)
  */
-class NostrService(
+class NostrService internal constructor(
     context: Context,
     relays: List<String> = RelayConfig.DEFAULT_RELAYS
 ) {
 
     companion object {
         private const val TAG = "NostrService"
+
+        @Volatile
+        private var INSTANCE: NostrService? = null
+
+        fun getInstance(context: Context): NostrService {
+            return INSTANCE ?: synchronized(this) {
+                INSTANCE ?: run {
+                    val appContext = context.applicationContext
+                    val relays = SettingsManager.getInstance(appContext).getEffectiveRelays()
+                    NostrService(appContext, relays).also { INSTANCE = it }
+                }
+            }
+        }
+
+        @VisibleForTesting
+        fun clearInstanceForTest() {
+            synchronized(this) {
+                INSTANCE?.disconnect()
+                INSTANCE = null
+            }
+        }
     }
 
     val keyManager = KeyManager(context)

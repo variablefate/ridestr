@@ -162,8 +162,8 @@ fun RidestrApp() {
     // Settings manager (created first to get custom relays)
     val settingsManager = remember { SettingsManager.getInstance(context) }
 
-    // NostrService for relay connections (uses custom relays from settings)
-    val nostrService = remember { NostrService(context, settingsManager.getEffectiveRelays()) }
+    // NostrService for relay connections (singleton, reads custom relays from settings)
+    val nostrService = remember { NostrService.getInstance(context) }
 
     // Tile management (singleton to share with ViewModels)
     val tileManager = remember { TileManager.getInstance(context) }

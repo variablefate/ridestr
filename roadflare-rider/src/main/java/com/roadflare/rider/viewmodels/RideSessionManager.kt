@@ -1,18 +1,19 @@
 package com.roadflare.rider.viewmodels
 
 import android.util.Log
-import com.roadflare.common.nostr.NostrService
-import com.roadflare.common.nostr.events.Location
-import com.roadflare.common.nostr.events.PaymentMethod
-import com.roadflare.common.nostr.events.RideAcceptanceData
-import com.roadflare.common.state.*
+import com.ridestr.common.nostr.NostrService
+import com.ridestr.common.nostr.events.Location
+import com.ridestr.common.nostr.events.PaymentMethod
+import com.ridestr.common.nostr.events.RideAcceptanceData
+import com.ridestr.common.state.RideState
+import com.ridestr.common.state.RideStateMachine
+import com.roadflare.rider.state.RideStage
+import androidx.annotation.VisibleForTesting
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import javax.inject.Inject
-import javax.inject.Singleton
 
 /**
  * Information about a driver who may service a ride.
@@ -65,11 +66,9 @@ data class RideSession(
  * - Confirms rides and cleans up non-chosen offers via NIP-09
  * - Handles cancellation with full event cleanup
  *
- * This is a singleton coordinator — the RiderViewModel delegates
- * ride-session state management here.
+ * The RiderViewModel delegates ride-session state management here.
  */
-@Singleton
-class RideSessionManager @Inject constructor(
+class RideSessionManager(
     private val nostrService: NostrService
 ) {
     companion object {
@@ -159,12 +158,13 @@ class RideSessionManager @Inject constructor(
 
             for ((pubkey, distance) in chunk) {
                 Log.d(TAG, "Sending offer to ${driverNames[pubkey] ?: pubkey.take(8)} (${String.format("%.1f", distance)} mi)")
-                val eventId = nostrService.sendRoadflareOffer(
+                val eventId = nostrService.sendRideOffer(
                     driverPubKey = pubkey,
                     pickup = pickup,
                     destination = destination,
                     fareEstimate = fareEstimate,
                     paymentMethod = paymentMethod,
+                    isRoadflare = true,
                     fiatPaymentMethods = fiatPaymentMethods
                 )
                 if (eventId != null) {
@@ -304,6 +304,24 @@ class RideSessionManager @Inject constructor(
         batchJob?.cancel()
         updateStage()
     }
+
+    /**
+     * Permanently tear down this coordinator. Cancels the coroutine scope
+     * and cleans up all ride state. Called from RiderViewModel.onCleared().
+     */
+    fun destroy() {
+        clearRide()
+        scope.cancel()
+    }
+
+    @VisibleForTesting
+    internal fun isScopeActive(): Boolean = scope.isActive
+
+    @VisibleForTesting
+    internal fun activeSubscriptionCount(): Int = acceptanceSubscriptionIds.size
+
+    @VisibleForTesting
+    internal fun addTestSubscriptionId(id: String) { acceptanceSubscriptionIds.add(id) }
 
     /**
      * Get the list of drivers who have accepted the current ride offer.

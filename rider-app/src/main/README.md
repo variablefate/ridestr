@@ -158,8 +158,8 @@ Fixes for driver status bouncing between offline/online:
 ## MainActivity Initialization Flow
 
 ```kotlin
-// Line 131: NostrService with custom relays
-val nostrService = NostrService(context, settingsManager.getEffectiveRelays())
+// Line 131: NostrService singleton (reads relays from SettingsManager internally)
+val nostrService = NostrService.getInstance(context)
 
 // Line 153-154: WalletService initialization
 val walletService = WalletService(context, walletKeyManager)

@@ -17,11 +17,11 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.roadflare.common.data.RideHistoryRepository
-import com.roadflare.common.nostr.events.RideHistoryEntry
-import com.roadflare.common.nostr.events.RideHistoryStats
-import com.roadflare.common.settings.DisplayCurrency
-import com.roadflare.common.settings.SettingsRepository
+import com.ridestr.common.data.RideHistoryRepository
+import com.ridestr.common.nostr.events.RideHistoryEntry
+import com.ridestr.common.nostr.events.RideHistoryStats
+import com.ridestr.common.settings.DisplayCurrency
+import com.ridestr.common.settings.SettingsManager
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
@@ -33,7 +33,7 @@ import java.util.*
 @Composable
 fun HistoryScreen(
     rideHistoryRepository: RideHistoryRepository,
-    settingsRepository: SettingsRepository,
+    settingsManager: SettingsManager,
     onRideClick: (RideHistoryEntry) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -55,7 +55,7 @@ fun HistoryScreen(
             cancelledRides = rides.count { it.status == "cancelled" }
         )
     }
-    val displayCurrency by settingsRepository.displayCurrency.collectAsState(initial = DisplayCurrency.USD)
+    val displayCurrency by settingsManager.displayCurrency.collectAsState()
     val coroutineScope = rememberCoroutineScope()
 
     var showClearDialog by remember { mutableStateOf(false) }
@@ -137,7 +137,7 @@ fun HistoryScreen(
                 StatsCard(
                     stats = stats,
                     displayCurrency = displayCurrency,
-                    settingsRepository = settingsRepository
+                    settingsManager = settingsManager
                 )
             }
 
@@ -179,7 +179,7 @@ fun HistoryScreen(
                     RideHistoryCard(
                         ride = ride,
                         displayCurrency = displayCurrency,
-                        settingsRepository = settingsRepository,
+                        settingsManager = settingsManager,
                         onClick = { onRideClick(ride) },
                         onDelete = { rideToDelete = ride }
                     )
@@ -194,7 +194,7 @@ fun HistoryScreen(
 private fun StatsCard(
     stats: RideHistoryStats,
     displayCurrency: DisplayCurrency,
-    settingsRepository: SettingsRepository
+    settingsManager: SettingsManager
 ) {
     val scope = rememberCoroutineScope()
 
@@ -277,7 +277,7 @@ private fun StatsCard(
                         modifier = Modifier.clickable {
                             scope.launch {
                                 val newCurrency = if (displayCurrency == DisplayCurrency.USD) DisplayCurrency.SATS else DisplayCurrency.USD
-                                settingsRepository.setDisplayCurrency(newCurrency)
+                                settingsManager.setDisplayCurrency(newCurrency)
                             }
                         }
                     )
@@ -330,7 +330,7 @@ private fun StatItem(
 private fun RideHistoryCard(
     ride: RideHistoryEntry,
     displayCurrency: DisplayCurrency,
-    settingsRepository: SettingsRepository,
+    settingsManager: SettingsManager,
     onClick: () -> Unit,
     onDelete: () -> Unit
 ) {
@@ -505,7 +505,7 @@ private fun RideHistoryCard(
                                 .clickable {
                                     scope.launch {
                                         val newCurrency = if (displayCurrency == DisplayCurrency.USD) DisplayCurrency.SATS else DisplayCurrency.USD
-                                        settingsRepository.setDisplayCurrency(newCurrency)
+                                        settingsManager.setDisplayCurrency(newCurrency)
                                     }
                                 }
                                 .padding(horizontal = 12.dp, vertical = 6.dp)

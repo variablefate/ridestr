@@ -27,6 +27,18 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
+ * Determines whether the location search dropdown should be visible.
+ * Extracted for testability — the 3-char threshold matches the debounce
+ * trigger (LaunchedEffect requires value.length >= 3 before calling onSearch).
+ */
+internal fun shouldShowLocationDropdown(
+    isFocused: Boolean,
+    selectedLocation: Location?,
+    valueLength: Int,
+    showMyLocation: Boolean
+): Boolean = isFocused && selectedLocation == null && (valueLength >= 3 || showMyLocation)
+
+/**
  * Search field for location input with autocomplete suggestions.
  *
  * @param value Current text value
@@ -73,7 +85,7 @@ fun LocationSearchField(
     }
 
     // Show dropdown when we have results and field is focused
-    showDropdown = isFocused && (searchResults.isNotEmpty() || isSearching) && selectedLocation == null
+    showDropdown = shouldShowLocationDropdown(isFocused, selectedLocation, value.length, showMyLocation)
 
     Column(modifier = modifier) {
         // Label if provided
@@ -251,16 +263,21 @@ private fun SuggestionItem(
         Spacer(modifier = Modifier.width(12.dp))
 
         Column(modifier = Modifier.weight(1f)) {
-            // Feature name or first line of address
+            // Filter out street-number-only featureNames (e.g. "123") that Geocoder returns
+            val titleFromFeatureName = result.featureName?.takeIf { name ->
+                name.length >= 2 && name.any { it.isLetter() }
+            }
             Text(
-                text = result.featureName ?: result.addressLine.split(",").firstOrNull() ?: result.addressLine,
+                text = titleFromFeatureName
+                    ?: result.addressLine.split(",").firstOrNull()?.trim()
+                    ?: result.addressLine,
                 style = MaterialTheme.typography.bodyMedium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
 
             // Full address as secondary text
-            if (result.featureName != null || result.addressLine.contains(",")) {
+            if (titleFromFeatureName != null || result.addressLine.contains(",")) {
                 Text(
                     text = result.addressLine,
                     style = MaterialTheme.typography.bodySmall,

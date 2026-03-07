@@ -1,7 +1,7 @@
 package com.roadflare.rider.viewmodels
 
 import android.util.Log
-import com.roadflare.common.nostr.NostrService
+import com.ridestr.common.nostr.NostrService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -9,8 +9,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import javax.inject.Inject
-import javax.inject.Singleton
 
 /**
  * Coordinates in-ride chat between rider and driver.
@@ -18,11 +16,9 @@ import javax.inject.Singleton
  * Chat messages are sent as NIP-44 encrypted DMs tagged with the
  * ride's confirmation event ID so both sides can filter them.
  *
- * This is a singleton coordinator — the RiderViewModel delegates
- * chat state management here.
+ * The RiderViewModel delegates chat state management here.
  */
-@Singleton
-class ChatCoordinator @Inject constructor(
+class ChatCoordinator(
     private val nostrService: NostrService
 ) {
     companion object {
@@ -110,5 +106,13 @@ class ChatCoordinator @Inject constructor(
             Log.d(TAG, "Closed chat subscription")
         }
         subscriptionId = null
+    }
+
+    /**
+     * Permanently tear down this coordinator. Closes any active subscription
+     * and clears message state. Called from RiderViewModel.onCleared().
+     */
+    fun destroy() {
+        clearMessages()
     }
 }

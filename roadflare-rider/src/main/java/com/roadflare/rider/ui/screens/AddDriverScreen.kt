@@ -19,8 +19,8 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import com.roadflare.common.data.FollowedDriversRepository
-import com.roadflare.common.nostr.events.FollowedDriver
+import com.ridestr.common.data.FollowedDriversRepository
+import com.ridestr.common.nostr.events.FollowedDriver
 import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
 import com.vitorpamplona.quartz.nip19Bech32.entities.NPub
 import io.github.g00fy2.quickie.QRResult
