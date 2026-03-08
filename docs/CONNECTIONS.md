@@ -48,7 +48,7 @@ This document provides a comprehensive view of how all modules connect in the Ri
 
 **Ride Flow Simplification Phase 6 (February 2026):**
 - AtomicBoolean CAS guards prevent double-confirmation from concurrent multi-relay callbacks
-- `confirmationInFlight` guards `autoConfirmRide()` and `confirmRide()` (exactly one wins per ride)
+- `confirmationInFlight` guards `autoConfirmRide()` (exactly one wins per ride)
 - `hasAcceptedDriver` converted to AtomicBoolean with `compareAndSet` for broadcast first-wins
 - Callback stage checks use `StateFlow.update {}` CAS with `shouldConfirm` re-derived at lambda top
 - Post-suspension guards check acceptance identity before stage (prevents cross-ride contamination)
@@ -646,7 +646,7 @@ Nostr Layer (Phase 5 Domain Decomposition)
 │   ├── Availability: broadcastAvailability(), subscribeToDrivers(), subscribeToDriverAvailability() (Kind 30173)
 │   ├── Offers: sendRideOffer(), broadcastRideRequest(), subscribeToBroadcastRideRequests(), subscribeToOffers() (Kind 3173)
 │   ├── Acceptance: acceptRide(), acceptBroadcastRide(), subscribeToAcceptance(), subscribeToAcceptancesForOffer() (Kind 3174)
-│   ├── Confirmation: confirmRide(), subscribeToConfirmation() (Kind 3175)
+│   ├── Confirmation: subscribeToConfirmation() (Kind 3175)
 │   ├── DriverState: publishDriverRideState(), subscribeToDriverRideState() (Kind 30180)
 │   ├── RiderState: publishRiderRideState(), subscribeToRiderRideState() (Kind 30181)
 │   ├── Chat: sendChatMessage(), subscribeToChatMessages() (Kind 3178)

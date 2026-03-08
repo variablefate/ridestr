@@ -41,6 +41,7 @@ import com.google.android.gms.tasks.CancellationTokenSource
 import com.ridestr.common.data.Vehicle
 import com.ridestr.common.data.VehicleRepository
 import com.ridestr.common.nostr.events.BroadcastRideOfferData
+import com.ridestr.common.nostr.events.PaymentPath
 import com.ridestr.common.nostr.events.Location
 import com.ridestr.common.nostr.events.RideOfferData
 import com.ridestr.common.nostr.events.RideshareChatData
@@ -405,7 +406,8 @@ fun DriverModeScreen(
                     })
                 },
                 confirmButton = {
-                    if (!isWaiting) {
+                    // Hide "Complete Anyway" for SAME_MINT rides — escrow payment is required
+                    if (!isWaiting && uiState.rideSession.paymentPath != PaymentPath.SAME_MINT) {
                         TextButton(onClick = { viewModel.confirmCompleteWithoutPayment() }) {
                             Text("Complete Anyway")
                         }

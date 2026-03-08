@@ -140,7 +140,6 @@ Always close ride subscriptions when:
 - User logs out
 
 Use `closeAllRideSubscriptionsAndJobs()` for ride-ending paths (completion, cancellation).
-Use `closeAllRideSubscriptions()` only for mid-ride transitions (e.g., `confirmRide()`).
 
 ---
 
@@ -203,7 +202,7 @@ Use `closeAllRideSubscriptions()` only for mid-ride transitions (e.g., `confirmR
 | Purpose | File | Functions |
 |---------|------|-----------|
 | Create subscriptions | `RideshareDomainService.kt` | `subscribeToDriverRideState()`, `subscribeToRiderRideState()` |
-| Close subscriptions | ViewModels | `closeAllRideSubscriptionsAndJobs()` (ride-ending), `closeAllRideSubscriptions()` (mid-ride) |
+| Close subscriptions | ViewModels | `closeAllRideSubscriptionsAndJobs()` (ride-ending) |
 
 ---
 

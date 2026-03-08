@@ -469,6 +469,41 @@ fun RiderModeScreen(
         )
     }
 
+    // Escrow lock failure dialog (SAME_MINT payment setup failed)
+    if (uiState.rideSession.showEscrowFailedDialog) {
+        AlertDialog(
+            onDismissRequest = { },  // Non-dismissable: must choose retry or cancel
+            icon = {
+                Icon(
+                    Icons.Default.Warning,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error
+                )
+            },
+            title = { Text("Payment Setup Failed") },
+            text = {
+                Column {
+                    Text(uiState.rideSession.escrowFailedMessage
+                        ?: "Could not set up payment escrow.")
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "You can retry or cancel the ride.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                Button(onClick = { viewModel.retryEscrowLock() }) { Text("Retry") }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.cancelRideAfterEscrowFailure() }) {
+                    Text("Cancel Ride")
+                }
+            }
+        )
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()

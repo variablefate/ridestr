@@ -204,27 +204,25 @@ fun RidestrApp() {
         }
     }
 
-    // ProfileSyncManager for coordinated profile data sync
-    val profileSyncManager = remember {
-        ProfileSyncManager.getInstance(context, settingsManager.getEffectiveRelays())
-    }
-
     // Ride history repository (for sync adapter)
     val rideHistoryRepo = remember { RideHistoryRepository.getInstance(context) }
     val savedLocationRepo = remember { SavedLocationRepository.getInstance(context) }
     val followedDriversRepo = remember { FollowedDriversRepository.getInstance(context) }
 
-    // Register sync adapters (rider app: includes saved locations, no vehicles)
-    LaunchedEffect(Unit) {
-        profileSyncManager.registerSyncable(Nip60WalletSyncAdapter(nip60Sync))
-        profileSyncManager.registerSyncable(ProfileSyncAdapter(
-            vehicleRepository = null,  // Rider app doesn't use vehicles
-            savedLocationRepository = savedLocationRepo,
-            settingsManager = settingsManager,
-            nostrService = nostrService
-        ))
-        profileSyncManager.registerSyncable(RideHistorySyncAdapter(rideHistoryRepo, nostrService))
-        profileSyncManager.registerSyncable(FollowedDriversSyncAdapter(followedDriversRepo, nostrService))
+    // ProfileSyncManager for coordinated profile data sync
+    // Registration is synchronous in remember{} to prevent race with PROFILE_SYNC screen
+    val profileSyncManager = remember {
+        ProfileSyncManager.getInstance(context, settingsManager.getEffectiveRelays()).also { psm ->
+            psm.registerSyncable(Nip60WalletSyncAdapter(nip60Sync))
+            psm.registerSyncable(ProfileSyncAdapter(
+                vehicleRepository = null,  // Rider app doesn't use vehicles
+                savedLocationRepository = savedLocationRepo,
+                settingsManager = settingsManager,
+                nostrService = nostrService
+            ))
+            psm.registerSyncable(RideHistorySyncAdapter(rideHistoryRepo, nostrService))
+            psm.registerSyncable(FollowedDriversSyncAdapter(followedDriversRepo, nostrService))
+        }
     }
 
     // Subscribe to RoadFlare key share events (Kind 3186)
@@ -460,6 +458,8 @@ fun RidestrApp() {
                     profileSyncManager.checkAndSyncRidestrData()
                 }
 
+                val syncRetryScope = rememberCoroutineScope()
+
                 ProfileSyncScreen(
                     syncState = syncState,
                     isDriverApp = false,  // Rider app
@@ -480,12 +480,19 @@ fun RidestrApp() {
                     onSkip = {
                         profileSyncManager.resetSyncState()
                         onboardingViewModel.markProfileSyncCompleted()
-                        // Skip sync, proceed with normal onboarding
+                        // Skip sync, proceed with normal onboarding (same routing as onComplete)
                         currentScreen = if (uiState.isProfileCompleted) {
-                            Screen.LOCATION_PERMISSION
+                            if (settingsManager.isWalletSetupDone()) {
+                                Screen.LOCATION_PERMISSION
+                            } else {
+                                Screen.WALLET_SETUP
+                            }
                         } else {
                             Screen.PROFILE_SETUP
                         }
+                    },
+                    onRetry = {
+                        syncRetryScope.launch { profileSyncManager.checkAndSyncRidestrData() }
                     },
                     modifier = Modifier.padding(innerPadding)
                 )

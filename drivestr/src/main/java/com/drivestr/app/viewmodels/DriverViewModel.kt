@@ -576,6 +576,12 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                 put("offer_pickupLon", offer.approxPickup.lon)
                 put("offer_destLat", offer.destination.lat)
                 put("offer_destLon", offer.destination.lon)
+                put("offer_mintUrl", offer.mintUrl ?: "")
+                put("offer_paymentMethod", offer.paymentMethod)
+
+                // Payment path persistence (for escrow guard after restart)
+                put("paymentPath", session.paymentPath.name)
+                put("driverMintUrl", session.driverMintUrl ?: "")
 
                 // Precise pickup if available
                 session.precisePickupLocation?.let {
@@ -656,8 +662,19 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     lon = data.getDouble("offer_destLon")
                 ),
                 fareEstimate = data.getDouble("offer_fareEstimate"),
-                createdAt = data.getLong("offer_createdAt")
+                createdAt = data.getLong("offer_createdAt"),
+                mintUrl = data.optString("offer_mintUrl", "").ifEmpty { null },
+                paymentMethod = data.optString("offer_paymentMethod", "cashu")
             )
+
+            // Restore payment path (for escrow guard after restart)
+            val savedDriverMintUrl = data.optString("driverMintUrl", "").ifEmpty { null }
+            val paymentPath = try {
+                PaymentPath.valueOf(data.getString("paymentPath"))
+            } catch (_: Exception) {
+                // Recompute from fully persisted fields (no runtime lookups needed)
+                PaymentPath.determine(offer.mintUrl, savedDriverMintUrl, offer.paymentMethod)
+            }
 
             // Reconstruct precise pickup if available
             val precisePickup = if (data.has("precisePickupLat")) {
@@ -712,7 +729,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                         confirmationEventId = confirmationEventId,
                         precisePickupLocation = precisePickup,
                         pinAttempts = pinAttempts,
-                        chatMessages = chatMessages
+                        chatMessages = chatMessages,
+                        paymentPath = paymentPath,
+                        driverMintUrl = savedDriverMintUrl,
+                        riderMintUrl = offer.mintUrl
                     )
                 )
             }
@@ -1402,6 +1422,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
                     activeEscrowToken = null,
                     canSettleEscrow = false,
                     paymentPath = paymentPath,
+                    driverMintUrl = driverMintUrl,
                     riderMintUrl = offer.mintUrl,
                     crossMintPaymentComplete = false,
                     pendingDepositQuoteId = null,
@@ -2236,6 +2257,11 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
      * User confirmed to complete ride without payment.
      */
     fun confirmCompleteWithoutPayment() {
+        // SAME_MINT rides must not complete without escrow payment
+        if (_uiState.value.rideSession.paymentPath == PaymentPath.SAME_MINT) {
+            Log.e(TAG, "Cannot complete SAME_MINT ride without payment — blocked")
+            return
+        }
         Log.d(TAG, "User confirmed to complete ride without payment")
         updateRideSession { copy(
             showPaymentWarningDialog = false,
@@ -4159,6 +4185,7 @@ data class DriverRideSession(
 
     // Multi-mint payment
     val paymentPath: PaymentPath = PaymentPath.NO_PAYMENT,
+    val driverMintUrl: String? = null,
     val riderMintUrl: String? = null,
     val crossMintPaymentComplete: Boolean = false,
     val pendingDepositQuoteId: String? = null,

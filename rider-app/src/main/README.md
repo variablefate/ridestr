@@ -217,8 +217,7 @@ All subscription IDs managed via `SubscriptionManager` instance (`subs`), replac
 - `subscribeToAcceptances()` - Watch for Kind 3174 responses
 - `subscribeToSelectedDriverAvailability()` - Watch selected driver's Kind 30173 (Issue #22)
 
-**Cleanup tiers:**
-- `closeAllRideSubscriptions()` - Closes `SubKeys.RIDE_BASE` (4 subs: acceptance, cancellation, driver_ride_state, chat). Used by `confirmRide()` only — keeps `SELECTED_DRIVER_AVAILABILITY` open for Issue #22.
+**Cleanup:**
 - `closeAllRideSubscriptionsAndJobs()` - Closes `SubKeys.RIDE_ALL` (5 subs, includes availability) + cancels all jobs. Used by all ride-ending paths.
 - `closeDriverAvailabilitySubscription()` - Clean up driver monitoring on acceptance/cancel
 
@@ -248,7 +247,7 @@ Thread-safe race condition fix prevents duplicate confirmation from multi-relay 
 
 ### PaymentHash in Confirmation (January 2026)
 paymentHash is now sent in confirmation (Kind 3175), not offer (Kind 3173):
-- `autoConfirmRide()` at line 2940 passes `paymentHash` and `escrowToken` to `confirmRide()`
+- `autoConfirmRide()` passes `paymentHash` and `escrowToken` to `nostrService.confirmRide()`
 - This ensures HTLC is locked with the correct driver wallet key AFTER acceptance
 - Fixes boost bug where resending offer overwrote driver's paymentHash with null
 - Driver extracts paymentHash from `confirmation.paymentHash` in `subscribeToConfirmation()`
