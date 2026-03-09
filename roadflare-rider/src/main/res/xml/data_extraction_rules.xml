@@ -10,6 +10,19 @@
         <exclude domain="sharedpref" path="roadflare_vehicles.xml" />
         <exclude domain="sharedpref" path="roadflare_followed_drivers.xml" />
         <exclude domain="sharedpref" path="roadflare_driver_state.xml" />
+        <!-- Correct common-module SharedPrefs names (pre-existing name mismatch fix) -->
+        <exclude domain="sharedpref" path="ridestr_secure_keys.xml" />
+        <exclude domain="sharedpref" path="ridestr_ride_history.xml" />
+        <exclude domain="sharedpref" path="ridestr_saved_locations.xml" />
+        <exclude domain="sharedpref" path="ridestr_vehicles.xml" />
+        <!-- Settings files (DataStore replaces SharedPreferences) -->
+        <exclude domain="sharedpref" path="ridestr_settings.xml" />
+        <exclude domain="file" path="datastore/settings_datastore.preferences_pb" />
+        <!-- Shared caches from common module -->
+        <exclude domain="sharedpref" path="tile_discovery_cache.xml" />
+        <exclude domain="sharedpref" path="profile_picture_prefs.xml" />
+        <!-- Sync state (roadflare-rider OnboardingViewModel persistence) -->
+        <exclude domain="sharedpref" path="roadflare_sync.xml" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="roadflare_secure_keys.xml" />
@@ -21,5 +34,18 @@
         <exclude domain="sharedpref" path="roadflare_vehicles.xml" />
         <exclude domain="sharedpref" path="roadflare_followed_drivers.xml" />
         <exclude domain="sharedpref" path="roadflare_driver_state.xml" />
+        <!-- Correct common-module SharedPrefs names (pre-existing name mismatch fix) -->
+        <exclude domain="sharedpref" path="ridestr_secure_keys.xml" />
+        <exclude domain="sharedpref" path="ridestr_ride_history.xml" />
+        <exclude domain="sharedpref" path="ridestr_saved_locations.xml" />
+        <exclude domain="sharedpref" path="ridestr_vehicles.xml" />
+        <!-- Settings files (DataStore replaces SharedPreferences) -->
+        <exclude domain="sharedpref" path="ridestr_settings.xml" />
+        <exclude domain="file" path="datastore/settings_datastore.preferences_pb" />
+        <!-- Shared caches from common module -->
+        <exclude domain="sharedpref" path="tile_discovery_cache.xml" />
+        <exclude domain="sharedpref" path="profile_picture_prefs.xml" />
+        <!-- Sync state (roadflare-rider OnboardingViewModel persistence) -->
+        <exclude domain="sharedpref" path="roadflare_sync.xml" />
     </device-transfer>
 </data-extraction-rules>

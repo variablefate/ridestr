@@ -20,7 +20,6 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.ridestr.common.payment.*
 import com.ridestr.common.nostr.events.MintOption as AdminMintOption
-import com.ridestr.common.settings.SettingsManager
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
@@ -39,7 +38,8 @@ import java.util.*
 @Composable
 fun WalletSettingsScreen(
     walletService: WalletService,
-    settingsManager: SettingsManager,
+    alwaysShowWalletDiagnostics: Boolean,
+    onSetAlwaysShowWalletDiagnostics: (Boolean) -> Unit,
     isDriverApp: Boolean,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
@@ -849,8 +849,6 @@ fun WalletSettingsScreen(
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     // Always show wallet diagnostics toggle
-                    val alwaysShowDiagnostics by settingsManager.alwaysShowWalletDiagnostics.collectAsState()
-
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -862,7 +860,7 @@ fun WalletSettingsScreen(
                                 style = MaterialTheme.typography.bodyLarge
                             )
                             Text(
-                                text = if (alwaysShowDiagnostics)
+                                text = if (alwaysShowWalletDiagnostics)
                                     "Shows sync status icon (green = synced)"
                                 else
                                     "Only shows icon when there are issues",
@@ -872,8 +870,8 @@ fun WalletSettingsScreen(
                         }
                         Spacer(modifier = Modifier.width(16.dp))
                         Switch(
-                            checked = alwaysShowDiagnostics,
-                            onCheckedChange = { settingsManager.setAlwaysShowWalletDiagnostics(it) }
+                            checked = alwaysShowWalletDiagnostics,
+                            onCheckedChange = { onSetAlwaysShowWalletDiagnostics(it) }
                         )
                     }
 

@@ -15,7 +15,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.ridestr.common.nostr.events.RideHistoryEntry
 import com.ridestr.common.settings.DisplayCurrency
-import com.ridestr.common.settings.SettingsManager
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -31,7 +30,7 @@ fun RideDetailScreen(
     ride: RideHistoryEntry,
     displayCurrency: DisplayCurrency,
     btcPriceUsd: Int?,
-    settingsManager: SettingsManager,
+    onToggleCurrency: () -> Unit,
     isRiderApp: Boolean,
     onBack: () -> Unit,
     onDelete: () -> Unit,
@@ -262,7 +261,7 @@ fun RideDetailScreen(
                                         text = tipDisplay,
                                         style = MaterialTheme.typography.titleSmall,
                                         color = MaterialTheme.colorScheme.onTertiaryContainer,
-                                        modifier = Modifier.clickable(role = Role.Button, onClickLabel = "Toggle currency") { settingsManager.toggleDisplayCurrency() }
+                                        modifier = Modifier.clickable(role = Role.Button, onClickLabel = "Toggle currency") { onToggleCurrency() }
                                     )
                                 }
                             }
@@ -500,7 +499,7 @@ fun RideDetailScreen(
                                     text = fareDisplay,
                                     style = MaterialTheme.typography.headlineMedium,
                                     color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                    modifier = Modifier.clickable(role = Role.Button, onClickLabel = "Toggle currency") { settingsManager.toggleDisplayCurrency() }
+                                    modifier = Modifier.clickable(role = Role.Button, onClickLabel = "Toggle currency") { onToggleCurrency() }
                                 )
                             }
                         }
@@ -531,7 +530,7 @@ fun RideDetailScreen(
                                     text = "Tip: $tipDisplay",
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.tertiary,
-                                    modifier = Modifier.clickable(role = Role.Button, onClickLabel = "Toggle currency") { settingsManager.toggleDisplayCurrency() }
+                                    modifier = Modifier.clickable(role = Role.Button, onClickLabel = "Toggle currency") { onToggleCurrency() }
                                 )
                             }
                         }

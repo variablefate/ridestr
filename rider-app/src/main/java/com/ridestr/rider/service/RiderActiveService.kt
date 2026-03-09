@@ -2,6 +2,7 @@ package com.ridestr.rider.service
 
 import android.app.PendingIntent
 import android.app.Service
+import dagger.hilt.android.AndroidEntryPoint
 import android.content.Context
 import android.content.Intent
 import android.os.Build
@@ -11,7 +12,9 @@ import com.ridestr.common.notification.AlertType
 import com.ridestr.common.notification.NotificationCoordinator
 import com.ridestr.common.notification.NotificationHelper
 import com.ridestr.common.notification.SoundManager
-import com.ridestr.common.settings.SettingsManager
+import com.ridestr.common.settings.SettingsRepository
+import javax.inject.Inject
+import kotlinx.coroutines.runBlocking
 import com.ridestr.rider.MainActivity
 import com.ridestr.rider.notification.RiderNotificationTextProvider
 import kotlinx.coroutines.CoroutineScope
@@ -43,6 +46,7 @@ sealed class RiderStatus : Serializable {
  * Alerts (chat messages, driver arrived) are stacked and persist until
  * the user brings the app to foreground via clearAlerts().
  */
+@AndroidEntryPoint
 class RiderActiveService : Service() {
 
     companion object {
@@ -138,13 +142,13 @@ class RiderActiveService : Service() {
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     // Settings for sound/vibration preferences
-    private var settingsManager: SettingsManager? = null
+    @Inject lateinit var settingsRepository: SettingsRepository
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
-        settingsManager = SettingsManager.getInstance(this)
+        runBlocking { settingsRepository.awaitInitialLoad() }
         Log.d(TAG, "Service created")
     }
 
@@ -213,7 +217,7 @@ class RiderActiveService : Service() {
             }
             is RiderStatus.DriverAccepted -> {
                 // Play confirmation sound (respecting user settings)
-                SoundManager.playConfirmationAlert(this, settingsManager)
+                SoundManager.playConfirmationAlert(this, settingsRepository)
                 // Add to alert stack so it persists in notification when backgrounded
                 coordinator.addAlert(AlertType.Accepted(status.driverName))
                 coordinator.updateStatus(status)
@@ -227,7 +231,7 @@ class RiderActiveService : Service() {
             }
             is RiderStatus.DriverArrived -> {
                 // Play driver arrived sound (respecting user settings)
-                SoundManager.playDriverArrivedAlert(this, settingsManager)
+                SoundManager.playDriverArrivedAlert(this, settingsRepository)
                 // coordinator.addAlert clears EnRoute when adding Arrived
                 coordinator.addAlert(AlertType.Arrived(status.driverName))
                 coordinator.updateStatus(status)
@@ -243,7 +247,7 @@ class RiderActiveService : Service() {
             }
             is RiderStatus.Cancelled -> {
                 // Play cancellation sound (respecting user settings)
-                SoundManager.playCancellationAlert(this, settingsManager)
+                SoundManager.playCancellationAlert(this, settingsRepository)
                 // Clear ALL alerts on cancellation
                 coordinator.clearAlerts()
                 coordinator.updateStatus(status)
@@ -258,18 +262,18 @@ class RiderActiveService : Service() {
         when (alert) {
             is AlertType.Chat -> {
                 // Play chat sound (respecting user settings)
-                SoundManager.playChatMessageAlert(this, settingsManager)
+                SoundManager.playChatMessageAlert(this, settingsRepository)
             }
             is AlertType.Accepted -> {
                 // Play confirmation sound (respecting user settings)
-                SoundManager.playConfirmationAlert(this, settingsManager)
+                SoundManager.playConfirmationAlert(this, settingsRepository)
             }
             is AlertType.EnRoute -> {
                 // No sound for en route - transitional state
             }
             is AlertType.Arrived -> {
                 // Play driver arrived sound (respecting user settings)
-                SoundManager.playDriverArrivedAlert(this, settingsManager)
+                SoundManager.playDriverArrivedAlert(this, settingsRepository)
             }
             else -> {
                 // Other alert types (driver-specific) - just add without sound

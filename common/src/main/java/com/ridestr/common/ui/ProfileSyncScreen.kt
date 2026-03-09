@@ -29,6 +29,7 @@ fun ProfileSyncScreen(
     isDriverApp: Boolean,
     onComplete: (RestoredProfileData) -> Unit,
     onSkip: () -> Unit,
+    onRetry: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -69,7 +70,8 @@ fun ProfileSyncScreen(
                 SyncErrorContent(
                     message = syncState.message,
                     retryable = syncState.retryable,
-                    onSkip = onSkip
+                    onSkip = onSkip,
+                    onRetry = onRetry
                 )
             }
             is ProfileSyncState.Backing -> {
@@ -346,7 +348,8 @@ private fun RestoredItem(
 private fun SyncErrorContent(
     message: String,
     retryable: Boolean,
-    onSkip: () -> Unit
+    onSkip: () -> Unit,
+    onRetry: (() -> Unit)? = null
 ) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -372,9 +375,23 @@ private fun SyncErrorContent(
 
         Spacer(modifier = Modifier.height(24.dp))
 
+        if (retryable && onRetry != null) {
+            Button(
+                onClick = onRetry,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Retry")
+            }
+        }
+
         Button(
             onClick = onSkip,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
+            colors = if (retryable && onRetry != null) {
+                ButtonDefaults.outlinedButtonColors()
+            } else {
+                ButtonDefaults.buttonColors()
+            }
         ) {
             Text("Continue without backup")
         }

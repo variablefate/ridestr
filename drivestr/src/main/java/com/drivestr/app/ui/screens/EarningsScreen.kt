@@ -23,7 +23,6 @@ import com.ridestr.common.nostr.events.RideHistoryEntry
 import com.ridestr.common.nostr.events.RideHistoryStats
 import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.settings.DisplayCurrency
-import com.ridestr.common.settings.SettingsManager
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
@@ -36,7 +35,8 @@ import java.util.*
 @Composable
 fun EarningsScreen(
     rideHistoryRepository: RideHistoryRepository,
-    settingsManager: SettingsManager,
+    displayCurrency: DisplayCurrency,
+    onToggleCurrency: () -> Unit,
     nostrService: NostrService,
     priceService: BitcoinPriceService,
     onBack: () -> Unit,
@@ -71,7 +71,6 @@ fun EarningsScreen(
             cancelledRides = rides.count { it.status == "cancelled" }
         )
     }
-    val displayCurrency by settingsManager.displayCurrency.collectAsState()
     val btcPriceUsd by priceService.btcPriceUsd.collectAsState()
     val coroutineScope = rememberCoroutineScope()
 
@@ -184,7 +183,7 @@ fun EarningsScreen(
                         stats = stats,
                         displayCurrency = displayCurrency,
                         btcPriceUsd = btcPriceUsd,
-                        settingsManager = settingsManager
+                        onToggleCurrency = onToggleCurrency
                     )
                 }
 
@@ -227,7 +226,7 @@ fun EarningsScreen(
                             ride = ride,
                             displayCurrency = displayCurrency,
                             btcPriceUsd = btcPriceUsd,
-                            settingsManager = settingsManager,
+                            onToggleCurrency = onToggleCurrency,
                             onClick = { onRideClick(ride) },
                             onDelete = { rideToDelete = ride }
                         )
@@ -244,7 +243,7 @@ private fun EarningsCard(
     stats: RideHistoryStats,
     displayCurrency: DisplayCurrency,
     btcPriceUsd: Int?,
-    settingsManager: SettingsManager
+    onToggleCurrency: () -> Unit
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -305,7 +304,7 @@ private fun EarningsCard(
                         text = totalEarnedDisplay,
                         style = MaterialTheme.typography.headlineMedium,
                         color = MaterialTheme.colorScheme.onPrimary,
-                        modifier = Modifier.clickable { settingsManager.toggleDisplayCurrency() }
+                        modifier = Modifier.clickable { onToggleCurrency() }
                     )
                 }
             }
@@ -350,7 +349,7 @@ private fun EarningsCard(
                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { settingsManager.toggleDisplayCurrency() },
+                        .clickable { onToggleCurrency() },
                     textAlign = TextAlign.Center
                 )
             }
@@ -402,7 +401,7 @@ private fun DriverRideCard(
     ride: RideHistoryEntry,
     displayCurrency: DisplayCurrency,
     btcPriceUsd: Int?,
-    settingsManager: SettingsManager,
+    onToggleCurrency: () -> Unit,
     onClick: () -> Unit,
     onDelete: () -> Unit
 ) {
@@ -476,7 +475,7 @@ private fun DriverRideCard(
                             style = MaterialTheme.typography.titleSmall,
                             color = MaterialTheme.colorScheme.onPrimary,
                             modifier = Modifier
-                                .clickable { settingsManager.toggleDisplayCurrency() }
+                                .clickable { onToggleCurrency() }
                                 .padding(horizontal = 12.dp, vertical = 6.dp)
                         )
                     }

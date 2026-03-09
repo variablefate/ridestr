@@ -2,6 +2,7 @@ package com.roadflare.rider.service
 
 import android.app.Notification
 import android.app.NotificationChannel
+import dagger.hilt.android.AndroidEntryPoint
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
@@ -18,7 +19,8 @@ import android.os.VibratorManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
-import com.ridestr.common.settings.SettingsManager
+import com.ridestr.common.settings.SettingsRepository
+import javax.inject.Inject
 import com.roadflare.rider.MainActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -92,6 +94,7 @@ sealed class RiderStatus : Serializable {
  * Alerts (chat messages, driver arrived) are stacked and persist until
  * the user brings the app to foreground via clearAlerts().
  */
+@AndroidEntryPoint
 class RiderActiveService : Service() {
 
     companion object {
@@ -180,7 +183,7 @@ class RiderActiveService : Service() {
         }
     }
 
-    private lateinit var settingsManager: SettingsManager
+    @Inject lateinit var settingsRepository: SettingsRepository
 
     // Coroutine scope for async work (reading settings, etc.)
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
@@ -195,7 +198,7 @@ class RiderActiveService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        settingsManager = SettingsManager.getInstance(this)
+        kotlinx.coroutines.runBlocking { settingsRepository.awaitInitialLoad() }
         ensureNotificationChannels()
         Log.d(TAG, "Service created")
     }
@@ -489,8 +492,8 @@ class RiderActiveService : Service() {
      * and the device ringer mode.
      */
     private fun playSoundAndVibrate(vibrationPattern: LongArray) {
-        val soundEnabled = settingsManager.notificationSound.value
-        val vibrationEnabled = settingsManager.notificationVibration.value
+        val soundEnabled = settingsRepository.getNotificationSoundEnabled()
+        val vibrationEnabled = settingsRepository.getNotificationVibrationEnabled()
 
         if (soundEnabled) playNotificationSoundIfAllowed()
         if (vibrationEnabled) vibrateIfAllowed(vibrationPattern)

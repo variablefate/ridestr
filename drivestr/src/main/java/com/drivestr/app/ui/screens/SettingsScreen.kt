@@ -18,7 +18,7 @@ import androidx.compose.ui.unit.dp
 import com.drivestr.app.viewmodels.DriverStage
 import com.ridestr.common.settings.DisplayCurrency
 import com.ridestr.common.settings.DistanceUnit
-import com.ridestr.common.settings.SettingsManager
+import com.ridestr.common.settings.SettingsUiState
 import com.ridestr.common.ui.components.SettingsActionRow
 import com.ridestr.common.ui.components.SettingsNavigationRow
 import com.ridestr.common.ui.components.SettingsSwitchRow
@@ -33,7 +33,14 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
-    settingsManager: SettingsManager,
+    settings: SettingsUiState,
+    onToggleDisplayCurrency: () -> Unit,
+    onToggleDistanceUnit: () -> Unit,
+    onSetAutoOpenNavigation: (Boolean) -> Unit,
+    onSetNotificationSoundEnabled: (Boolean) -> Unit,
+    onSetNotificationVibrationEnabled: (Boolean) -> Unit,
+    onSetAlwaysAskVehicle: (Boolean) -> Unit,
+    onSetRoadflareAlertsEnabled: (Boolean) -> Unit,
     onBack: () -> Unit,
     onOpenTiles: () -> Unit,
     onOpenDevOptions: () -> Unit,
@@ -59,7 +66,14 @@ fun SettingsScreen(
         modifier = modifier
     ) { padding ->
         SettingsContent(
-            settingsManager = settingsManager,
+            settings = settings,
+            onToggleDisplayCurrency = onToggleDisplayCurrency,
+            onToggleDistanceUnit = onToggleDistanceUnit,
+            onSetAutoOpenNavigation = onSetAutoOpenNavigation,
+            onSetNotificationSoundEnabled = onSetNotificationSoundEnabled,
+            onSetNotificationVibrationEnabled = onSetNotificationVibrationEnabled,
+            onSetAlwaysAskVehicle = onSetAlwaysAskVehicle,
+            onSetRoadflareAlertsEnabled = onSetRoadflareAlertsEnabled,
             onOpenTiles = onOpenTiles,
             onOpenDevOptions = onOpenDevOptions,
             onOpenWalletSettings = onOpenWalletSettings,
@@ -73,7 +87,14 @@ fun SettingsScreen(
  */
 @Composable
 fun SettingsContent(
-    settingsManager: SettingsManager,
+    settings: SettingsUiState,
+    onToggleDisplayCurrency: () -> Unit,
+    onToggleDistanceUnit: () -> Unit,
+    onSetAutoOpenNavigation: (Boolean) -> Unit,
+    onSetNotificationSoundEnabled: (Boolean) -> Unit,
+    onSetNotificationVibrationEnabled: (Boolean) -> Unit,
+    onSetAlwaysAskVehicle: (Boolean) -> Unit,
+    onSetRoadflareAlertsEnabled: (Boolean) -> Unit,
     hasMultipleVehicles: Boolean = false,
     driverStage: DriverStage? = null,
     onOpenTiles: () -> Unit,
@@ -84,13 +105,13 @@ fun SettingsContent(
     onSyncProfile: (suspend () -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    val autoOpenNavigation by settingsManager.autoOpenNavigation.collectAsState()
-    val displayCurrency by settingsManager.displayCurrency.collectAsState()
-    val distanceUnit by settingsManager.distanceUnit.collectAsState()
-    val notificationSoundEnabled by settingsManager.notificationSoundEnabled.collectAsState()
-    val notificationVibrationEnabled by settingsManager.notificationVibrationEnabled.collectAsState()
-    val alwaysAskVehicle by settingsManager.alwaysAskVehicle.collectAsState()
-    val roadflareAlertsEnabled by settingsManager.roadflareAlertsEnabled.collectAsState()
+    val autoOpenNavigation = settings.autoOpenNavigation
+    val displayCurrency = settings.displayCurrency
+    val distanceUnit = settings.distanceUnit
+    val notificationSoundEnabled = settings.notificationSoundEnabled
+    val notificationVibrationEnabled = settings.notificationVibrationEnabled
+    val alwaysAskVehicle = settings.alwaysAskVehicle
+    val roadflareAlertsEnabled = settings.roadflareAlertsEnabled
 
     val context = LocalContext.current
 
@@ -122,7 +143,7 @@ fun SettingsContent(
                 else
                     "Showing fares in Satoshis",
                 checked = displayCurrency == DisplayCurrency.USD,
-                onCheckedChange = { settingsManager.toggleDisplayCurrency() },
+                onCheckedChange = { onToggleDisplayCurrency() },
                 checkedLabel = "USD",
                 uncheckedLabel = "Sats"
             )
@@ -137,7 +158,7 @@ fun SettingsContent(
                 else
                     "Showing distances in kilometers",
                 checked = distanceUnit == DistanceUnit.MILES,
-                onCheckedChange = { settingsManager.toggleDistanceUnit() },
+                onCheckedChange = { onToggleDistanceUnit() },
                 checkedLabel = "Miles",
                 uncheckedLabel = "km"
             )
@@ -149,7 +170,7 @@ fun SettingsContent(
                 title = "Auto-open Navigation",
                 description = "Automatically open your maps app when heading to pickup or destination",
                 checked = autoOpenNavigation,
-                onCheckedChange = { settingsManager.setAutoOpenNavigation(it) }
+                onCheckedChange = { onSetAutoOpenNavigation(it) }
             )
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
@@ -167,7 +188,7 @@ fun SettingsContent(
                 title = "Sound",
                 description = "Play sound for ride requests and updates",
                 checked = notificationSoundEnabled,
-                onCheckedChange = { settingsManager.setNotificationSoundEnabled(it) }
+                onCheckedChange = { onSetNotificationSoundEnabled(it) }
             )
 
             // Notification Vibration Setting
@@ -175,7 +196,7 @@ fun SettingsContent(
                 title = "Vibration",
                 description = "Vibrate for ride requests and updates",
                 checked = notificationVibrationEnabled,
-                onCheckedChange = { settingsManager.setNotificationVibrationEnabled(it) }
+                onCheckedChange = { onSetNotificationVibrationEnabled(it) }
             )
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
@@ -199,7 +220,7 @@ fun SettingsContent(
                 onCheckedChange = { enabled ->
                     // Only update the setting - MainActivity's LaunchedEffect handles
                     // service lifecycle with permission gating (Finding 5, Finding 14)
-                    settingsManager.setRoadflareAlertsEnabled(enabled)
+                    onSetRoadflareAlertsEnabled(enabled)
                 }
             )
 
@@ -222,7 +243,7 @@ fun SettingsContent(
                         else -> "Your primary vehicle will be used automatically"
                     },
                     checked = alwaysAskVehicle,
-                    onCheckedChange = { settingsManager.setAlwaysAskVehicle(it) },
+                    onCheckedChange = { onSetAlwaysAskVehicle(it) },
                     enabled = !isRideActive
                 )
             }

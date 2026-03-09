@@ -11,7 +11,7 @@ import com.ridestr.common.nostr.events.ProfileBackupEvent
 import com.ridestr.common.nostr.events.RideshareEventKinds
 import com.ridestr.common.nostr.events.SettingsBackup
 import com.ridestr.common.nostr.relay.RelayManager
-import com.ridestr.common.settings.SettingsManager
+import com.ridestr.common.settings.SettingsRepository
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
 
 /**
@@ -31,7 +31,7 @@ import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
 class ProfileSyncAdapter(
     private val vehicleRepository: VehicleRepository?,
     private val savedLocationRepository: SavedLocationRepository?,
-    private val settingsManager: SettingsManager,
+    private val settingsRepository: SettingsRepository,
     private val nostrService: NostrService
 ) : SyncableProfileData {
 
@@ -82,7 +82,7 @@ class ProfileSyncAdapter(
 
                 // Restore settings
                 val hadSettings = profileData.settings != SettingsBackup()
-                settingsManager.restoreFromBackup(profileData.settings)
+                settingsRepository.restoreFromBackup(profileData.settings)
                 Log.d(TAG, "Restored settings")
 
                 val metadata = SyncMetadata.Profile(
@@ -188,7 +188,7 @@ class ProfileSyncAdapter(
             val savedLocations = savedLocationRepository?.savedLocations?.value
                 ?: existingProfile?.savedLocations
                 ?: emptyList()
-            val settings = settingsManager.toBackupData()
+            val settings = settingsRepository.toBackupData()
 
             val eventId = nostrService.publishProfileBackup(vehicles, savedLocations, settings)
             if (eventId != null) {
@@ -206,14 +206,14 @@ class ProfileSyncAdapter(
     override fun hasLocalData(): Boolean {
         val hasVehicles = vehicleRepository?.hasVehicles() == true
         val hasLocations = savedLocationRepository?.hasLocations() == true
-        val hasSettings = settingsManager.hasCustomSettings()
+        val hasSettings = settingsRepository.hasCustomSettings()
         return hasVehicles || hasLocations || hasSettings
     }
 
     override fun clearLocalData() {
         vehicleRepository?.clearAll()
         savedLocationRepository?.clearAll()
-        // Note: We don't clear settings here - they're cleared by SettingsManager.clearAllData() on logout
+        // Note: We don't clear settings here - they're cleared by SettingsRepository.clearAllData() on logout
         Log.d(TAG, "Cleared profile data (vehicles and locations)")
     }
 
@@ -247,10 +247,10 @@ class ProfileSyncAdapter(
      * Restore vehicles from backup, replacing local data.
      * Also sanitizes activeVehicleId if it points to a non-existent vehicle.
      */
-    private fun restoreVehicles(repository: VehicleRepository, vehicles: List<Vehicle>) {
+    private suspend fun restoreVehicles(repository: VehicleRepository, vehicles: List<Vehicle>) {
         repository.restoreFromBackup(vehicles)
         // Sanitize activeVehicleId if it points to a non-existent vehicle
-        settingsManager.sanitizeActiveVehicleId(vehicles.map { it.id }.toSet())
+        settingsRepository.sanitizeActiveVehicleId(vehicles.map { it.id }.toSet())
     }
 
     /**

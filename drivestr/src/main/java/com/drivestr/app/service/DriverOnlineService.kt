@@ -2,6 +2,7 @@ package com.drivestr.app.service
 
 import android.app.PendingIntent
 import android.app.Service
+import dagger.hilt.android.AndroidEntryPoint
 import android.content.Context
 import android.content.Intent
 import android.os.Build
@@ -13,13 +14,15 @@ import com.ridestr.common.notification.AlertType
 import com.ridestr.common.notification.NotificationCoordinator
 import com.ridestr.common.notification.NotificationHelper
 import com.ridestr.common.notification.SoundManager
-import com.ridestr.common.settings.SettingsManager
+import com.ridestr.common.settings.SettingsRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.runBlocking
 import java.io.Serializable
+import javax.inject.Inject
 
 private const val TAG = "DriverOnlineService"
 
@@ -45,6 +48,7 @@ sealed class DriverStatus : Serializable {
  * Alerts (chat messages, new requests) are stacked and persist until
  * the user brings the app to foreground via clearAlerts().
  */
+@AndroidEntryPoint
 class DriverOnlineService : Service() {
 
     companion object {
@@ -159,16 +163,16 @@ class DriverOnlineService : Service() {
     private var newRequestRevertJob: Job? = null
 
     // Settings for sound/vibration preferences
-    private var settingsManager: SettingsManager? = null
+    @Inject lateinit var settingsRepository: SettingsRepository
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
-        settingsManager = SettingsManager.getInstance(this)
+        runBlocking { settingsRepository.awaitInitialLoad() }
         // Clear any stale status from previous process death (handles force-kill)
         // Will be set correctly in onStartCommand
-        settingsManager?.setDriverOnlineStatus(null)
+        settingsRepository.setDriverOnlineStatus(null)
         Log.d(TAG, "Service created")
     }
 
@@ -183,7 +187,7 @@ class DriverOnlineService : Service() {
                 coordinator.clearAlerts()
                 newRequestRevertJob?.cancel()
                 // Service is authoritative - set status immediately (closes race window)
-                settingsManager?.setDriverOnlineStatus("AVAILABLE")
+                settingsRepository.setDriverOnlineStatus("AVAILABLE")
                 updateNotification()
             }
             ACTION_START_ROADFLARE_ONLY -> {
@@ -193,7 +197,7 @@ class DriverOnlineService : Service() {
                 newRequestRevertJob?.cancel()
                 // Set ROADFLARE_ONLY immediately - avoids race window where start() sets
                 // AVAILABLE then updateStatus() sets ROADFLARE_ONLY (Finding #1 fix)
-                settingsManager?.setDriverOnlineStatus("ROADFLARE_ONLY")
+                settingsRepository.setDriverOnlineStatus("ROADFLARE_ONLY")
                 updateNotification()
             }
             ACTION_UPDATE_STATUS -> {
@@ -210,7 +214,7 @@ class DriverOnlineService : Service() {
                         is DriverStatus.NewRequest -> "AVAILABLE"  // Still available, just got a request
                         is DriverStatus.Cancelled -> "AVAILABLE"   // Returns to available after cancel
                     }
-                    settingsManager?.setDriverOnlineStatus(statusString)
+                    settingsRepository.setDriverOnlineStatus(statusString)
                 }
             }
             ACTION_ADD_ALERT -> {
@@ -229,7 +233,7 @@ class DriverOnlineService : Service() {
                 coordinator.clearAlerts()
                 newRequestRevertJob?.cancel()
                 // Clear status before stopping (service is authoritative)
-                settingsManager?.setDriverOnlineStatus(null)
+                settingsRepository.setDriverOnlineStatus(null)
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
@@ -250,7 +254,7 @@ class DriverOnlineService : Service() {
         super.onDestroy()
         serviceScope.cancel()
         // Clear status on service destroy (handles normal stop)
-        settingsManager?.setDriverOnlineStatus(null)
+        settingsRepository.setDriverOnlineStatus(null)
         Log.d(TAG, "Service destroyed")
     }
 
@@ -269,7 +273,7 @@ class DriverOnlineService : Service() {
                 coordinator.updateStatus(DriverStatus.Available(status.count))
                 coordinator.addAlert(AlertType.NewRideRequest(status.fare, status.distance))
                 // Play ride request sound (respecting user settings)
-                SoundManager.playRideRequestAlert(this, settingsManager)
+                SoundManager.playRideRequestAlert(this, settingsRepository)
                 updateNotification()
             }
             is DriverStatus.EnRouteToPickup -> {
@@ -291,7 +295,7 @@ class DriverOnlineService : Service() {
             }
             is DriverStatus.Cancelled -> {
                 // Play cancellation sound (respecting user settings)
-                SoundManager.playCancellationAlert(this, settingsManager)
+                SoundManager.playCancellationAlert(this, settingsRepository)
                 // Clear ALL alerts on cancellation
                 coordinator.clearAlerts()
                 // DON'T reset to Available - keep Cancelled until next action
@@ -313,11 +317,11 @@ class DriverOnlineService : Service() {
         when (alert) {
             is AlertType.Chat -> {
                 // Play chat sound (respecting user settings)
-                SoundManager.playChatMessageAlert(this, settingsManager)
+                SoundManager.playChatMessageAlert(this, settingsRepository)
             }
             is AlertType.NewRideRequest -> {
                 // Play ride request sound (respecting user settings)
-                SoundManager.playRideRequestAlert(this, settingsManager)
+                SoundManager.playRideRequestAlert(this, settingsRepository)
             }
             else -> {
                 // Other alert types (rider-specific) - just add without sound

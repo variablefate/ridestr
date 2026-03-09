@@ -1,21 +1,17 @@
 package com.roadflare.rider.ui.screens
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.ridestr.common.settings.DistanceUnit
-import com.ridestr.common.settings.SettingsManager
 import com.ridestr.common.ui.components.SettingsActionRow
 import com.ridestr.common.ui.components.SettingsNavigationRow
 import com.ridestr.common.ui.components.SettingsSwitchRow
@@ -27,7 +23,12 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
-    settingsManager: SettingsManager,
+    distanceUnit: DistanceUnit,
+    notificationSoundEnabled: Boolean,
+    notificationVibrationEnabled: Boolean,
+    onSetDistanceUnit: (DistanceUnit) -> Unit,
+    onSetNotificationSoundEnabled: (Boolean) -> Unit,
+    onSetNotificationVibrationEnabled: (Boolean) -> Unit,
     onBack: () -> Unit,
     onOpenTiles: () -> Unit,
     onOpenDevOptions: () -> Unit,
@@ -52,7 +53,12 @@ fun SettingsScreen(
         modifier = modifier
     ) { padding ->
         SettingsContent(
-            settingsManager = settingsManager,
+            distanceUnit = distanceUnit,
+            notificationSoundEnabled = notificationSoundEnabled,
+            notificationVibrationEnabled = notificationVibrationEnabled,
+            onSetDistanceUnit = onSetDistanceUnit,
+            onSetNotificationSoundEnabled = onSetNotificationSoundEnabled,
+            onSetNotificationVibrationEnabled = onSetNotificationVibrationEnabled,
             onOpenTiles = onOpenTiles,
             onOpenDevOptions = onOpenDevOptions,
             modifier = Modifier.padding(padding)
@@ -65,16 +71,17 @@ fun SettingsScreen(
  */
 @Composable
 fun SettingsContent(
-    settingsManager: SettingsManager,
+    distanceUnit: DistanceUnit,
+    notificationSoundEnabled: Boolean,
+    notificationVibrationEnabled: Boolean,
+    onSetDistanceUnit: (DistanceUnit) -> Unit,
+    onSetNotificationSoundEnabled: (Boolean) -> Unit,
+    onSetNotificationVibrationEnabled: (Boolean) -> Unit,
     onOpenTiles: () -> Unit,
     onOpenDevOptions: () -> Unit,
     onSyncProfile: (suspend () -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    val distanceUnit by settingsManager.distanceUnit.collectAsState()
-    val notificationSoundEnabled by settingsManager.notificationSound.collectAsState()
-    val notificationVibrationEnabled by settingsManager.notificationVibration.collectAsState()
-
     // Sync state
     var isSyncing by remember { mutableStateOf(false) }
     var syncResult by remember { mutableStateOf<String?>(null) }
@@ -95,10 +102,8 @@ fun SettingsContent(
                     "Showing distances in kilometers",
                 checked = distanceUnit == DistanceUnit.MILES,
                 onCheckedChange = {
-                    coroutineScope.launch {
-                        val newUnit = if (distanceUnit == DistanceUnit.MILES) DistanceUnit.KILOMETERS else DistanceUnit.MILES
-                        settingsManager.setDistanceUnit(newUnit)
-                    }
+                    val newUnit = if (distanceUnit == DistanceUnit.MILES) DistanceUnit.KILOMETERS else DistanceUnit.MILES
+                    onSetDistanceUnit(newUnit)
                 },
                 checkedLabel = "Miles",
                 uncheckedLabel = "km"
@@ -119,9 +124,7 @@ fun SettingsContent(
                 title = "Sound",
                 description = "Play sound for ride updates",
                 checked = notificationSoundEnabled,
-                onCheckedChange = { enabled ->
-                    coroutineScope.launch { settingsManager.setNotificationSoundEnabled(enabled) }
-                }
+                onCheckedChange = { enabled -> onSetNotificationSoundEnabled(enabled) }
             )
 
             // Notification Vibration Setting
@@ -129,9 +132,7 @@ fun SettingsContent(
                 title = "Vibration",
                 description = "Vibrate for ride updates",
                 checked = notificationVibrationEnabled,
-                onCheckedChange = { enabled ->
-                    coroutineScope.launch { settingsManager.setNotificationVibrationEnabled(enabled) }
-                }
+                onCheckedChange = { enabled -> onSetNotificationVibrationEnabled(enabled) }
             )
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))

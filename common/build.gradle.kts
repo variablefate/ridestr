@@ -81,6 +81,9 @@ dependencies {
     // Networking
     implementation(libs.okhttp)
 
+    // DataStore Preferences (api — exposed via settingsDataStore extension property)
+    api(libs.datastore.preferences)
+
     // Image Loading
     api(libs.coil.compose)
 

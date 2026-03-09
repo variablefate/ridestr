@@ -129,7 +129,8 @@ fun calculateRoadflareFare(
 fun RoadflareTab(
     followedDriversRepository: FollowedDriversRepository,
     nostrService: NostrService?,
-    settingsManager: com.ridestr.common.settings.SettingsManager? = null,
+    roadflarePaymentMethods: List<String> = emptyList(),
+    onSetRoadflarePaymentMethods: (List<String>) -> Unit = {},
     riderLocation: Location? = null,
     onAddDriver: () -> Unit = {},
     onDriverClick: (FollowedDriver) -> Unit = {},
@@ -413,9 +414,10 @@ fun RoadflareTab(
     }
 
     // Payment methods dialog
-    if (showPaymentMethodsDialog && settingsManager != null) {
+    if (showPaymentMethodsDialog) {
         RoadflarePaymentMethodsDialog(
-            settingsManager = settingsManager,
+            roadflarePaymentMethods = roadflarePaymentMethods,
+            onSetRoadflarePaymentMethods = onSetRoadflarePaymentMethods,
             onDismiss = { showPaymentMethodsDialog = false }
         )
     }
@@ -855,13 +857,12 @@ internal fun decryptRoadflareLocation(
  */
 @Composable
 fun RoadflarePaymentMethodsDialog(
-    settingsManager: com.ridestr.common.settings.SettingsManager,
+    roadflarePaymentMethods: List<String>,
+    onSetRoadflarePaymentMethods: (List<String>) -> Unit,
     onDismiss: () -> Unit
 ) {
-    val currentMethods by settingsManager.roadflarePaymentMethods.collectAsState()
-
     // Local state for Save/Cancel pattern
-    var localMethods by remember(currentMethods) { mutableStateOf(currentMethods) }
+    var localMethods by remember(roadflarePaymentMethods) { mutableStateOf(roadflarePaymentMethods) }
 
     // All known methods + any unknown stored strings
     val allMethods = remember(localMethods) {
@@ -910,7 +911,7 @@ fun RoadflarePaymentMethodsDialog(
         },
         confirmButton = {
             Button(onClick = {
-                settingsManager.setRoadflarePaymentMethods(localMethods)
+                onSetRoadflarePaymentMethods(localMethods)
                 onDismiss()
             }) {
                 Text("Save")

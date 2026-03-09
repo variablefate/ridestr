@@ -49,7 +49,7 @@ import com.ridestr.common.location.GeocodingService
 import com.ridestr.common.routing.RouteResult
 import com.ridestr.common.settings.DisplayCurrency
 import com.ridestr.common.settings.DistanceUnit
-import com.ridestr.common.settings.SettingsManager
+import com.ridestr.common.settings.SettingsUiState
 import com.ridestr.common.ui.ActiveRideCard
 import com.ridestr.common.ui.ChatBottomSheet
 import com.ridestr.common.ui.FareDisplay
@@ -67,9 +67,11 @@ private const val DEMO_DRIVER_LON = -108.8817009
 @Composable
 fun DriverModeScreen(
     viewModel: DriverViewModel,
-    settingsManager: SettingsManager,
+    settings: SettingsUiState,
     vehicleRepository: VehicleRepository,
     autoOpenNavigation: Boolean = true,
+    onToggleCurrency: () -> Unit = {},
+    onSetActiveVehicleId: (String?) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -79,8 +81,8 @@ fun DriverModeScreen(
 
     // Vehicle picker state
     val vehicles by vehicleRepository.vehicles.collectAsState()
-    val alwaysAskVehicle by settingsManager.alwaysAskVehicle.collectAsState()
-    val activeVehicleId by settingsManager.activeVehicleId.collectAsState()
+    val alwaysAskVehicle = settings.alwaysAskVehicle
+    val activeVehicleId = settings.activeVehicleId
     var showVehiclePickerDialog by remember { mutableStateOf(false) }
     var pendingLocationForGoOnline by remember { mutableStateOf<Location?>(null) }
 
@@ -200,9 +202,9 @@ fun DriverModeScreen(
     }
 
     // Manual location settings
-    val useManualDriverLocation by settingsManager.useManualDriverLocation.collectAsState()
-    val manualDriverLat by settingsManager.manualDriverLat.collectAsState()
-    val manualDriverLon by settingsManager.manualDriverLon.collectAsState()
+    val useManualDriverLocation = settings.useManualDriverLocation
+    val manualDriverLat = settings.manualDriverLat
+    val manualDriverLon = settings.manualDriverLon
 
     // Function to get current location and execute action
     fun withCurrentLocation(action: (Location) -> Unit) {
@@ -355,7 +357,7 @@ fun DriverModeScreen(
                 lastUsedVehicleId = activeVehicleId,
                 onSelect = { vehicle ->
                     showVehiclePickerDialog = false
-                    settingsManager.setActiveVehicleId(vehicle.id)
+                    onSetActiveVehicleId(vehicle.id)
                     pendingLocationForGoOnline?.let { location ->
                         viewModel.goOnline(location, vehicle)
                     }
@@ -573,7 +575,10 @@ fun DriverModeScreen(
                     onDeclineOffer = { viewModel.declineOffer(it) },
                     onSetNoMatchWarning = { viewModel.setNoMatchWarningOffer(it) },
                     onDismissNoMatchWarning = { viewModel.dismissNoMatchWarning() },
-                    settingsManager = settingsManager,
+                    displayCurrency = settings.displayCurrency,
+                    distanceUnit = settings.distanceUnit,
+                    roadflarePaymentMethods = settings.roadflarePaymentMethods,
+                    onToggleCurrency = onToggleCurrency,
                     priceService = viewModel.bitcoinPriceService
                 )
             }
@@ -589,7 +594,10 @@ fun DriverModeScreen(
                     onDeclineOffer = { viewModel.declineOffer(it) },
                     onSetNoMatchWarning = { viewModel.setNoMatchWarningOffer(it) },
                     onDismissNoMatchWarning = { viewModel.dismissNoMatchWarning() },
-                    settingsManager = settingsManager,
+                    displayCurrency = settings.displayCurrency,
+                    distanceUnit = settings.distanceUnit,
+                    roadflarePaymentMethods = settings.roadflarePaymentMethods,
+                    onToggleCurrency = onToggleCurrency,
                     priceService = viewModel.bitcoinPriceService
                 )
             }
@@ -602,7 +610,8 @@ fun DriverModeScreen(
                     onCancel = { viewModel.cancelRide() },
                     onOpenChat = { showChatSheet = true },
                     chatMessageCount = uiState.rideSession.chatMessages.size,
-                    settingsManager = settingsManager,
+                    displayCurrency = settings.displayCurrency,
+                    onToggleCurrency = onToggleCurrency,
                     priceService = viewModel.bitcoinPriceService
                 )
             }
@@ -616,7 +625,8 @@ fun DriverModeScreen(
                     onCancel = { viewModel.cancelRide() },
                     onOpenChat = { showChatSheet = true },
                     chatMessageCount = uiState.rideSession.chatMessages.size,
-                    settingsManager = settingsManager,
+                    displayCurrency = settings.displayCurrency,
+                    onToggleCurrency = onToggleCurrency,
                     priceService = viewModel.bitcoinPriceService
                 )
             }
@@ -639,7 +649,8 @@ fun DriverModeScreen(
                     onCancel = { viewModel.cancelRide() },
                     onOpenChat = { showChatSheet = true },
                     chatMessageCount = uiState.rideSession.chatMessages.size,
-                    settingsManager = settingsManager,
+                    displayCurrency = settings.displayCurrency,
+                    onToggleCurrency = onToggleCurrency,
                     priceService = viewModel.bitcoinPriceService,
                     sliderResetToken = uiState.sliderResetToken
                 )
@@ -650,7 +661,8 @@ fun DriverModeScreen(
                     uiState = uiState,
                     onFinish = { withCurrentLocation { location -> viewModel.finishAndGoOnline(location) } },
                     onGoOffline = { viewModel.clearAcceptedOffer() },
-                    settingsManager = settingsManager,
+                    displayCurrency = settings.displayCurrency,
+                    onToggleCurrency = onToggleCurrency,
                     priceService = viewModel.bitcoinPriceService
                 )
             }
@@ -761,13 +773,14 @@ private fun RoadflareOnlyContent(
     onDeclineOffer: (RideOfferData) -> Unit,
     onSetNoMatchWarning: (String) -> Unit,
     onDismissNoMatchWarning: () -> Unit,
-    settingsManager: SettingsManager,
+    displayCurrency: DisplayCurrency,
+    distanceUnit: DistanceUnit,
+    roadflarePaymentMethods: List<String>,
+    onToggleCurrency: () -> Unit,
     priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
-    val displayCurrency by settingsManager.displayCurrency.collectAsState()
-    val distanceUnit by settingsManager.distanceUnit.collectAsState()
     val btcPriceUsd by priceService.btcPriceUsd.collectAsState()
-    val driverFiatMethods by settingsManager.roadflarePaymentMethods.collectAsState()
+    val driverFiatMethods = roadflarePaymentMethods
 
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -858,7 +871,9 @@ private fun RoadflareOnlyContent(
                         }
                     },
                     onDecline = { onDeclineOffer(offer) },
-                    settingsManager = settingsManager,
+                    displayCurrency = displayCurrency,
+                    distanceUnit = distanceUnit,
+                    onToggleCurrency = onToggleCurrency,
                     priceService = priceService,
                     driverFiatMethods = driverFiatMethods
                 )
@@ -929,10 +944,13 @@ private fun AvailableContent(
     onDeclineOffer: (RideOfferData) -> Unit,
     onSetNoMatchWarning: (String) -> Unit,
     onDismissNoMatchWarning: () -> Unit,
-    settingsManager: SettingsManager,
+    displayCurrency: DisplayCurrency,
+    distanceUnit: DistanceUnit,
+    roadflarePaymentMethods: List<String>,
+    onToggleCurrency: () -> Unit,
     priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
-    val driverFiatMethods by settingsManager.roadflarePaymentMethods.collectAsState()
+    val driverFiatMethods = roadflarePaymentMethods
 
     // Ticker for updating "time since last broadcast" display
     var currentTimeMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -1089,7 +1107,9 @@ private fun AvailableContent(
                     isProcessing = uiState.rideSession.isProcessingOffer,
                     onAccept = { onAcceptBroadcastRequest(request) },
                     onDecline = { onDeclineBroadcastRequest(request) },
-                    settingsManager = settingsManager,
+                    displayCurrency = displayCurrency,
+                    distanceUnit = distanceUnit,
+                    onToggleCurrency = onToggleCurrency,
                     priceService = priceService
                 )
             }
@@ -1124,7 +1144,9 @@ private fun AvailableContent(
                             }
                         },
                         onDecline = { onDeclineOffer(offer) },
-                        settingsManager = settingsManager,
+                        displayCurrency = displayCurrency,
+                        distanceUnit = distanceUnit,
+                        onToggleCurrency = onToggleCurrency,
                         priceService = priceService,
                         driverFiatMethods = driverFiatMethods
                     )
@@ -1166,7 +1188,8 @@ private fun RideAcceptedContent(
     onCancel: () -> Unit,
     onOpenChat: () -> Unit,
     chatMessageCount: Int,
-    settingsManager: SettingsManager,
+    displayCurrency: DisplayCurrency,
+    onToggleCurrency: () -> Unit,
     priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
     val context = LocalContext.current
@@ -1295,7 +1318,8 @@ private fun RideAcceptedContent(
                     }
                     FareDisplay(
                         satsAmount = offer.fareEstimate,
-                        settingsManager = settingsManager,
+                        displayCurrency = displayCurrency,
+                        onToggleCurrency = onToggleCurrency,
                         priceService = priceService,
                         style = MaterialTheme.typography.titleMedium,
                         prefix = "Fare: "
@@ -1361,7 +1385,8 @@ private fun EnRouteContent(
     onCancel: () -> Unit,
     onOpenChat: () -> Unit,
     chatMessageCount: Int,
-    settingsManager: SettingsManager,
+    displayCurrency: DisplayCurrency,
+    onToggleCurrency: () -> Unit,
     priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
     val context = LocalContext.current
@@ -1433,7 +1458,8 @@ private fun EnRouteContent(
 
             FareDisplay(
                 satsAmount = offer.fareEstimate,
-                settingsManager = settingsManager,
+                displayCurrency = displayCurrency,
+                onToggleCurrency = onToggleCurrency,
                 priceService = priceService,
                 style = MaterialTheme.typography.titleMedium,
                 prefix = "Fare: "
@@ -1664,7 +1690,8 @@ private fun InRideContent(
     onCancel: () -> Unit,
     onOpenChat: () -> Unit,
     chatMessageCount: Int,
-    settingsManager: SettingsManager,
+    displayCurrency: DisplayCurrency,
+    onToggleCurrency: () -> Unit,
     priceService: com.ridestr.common.bitcoin.BitcoinPriceService,
     sliderResetToken: Int = 0  // Pass through to SlideToConfirm
 ) {
@@ -1731,7 +1758,8 @@ private fun InRideContent(
 
             FareDisplay(
                 satsAmount = offer.fareEstimate,
-                settingsManager = settingsManager,
+                displayCurrency = displayCurrency,
+                onToggleCurrency = onToggleCurrency,
                 priceService = priceService,
                 style = MaterialTheme.typography.titleMedium,
                 prefix = "Fare: "
@@ -1799,7 +1827,8 @@ private fun RideCompletedContent(
     uiState: DriverUiState,
     onFinish: () -> Unit,
     onGoOffline: () -> Unit,
-    settingsManager: SettingsManager,
+    displayCurrency: DisplayCurrency,
+    onToggleCurrency: () -> Unit,
     priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
     val offer = uiState.rideSession.acceptedOffer
@@ -1836,7 +1865,8 @@ private fun RideCompletedContent(
             offer?.let {
                 FareDisplay(
                     satsAmount = it.fareEstimate,
-                    settingsManager = settingsManager,
+                    displayCurrency = displayCurrency,
+                    onToggleCurrency = onToggleCurrency,
                     priceService = priceService,
                     style = MaterialTheme.typography.titleLarge,
                     prefix = "Fare: "
@@ -1887,14 +1917,14 @@ private fun RideOfferCard(
     isProcessing: Boolean,
     onAccept: () -> Unit,
     onDecline: () -> Unit,
-    settingsManager: SettingsManager,
+    displayCurrency: DisplayCurrency,
+    distanceUnit: DistanceUnit,
+    onToggleCurrency: () -> Unit,
     priceService: com.ridestr.common.bitcoin.BitcoinPriceService,
     driverFiatMethods: List<String>
 ) {
     val context = LocalContext.current
     val geocodingService = remember { GeocodingService(context) }
-    val distanceUnit by settingsManager.distanceUnit.collectAsState()
-    val displayCurrency by settingsManager.displayCurrency.collectAsState()
     val btcPrice by priceService.btcPriceUsd.collectAsState()
 
     // Update relative time every second
@@ -1966,7 +1996,8 @@ private fun RideOfferCard(
                         Spacer(modifier = Modifier.width(4.dp))
                         FareDisplay(
                             satsAmount = offer.fareEstimate,
-                            settingsManager = settingsManager,
+                            displayCurrency = displayCurrency,
+                            onToggleCurrency = onToggleCurrency,
                             priceService = priceService,
                             style = MaterialTheme.typography.headlineSmall
                         )
@@ -2150,11 +2181,11 @@ private fun BroadcastRideRequestCard(
     isProcessing: Boolean,
     onAccept: () -> Unit,
     onDecline: () -> Unit,
-    settingsManager: SettingsManager,
+    displayCurrency: DisplayCurrency,
+    distanceUnit: DistanceUnit,
+    onToggleCurrency: () -> Unit,
     priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
-    val distanceUnit by settingsManager.distanceUnit.collectAsState()
-    val displayCurrency by settingsManager.displayCurrency.collectAsState()
     val btcPrice by priceService.btcPriceUsd.collectAsState()
 
     // Update relative time every second
@@ -2234,7 +2265,8 @@ private fun BroadcastRideRequestCard(
                         Spacer(modifier = Modifier.width(4.dp))
                         FareDisplay(
                             satsAmount = request.fareEstimate,
-                            settingsManager = settingsManager,
+                            displayCurrency = displayCurrency,
+                            onToggleCurrency = onToggleCurrency,
                             priceService = priceService,
                             style = MaterialTheme.typography.headlineSmall
                         )

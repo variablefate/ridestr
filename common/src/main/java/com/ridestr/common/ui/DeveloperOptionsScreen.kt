@@ -16,8 +16,6 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.ridestr.common.nostr.NostrService
 import com.ridestr.common.nostr.events.RideshareEventKinds
-import com.ridestr.common.settings.SettingsManager
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -27,12 +25,19 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DeveloperOptionsScreen(
-    settingsManager: SettingsManager,
+    useGeocodingSearch: Boolean,
+    onToggleUseGeocodingSearch: () -> Unit,
+    ignoreFollowNotifications: Boolean,
+    onSetIgnoreFollowNotifications: (Boolean) -> Unit,
+    useManualDriverLocation: Boolean,
+    onSetUseManualDriverLocation: (Boolean) -> Unit,
+    manualDriverLat: Double,
+    manualDriverLon: Double,
+    onSetManualDriverLocation: (Double, Double) -> Unit,
     isDriverApp: Boolean,
     nostrService: NostrService? = null,
     onOpenRelaySettings: () -> Unit,
     onBack: () -> Unit,
-    // RoadFlare key debug (driver only)
     onGetLocalKeyVersion: (() -> Int)? = null,
     onGetLocalKeyUpdatedAt: (() -> Long?)? = null,
     onFetchNostrKeyUpdatedAt: (suspend () -> Long?)? = null,
@@ -43,10 +48,6 @@ fun DeveloperOptionsScreen(
     BackHandler(onBack = onBack)
 
     val scope = rememberCoroutineScope()
-    val useGeocodingSearch by settingsManager.useGeocodingSearch.collectAsState()
-
-    // RoadFlare debug settings
-    val ignoreFollowNotifications by settingsManager.ignoreFollowNotifications.collectAsState()
 
     // RoadFlare event inspector state
     data class EventTypeState(
@@ -64,11 +65,6 @@ fun DeveloperOptionsScreen(
     var isCheckingFollowNotify by remember { mutableStateOf(false) }
     var isDeletingFollowNotify by remember { mutableStateOf(false) }
     var cleanupMessage by remember { mutableStateOf<String?>(null) }
-
-    // Driver-specific settings
-    val useManualDriverLocation by settingsManager.useManualDriverLocation.collectAsState()
-    val manualDriverLat by settingsManager.manualDriverLat.collectAsState()
-    val manualDriverLon by settingsManager.manualDriverLon.collectAsState()
 
     // Manual location input state (driver only)
     var latInput by remember(manualDriverLat) { mutableStateOf(manualDriverLat.toString()) }
@@ -105,7 +101,7 @@ fun DeveloperOptionsScreen(
                 else
                     "Using manual coordinate entry",
                 checked = useGeocodingSearch,
-                onCheckedChange = { settingsManager.toggleUseGeocodingSearch() }
+                onCheckedChange = { onToggleUseGeocodingSearch() }
             )
 
             // Driver-specific: Manual Driver Location
@@ -119,7 +115,7 @@ fun DeveloperOptionsScreen(
                     else
                         "Using GPS for driver location",
                     checked = useManualDriverLocation,
-                    onCheckedChange = { settingsManager.setUseManualDriverLocation(it) }
+                    onCheckedChange = { onSetUseManualDriverLocation(it) }
                 )
 
                 // Manual location inputs (shown when enabled)
@@ -156,7 +152,7 @@ fun DeveloperOptionsScreen(
                                 val lat = latInput.toDoubleOrNull()
                                 val lon = lonInput.toDoubleOrNull()
                                 if (lat != null && lon != null) {
-                                    settingsManager.setManualDriverLocation(lat, lon)
+                                    onSetManualDriverLocation(lat, lon)
                                 }
                             },
                             modifier = Modifier.fillMaxWidth(),
@@ -206,7 +202,7 @@ fun DeveloperOptionsScreen(
                         else
                             "Processing Kind 3187 notifications normally",
                         checked = ignoreFollowNotifications,
-                        onCheckedChange = { settingsManager.setIgnoreFollowNotifications(it) }
+                        onCheckedChange = { onSetIgnoreFollowNotifications(it) }
                     )
 
                     Spacer(modifier = Modifier.height(8.dp))

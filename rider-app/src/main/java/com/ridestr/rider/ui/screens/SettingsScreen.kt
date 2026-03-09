@@ -16,7 +16,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.ridestr.common.settings.DisplayCurrency
 import com.ridestr.common.settings.DistanceUnit
-import com.ridestr.common.settings.SettingsManager
 import com.ridestr.common.ui.components.SettingsActionRow
 import com.ridestr.common.ui.components.SettingsNavigationRow
 import com.ridestr.common.ui.components.SettingsSwitchRow
@@ -28,7 +27,14 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
-    settingsManager: SettingsManager,
+    displayCurrency: DisplayCurrency,
+    distanceUnit: DistanceUnit,
+    notificationSoundEnabled: Boolean,
+    notificationVibrationEnabled: Boolean,
+    onToggleDisplayCurrency: () -> Unit,
+    onToggleDistanceUnit: () -> Unit,
+    onSetNotificationSoundEnabled: (Boolean) -> Unit,
+    onSetNotificationVibrationEnabled: (Boolean) -> Unit,
     onBack: () -> Unit,
     onOpenTiles: () -> Unit,
     onOpenDevOptions: () -> Unit,
@@ -54,7 +60,14 @@ fun SettingsScreen(
         modifier = modifier
     ) { padding ->
         SettingsContent(
-            settingsManager = settingsManager,
+            displayCurrency = displayCurrency,
+            distanceUnit = distanceUnit,
+            notificationSoundEnabled = notificationSoundEnabled,
+            notificationVibrationEnabled = notificationVibrationEnabled,
+            onToggleDisplayCurrency = onToggleDisplayCurrency,
+            onToggleDistanceUnit = onToggleDistanceUnit,
+            onSetNotificationSoundEnabled = onSetNotificationSoundEnabled,
+            onSetNotificationVibrationEnabled = onSetNotificationVibrationEnabled,
             onOpenTiles = onOpenTiles,
             onOpenDevOptions = onOpenDevOptions,
             onOpenWalletSettings = onOpenWalletSettings,
@@ -68,17 +81,20 @@ fun SettingsScreen(
  */
 @Composable
 fun SettingsContent(
-    settingsManager: SettingsManager,
+    displayCurrency: DisplayCurrency,
+    distanceUnit: DistanceUnit,
+    notificationSoundEnabled: Boolean,
+    notificationVibrationEnabled: Boolean,
+    onToggleDisplayCurrency: () -> Unit,
+    onToggleDistanceUnit: () -> Unit,
+    onSetNotificationSoundEnabled: (Boolean) -> Unit,
+    onSetNotificationVibrationEnabled: (Boolean) -> Unit,
     onOpenTiles: () -> Unit,
     onOpenDevOptions: () -> Unit,
     onOpenWalletSettings: () -> Unit = {},
     onSyncProfile: (suspend () -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    val displayCurrency by settingsManager.displayCurrency.collectAsState()
-    val distanceUnit by settingsManager.distanceUnit.collectAsState()
-    val notificationSoundEnabled by settingsManager.notificationSoundEnabled.collectAsState()
-    val notificationVibrationEnabled by settingsManager.notificationVibrationEnabled.collectAsState()
 
     // Sync state
     var isSyncing by remember { mutableStateOf(false) }
@@ -99,7 +115,7 @@ fun SettingsContent(
                 else
                     "Showing fares in Satoshis",
                 checked = displayCurrency == DisplayCurrency.USD,
-                onCheckedChange = { settingsManager.toggleDisplayCurrency() },
+                onCheckedChange = { onToggleDisplayCurrency() },
                 checkedLabel = "USD",
                 uncheckedLabel = "Sats"
             )
@@ -114,7 +130,7 @@ fun SettingsContent(
                 else
                     "Showing distances in kilometers",
                 checked = distanceUnit == DistanceUnit.MILES,
-                onCheckedChange = { settingsManager.toggleDistanceUnit() },
+                onCheckedChange = { onToggleDistanceUnit() },
                 checkedLabel = "Miles",
                 uncheckedLabel = "km"
             )
@@ -134,7 +150,7 @@ fun SettingsContent(
                 title = "Sound",
                 description = "Play sound for ride updates",
                 checked = notificationSoundEnabled,
-                onCheckedChange = { settingsManager.setNotificationSoundEnabled(it) }
+                onCheckedChange = { onSetNotificationSoundEnabled(it) }
             )
 
             // Notification Vibration Setting
@@ -142,7 +158,7 @@ fun SettingsContent(
                 title = "Vibration",
                 description = "Vibrate for ride updates",
                 checked = notificationVibrationEnabled,
-                onCheckedChange = { settingsManager.setNotificationVibrationEnabled(it) }
+                onCheckedChange = { onSetNotificationVibrationEnabled(it) }
             )
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))

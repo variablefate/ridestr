@@ -2,6 +2,7 @@ package com.roadflare.rider.viewmodels
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.data.FollowedDriversRepository
@@ -16,10 +17,13 @@ import com.ridestr.common.routing.NostrTileDiscoveryService
 import com.ridestr.common.routing.TileDownloadService
 import com.ridestr.common.routing.TileManager
 import com.ridestr.common.routing.ValhallaRoutingService
-import com.ridestr.common.settings.SettingsManager
+import com.ridestr.common.settings.SettingsRepository
+import com.ridestr.common.settings.SettingsUiState
 import com.ridestr.common.sync.ProfileSyncManager
 import com.ridestr.common.util.FareCalculator
 import com.roadflare.rider.state.RideStage
+import dagger.hilt.android.lifecycle.HiltViewModel
+import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -38,11 +42,18 @@ import kotlinx.coroutines.launch
  * This ViewModel exposes combined state flows for the UI and acts as
  * the integration point between coordinators.
  */
-class RiderViewModel(application: Application) : AndroidViewModel(application) {
+@HiltViewModel
+class RiderViewModel @Inject constructor(
+    application: Application,
+    savedStateHandle: SavedStateHandle,
+    private val settingsRepository: SettingsRepository
+) : AndroidViewModel(application) {
+
+    // Combined settings state for UI
+    val settings: StateFlow<SettingsUiState> = settingsRepository.settings
 
     // Shared singletons
-    val nostrService = NostrService.getInstance(application)
-    val settingsManager = SettingsManager.getInstance(application)
+    val nostrService = NostrService.getInstance(application, settingsRepository.getEffectiveRelays())
     val followedDriversRepository = FollowedDriversRepository.getInstance(application)
     val rideHistoryRepository = RideHistoryRepository.getInstance(application)
     val savedLocationRepository = SavedLocationRepository.getInstance(application)
@@ -261,7 +272,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
             val fareUsd = route?.fareUsd ?: fareCoordinator.calculateRoute(pickup, dest).fareUsd
             val fareSats = route?.fareSats
-            val fiatPaymentMethods = settingsManager.roadflarePaymentMethods.value
+            val fiatPaymentMethods = settingsRepository.getRoadflarePaymentMethods()
 
             rideSessionManager.sendRoadflareToAll(
                 drivers = driversWithDistance,
@@ -300,9 +311,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         savedLocationRepository.clearAll()
         rideHistoryRepository.clearAllHistory()
 
-        // Clear settings (synchronous SharedPreferences via SettingsManager)
+        // Clear settings (DataStore via SettingsRepository)
         try {
-            settingsManager.clearAllData()
+            settingsRepository.clearAllData()
         } catch (ce: CancellationException) {
             throw ce
         } catch (e: Exception) {
@@ -315,4 +326,22 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         syncManager.disconnect()
         syncManager.resetSyncState()
     }
+
+    // --- Settings mediation methods (screens call these, ViewModel wraps suspend setters) ---
+
+    fun onToggleDisplayCurrency() = viewModelScope.launch { settingsRepository.toggleDisplayCurrency() }
+    fun onToggleDistanceUnit() = viewModelScope.launch { settingsRepository.toggleDistanceUnit() }
+    fun onSetNotificationSoundEnabled(enabled: Boolean) = viewModelScope.launch { settingsRepository.setNotificationSoundEnabled(enabled) }
+    fun onSetNotificationVibrationEnabled(enabled: Boolean) = viewModelScope.launch { settingsRepository.setNotificationVibrationEnabled(enabled) }
+    fun onSetRoadflarePaymentMethods(methods: List<String>) = viewModelScope.launch { settingsRepository.setRoadflarePaymentMethods(methods) }
+    fun onAddRelay(url: String) = viewModelScope.launch { settingsRepository.addRelay(url) }
+    fun onRemoveRelay(url: String) = viewModelScope.launch { settingsRepository.removeRelay(url) }
+    fun onResetRelays() = viewModelScope.launch { settingsRepository.resetRelaysToDefault() }
+    fun onToggleUseGeocodingSearch() = viewModelScope.launch { settingsRepository.toggleUseGeocodingSearch() }
+    fun onSetUseManualDriverLocation(enabled: Boolean) = viewModelScope.launch { settingsRepository.setUseManualDriverLocation(enabled) }
+    fun onSetManualDriverLocation(lat: Double, lon: Double) = viewModelScope.launch { settingsRepository.setManualDriverLocation(lat, lon) }
+    fun onSetAlwaysShowWalletDiagnostics(enabled: Boolean) = viewModelScope.launch { settingsRepository.setAlwaysShowWalletDiagnostics(enabled) }
+    fun onSetIgnoreFollowNotifications(enabled: Boolean) = viewModelScope.launch { settingsRepository.setIgnoreFollowNotifications(enabled) }
+    fun onSetDistanceUnit(unit: com.ridestr.common.settings.DistanceUnit) = viewModelScope.launch { settingsRepository.setDistanceUnit(unit) }
+    fun onSetDisplayCurrency(currency: com.ridestr.common.settings.DisplayCurrency) = viewModelScope.launch { settingsRepository.setDisplayCurrency(currency) }
 }

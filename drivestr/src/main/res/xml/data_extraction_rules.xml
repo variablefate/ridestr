@@ -10,6 +10,8 @@
         <exclude domain="sharedpref" path="ridestr_wallet_keys.xml" />
         <exclude domain="sharedpref" path="ridestr_wallet_storage.xml" />
         <exclude domain="sharedpref" path="ridestr_settings.xml" />
+        <!-- DataStore settings file (replaces ridestr_settings.xml) -->
+        <exclude domain="file" path="datastore/settings_datastore.preferences_pb" />
         <exclude domain="sharedpref" path="__androidx_security_crypto_encrypted_file_pref__.xml" />
         <!-- Exclude privacy-sensitive location/history data (Nostr sync is recovery path) -->
         <exclude domain="sharedpref" path="ridestr_ride_history.xml" />
@@ -27,6 +29,8 @@
         <exclude domain="sharedpref" path="ridestr_wallet_keys.xml" />
         <exclude domain="sharedpref" path="ridestr_wallet_storage.xml" />
         <exclude domain="sharedpref" path="ridestr_settings.xml" />
+        <!-- DataStore settings file (replaces ridestr_settings.xml) -->
+        <exclude domain="file" path="datastore/settings_datastore.preferences_pb" />
         <exclude domain="sharedpref" path="__androidx_security_crypto_encrypted_file_pref__.xml" />
         <exclude domain="sharedpref" path="ridestr_ride_history.xml" />
         <exclude domain="sharedpref" path="ridestr_saved_locations.xml" />

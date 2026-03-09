@@ -5,7 +5,6 @@ import android.util.Log
 import com.ridestr.common.data.SavedLocation
 import com.ridestr.common.data.Vehicle
 import com.ridestr.common.nostr.events.*
-import com.ridestr.common.settings.SettingsManager
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
 import com.ridestr.common.nostr.keys.KeyManager
 import com.ridestr.common.nostr.relay.RelayConfig
@@ -46,11 +45,10 @@ class NostrService internal constructor(
         @Volatile
         private var INSTANCE: NostrService? = null
 
-        fun getInstance(context: Context): NostrService {
+        fun getInstance(context: Context, relays: List<String> = RelayConfig.DEFAULT_RELAYS): NostrService {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: run {
                     val appContext = context.applicationContext
-                    val relays = SettingsManager.getInstance(appContext).getEffectiveRelays()
                     NostrService(appContext, relays).also { INSTANCE = it }
                 }
             }

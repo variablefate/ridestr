@@ -40,7 +40,8 @@ import com.ridestr.common.routing.TileManager
 import com.ridestr.common.routing.TileSource
 import com.ridestr.common.settings.DisplayCurrency
 import com.ridestr.common.settings.RemoteConfigManager
-import com.ridestr.common.settings.SettingsManager
+import com.ridestr.common.settings.SettingsRepository
+import com.ridestr.common.settings.SettingsUiState
 import com.ridestr.common.routing.ValhallaRoutingService
 import com.ridestr.common.payment.BridgePaymentStatus
 import com.ridestr.common.payment.LockResult
@@ -73,12 +74,20 @@ import kotlinx.coroutines.sync.withLock
 import kotlin.coroutines.coroutineContext
 import org.json.JSONObject
 import com.ridestr.rider.BuildConfig
+import dagger.hilt.android.lifecycle.HiltViewModel
+import javax.inject.Inject
+import androidx.lifecycle.SavedStateHandle
 
 /**
  * ViewModel for Rider mode.
  * Manages available drivers, route calculation, and ride requests.
  */
-class RiderViewModel(application: Application) : AndroidViewModel(application) {
+@HiltViewModel
+class RiderViewModel @Inject constructor(
+    application: Application,
+    savedStateHandle: SavedStateHandle,
+    private val settingsRepository: SettingsRepository
+) : AndroidViewModel(application) {
 
     companion object {
         private const val TAG = "RiderViewModel"
@@ -152,7 +161,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     )
 
     private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    private val nostrService = NostrService.getInstance(application)
+    private val nostrService = NostrService.getInstance(application, settingsRepository.getEffectiveRelays())
 
     /** Expose NostrService for RoadFlare location subscriptions */
     fun getNostrService(): NostrService = nostrService
@@ -172,8 +181,8 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     // Track which tile region is currently loaded
     private var currentTileRegion: String? = null
 
-    // Settings manager for user preferences
-    val settingsManager = SettingsManager.getInstance(application)
+    // Settings state for UI screens
+    val settings: StateFlow<SettingsUiState> = settingsRepository.settings
 
     // Geocoding state
     private val _pickupSearchResults = MutableStateFlow<List<GeocodingResult>>(emptyList())
@@ -197,6 +206,27 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     fun setWalletService(service: WalletService?) {
         walletService = service
     }
+
+    // === Settings mediation methods (screens call these, ViewModel delegates to repository) ===
+    fun onToggleDisplayCurrency() = viewModelScope.launch { settingsRepository.toggleDisplayCurrency() }
+    fun onToggleDistanceUnit() = viewModelScope.launch { settingsRepository.toggleDistanceUnit() }
+    fun onSetNotificationSoundEnabled(enabled: Boolean) = viewModelScope.launch { settingsRepository.setNotificationSoundEnabled(enabled) }
+    fun onSetNotificationVibrationEnabled(enabled: Boolean) = viewModelScope.launch { settingsRepository.setNotificationVibrationEnabled(enabled) }
+    fun onSetUseGpsForPickup(enabled: Boolean) = viewModelScope.launch { settingsRepository.setUseGpsForPickup(enabled) }
+    fun onAddRelay(url: String) = viewModelScope.launch { settingsRepository.addRelay(url) }
+    fun onRemoveRelay(url: String) = viewModelScope.launch { settingsRepository.removeRelay(url) }
+    fun onResetRelays() = viewModelScope.launch { settingsRepository.resetRelaysToDefault() }
+    fun onSetRoadflarePaymentMethods(methods: List<String>) = viewModelScope.launch { settingsRepository.setRoadflarePaymentMethods(methods) }
+    fun onSetPaymentMethods(methods: List<String>) = viewModelScope.launch { settingsRepository.setPaymentMethods(methods) }
+    fun onAddFavoriteLnAddress(address: String, label: String? = null) = viewModelScope.launch { settingsRepository.addFavoriteLnAddress(address, label) }
+    fun onRemoveFavoriteLnAddress(address: String) = viewModelScope.launch { settingsRepository.removeFavoriteLnAddress(address) }
+    fun onUpdateFavoriteLastUsed(address: String) = viewModelScope.launch { settingsRepository.updateFavoriteLastUsed(address) }
+    fun onToggleUseGeocodingSearch() = viewModelScope.launch { settingsRepository.toggleUseGeocodingSearch() }
+    fun onSetUseManualDriverLocation(enabled: Boolean) = viewModelScope.launch { settingsRepository.setUseManualDriverLocation(enabled) }
+    fun onSetManualDriverLocation(lat: Double, lon: Double) = viewModelScope.launch { settingsRepository.setManualDriverLocation(lat, lon) }
+    fun onSetAlwaysShowWalletDiagnostics(enabled: Boolean) = viewModelScope.launch { settingsRepository.setAlwaysShowWalletDiagnostics(enabled) }
+    fun onSetIgnoreFollowNotifications(enabled: Boolean) = viewModelScope.launch { settingsRepository.setIgnoreFollowNotifications(enabled) }
+    fun onSetEncryptionFallbackWarned(warned: Boolean) = viewModelScope.launch { settingsRepository.setEncryptionFallbackWarned(warned) }
 
     private val _uiState = MutableStateFlow(RiderUiState())
     val uiState: StateFlow<RiderUiState> = _uiState.asStateFlow()
@@ -1374,7 +1404,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // Track if using current location for pickup (initialized from saved preference)
-    private val _usingCurrentLocationForPickup = MutableStateFlow(settingsManager.useGpsForPickup.value)
+    private val _usingCurrentLocationForPickup = MutableStateFlow(settingsRepository.getUseGpsForPickup())
     val usingCurrentLocationForPickup: StateFlow<Boolean> = _usingCurrentLocationForPickup.asStateFlow()
 
     // Track if we're fetching current location
@@ -1392,7 +1422,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _isFetchingLocation.value = true
             _usingCurrentLocationForPickup.value = true
-            settingsManager.setUseGpsForPickup(true)  // Persist preference
+            viewModelScope.launch { settingsRepository.setUseGpsForPickup(true) }  // Persist preference
 
             Log.d(TAG, "useCurrentLocationForPickup: gpsLat=$gpsLat, gpsLon=$gpsLon")
 
@@ -1401,7 +1431,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 Log.w(TAG, "GPS unavailable - cannot use current location")
                 _isFetchingLocation.value = false
                 _usingCurrentLocationForPickup.value = false
-                settingsManager.setUseGpsForPickup(false)  // Revert preference on failure
+                viewModelScope.launch { settingsRepository.setUseGpsForPickup(false) }  // Revert preference on failure
                 return@launch
             }
 
@@ -1437,7 +1467,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun stopUsingCurrentLocationForPickup() {
         _usingCurrentLocationForPickup.value = false
-        settingsManager.setUseGpsForPickup(false)  // Persist preference
+        viewModelScope.launch { settingsRepository.setUseGpsForPickup(false) }  // Persist preference
         clearPickupLocation()
     }
 
@@ -1763,7 +1793,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 pickup = pickup, destination = destination,
                 fareEstimate = fareEstimate, rideRoute = state.routeResult,
                 preimage = preimage, paymentHash = paymentHash,
-                paymentMethod = settingsManager.defaultPaymentMethod.value,
+                paymentMethod = settingsRepository.getDefaultPaymentMethod(),
                 isRoadflare = false, isBroadcast = false,
                 statusMessage = "Waiting for driver to accept...",
                 roadflareTargetPubKey = null, roadflareTargetLocation = null
@@ -1798,9 +1828,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             calculateRoadflareFare(pickup, driverLocation, rideRoute)
         } else { state.fareEstimate ?: return }
 
-        val paymentMethod = settingsManager.defaultPaymentMethod.value
+        val paymentMethod = settingsRepository.getDefaultPaymentMethod()
         val fiatMethods = if (paymentMethod != com.ridestr.common.nostr.events.PaymentMethod.CASHU.value) {
-            settingsManager.roadflarePaymentMethods.value
+            settingsRepository.getRoadflarePaymentMethods()
         } else emptyList()
 
         // Sync balance check — only meaningful for cashu (non-cashu skips HTLC escrow)
@@ -1906,7 +1936,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 isRoadflare = true, isBroadcast = false,
                 statusMessage = "Waiting for driver to accept...",
                 roadflareTargetPubKey = driverPubKey, roadflareTargetLocation = driverLocation,
-                fiatPaymentMethods = settingsManager.roadflarePaymentMethods.value
+                fiatPaymentMethods = settingsRepository.getRoadflarePaymentMethods()
             )
 
             val pickupRoute = calculatePickupRoute(driverLocation, pickup)
@@ -2255,7 +2285,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
 
         // Include fiat methods for non-cashu offers (Issue #46)
         val fiatMethods = if (paymentMethod != com.ridestr.common.nostr.events.PaymentMethod.CASHU.value) {
-            settingsManager.roadflarePaymentMethods.value
+            settingsRepository.getRoadflarePaymentMethods()
         } else emptyList()
 
         val params = OfferParams(
@@ -2542,7 +2572,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
         val newFare = currentFare + boostAmount
 
         // Read payment method from session (preserves original offer's payment rail)
-        val paymentMethod = session.activePaymentMethod ?: settingsManager.defaultPaymentMethod.value
+        val paymentMethod = session.activePaymentMethod ?: settingsRepository.getDefaultPaymentMethod()
 
         // Check wallet balance before boosting — only meaningful for cashu
         if (paymentMethod == com.ridestr.common.nostr.events.PaymentMethod.CASHU.value) {
@@ -2611,7 +2641,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                 statusMessage = "Waiting for driver to accept boosted offer...",
                 roadflareTargetPubKey = null, roadflareTargetLocation = null,
                 fiatPaymentMethods = if (isRoadflare && paymentMethod != com.ridestr.common.nostr.events.PaymentMethod.CASHU.value) {
-                    settingsManager.roadflarePaymentMethods.value
+                    settingsRepository.getRoadflarePaymentMethods()
                 } else emptyList()
             )
 
@@ -2690,7 +2720,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
             Log.d(TAG, "Broadcasting with approximate locations - pickup: ${approxPickup.lat},${approxPickup.lon}, dest: ${approxDestination.lat},${approxDestination.lon}")
 
             val riderMintUrl = walletService?.getSavedMintUrl()
-            val paymentMethod = settingsManager.defaultPaymentMethod.value
+            val paymentMethod = settingsRepository.getDefaultPaymentMethod()
 
             val eventId = nostrService.broadcastRideRequest(
                 pickup = approxPickup,
@@ -3259,7 +3289,7 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 } else {
                     // Check payment method compatibility before showing driver
-                    val riderMethods = settingsManager.paymentMethods.value
+                    val riderMethods = settingsRepository.getPaymentMethods()
                     if (!isPaymentCompatible(riderMethods, driver.paymentMethods)) {
                         Log.d(TAG, "Filtering out driver ${driver.driverPubKey.take(8)} - incompatible payment methods: rider=$riderMethods, driver=${driver.paymentMethods}")
                         // Remove if they were already in the list (e.g., updated their methods).
@@ -5258,19 +5288,9 @@ class RiderViewModel(application: Application) : AndroidViewModel(application) {
      * Get the fare boost amount based on currency setting.
      * USD mode: $1 converted to sats
      * SATS mode: 1000 sats
-     *
-     * Note: Reads directly from SharedPreferences to ensure we get the current setting,
-     * since the ViewModel's SettingsManager instance may be out of sync with the UI's instance.
      */
     private fun getBoostAmount(): Double {
-        // Read currency setting directly from SharedPreferences to get current value
-        val settingsPrefs = getApplication<Application>().getSharedPreferences("ridestr_settings", Context.MODE_PRIVATE)
-        val currencyName = settingsPrefs.getString("display_currency", DisplayCurrency.USD.name) ?: DisplayCurrency.USD.name
-        val currency = try {
-            DisplayCurrency.valueOf(currencyName)
-        } catch (e: IllegalArgumentException) {
-            DisplayCurrency.USD
-        }
+        val currency = settingsRepository.getDisplayCurrency()
 
         return when (currency) {
             DisplayCurrency.USD -> {

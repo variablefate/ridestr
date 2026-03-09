@@ -1,7 +1,7 @@
-package com.roadflare.rider
+package com.drivestr.app
 
 import android.app.Application
 import dagger.hilt.android.HiltAndroidApp
 
 @HiltAndroidApp
-class RoadFlareApplication : Application()
+class DrivestrApplication : Application()

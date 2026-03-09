@@ -4,9 +4,14 @@ import android.app.Application
 import android.content.Context
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import com.drivestr.app.service.DriverOnlineService
 import com.drivestr.app.service.DriverStatus
+import com.ridestr.common.settings.SettingsRepository
+import com.ridestr.common.settings.SettingsUiState
+import dagger.hilt.android.lifecycle.HiltViewModel
+import javax.inject.Inject
 import com.ridestr.common.notification.AlertType
 import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.data.DriverRoadflareRepository
@@ -82,7 +87,12 @@ enum class DriverStage {
 /**
  * ViewModel for Driver mode.
  */
-class DriverViewModel(application: Application) : AndroidViewModel(application) {
+@HiltViewModel
+class DriverViewModel @Inject constructor(
+    application: Application,
+    savedStateHandle: SavedStateHandle,
+    private val settingsRepository: SettingsRepository
+) : AndroidViewModel(application) {
 
     companion object {
         private const val TAG = "DriverViewModel"
@@ -128,10 +138,10 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
     private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-    // Settings manager for user preferences
-    private val settingsManager = com.ridestr.common.settings.SettingsManager.getInstance(application)
+    /** Combined settings state for screens. */
+    val settings: StateFlow<SettingsUiState> = settingsRepository.settings
 
-    private val nostrService = NostrService.getInstance(application)
+    private val nostrService = NostrService.getInstance(application, settingsRepository.getEffectiveRelays())
 
     // Remote config for platform settings (fetched from admin pubkey Kind 30182)
     private val remoteConfigManager = com.ridestr.common.settings.RemoteConfigManager(application, nostrService.relayManager)
@@ -808,7 +818,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         // Check if wallet is set up (has mint URL configured)
         // Without a wallet, riders using Cashu payments won't be able to complete rides
         val mintUrl = walletService?.getSavedMintUrl()
-        val paymentMethods = settingsManager.paymentMethods.value
+        val paymentMethods = settingsRepository.getPaymentMethods()
 
         // Warn if Cashu is a payment method but wallet isn't configured
         if (paymentMethods.contains("cashu") && mintUrl == null) {
@@ -3000,7 +3010,7 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
 
                 Log.d(TAG, "Broadcasting availability at ${currentLocation.lat}, ${currentLocation.lon}")
                 val mintUrl = walletService?.getSavedMintUrl()
-                val paymentMethods = settingsManager.paymentMethods.value
+                val paymentMethods = settingsRepository.getPaymentMethods()
                 val eventId = nostrService.broadcastAvailability(
                     location = currentLocation,
                     vehicle = activeVehicle,
@@ -4126,6 +4136,33 @@ class DriverViewModel(application: Application) : AndroidViewModel(application) 
         bitcoinPriceService.cleanup()
         roadflareLocationBroadcaster?.destroy()
     }
+
+    // ========================================
+    // Settings Mediation (ViewModel → Repository)
+    // Screens call these; repository is never exposed.
+    // ========================================
+
+    fun onToggleDisplayCurrency() = viewModelScope.launch { settingsRepository.toggleDisplayCurrency() }
+    fun onToggleDistanceUnit() = viewModelScope.launch { settingsRepository.toggleDistanceUnit() }
+    fun onSetAutoOpenNavigation(enabled: Boolean) = viewModelScope.launch { settingsRepository.setAutoOpenNavigation(enabled) }
+    fun onSetNotificationSoundEnabled(enabled: Boolean) = viewModelScope.launch { settingsRepository.setNotificationSoundEnabled(enabled) }
+    fun onSetNotificationVibrationEnabled(enabled: Boolean) = viewModelScope.launch { settingsRepository.setNotificationVibrationEnabled(enabled) }
+    fun onSetAlwaysAskVehicle(enabled: Boolean) = viewModelScope.launch { settingsRepository.setAlwaysAskVehicle(enabled) }
+    fun onSetActiveVehicleId(id: String?) = viewModelScope.launch { settingsRepository.setActiveVehicleId(id) }
+    fun onSetRoadflareAlertsEnabled(enabled: Boolean) = viewModelScope.launch { settingsRepository.setRoadflareAlertsEnabled(enabled) }
+    fun onSetIgnoreFollowNotifications(enabled: Boolean) = viewModelScope.launch { settingsRepository.setIgnoreFollowNotifications(enabled) }
+    fun onAddRelay(url: String) = viewModelScope.launch { settingsRepository.addRelay(url) }
+    fun onRemoveRelay(url: String) = viewModelScope.launch { settingsRepository.removeRelay(url) }
+    fun onResetRelays() = viewModelScope.launch { settingsRepository.resetRelaysToDefault() }
+    fun onSetRoadflarePaymentMethods(methods: List<String>) = viewModelScope.launch { settingsRepository.setRoadflarePaymentMethods(methods) }
+    fun onSetPaymentMethods(methods: List<String>) = viewModelScope.launch { settingsRepository.setPaymentMethods(methods) }
+    fun onAddFavoriteLnAddress(address: String, label: String? = null) = viewModelScope.launch { settingsRepository.addFavoriteLnAddress(address, label) }
+    fun onRemoveFavoriteLnAddress(address: String) = viewModelScope.launch { settingsRepository.removeFavoriteLnAddress(address) }
+    fun onUpdateFavoriteLastUsed(address: String) = viewModelScope.launch { settingsRepository.updateFavoriteLastUsed(address) }
+    fun onToggleUseGeocodingSearch() = viewModelScope.launch { settingsRepository.toggleUseGeocodingSearch() }
+    fun onSetUseManualDriverLocation(enabled: Boolean) = viewModelScope.launch { settingsRepository.setUseManualDriverLocation(enabled) }
+    fun onSetManualDriverLocation(lat: Double, lon: Double) = viewModelScope.launch { settingsRepository.setManualDriverLocation(lat, lon) }
+    fun onSetAlwaysShowWalletDiagnostics(enabled: Boolean) = viewModelScope.launch { settingsRepository.setAlwaysShowWalletDiagnostics(enabled) }
 
     override fun onCleared() {
         super.onCleared()

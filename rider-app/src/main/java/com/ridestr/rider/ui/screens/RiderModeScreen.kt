@@ -60,7 +60,7 @@ import com.ridestr.common.location.GeocodingResult
 import com.ridestr.common.location.GeocodingService
 import com.ridestr.common.settings.DisplayCurrency
 import com.ridestr.common.settings.DistanceUnit
-import com.ridestr.common.settings.SettingsManager
+import com.ridestr.common.settings.SettingsUiState
 import com.ridestr.common.data.SavedLocation
 import com.ridestr.common.ui.ActiveRideCard
 import com.ridestr.common.ui.ChatBottomSheet
@@ -101,7 +101,9 @@ private enum class WaitingMode {
 @Composable
 fun RiderModeScreen(
     viewModel: RiderViewModel,
-    settingsManager: SettingsManager,
+    settings: SettingsUiState,
+    onToggleDisplayCurrency: () -> Unit,
+    onSetRoadflarePaymentMethods: (List<String>) -> Unit,
     followedDriversRepository: FollowedDriversRepository? = null,
     onAddDriverToFavorites: (suspend (driverPubKey: String) -> Unit)? = null,
     onOpenTiles: () -> Unit,
@@ -121,7 +123,7 @@ fun RiderModeScreen(
         normalFareUsd + FareCalculator.ROADFLARE_MAX_SURCHARGE_USD
     }
     // Payment method selection for batch RoadFlare send
-    val roadflarePaymentMethods by settingsManager.roadflarePaymentMethods.collectAsState()
+    val roadflarePaymentMethods = settings.roadflarePaymentMethods
     var pendingBatchAction by remember { mutableStateOf<PendingBatchAction?>(null) }
 
     var showChatSheet by remember { mutableStateOf(false) }
@@ -141,7 +143,7 @@ fun RiderModeScreen(
     val destSearchResults by viewModel.destSearchResults.collectAsState()
     val isSearchingPickup by viewModel.isSearchingPickup.collectAsState()
     val isSearchingDest by viewModel.isSearchingDest.collectAsState()
-    val useGeocodingSearch by settingsManager.useGeocodingSearch.collectAsState()
+    val useGeocodingSearch = settings.useGeocodingSearch
     val usingCurrentLocationForPickup by viewModel.usingCurrentLocationForPickup.collectAsState()
     val isFetchingLocation by viewModel.isFetchingLocation.collectAsState()
 
@@ -206,7 +208,9 @@ fun RiderModeScreen(
                 },
                 showBroadcastOption = false,  // Don't show broadcast when switching drivers
                 onToggleBroadcastOption = { },
-                settingsManager = settingsManager,
+                displayCurrency = settings.displayCurrency,
+                distanceUnit = settings.distanceUnit,
+                onToggleCurrency = onToggleDisplayCurrency,
                 priceService = viewModel.bitcoinPriceService
             )
         }
@@ -362,7 +366,7 @@ fun RiderModeScreen(
                         allMethods = allMethods,
                         enabledMethods = roadflarePaymentMethods,
                         onOrderChanged = { reordered ->
-                            settingsManager.setRoadflarePaymentMethods(reordered)
+                            onSetRoadflarePaymentMethods(reordered)
                         },
                         onMethodToggled = { method, enabled ->
                             val updated = if (enabled) {
@@ -370,7 +374,7 @@ fun RiderModeScreen(
                             } else {
                                 roadflarePaymentMethods - method
                             }
-                            settingsManager.setRoadflarePaymentMethods(updated)
+                            onSetRoadflarePaymentMethods(updated)
                         },
                         modifier = Modifier.heightIn(max = 350.dp)
                     )
@@ -623,7 +627,9 @@ fun RiderModeScreen(
                         // Then broadcast the ride request
                         viewModel.broadcastRideRequest()
                     },
-                    settingsManager = settingsManager,
+                    displayCurrency = settings.displayCurrency,
+                    distanceUnit = settings.distanceUnit,
+                    onToggleCurrency = onToggleDisplayCurrency,
                     priceService = viewModel.bitcoinPriceService,
                     favorites = viewModel.getFavorites(),
                     recents = viewModel.getRecents(),
@@ -659,7 +665,8 @@ fun RiderModeScreen(
                     onBoostFare = viewModel::boostFare,  // BROADCAST boost - creates public event
                     onContinueWaiting = viewModel::continueWaiting,
                     onCancel = viewModel::cancelOffer,
-                    settingsManager = settingsManager,
+                    displayCurrency = settings.displayCurrency,
+                    onToggleCurrency = onToggleDisplayCurrency,
                     priceService = viewModel.bitcoinPriceService
                 )
             }
@@ -675,7 +682,8 @@ fun RiderModeScreen(
                         viewModel.cancelOffer()         // Cancel current offer (deletes event, closes subscription)
                         showDriverSelectionSheet = true // Reopen driver list with same route
                     },
-                    settingsManager = settingsManager,
+                    displayCurrency = settings.displayCurrency,
+                    onToggleCurrency = onToggleDisplayCurrency,
                     priceService = viewModel.bitcoinPriceService
                 )
             }
@@ -685,7 +693,8 @@ fun RiderModeScreen(
                     onCancel = viewModel::attemptCancelRide,
                     onOpenChat = { showChatSheet = true },
                     chatMessageCount = uiState.rideSession.chatMessages.size,
-                    settingsManager = settingsManager,
+                    displayCurrency = settings.displayCurrency,
+                    onToggleCurrency = onToggleDisplayCurrency,
                     priceService = viewModel.bitcoinPriceService
                 )
             }
@@ -768,7 +777,9 @@ private fun IdleContent(
     onClearDriver: () -> Unit,
     onSendOffer: () -> Unit,
     onBroadcastRequest: () -> Unit,
-    settingsManager: SettingsManager,
+    displayCurrency: DisplayCurrency,
+    distanceUnit: DistanceUnit,
+    onToggleCurrency: () -> Unit,
     priceService: BitcoinPriceService,
     favorites: List<SavedLocation>,
     recents: List<SavedLocation>,
@@ -821,7 +832,9 @@ private fun IdleContent(
                 onBroadcastRequest = { showPrivacyWarningDialog = true },
                 showBroadcastOption = showBroadcastOption,
                 onToggleBroadcastOption = { showBroadcastOption = !showBroadcastOption },
-                settingsManager = settingsManager,
+                displayCurrency = displayCurrency,
+                distanceUnit = distanceUnit,
+                onToggleCurrency = onToggleCurrency,
                 priceService = priceService
             )
         }
@@ -840,7 +853,8 @@ private fun IdleContent(
                 routeResult = uiState.routeResult,
                 isSending = uiState.rideSession.isSendingOffer,
                 nostrService = nostrService,
-                settingsManager = settingsManager,
+                displayCurrency = displayCurrency,
+                onToggleCurrency = onToggleCurrency,
                 priceService = priceService,
                 roadflareRatePerMile = roadflareRatePerMile,
                 maxRoadflareFareUsd = maxRoadflareFareUsd,
@@ -929,7 +943,9 @@ private fun IdleContent(
                     nearbyDriverCount = uiState.nearbyDriverCount,
                     onOpenRoadflare = { showRoadflareSheet = true },
                     hasRoadflareDrivers = hasRoadflareDrivers,
-                    settingsManager = settingsManager,
+                    displayCurrency = displayCurrency,
+                    distanceUnit = distanceUnit,
+                    onToggleCurrency = onToggleCurrency,
                     priceService = priceService,
                     onRequestRide = { showDriverSelectionSheet = true },
                     favorites = favorites,
@@ -984,7 +1000,9 @@ private fun GeocodingLocationInputCard(
     nearbyDriverCount: Int,
     onOpenRoadflare: () -> Unit,
     hasRoadflareDrivers: Boolean,
-    settingsManager: SettingsManager,
+    displayCurrency: DisplayCurrency,
+    distanceUnit: DistanceUnit,
+    onToggleCurrency: () -> Unit,
     priceService: BitcoinPriceService,
     onRequestRide: () -> Unit,
     favorites: List<SavedLocation>,
@@ -998,7 +1016,7 @@ private fun GeocodingLocationInputCard(
 ) {
     val context = LocalContext.current
     // Hoisted from inside conditionals (was inside if blocks)
-    val distanceUnit by settingsManager.distanceUnit.collectAsState()
+    // distanceUnit is passed as parameter
     var isRefreshing by remember { mutableStateOf(false) }
 
     var pickupQuery by rememberSaveable { mutableStateOf("") }
@@ -1433,7 +1451,8 @@ private fun GeocodingLocationInputCard(
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             FareDisplay(
                                 satsAmount = fareEstimate,
-                                settingsManager = settingsManager,
+                                displayCurrency = displayCurrency,
+                                onToggleCurrency = onToggleCurrency,
                                 priceService = priceService,
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold
@@ -1686,10 +1705,11 @@ private fun RouteInfoCard(
     routeResult: RouteResult?,
     fareEstimate: Double?,
     isCalculating: Boolean,
-    settingsManager: SettingsManager,
+    displayCurrency: DisplayCurrency,
+    distanceUnit: DistanceUnit,
+    onToggleCurrency: () -> Unit,
     priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
-    val distanceUnit by settingsManager.distanceUnit.collectAsState()
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -1741,7 +1761,8 @@ private fun RouteInfoCard(
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     FareDisplay(
                         satsAmount = fareEstimate ?: 0.0,
-                        settingsManager = settingsManager,
+                        displayCurrency = displayCurrency,
+                        onToggleCurrency = onToggleCurrency,
                         priceService = priceService,
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold
@@ -1765,9 +1786,8 @@ private fun SwipeableDriverCard(
     profile: UserProfile?,
     pickupLocation: Location?,
     onRequestRide: () -> Unit,
-    settingsManager: SettingsManager
+    distanceUnit: DistanceUnit
 ) {
-    val distanceUnit by settingsManager.distanceUnit.collectAsState()
     var isRevealed by remember { mutableStateOf(false) }
     var offsetX by remember { mutableFloatStateOf(0f) }
 
@@ -1920,9 +1940,8 @@ private fun DriverCard(
     pickupLocation: Location?,
     isSelected: Boolean,
     onSelect: () -> Unit,
-    settingsManager: SettingsManager
+    distanceUnit: DistanceUnit
 ) {
-    val distanceUnit by settingsManager.distanceUnit.collectAsState()
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -2023,7 +2042,9 @@ private fun DriverSelectionSheetContent(
     onBroadcastRequest: () -> Unit,
     showBroadcastOption: Boolean,
     onToggleBroadcastOption: () -> Unit,
-    settingsManager: SettingsManager,
+    displayCurrency: DisplayCurrency,
+    distanceUnit: DistanceUnit,
+    onToggleCurrency: () -> Unit,
     priceService: BitcoinPriceService
 ) {
     val drivers = uiState.availableDrivers
@@ -2148,7 +2169,7 @@ private fun DriverSelectionSheetContent(
                             onSelectDriver(driver)
                             onSendOffer()
                         },
-                        settingsManager = settingsManager
+                        distanceUnit = distanceUnit
                     )
                 }
             }
@@ -2302,7 +2323,8 @@ private fun RequestRideCard(
     isSending: Boolean,
     onRequest: () -> Unit,
     onCancel: () -> Unit,
-    settingsManager: SettingsManager,
+    displayCurrency: DisplayCurrency,
+    onToggleCurrency: () -> Unit,
     priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
     Card(
@@ -2336,7 +2358,8 @@ private fun RequestRideCard(
             }
             FareDisplay(
                 satsAmount = fareEstimate,
-                settingsManager = settingsManager,
+                displayCurrency = displayCurrency,
+                onToggleCurrency = onToggleCurrency,
                 priceService = priceService,
                 style = MaterialTheme.typography.bodyMedium,
                 prefix = "Fare: "
@@ -2385,7 +2408,8 @@ private fun RideWaitingContent(
     onContinueWaiting: () -> Unit,
     onCancel: () -> Unit,
     onRequestAnotherDriver: (() -> Unit)? = null,  // Only for DIRECT mode
-    settingsManager: SettingsManager,
+    displayCurrency: DisplayCurrency,
+    onToggleCurrency: () -> Unit,
     priceService: BitcoinPriceService
 ) {
     var dotCount by remember { mutableIntStateOf(0) }
@@ -2427,9 +2451,6 @@ private fun RideWaitingContent(
             }
         }
     }
-
-    // Get currency setting for boost display
-    val displayCurrency by settingsManager.displayCurrency.collectAsState()
 
     // State for price info dialog
     var showPriceInfoDialog by remember { mutableStateOf(false) }
@@ -2477,7 +2498,7 @@ private fun RideWaitingContent(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
                         .padding(8.dp)
-                        .clickable { settingsManager.toggleDisplayCurrency() },
+                        .clickable { onToggleCurrency() },
                     containerColor = MaterialTheme.colorScheme.error
                 ) {
                     Text(
@@ -2554,7 +2575,7 @@ private fun RideWaitingContent(
 
                     // Keep waiting button with current fare (displayed with fee buffer)
                     val currentFare = uiState.fareEstimateWithFees ?: 0.0
-                    val fareText = formatFare(currentFare, settingsManager, priceService)
+                    val fareText = formatFare(currentFare, displayCurrency, priceService)
                     OutlinedButton(
                         onClick = onContinueWaiting,
                         modifier = Modifier.fillMaxWidth()
@@ -2736,7 +2757,8 @@ private fun RideWaitingContent(
                             Spacer(modifier = Modifier.width(4.dp))
                             FareDisplay(
                                 satsAmount = currentFare,
-                                settingsManager = settingsManager,
+                                displayCurrency = displayCurrency,
+                                onToggleCurrency = onToggleCurrency,
                                 priceService = priceService,
                                 style = MaterialTheme.typography.titleSmall,
                                 prefix = "Current fare: ",
@@ -2855,7 +2877,8 @@ private fun DriverAcceptedContent(
     onCancel: () -> Unit,
     onOpenChat: () -> Unit,
     chatMessageCount: Int,
-    settingsManager: com.ridestr.common.settings.SettingsManager,
+    displayCurrency: DisplayCurrency,
+    onToggleCurrency: () -> Unit,
     priceService: com.ridestr.common.bitcoin.BitcoinPriceService
 ) {
     // Get driver info
@@ -3019,7 +3042,7 @@ private fun DriverAcceptedContent(
                             Text(
                                 text = formatFare(
                                     satsAmount = fare.toDouble(),
-                                    settingsManager = settingsManager,
+                                    displayCurrency = displayCurrency,
                                     priceService = priceService
                                 ),
                                 style = MaterialTheme.typography.titleMedium,
@@ -3468,7 +3491,8 @@ private fun RoadflareDriverSelectionSheet(
     routeResult: RouteResult?,
     isSending: Boolean,
     nostrService: com.ridestr.common.nostr.NostrService?,
-    settingsManager: SettingsManager,
+    displayCurrency: DisplayCurrency,
+    onToggleCurrency: () -> Unit,
     priceService: BitcoinPriceService,
     roadflareRatePerMile: Double = AdminConfig.DEFAULT_ROADFLARE_FARE_RATE,
     maxRoadflareFareUsd: Double? = null,
@@ -3681,7 +3705,7 @@ private fun RoadflareDriverSelectionSheet(
                     } else null
 
                     val fare = if (fareSats != null) {
-                        formatFare(fareSats, settingsManager, priceService)
+                        formatFare(fareSats, displayCurrency, priceService)
                     } else null
 
                     // Only compute isTooFar for ONLINE drivers — offline drivers must show "Offline", not "Too far"

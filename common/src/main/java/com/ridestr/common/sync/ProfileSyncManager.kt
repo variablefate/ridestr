@@ -305,6 +305,16 @@ class ProfileSyncManager private constructor(
      */
     suspend fun checkAndSyncRidestrData() = withContext(Dispatchers.IO) {
         Log.d(TAG, "=== CHECKING FOR RIDESTR DATA ===")
+
+        if (syncables.isEmpty()) {
+            Log.e(TAG, "checkAndSyncRidestrData called with no registered syncables")
+            _syncState.value = ProfileSyncState.Error(
+                message = "Sync adapters not registered yet. Please retry.",
+                retryable = true
+            )
+            return@withContext
+        }
+
         _syncState.value = ProfileSyncState.Checking
 
         // Connect to relays first

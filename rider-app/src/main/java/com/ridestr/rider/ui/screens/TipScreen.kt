@@ -24,7 +24,6 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.ridestr.common.settings.DisplayCurrency
-import com.ridestr.common.settings.SettingsManager
 
 /**
  * Screen for tipping the driver after a completed ride.
@@ -38,7 +37,7 @@ fun TipScreen(
     lightningAddress: String,
     displayCurrency: DisplayCurrency,
     btcPriceUsd: Int?,
-    settingsManager: SettingsManager,
+    onToggleCurrency: () -> Unit,
     onBack: () -> Unit,
     onTipSent: (tipAmountSats: Long) -> Unit,
     modifier: Modifier = Modifier
@@ -191,7 +190,7 @@ fun TipScreen(
                                     color = MaterialTheme.colorScheme.primary,
                                     modifier = Modifier
                                         .padding(end = 8.dp)
-                                        .clickable { settingsManager.toggleDisplayCurrency() }
+                                        .clickable { onToggleCurrency() }
                                 )
                             }
                         }

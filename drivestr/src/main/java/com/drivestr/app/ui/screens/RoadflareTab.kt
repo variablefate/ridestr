@@ -15,7 +15,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import com.ridestr.common.nostr.events.PaymentMethod
-import com.ridestr.common.settings.SettingsManager
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -47,7 +46,8 @@ fun RoadflareTab(
     driverPubkey: String,
     driverNpub: String = "",
     driverName: String = "",
-    settingsManager: SettingsManager? = null,
+    roadflarePaymentMethods: List<String> = emptyList(),
+    onSetRoadflarePaymentMethods: (List<String>) -> Unit = {},
     backgroundAlertsEnabled: Boolean = false,
     isDriverOnline: Boolean = false,
     onApproveFollower: (String) -> Unit = {},
@@ -216,60 +216,61 @@ fun RoadflareTab(
             }
 
             // Accepted payment methods section with animated expand/collapse
-            if (settingsManager != null) {
-                item {
-                    val paymentChevronRotation by animateFloatAsState(
-                        targetValue = if (showPaymentMethods) 180f else 0f,
-                        label = "paymentChevronRotation"
-                    )
+            item {
+                val paymentChevronRotation by animateFloatAsState(
+                    targetValue = if (showPaymentMethods) 180f else 0f,
+                    label = "paymentChevronRotation"
+                )
 
-                    Column {
-                        // Header card (always visible)
-                        OutlinedCard(
-                            onClick = { showPaymentMethods = !showPaymentMethods },
-                            modifier = Modifier.fillMaxWidth()
+                Column {
+                    // Header card (always visible)
+                    OutlinedCard(
+                        onClick = { showPaymentMethods = !showPaymentMethods },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp)
                         ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(16.dp)
-                            ) {
-                                Icon(
-                                    Icons.Default.Payment,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(24.dp)
+                            Icon(
+                                Icons.Default.Payment,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Accepted Payment Methods",
+                                    style = MaterialTheme.typography.titleMedium
                                 )
-                                Spacer(modifier = Modifier.width(12.dp))
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = "Accepted Payment Methods",
-                                        style = MaterialTheme.typography.titleMedium
-                                    )
-                                    Text(
-                                        text = "Non-bitcoin methods for RoadFlare",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                                Icon(
-                                    Icons.Default.KeyboardArrowDown,
-                                    contentDescription = if (showPaymentMethods) "Collapse" else "Expand",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.rotate(paymentChevronRotation)
+                                Text(
+                                    text = "Non-bitcoin methods for RoadFlare",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
+                            Icon(
+                                Icons.Default.KeyboardArrowDown,
+                                contentDescription = if (showPaymentMethods) "Collapse" else "Expand",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.rotate(paymentChevronRotation)
+                            )
                         }
+                    }
 
-                        // Animated payment methods content
-                        AnimatedVisibility(
-                            visible = showPaymentMethods,
-                            enter = expandVertically(),
-                            exit = shrinkVertically()
-                        ) {
-                            PaymentMethodsContent(settingsManager = settingsManager)
-                        }
+                    // Animated payment methods content
+                    AnimatedVisibility(
+                        visible = showPaymentMethods,
+                        enter = expandVertically(),
+                        exit = shrinkVertically()
+                    ) {
+                        PaymentMethodsContent(
+                            currentMethods = roadflarePaymentMethods,
+                            onSetMethods = onSetRoadflarePaymentMethods
+                        )
                     }
                 }
             }
@@ -788,9 +789,10 @@ private fun generateQrCode(content: String, size: Int): Bitmap? {
  * Uses reorderable list for priority ordering (Issue #46).
  */
 @Composable
-private fun PaymentMethodsContent(settingsManager: SettingsManager) {
-    val currentMethods by settingsManager.roadflarePaymentMethods.collectAsState()
-
+private fun PaymentMethodsContent(
+    currentMethods: List<String>,
+    onSetMethods: (List<String>) -> Unit
+) {
     // All known methods + any unknown stored strings
     val allMethods = remember(currentMethods) {
         val known = PaymentMethod.ROADFLARE_ALTERNATE_METHODS.map { it.value }
@@ -816,7 +818,7 @@ private fun PaymentMethodsContent(settingsManager: SettingsManager) {
                 allMethods = allMethods,
                 enabledMethods = currentMethods,
                 onOrderChanged = { reordered ->
-                    settingsManager.setRoadflarePaymentMethods(reordered)
+                    onSetMethods(reordered)
                 },
                 onMethodToggled = { method, enabled ->
                     val updated = if (enabled) {
@@ -824,7 +826,7 @@ private fun PaymentMethodsContent(settingsManager: SettingsManager) {
                     } else {
                         currentMethods - method
                     }
-                    settingsManager.setRoadflarePaymentMethods(updated)
+                    onSetMethods(updated)
                 },
                 modifier = Modifier.heightIn(max = 350.dp)
             )

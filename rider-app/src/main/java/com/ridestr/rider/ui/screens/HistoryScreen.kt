@@ -23,7 +23,6 @@ import com.ridestr.common.nostr.events.RideHistoryEntry
 import com.ridestr.common.nostr.events.RideHistoryStats
 import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.settings.DisplayCurrency
-import com.ridestr.common.settings.SettingsManager
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
@@ -35,7 +34,8 @@ import java.util.*
 @Composable
 fun HistoryScreen(
     rideHistoryRepository: RideHistoryRepository,
-    settingsManager: SettingsManager,
+    displayCurrency: DisplayCurrency,
+    onToggleCurrency: () -> Unit,
     nostrService: NostrService,
     priceService: BitcoinPriceService,
     onRideClick: (RideHistoryEntry) -> Unit = {},
@@ -67,7 +67,6 @@ fun HistoryScreen(
             cancelledRides = rides.count { it.status == "cancelled" }
         )
     }
-    val displayCurrency by settingsManager.displayCurrency.collectAsState()
     val btcPriceUsd by priceService.btcPriceUsd.collectAsState()
     val coroutineScope = rememberCoroutineScope()
 
@@ -162,7 +161,7 @@ fun HistoryScreen(
                     stats = stats,
                     displayCurrency = displayCurrency,
                     btcPriceUsd = btcPriceUsd,
-                    settingsManager = settingsManager
+                    onToggleCurrency = onToggleCurrency
                 )
             }
 
@@ -205,7 +204,7 @@ fun HistoryScreen(
                         ride = ride,
                         displayCurrency = displayCurrency,
                         btcPriceUsd = btcPriceUsd,
-                        settingsManager = settingsManager,
+                        onToggleCurrency = onToggleCurrency,
                         onClick = { onRideClick(ride) },
                         onDelete = { rideToDelete = ride }
                     )
@@ -221,7 +220,7 @@ private fun StatsCard(
     stats: RideHistoryStats,
     displayCurrency: DisplayCurrency,
     btcPriceUsd: Int?,
-    settingsManager: SettingsManager
+    onToggleCurrency: () -> Unit
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -305,7 +304,7 @@ private fun StatsCard(
                         text = totalSpentDisplay,
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        modifier = Modifier.clickable { settingsManager.toggleDisplayCurrency() }
+                        modifier = Modifier.clickable { onToggleCurrency() }
                     )
                 }
             }
@@ -357,7 +356,7 @@ private fun RideHistoryCard(
     ride: RideHistoryEntry,
     displayCurrency: DisplayCurrency,
     btcPriceUsd: Int?,
-    settingsManager: SettingsManager,
+    onToggleCurrency: () -> Unit,
     onClick: () -> Unit,
     onDelete: () -> Unit
 ) {
@@ -533,7 +532,7 @@ private fun RideHistoryCard(
                             style = MaterialTheme.typography.titleSmall,
                             color = MaterialTheme.colorScheme.onPrimaryContainer,
                             modifier = Modifier
-                                .clickable { settingsManager.toggleDisplayCurrency() }
+                                .clickable { onToggleCurrency() }
                                 .padding(horizontal = 12.dp, vertical = 6.dp)
                         )
                     }

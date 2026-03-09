@@ -21,7 +21,6 @@ import com.ridestr.common.data.RideHistoryRepository
 import com.ridestr.common.nostr.events.RideHistoryEntry
 import com.ridestr.common.nostr.events.RideHistoryStats
 import com.ridestr.common.settings.DisplayCurrency
-import com.ridestr.common.settings.SettingsManager
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
@@ -33,7 +32,9 @@ import java.util.*
 @Composable
 fun HistoryScreen(
     rideHistoryRepository: RideHistoryRepository,
-    settingsManager: SettingsManager,
+    displayCurrency: DisplayCurrency,
+    onToggleCurrency: () -> Unit,
+    nostrService: com.ridestr.common.nostr.NostrService? = null,
     onRideClick: (RideHistoryEntry) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -55,7 +56,6 @@ fun HistoryScreen(
             cancelledRides = rides.count { it.status == "cancelled" }
         )
     }
-    val displayCurrency by settingsManager.displayCurrency.collectAsState()
     val coroutineScope = rememberCoroutineScope()
 
     var showClearDialog by remember { mutableStateOf(false) }
@@ -121,7 +121,9 @@ fun HistoryScreen(
         onRefresh = {
             isRefreshing = true
             coroutineScope.launch {
-                // TODO: sync from Nostr when ProfileSyncManager is wired up
+                if (nostrService != null) {
+                    rideHistoryRepository.syncFromNostr(nostrService)
+                }
                 isRefreshing = false
             }
         },
@@ -137,7 +139,7 @@ fun HistoryScreen(
                 StatsCard(
                     stats = stats,
                     displayCurrency = displayCurrency,
-                    settingsManager = settingsManager
+                    onToggleCurrency = onToggleCurrency
                 )
             }
 
@@ -179,7 +181,7 @@ fun HistoryScreen(
                     RideHistoryCard(
                         ride = ride,
                         displayCurrency = displayCurrency,
-                        settingsManager = settingsManager,
+                        onToggleCurrency = onToggleCurrency,
                         onClick = { onRideClick(ride) },
                         onDelete = { rideToDelete = ride }
                     )
@@ -194,10 +196,8 @@ fun HistoryScreen(
 private fun StatsCard(
     stats: RideHistoryStats,
     displayCurrency: DisplayCurrency,
-    settingsManager: SettingsManager
+    onToggleCurrency: () -> Unit
 ) {
-    val scope = rememberCoroutineScope()
-
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -274,12 +274,7 @@ private fun StatsCard(
                         text = totalSpentDisplay,
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        modifier = Modifier.clickable {
-                            scope.launch {
-                                val newCurrency = if (displayCurrency == DisplayCurrency.USD) DisplayCurrency.SATS else DisplayCurrency.USD
-                                settingsManager.setDisplayCurrency(newCurrency)
-                            }
-                        }
+                        modifier = Modifier.clickable { onToggleCurrency() }
                     )
                 }
             }
@@ -330,11 +325,10 @@ private fun StatItem(
 private fun RideHistoryCard(
     ride: RideHistoryEntry,
     displayCurrency: DisplayCurrency,
-    settingsManager: SettingsManager,
+    onToggleCurrency: () -> Unit,
     onClick: () -> Unit,
     onDelete: () -> Unit
 ) {
-    val scope = rememberCoroutineScope()
     val dateFormat = remember { SimpleDateFormat("MMM d, yyyy 'at' h:mm a", Locale.getDefault()) }
     val formattedDate = remember(ride.timestamp) {
         dateFormat.format(Date(ride.timestamp * 1000))
@@ -502,12 +496,7 @@ private fun RideHistoryCard(
                             style = MaterialTheme.typography.titleSmall,
                             color = MaterialTheme.colorScheme.onPrimaryContainer,
                             modifier = Modifier
-                                .clickable {
-                                    scope.launch {
-                                        val newCurrency = if (displayCurrency == DisplayCurrency.USD) DisplayCurrency.SATS else DisplayCurrency.USD
-                                        settingsManager.setDisplayCurrency(newCurrency)
-                                    }
-                                }
+                                .clickable { onToggleCurrency() }
                                 .padding(horizontal = 12.dp, vertical = 6.dp)
                         )
                     }

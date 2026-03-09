@@ -128,6 +128,39 @@ object RoadflareFollowNotifyEvent {
     }
 
     /**
+     * Parse and decrypt a follow notification event using a NostrSigner.
+     * Suspend overload matching the KeyShare/KeyAck pattern.
+     *
+     * @param signer The NostrSigner (driver's identity) to decrypt the content
+     * @param event The raw event
+     * @return Parsed data or null on error
+     */
+    suspend fun parseAndDecrypt(
+        signer: NostrSigner,
+        event: Event
+    ): RoadflareFollowNotifyData? {
+        if (event.kind != RideshareEventKinds.ROADFLARE_FOLLOW_NOTIFY) {
+            Log.w(TAG, "Wrong event kind: ${event.kind}")
+            return null
+        }
+
+        return try {
+            val decrypted = signer.nip44Decrypt(event.content, event.pubKey)
+
+            val json = JSONObject(decrypted)
+            RoadflareFollowNotifyData(
+                riderPubKey = event.pubKey,
+                riderName = json.optString("riderName", ""),
+                action = json.optString("action", "follow"),
+                timestamp = json.optLong("timestamp", System.currentTimeMillis() / 1000)
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to parse follow notify event", e)
+            null
+        }
+    }
+
+    /**
      * Check if an event is a follow notification for this driver.
      */
     fun isFollowNotifyFor(event: Event, driverPubKey: String): Boolean {

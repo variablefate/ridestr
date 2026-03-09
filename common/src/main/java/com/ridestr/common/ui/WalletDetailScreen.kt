@@ -30,7 +30,7 @@ import androidx.compose.ui.unit.dp
 import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.payment.*
 import com.ridestr.common.settings.DisplayCurrency
-import com.ridestr.common.settings.SettingsManager
+import com.ridestr.common.settings.FavoriteLnAddress
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -59,7 +59,11 @@ import com.google.zxing.qrcode.QRCodeWriter
 @Composable
 fun WalletDetailScreen(
     walletService: WalletService,
-    settingsManager: SettingsManager,
+    displayCurrency: DisplayCurrency,
+    onToggleCurrency: () -> Unit,
+    favoriteLnAddresses: List<FavoriteLnAddress>,
+    onAddFavoriteLnAddress: (String) -> Unit,
+    onUpdateFavoriteLastUsed: (String) -> Unit,
     priceService: BitcoinPriceService,
     onBack: () -> Unit,
     initialDepositAmount: Long? = null,  // If set, auto-open deposit dialog with this amount
@@ -71,7 +75,6 @@ fun WalletDetailScreen(
     val isConnected by walletService.isConnected.collectAsState()
     val mintName by walletService.currentMintName.collectAsState()
     val transactions by walletService.transactions.collectAsState()
-    val displayCurrency by settingsManager.displayCurrency.collectAsState()
     val btcPriceUsd by priceService.btcPriceUsd.collectAsState()
 
     // Dialog state - auto-open deposit dialog if initialDepositAmount is provided
@@ -130,7 +133,7 @@ fun WalletDetailScreen(
                     balance = balance,
                     displayCurrency = displayCurrency,
                     btcPriceUsd = btcPriceUsd,
-                    onToggleCurrency = { settingsManager.toggleDisplayCurrency() }
+                    onToggleCurrency = onToggleCurrency
                 )
             }
 
@@ -220,7 +223,10 @@ fun WalletDetailScreen(
     if (showWithdrawDialog) {
         WithdrawDialog(
             walletService = walletService,
-            settingsManager = settingsManager,
+            favoriteLnAddresses = favoriteLnAddresses,
+            isFavoriteLnAddress = { addr -> favoriteLnAddresses.any { it.address.equals(addr, ignoreCase = true) } },
+            onAddFavoriteLnAddress = onAddFavoriteLnAddress,
+            onUpdateFavoriteLastUsed = onUpdateFavoriteLastUsed,
             maxAmount = balance.availableSats,
             onDismiss = { showWithdrawDialog = false }
         )
@@ -751,7 +757,10 @@ private fun kotlinx.coroutines.CoroutineScope.pollForDeposit(
 @Composable
 private fun WithdrawDialog(
     walletService: WalletService,
-    settingsManager: SettingsManager,
+    favoriteLnAddresses: List<FavoriteLnAddress>,
+    isFavoriteLnAddress: (String) -> Boolean,
+    onAddFavoriteLnAddress: (String) -> Unit,
+    onUpdateFavoriteLastUsed: (String) -> Unit,
     maxAmount: Long,
     onDismiss: () -> Unit
 ) {
@@ -766,7 +775,6 @@ private fun WithdrawDialog(
     var amountInput by remember { mutableStateOf("") }
 
     // Favorite addresses (Issue #14)
-    val favoriteAddresses by settingsManager.favoriteLnAddresses.collectAsState()
     var showSaveToFavorites by remember { mutableStateOf(false) }
     var savedToFavorites by remember { mutableStateOf(false) }
 
@@ -798,7 +806,7 @@ private fun WithdrawDialog(
                         )
 
                         // Favorite addresses (Issue #14)
-                        if (favoriteAddresses.isNotEmpty()) {
+                        if (favoriteLnAddresses.isNotEmpty()) {
                             Text(
                                 text = "Favorites",
                                 style = MaterialTheme.typography.labelMedium,
@@ -806,7 +814,7 @@ private fun WithdrawDialog(
                                 modifier = Modifier.padding(top = 8.dp)
                             )
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                favoriteAddresses.sortedByDescending { it.lastUsed }.forEach { fav ->
+                                favoriteLnAddresses.sortedByDescending { it.lastUsed }.forEach { fav ->
                                     AssistChip(
                                         onClick = { invoice = fav.address },
                                         label = {
@@ -928,12 +936,12 @@ private fun WithdrawDialog(
                             )
 
                             // Show save to favorites option for LN addresses (Issue #14)
-                            if (lnAddress != null && !settingsManager.isFavoriteLnAddress(lnAddress!!)) {
+                            if (lnAddress != null && !isFavoriteLnAddress(lnAddress!!)) {
                                 Spacer(modifier = Modifier.height(16.dp))
                                 if (!savedToFavorites) {
                                     OutlinedButton(
                                         onClick = {
-                                            settingsManager.addFavoriteLnAddress(lnAddress!!)
+                                            onAddFavoriteLnAddress(lnAddress!!)
                                             savedToFavorites = true
                                         }
                                     ) {
@@ -964,7 +972,7 @@ private fun WithdrawDialog(
                             } else if (lnAddress != null) {
                                 // Already in favorites - update last used
                                 LaunchedEffect(Unit) {
-                                    settingsManager.updateFavoriteLastUsed(lnAddress!!)
+                                    onUpdateFavoriteLastUsed(lnAddress!!)
                                 }
                             }
                         }

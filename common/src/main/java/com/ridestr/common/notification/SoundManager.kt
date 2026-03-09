@@ -9,7 +9,7 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.util.Log
-import com.ridestr.common.settings.SettingsManager
+import com.ridestr.common.settings.SettingsRepository
 
 private const val TAG = "SoundManager"
 
@@ -102,55 +102,55 @@ object SoundManager {
         if (vibrationEnabled) vibrateIfAllowed(context, VIBRATION_CONFIRMATION)
     }
 
-    // === CONVENIENCE OVERLOADS: Automatically read settings from SettingsManager ===
+    // === CONVENIENCE OVERLOADS: Automatically read settings from SettingsRepository ===
 
     /**
-     * Play ride request alert using settings from SettingsManager.
-     * Falls back to enabled if SettingsManager is null.
+     * Play ride request alert using settings from SettingsRepository.
+     * Falls back to enabled if SettingsRepository is null.
      */
-    fun playRideRequestAlert(context: Context, settingsManager: SettingsManager?) {
-        val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
-        val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
+    fun playRideRequestAlert(context: Context, repository: SettingsRepository?) {
+        val soundEnabled = repository?.getNotificationSoundEnabled() ?: true
+        val vibrationEnabled = repository?.getNotificationVibrationEnabled() ?: true
         playRideRequestAlert(context, soundEnabled, vibrationEnabled)
     }
 
     /**
-     * Play confirmation alert using settings from SettingsManager.
-     * Falls back to enabled if SettingsManager is null.
+     * Play confirmation alert using settings from SettingsRepository.
+     * Falls back to enabled if SettingsRepository is null.
      */
-    fun playConfirmationAlert(context: Context, settingsManager: SettingsManager?) {
-        val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
-        val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
+    fun playConfirmationAlert(context: Context, repository: SettingsRepository?) {
+        val soundEnabled = repository?.getNotificationSoundEnabled() ?: true
+        val vibrationEnabled = repository?.getNotificationVibrationEnabled() ?: true
         playConfirmationAlert(context, soundEnabled, vibrationEnabled)
     }
 
     /**
-     * Play cancellation alert using settings from SettingsManager.
-     * Falls back to enabled if SettingsManager is null.
+     * Play cancellation alert using settings from SettingsRepository.
+     * Falls back to enabled if SettingsRepository is null.
      */
-    fun playCancellationAlert(context: Context, settingsManager: SettingsManager?) {
-        val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
-        val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
+    fun playCancellationAlert(context: Context, repository: SettingsRepository?) {
+        val soundEnabled = repository?.getNotificationSoundEnabled() ?: true
+        val vibrationEnabled = repository?.getNotificationVibrationEnabled() ?: true
         playCancellationAlert(context, soundEnabled, vibrationEnabled)
     }
 
     /**
-     * Play chat message alert using settings from SettingsManager.
-     * Falls back to enabled if SettingsManager is null.
+     * Play chat message alert using settings from SettingsRepository.
+     * Falls back to enabled if SettingsRepository is null.
      */
-    fun playChatMessageAlert(context: Context, settingsManager: SettingsManager?) {
-        val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
-        val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
+    fun playChatMessageAlert(context: Context, repository: SettingsRepository?) {
+        val soundEnabled = repository?.getNotificationSoundEnabled() ?: true
+        val vibrationEnabled = repository?.getNotificationVibrationEnabled() ?: true
         playChatMessageAlert(context, soundEnabled, vibrationEnabled)
     }
 
     /**
-     * Play driver arrived alert using settings from SettingsManager.
-     * Falls back to enabled if SettingsManager is null.
+     * Play driver arrived alert using settings from SettingsRepository.
+     * Falls back to enabled if SettingsRepository is null.
      */
-    fun playDriverArrivedAlert(context: Context, settingsManager: SettingsManager?) {
-        val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
-        val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
+    fun playDriverArrivedAlert(context: Context, repository: SettingsRepository?) {
+        val soundEnabled = repository?.getNotificationSoundEnabled() ?: true
+        val vibrationEnabled = repository?.getNotificationVibrationEnabled() ?: true
         playDriverArrivedAlert(context, soundEnabled, vibrationEnabled)
     }
 

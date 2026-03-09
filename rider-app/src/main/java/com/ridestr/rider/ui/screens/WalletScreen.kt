@@ -20,7 +20,6 @@ import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.payment.WalletDiagnostics
 import com.ridestr.common.payment.WalletService
 import com.ridestr.common.settings.DisplayCurrency
-import com.ridestr.common.settings.SettingsManager
 import kotlinx.coroutines.launch
 import java.util.*
 
@@ -32,7 +31,11 @@ import java.util.*
 @Composable
 fun WalletScreen(
     rideHistoryRepository: RideHistoryRepository,
-    settingsManager: SettingsManager,
+    displayCurrency: DisplayCurrency,
+    onToggleCurrency: () -> Unit,
+    walletSetupCompleted: Boolean,
+    walletSetupSkipped: Boolean,
+    alwaysShowDiagnostics: Boolean,
     priceService: BitcoinPriceService,
     walletService: WalletService? = null,
     onSetupWallet: (() -> Unit)? = null,
@@ -42,11 +45,7 @@ fun WalletScreen(
 ) {
     val stats by rideHistoryRepository.stats.collectAsState()
     val rides by rideHistoryRepository.rides.collectAsState()
-    val displayCurrency by settingsManager.displayCurrency.collectAsState()
     val btcPriceUsd by priceService.btcPriceUsd.collectAsState()
-    val walletSetupCompleted by settingsManager.walletSetupCompleted.collectAsState()
-    val walletSetupSkipped by settingsManager.walletSetupSkipped.collectAsState()
-    val alwaysShowDiagnostics by settingsManager.alwaysShowWalletDiagnostics.collectAsState()
 
     // Wallet state (if service provided)
     val walletBalance = walletService?.balance?.collectAsState()?.value
@@ -83,7 +82,7 @@ fun WalletScreen(
                 alwaysShowDiagnostics = alwaysShowDiagnostics,
                 onSetup = onSetupWallet,
                 onCardClick = onOpenWalletDetail,
-                onToggleCurrency = { settingsManager.toggleDisplayCurrency() }
+                onToggleCurrency = onToggleCurrency
             )
         }
 
@@ -99,7 +98,7 @@ fun WalletScreen(
                 rides = rides,
                 displayCurrency = displayCurrency,
                 btcPriceUsd = btcPriceUsd,
-                settingsManager = settingsManager,
+                onToggleCurrency = onToggleCurrency,
                 onClick = onViewHistory
             )
         }
@@ -412,7 +411,7 @@ private fun SpendingHistoryCard(
     rides: List<com.ridestr.common.nostr.events.RideHistoryEntry>,
     displayCurrency: DisplayCurrency,
     btcPriceUsd: Int?,
-    settingsManager: SettingsManager,
+    onToggleCurrency: () -> Unit,
     onClick: () -> Unit
 ) {
     // Calculate this month's spending
@@ -482,7 +481,7 @@ private fun SpendingHistoryCard(
                     label = "This Month",
                     value = thisMonthDisplay,
                     icon = Icons.Default.DateRange,
-                    onToggleCurrency = { settingsManager.toggleDisplayCurrency() }
+                    onToggleCurrency = onToggleCurrency
                 )
                 SpendingStat(
                     label = "Total Rides",
@@ -494,7 +493,7 @@ private fun SpendingHistoryCard(
                     label = "All Time",
                     value = totalSpentDisplay,
                     icon = Icons.Default.Savings,
-                    onToggleCurrency = { settingsManager.toggleDisplayCurrency() }
+                    onToggleCurrency = onToggleCurrency
                 )
             }
 

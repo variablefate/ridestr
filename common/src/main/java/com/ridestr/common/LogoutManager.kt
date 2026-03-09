@@ -10,7 +10,8 @@ import com.ridestr.common.nostr.NostrService
 import com.ridestr.common.payment.WalletKeyManager
 import com.ridestr.common.payment.WalletService
 import com.ridestr.common.routing.NostrTileDiscoveryService
-import com.ridestr.common.settings.SettingsManager
+import com.ridestr.common.settings.SettingsRepository
+import kotlinx.coroutines.runBlocking
 import com.ridestr.common.sync.ProfileSyncManager
 
 object LogoutManager {
@@ -18,7 +19,7 @@ object LogoutManager {
     fun performFullCleanup(
         context: Context,
         nostrService: NostrService,
-        settingsManager: SettingsManager,
+        settingsRepository: SettingsRepository,
         walletService: WalletService,
         walletKeyManager: WalletKeyManager,
         tileDiscoveryService: NostrTileDiscoveryService
@@ -30,7 +31,7 @@ object LogoutManager {
         nostrService.keyManager.logout()
 
         // 3. Clear all settings + StateFlows
-        settingsManager.clearAllData()
+        runBlocking { settingsRepository.clearAllData() }
 
         // 4. Clear wallet storage + delete DB
         walletService.resetWallet()

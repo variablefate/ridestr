@@ -5,6 +5,8 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.ksp)
+    alias(libs.plugins.hilt)
 }
 
 // Load keystore properties
@@ -101,6 +103,10 @@ dependencies {
 
     // QR Code Scanner (ML Kit + CameraX)
     implementation("io.github.g00fy2.quickie:quickie-bundled:1.11.0")
+
+    // Hilt - Dependency Injection
+    implementation(libs.hilt.android)
+    ksp(libs.hilt.compiler)
 
     testImplementation(libs.junit)
     testImplementation("org.robolectric:robolectric:4.11.1")

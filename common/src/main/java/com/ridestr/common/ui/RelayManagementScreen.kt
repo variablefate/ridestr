@@ -18,7 +18,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.CircleShape
 import com.ridestr.common.nostr.relay.RelayConnectionState
-import com.ridestr.common.settings.SettingsManager
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -32,7 +31,12 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RelayManagementScreen(
-    settingsManager: SettingsManager,
+    relays: List<String>,
+    isUsingCustomRelays: Boolean,
+    maxRelays: Int,
+    onAddRelay: (String) -> Unit,
+    onRemoveRelay: (String) -> Unit,
+    onResetRelays: () -> Unit,
     connectedCount: Int,
     totalRelays: Int,
     connectionStates: Map<String, RelayConnectionState> = emptyMap(),
@@ -43,13 +47,7 @@ fun RelayManagementScreen(
     BackHandler(onBack = onBack)
 
     var isReconnecting by remember { mutableStateOf(false) }
-    // Relay management state - derive effectiveRelays reactively from customRelays
-    val customRelays by settingsManager.customRelays.collectAsState()
-    val effectiveRelays = remember(customRelays) {
-        if (customRelays.isEmpty()) SettingsManager.DEFAULT_RELAYS else customRelays
-    }
     var newRelayInput by remember { mutableStateOf("") }
-    val maxRelays = 10
 
     Scaffold(
         topBar = {
@@ -244,14 +242,14 @@ fun RelayManagementScreen(
             )
 
             Text(
-                text = if (customRelays.isEmpty()) "Using default relays" else "Using custom relays",
+                text = if (!isUsingCustomRelays) "Using default relays" else "Using custom relays",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(bottom = 8.dp)
             )
 
             // Current relays list
-            effectiveRelays.forEach { relay ->
+            relays.forEach { relay ->
                 Surface(
                     color = MaterialTheme.colorScheme.surfaceVariant,
                     shape = MaterialTheme.shapes.small,
@@ -284,7 +282,7 @@ fun RelayManagementScreen(
                             )
                         }
                         IconButton(
-                            onClick = { settingsManager.removeRelay(relay) },
+                            onClick = { onRemoveRelay(relay) },
                             modifier = Modifier.size(32.dp)
                         ) {
                             Icon(
@@ -329,10 +327,10 @@ fun RelayManagementScreen(
                 )
                 Button(
                     onClick = {
-                        settingsManager.addRelay(newRelayInput)
+                        onAddRelay(newRelayInput)
                         newRelayInput = ""
                     },
-                    enabled = newRelayInput.isNotBlank() && effectiveRelays.size < maxRelays
+                    enabled = newRelayInput.isNotBlank() && relays.size < maxRelays
                 ) {
                     Icon(Icons.Default.Add, contentDescription = "Add")
                 }
@@ -340,17 +338,17 @@ fun RelayManagementScreen(
 
             // Relay count hint
             Text(
-                text = "${effectiveRelays.size}/$maxRelays relays",
+                text = "${relays.size}/$maxRelays relays",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 4.dp)
             )
 
             // Reset to defaults button
-            if (customRelays.isNotEmpty()) {
+            if (isUsingCustomRelays) {
                 Spacer(modifier = Modifier.height(16.dp))
                 OutlinedButton(
-                    onClick = { settingsManager.resetRelaysToDefault() },
+                    onClick = { onResetRelays() },
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Icon(

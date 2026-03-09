@@ -2,6 +2,7 @@ package com.drivestr.app.service
 
 import android.app.PendingIntent
 import android.app.Service
+import dagger.hilt.android.AndroidEntryPoint
 import android.content.Context
 import android.content.Intent
 import android.os.Build
@@ -14,7 +15,7 @@ import com.ridestr.common.nostr.events.RideOfferEvent
 import com.ridestr.common.nostr.events.RideshareEventKinds
 import com.ridestr.common.notification.NotificationHelper
 import com.ridestr.common.notification.SoundManager
-import com.ridestr.common.settings.SettingsManager
+import com.ridestr.common.settings.SettingsRepository
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -24,8 +25,10 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+import kotlinx.coroutines.runBlocking
 import java.text.NumberFormat
 import java.util.Locale
+import javax.inject.Inject
 
 private const val TAG = "RoadflareListenerService"
 
@@ -42,6 +45,7 @@ private const val TAG = "RoadflareListenerService"
  * 3. Shows high-priority notifications with sound when RoadFlare arrives
  * 4. Filters out requests from muted riders
  */
+@AndroidEntryPoint
 class RoadflareListenerService : Service() {
 
     companion object {
@@ -80,18 +84,12 @@ class RoadflareListenerService : Service() {
             context.startService(intent)
         }
 
-        /**
-         * Check if the service should be running based on settings.
-         */
-        fun isEnabled(context: Context): Boolean {
-            val settings = SettingsManager.getInstance(context)
-            return settings.roadflareAlertsEnabled.value
-        }
     }
+
+    @Inject lateinit var settingsRepository: SettingsRepository
 
     private var nostrService: NostrService? = null
     private var driverRoadflareRepo: DriverRoadflareRepository? = null
-    private var settingsManager: SettingsManager? = null
 
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var subscriptionJob: Job? = null
@@ -108,11 +106,11 @@ class RoadflareListenerService : Service() {
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "Service created")
+        runBlocking { settingsRepository.awaitInitialLoad() }
 
         // Initialize services
-        settingsManager = SettingsManager.getInstance(this)
         driverRoadflareRepo = DriverRoadflareRepository.getInstance(this)
-        nostrService = NostrService.getInstance(this)
+        nostrService = NostrService.getInstance(this, settingsRepository.getEffectiveRelays())
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -260,15 +258,15 @@ class RoadflareListenerService : Service() {
     private fun showRoadflareNotification(riderName: String?, fareSats: Double?, eventId: String) {
         // Check if driver is online (AVAILABLE or IN_RIDE) - DriverViewModel handles these
         // Only show notification when OFFLINE or ROADFLARE_ONLY
-        val driverStatus = settingsManager?.driverOnlineStatus?.value
+        val driverStatus = settingsRepository.driverOnlineStatus.value
         if (driverStatus == "AVAILABLE" || driverStatus == "IN_RIDE") {
             Log.d(TAG, "Driver is online ($driverStatus), skipping notification (DriverViewModel will handle)")
             return
         }
 
         // Play alert sound (respecting user settings)
-        val soundEnabled = settingsManager?.notificationSoundEnabled?.value ?: true
-        val vibrationEnabled = settingsManager?.notificationVibrationEnabled?.value ?: true
+        val soundEnabled = settingsRepository.getNotificationSoundEnabled()
+        val vibrationEnabled = settingsRepository.getNotificationVibrationEnabled()
         SoundManager.playRideRequestAlert(this, soundEnabled, vibrationEnabled)
 
         // Format the notification content

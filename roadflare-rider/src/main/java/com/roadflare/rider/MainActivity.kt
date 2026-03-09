@@ -2,8 +2,11 @@ package com.roadflare.rider
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import dagger.hilt.android.AndroidEntryPoint
+import javax.inject.Inject
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -23,6 +26,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ridestr.common.data.FollowedDriversRepository
 import com.ridestr.common.data.RideHistoryRepository
@@ -30,7 +34,7 @@ import com.ridestr.common.data.SavedLocationRepository
 import com.ridestr.common.nostr.NostrService
 import com.ridestr.common.nostr.events.RoadflareKeyShareEvent
 import com.ridestr.common.nostr.relay.RelayConnectionState
-import com.ridestr.common.settings.SettingsManager
+import com.ridestr.common.settings.SettingsRepository
 import com.ridestr.common.sync.FollowedDriversSyncAdapter
 import com.ridestr.common.sync.ProfileSyncAdapter
 import com.ridestr.common.sync.ProfileSyncManager
@@ -59,17 +63,31 @@ import com.roadflare.rider.viewmodels.RiderViewModel
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.launch
 
+@AndroidEntryPoint
 class MainActivity : ComponentActivity() {
+
+    @Inject lateinit var settingsRepository: SettingsRepository
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
             RoadFlareTheme {
-                Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
-                ) {
-                    RoadFlareApp()
+                val isReady by settingsRepository.isReady.collectAsState()
+                if (!isReady) {
+                    LaunchedEffect(Unit) { settingsRepository.awaitInitialLoad() }
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .background(MaterialTheme.colorScheme.background)
+                    )
+                } else {
+                    Surface(
+                        modifier = Modifier.fillMaxSize(),
+                        color = MaterialTheme.colorScheme.background
+                    ) {
+                        RoadFlareApp(settingsRepository)
+                    }
                 }
             }
         }
@@ -86,10 +104,10 @@ private enum class AppScreen {
 }
 
 @Composable
-fun RoadFlareApp() {
+fun RoadFlareApp(settingsRepository: SettingsRepository) {
     val onboardingViewModel: OnboardingViewModel = viewModel()
     val onboardingState by onboardingViewModel.uiState.collectAsState()
-    val appStateViewModel: AppStateViewModel = viewModel()
+    val appStateViewModel: AppStateViewModel = hiltViewModel()
     val tilesSetupCompleted by appStateViewModel.tilesSetupCompleted.collectAsState()
     val hasAnyTileLoaded by appStateViewModel.hasAnyTileLoaded.collectAsState()
 
@@ -97,18 +115,17 @@ fun RoadFlareApp() {
     val appContext = context.applicationContext
 
     // Shared service references
-    val nostrService = remember { NostrService.getInstance(appContext) }
-    val settingsManager = remember { SettingsManager.getInstance(appContext) }
+    val nostrService = remember { NostrService.getInstance(appContext, settingsRepository.getEffectiveRelays()) }
     val followedDriversRepo = remember { FollowedDriversRepository.getInstance(appContext) }
     val savedLocationRepo = remember { SavedLocationRepository.getInstance(appContext) }
     val rideHistoryRepo = remember { RideHistoryRepository.getInstance(appContext) }
 
     val profileSyncManager = remember {
-        ProfileSyncManager.getInstance(appContext, settingsManager.getEffectiveRelays()).also { psm ->
+        ProfileSyncManager.getInstance(appContext, settingsRepository.getEffectiveRelays()).also { psm ->
             psm.registerSyncable(ProfileSyncAdapter(
                 vehicleRepository = null,
                 savedLocationRepository = savedLocationRepo,
-                settingsManager = settingsManager,
+                settingsRepository = settingsRepository,
                 nostrService = nostrService
             ))
             psm.registerSyncable(RideHistorySyncAdapter(rideHistoryRepo, nostrService))
@@ -188,7 +205,7 @@ fun RoadFlareApp() {
     }
 
     // Auto-backup settings when they change (debounced 2s)
-    val settingsHash by settingsManager.syncableSettingsHash.collectAsState(initial = 0)
+    val settingsHash by settingsRepository.syncableSettingsHash.collectAsState(initial = 0)
     var lastSettingsBackupHash by remember { mutableStateOf<Int?>(null) }
     LaunchedEffect(settingsHash, onboardingState.isLoggedIn) {
         if (!onboardingState.isLoggedIn || settingsHash == 0) return@LaunchedEffect
@@ -203,10 +220,10 @@ fun RoadFlareApp() {
     }
 
     // Relay sync — keep ProfileSyncManager and NostrService relay URLs current
-    val customRelays by settingsManager.customRelays.collectAsState()
+    val customRelays by settingsRepository.customRelays.collectAsState()
     LaunchedEffect(customRelays, onboardingState.isLoggedIn) {
         if (!onboardingState.isLoggedIn) return@LaunchedEffect
-        val effectiveRelays = settingsManager.getEffectiveRelays()
+        val effectiveRelays = settingsRepository.getEffectiveRelays()
         profileSyncManager.updateRelays(effectiveRelays)
         val currentNostr = nostrService.relayManager.getRelayUrls().toSet()
         val target = effectiveRelays.toSet()
@@ -217,11 +234,11 @@ fun RoadFlareApp() {
 
     // FULLY DERIVED — no mutableStateOf, no imperative assignments
     val currentScreen = when {
-        onboardingState.isLoading || tilesSetupCompleted == null || hasAnyTileLoaded == null -> AppScreen.LOADING
+        onboardingState.isLoading || hasAnyTileLoaded == null -> AppScreen.LOADING
         !onboardingState.isLoggedIn || onboardingState.showBackupReminder -> AppScreen.ONBOARDING
         onboardingState.needsProfileSync -> AppScreen.PROFILE_SYNC
         !onboardingState.isProfileCompleted -> AppScreen.PROFILE_SETUP
-        tilesSetupCompleted == false && hasAnyTileLoaded == false -> AppScreen.TILE_SETUP
+        !tilesSetupCompleted && hasAnyTileLoaded == false -> AppScreen.TILE_SETUP
         else -> AppScreen.MAIN
     }
 
@@ -246,6 +263,8 @@ fun RoadFlareApp() {
                 profileSyncManager.checkAndSyncRidestrData()
             }
 
+            val syncRetryScope = rememberCoroutineScope()
+
             ProfileSyncScreen(
                 syncState = syncState,
                 isDriverApp = false,
@@ -256,6 +275,9 @@ fun RoadFlareApp() {
                 onSkip = {
                     profileSyncManager.resetSyncState()
                     onboardingViewModel.markProfileSyncCompleted()
+                },
+                onRetry = {
+                    syncRetryScope.launch { profileSyncManager.checkAndSyncRidestrData() }
                 }
             )
         }
@@ -296,9 +318,10 @@ private sealed class SecondaryScreen {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MainTabScreen() {
-    val viewModel: RiderViewModel = viewModel()
+    val viewModel: RiderViewModel = hiltViewModel()
     val onboardingViewModel: OnboardingViewModel = viewModel()
     val onboardingState by onboardingViewModel.uiState.collectAsState()
+    val settingsState by viewModel.settings.collectAsState()
     var selectedTab by remember { mutableIntStateOf(0) }
     var secondaryScreen by remember { mutableStateOf<SecondaryScreen>(SecondaryScreen.None) }
     var showAccountSheet by remember { mutableStateOf(false) }
@@ -337,7 +360,12 @@ private fun MainTabScreen() {
         is SecondaryScreen.RelayManagement -> {
             val connectionStates by viewModel.nostrService.relayManager.connectionStates.collectAsState()
             RelayManagementScreen(
-                settingsManager = viewModel.settingsManager,
+                relays = settingsState.customRelays.ifEmpty { SettingsRepository.DEFAULT_RELAYS },
+                isUsingCustomRelays = settingsState.isUsingCustomRelays,
+                maxRelays = SettingsRepository.MAX_RELAYS,
+                onAddRelay = { url -> viewModel.onAddRelay(url) },
+                onRemoveRelay = { url -> viewModel.onRemoveRelay(url) },
+                onResetRelays = { viewModel.onResetRelays() },
                 connectedCount = connectionStates.count { it.value == RelayConnectionState.CONNECTED },
                 totalRelays = connectionStates.size,
                 connectionStates = connectionStates,
@@ -348,7 +376,15 @@ private fun MainTabScreen() {
         }
         is SecondaryScreen.DeveloperOptions -> {
             DeveloperOptionsScreen(
-                settingsManager = viewModel.settingsManager,
+                useGeocodingSearch = settingsState.useGeocodingSearch,
+                onToggleUseGeocodingSearch = { viewModel.onToggleUseGeocodingSearch() },
+                ignoreFollowNotifications = settingsState.ignoreFollowNotifications,
+                onSetIgnoreFollowNotifications = { enabled -> viewModel.onSetIgnoreFollowNotifications(enabled) },
+                useManualDriverLocation = settingsState.useManualDriverLocation,
+                onSetUseManualDriverLocation = { enabled -> viewModel.onSetUseManualDriverLocation(enabled) },
+                manualDriverLat = settingsState.manualDriverLat,
+                manualDriverLon = settingsState.manualDriverLon,
+                onSetManualDriverLocation = { lat, lon -> viewModel.onSetManualDriverLocation(lat, lon) },
                 isDriverApp = false,
                 nostrService = viewModel.nostrService,
                 onOpenRelaySettings = { secondaryScreen = SecondaryScreen.RelayManagement },
@@ -442,7 +478,8 @@ private fun MainTabScreen() {
             0 -> DriverNetworkTab(
                 followedDriversRepository = viewModel.followedDriversRepository,
                 nostrService = viewModel.nostrService,
-                settingsManager = viewModel.settingsManager,
+                roadflarePaymentMethods = settingsState.roadflarePaymentMethods,
+                onSetRoadflarePaymentMethods = { methods -> viewModel.onSetRoadflarePaymentMethods(methods) },
                 onAddDriver = { secondaryScreen = SecondaryScreen.AddDriver },
                 onDriverRemoved = {
                     scope.launch { profileSyncManager.backupFollowedDrivers() }
@@ -455,11 +492,18 @@ private fun MainTabScreen() {
             )
             2 -> HistoryScreen(
                 rideHistoryRepository = viewModel.rideHistoryRepository,
-                settingsManager = viewModel.settingsManager,
+                displayCurrency = settingsState.displayCurrency,
+                onToggleCurrency = { viewModel.onToggleDisplayCurrency() },
+                nostrService = viewModel.nostrService,
                 modifier = Modifier.padding(innerPadding)
             )
             3 -> SettingsContent(
-                settingsManager = viewModel.settingsManager,
+                distanceUnit = settingsState.distanceUnit,
+                notificationSoundEnabled = settingsState.notificationSoundEnabled,
+                notificationVibrationEnabled = settingsState.notificationVibrationEnabled,
+                onSetDistanceUnit = { unit -> viewModel.onSetDistanceUnit(unit) },
+                onSetNotificationSoundEnabled = { enabled -> viewModel.onSetNotificationSoundEnabled(enabled) },
+                onSetNotificationVibrationEnabled = { enabled -> viewModel.onSetNotificationVibrationEnabled(enabled) },
                 onOpenTiles = { secondaryScreen = SecondaryScreen.TileManagement },
                 onOpenDevOptions = { secondaryScreen = SecondaryScreen.DeveloperOptions },
                 onSyncProfile = {
