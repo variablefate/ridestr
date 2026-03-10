@@ -34,7 +34,8 @@ data class DriverOfferData(
     val pubkey: String,
     val displayName: String,
     val pickupMiles: Double,
-    val fareUsd: Double
+    val fareUsd: Double,
+    val fareSats: Long
 )
 
 /**
@@ -171,12 +172,17 @@ class RideSessionManager(
             if (!coroutineContext.isActive) break
 
             for (offer in chunk) {
-                Log.d(TAG, "Sending offer to ${offer.displayName} (${String.format("%.1f", offer.pickupMiles)} mi, $${String.format("%.2f", offer.fareUsd)})")
+                Log.d(
+                    TAG,
+                    "Sending offer to ${offer.displayName} " +
+                        "(${String.format("%.1f", offer.pickupMiles)} mi, " +
+                        "$${String.format("%.2f", offer.fareUsd)}, ${offer.fareSats} sats)"
+                )
                 val eventId = nostrService.sendRideOffer(
                     driverPubKey = offer.pubkey,
                     pickup = pickup,
                     destination = destination,
-                    fareEstimate = offer.fareUsd,
+                    fareEstimate = offer.fareSats.toDouble(),
                     paymentMethod = paymentMethod,
                     isRoadflare = true,
                     fiatPaymentMethods = fiatPaymentMethods

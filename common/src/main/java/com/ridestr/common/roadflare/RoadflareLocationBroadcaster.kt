@@ -99,10 +99,24 @@ class RoadflareLocationBroadcaster(
     /**
      * Set whether the driver is currently on a ride.
      * This affects the status field in broadcasts.
+     *
+     * When clearing on-ride status (false), forces an immediate broadcast
+     * to replace the stale ON_RIDE event on relays. Bypasses the minimum
+     * interval guard because status transitions are critical — a stale
+     * ON_RIDE event makes the driver appear permanently unavailable.
      */
     fun setOnRide(onRide: Boolean) {
+        val wasOnRide = isOnRide
         isOnRide = onRide
         Log.d(TAG, "On ride status: $onRide")
+
+        // Force immediate ONLINE broadcast when clearing on-ride status
+        if (wasOnRide && !onRide && _isBroadcasting.value) {
+            scope.launch {
+                Log.d(TAG, "Forcing immediate ONLINE broadcast after ride ended")
+                broadcastLocation()
+            }
+        }
     }
 
     /**

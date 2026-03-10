@@ -9,7 +9,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Flare
+import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.SwapVert
@@ -92,9 +92,9 @@ fun RoadFlareTab(
                     displayCurrency = settings.displayCurrency,
                     priceService = BitcoinPriceService.getInstance(),
                     isSending = rideStage != RideStage.IDLE,
-                    onSendToDriver = { pk, fare, pickupMiles, rideMiles ->
+                    onSendToDriver = { driverOffer, rideMiles ->
                         showDriverSelection = false
-                        viewModel.sendRoadflareToDriver(pk, fare, pickupMiles, rideMiles)
+                        viewModel.sendRoadflareToDriver(driverOffer, rideMiles)
                     },
                     onSendToAll = { driverOffers, rideMiles ->
                         showDriverSelection = false
@@ -471,9 +471,9 @@ private fun IdleContent(
                 .height(56.dp),
             enabled = sendRoadflareEnabled
         ) {
-            Icon(Icons.Default.Flare, contentDescription = null)
+            Icon(Icons.Default.Groups, contentDescription = null)
             Spacer(modifier = Modifier.width(8.dp))
-            Text("Send RoadFlare", style = MaterialTheme.typography.titleMedium)
+            Text("Check Driver Availability", style = MaterialTheme.typography.titleMedium)
         }
     }
 }

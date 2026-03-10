@@ -78,11 +78,7 @@ class RiderViewModel @Inject constructor(
     val rideSessionManager = RideSessionManager(nostrService)
     val chatCoordinator = ChatCoordinator(nostrService)
     private val valhallaRoutingService = ValhallaRoutingService(application)
-    val fareCoordinator = FareCoordinator(
-        fareCalculator = FareCalculator,
-        bitcoinPriceService = BitcoinPriceService.getInstance(),
-        valhallaRoutingService = valhallaRoutingService
-    )
+    val fareCoordinator = FareCoordinator(valhallaRoutingService)
 
     // ViewModel-scoped presence coordinator (replaces tab-scoped subscriptions)
     private val presenceCoordinator = RoadflareDriverPresenceCoordinator(
@@ -303,21 +299,13 @@ class RiderViewModel @Inject constructor(
      * Send to a single driver with their specific fare.
      * Called from DriverSelectionScreen when user taps a driver card.
      */
-    fun sendRoadflareToDriver(driverPubkey: String, fareUsd: Double, pickupMiles: Double, rideMiles: Double) {
+    fun sendRoadflareToDriver(driverOffer: DriverOfferData, rideMiles: Double) {
         val pickup = _pickupLocation.value ?: return
         val dest = _destLocation.value ?: return
-        val names = followedDriversRepository.driverNames.value
         val config = remoteConfigManager.config.value
 
         rideSessionManager.sendRoadflareToAll(
-            drivers = listOf(
-                DriverOfferData(
-                    pubkey = driverPubkey,
-                    displayName = names[driverPubkey] ?: driverPubkey.take(8),
-                    pickupMiles = pickupMiles,
-                    fareUsd = fareUsd
-                )
-            ),
+            drivers = listOf(driverOffer),
             pickup = pickup,
             destination = dest,
             rideReferenceFareUsd = RoadflareFarePolicy.rideReferenceFareUsd(rideMiles, config),

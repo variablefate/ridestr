@@ -3585,6 +3585,74 @@ private fun RoadflareDriverSelectionSheet(
                 )
             }
         } else {
+            // Build driver UI models once — shared by card rendering and broadcast button
+            val nowSec = System.currentTimeMillis() / 1000
+            val staleThresholdSec = 5 * 60  // 5 minutes
+
+            data class DriverModelEntry(
+                val driver: FollowedDriver,
+                val model: RoadflareDriverUiModel,
+                val driverLocation: Location?
+            )
+
+            val driverEntries = drivers.map { driver ->
+                val cachedState = cachedLocations[driver.pubkey]
+                val driverLocation = cachedState?.let { Location(lat = it.lat, lon = it.lon) }
+                val driverName = driverNames[driver.pubkey] ?: driver.pubkey.take(8) + "..."
+                val hasKey = driver.roadflareKey != null
+
+                val isOnline = cachedState != null &&
+                    cachedState.status == com.ridestr.common.nostr.events.RoadflareLocationEvent.Status.ONLINE &&
+                    (nowSec - cachedState.timestamp) < staleThresholdSec
+
+                val quote = if (driverLocation != null && pickupLocation != null) {
+                    RoadflareFarePolicy.quoteDriver(
+                        pickupLat = pickupLocation.lat,
+                        pickupLon = pickupLocation.lon,
+                        driverLat = driverLocation.lat,
+                        driverLon = driverLocation.lon,
+                        rideMiles = rideMiles,
+                        config = remoteConfig,
+                        pickupDistanceMiles = null,
+                        fareState = FareState.ESTIMATED,
+                        bitcoinPriceService = priceService
+                    )
+                } else null
+
+                val formattedFare = quote?.let { q ->
+                    when (displayCurrency) {
+                        DisplayCurrency.USD -> String.format("$%.2f", q.fareUsd)
+                        DisplayCurrency.SATS -> q.fareSats?.let { "${it} sats" }
+                            ?: String.format("$%.2f", q.fareUsd)
+                    }
+                }
+
+                val isTooFar = isOnline && (quote?.isTooFar == true)
+
+                val status = when {
+                    !hasKey -> RoadflareDriverUiModel.DriverStatus.PENDING_APPROVAL
+                    !isOnline -> RoadflareDriverUiModel.DriverStatus.OFFLINE
+                    isTooFar -> RoadflareDriverUiModel.DriverStatus.TOO_FAR
+                    else -> RoadflareDriverUiModel.DriverStatus.AVAILABLE
+                }
+
+                DriverModelEntry(
+                    driver = driver,
+                    driverLocation = driverLocation,
+                    model = RoadflareDriverUiModel(
+                        pubkey = driver.pubkey,
+                        displayName = driverName,
+                        status = status,
+                        formattedFare = formattedFare,
+                        pickupMiles = quote?.pickupMiles,
+                        fareState = quote?.fareState ?: FareState.ESTIMATED,
+                        isTooFar = isTooFar,
+                        isBroadcastEligible = hasKey && isOnline && !isTooFar,
+                        isDirectSelectable = hasKey && !isSending
+                    )
+                )
+            }
+
             // Driver list
             Text(
                 text = "Tap a driver to send request",
@@ -3599,69 +3667,11 @@ private fun RoadflareDriverSelectionSheet(
                     .heightIn(max = 350.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                items(drivers, key = { it.pubkey }) { driver ->
-                    val cachedState = cachedLocations[driver.pubkey]
-                    val driverLocation = cachedState?.let { Location(lat = it.lat, lon = it.lon) }
-                    val driverName = driverNames[driver.pubkey] ?: driver.pubkey.take(8) + "..."
-                    val hasKey = driver.roadflareKey != null
-
-                    // Check if online and fresh (< 5 min old)
-                    val staleThresholdSec = 5 * 60  // 5 minutes (matches RoadflareTab)
-                    val nowSec = System.currentTimeMillis() / 1000
-                    val isOnline = cachedState != null &&
-                        cachedState.status == com.ridestr.common.nostr.events.RoadflareLocationEvent.Status.ONLINE &&
-                        (nowSec - cachedState.timestamp) < staleThresholdSec
-
-                    // Calculate per-driver fare using shared policy (haversine estimate)
-                    val quote = if (driverLocation != null && pickupLocation != null) {
-                        RoadflareFarePolicy.quoteDriver(
-                            pickupLat = pickupLocation.lat,
-                            pickupLon = pickupLocation.lon,
-                            driverLat = driverLocation.lat,
-                            driverLon = driverLocation.lon,
-                            rideMiles = rideMiles,
-                            config = remoteConfig,
-                            pickupDistanceMiles = null,  // haversine — exact routing at send time
-                            fareState = FareState.ESTIMATED,
-                            bitcoinPriceService = priceService
-                        )
-                    } else null
-
-                    // Format fare for display
-                    val formattedFare = quote?.let { q ->
-                        when (displayCurrency) {
-                            DisplayCurrency.USD -> String.format("$%.2f", q.fareUsd)
-                            DisplayCurrency.SATS -> q.fareSats?.let { "${it} sats" }
-                                ?: String.format("$%.2f", q.fareUsd)
-                        }
-                    }
-
-                    // Only compute isTooFar for ONLINE drivers — offline drivers must show "Offline", not "Too far"
-                    val isTooFar = isOnline && (quote?.isTooFar == true)
-
-                    val status = when {
-                        !hasKey -> RoadflareDriverUiModel.DriverStatus.PENDING_APPROVAL
-                        !isOnline -> RoadflareDriverUiModel.DriverStatus.OFFLINE
-                        isTooFar -> RoadflareDriverUiModel.DriverStatus.TOO_FAR
-                        else -> RoadflareDriverUiModel.DriverStatus.AVAILABLE
-                    }
-
-                    val model = RoadflareDriverUiModel(
-                        pubkey = driver.pubkey,
-                        displayName = driverName,
-                        status = status,
-                        formattedFare = formattedFare,
-                        pickupMiles = quote?.pickupMiles,
-                        fareState = quote?.fareState ?: FareState.ESTIMATED,
-                        isTooFar = isTooFar,
-                        isBroadcastEligible = hasKey && isOnline && !isTooFar,
-                        isDirectSelectable = hasKey && !isSending
-                    )
-
+                items(driverEntries, key = { it.driver.pubkey }) { entry ->
                     com.ridestr.common.ui.RoadflareDriverCard(
-                        model = model,
+                        model = entry.model,
                         onClick = {
-                            onSelectDriver(driver.pubkey, driverLocation)
+                            onSelectDriver(entry.driver.pubkey, entry.driverLocation)
                         }
                     )
                 }
@@ -3688,32 +3698,12 @@ private fun RoadflareDriverSelectionSheet(
             HorizontalDivider()
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Send to all button - only include online, fresh, not-too-far drivers
-            val now = System.currentTimeMillis() / 1000
-            val staleThreshold = 5 * 60  // 5 minutes
-
-            val eligibleDrivers = drivers.filter { driver ->
-                driver.roadflareKey != null &&
-                cachedLocations[driver.pubkey]?.let { state ->
-                    val isOnline = state.status == com.ridestr.common.nostr.events.RoadflareLocationEvent.Status.ONLINE
-                    val isFresh = (now - state.timestamp) < staleThreshold
-                    val tooFar = if (pickupLocation != null) {
-                        val quote = RoadflareFarePolicy.quoteDriver(
-                            pickupLocation.lat, pickupLocation.lon,
-                            state.lat, state.lon,
-                            rideMiles, remoteConfig,
-                            fareState = FareState.ESTIMATED,
-                            bitcoinPriceService = priceService
-                        )
-                        quote.isTooFar
-                    } else false
-                    isOnline && isFresh && !tooFar
-                } ?: false
-            }
-            // Convert CachedDriverLocation map to Location map for the callback
-            val eligibleLocations = cachedLocations.filterKeys { pubkey ->
-                eligibleDrivers.any { it.pubkey == pubkey }
-            }.mapValues { Location(lat = it.value.lat, lon = it.value.lon) }
+            // Broadcast button — uses same models as card rendering (single source of truth)
+            val eligibleEntries = driverEntries.filter { it.model.isBroadcastEligible }
+            val eligibleDrivers = eligibleEntries.map { it.driver }
+            val eligibleLocations = eligibleEntries
+                .filter { it.driverLocation != null }
+                .associate { it.driver.pubkey to it.driverLocation!! }
 
             Button(
                 onClick = {

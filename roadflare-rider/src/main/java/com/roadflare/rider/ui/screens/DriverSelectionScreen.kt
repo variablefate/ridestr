@@ -7,7 +7,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Campaign
+import androidx.compose.material.icons.filled.Flare
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -29,6 +29,7 @@ import com.ridestr.common.roadflare.RoadflareDriverUiModel.DriverStatus
 import com.ridestr.common.settings.DisplayCurrency
 import com.ridestr.common.ui.RoadflareDriverCard
 import com.roadflare.rider.viewmodels.DriverOfferData
+import kotlin.math.roundToLong
 
 /**
  * Full-screen driver selection for roadflare-rider.
@@ -52,7 +53,7 @@ fun DriverSelectionScreen(
     displayCurrency: DisplayCurrency,
     priceService: BitcoinPriceService,
     isSending: Boolean,
-    onSendToDriver: (driverPubkey: String, fareUsd: Double, pickupMiles: Double, rideMiles: Double) -> Unit,
+    onSendToDriver: (DriverOfferData, rideMiles: Double) -> Unit,
     onSendToAll: (List<DriverOfferData>, rideMiles: Double) -> Unit,
     onBack: () -> Unit
 ) {
@@ -235,7 +236,16 @@ fun DriverSelectionScreen(
                     model = model,
                     onClick = {
                         val quote = driverQuotes[model.pubkey] ?: return@RoadflareDriverCard
-                        onSendToDriver(model.pubkey, quote.fareUsd, quote.pickupMiles, rideMiles)
+                        onSendToDriver(
+                            DriverOfferData(
+                                pubkey = model.pubkey,
+                                displayName = model.displayName,
+                                pickupMiles = quote.pickupMiles,
+                                fareUsd = quote.fareUsd,
+                                fareSats = quote.toEventFareSats(priceService)
+                            ),
+                            rideMiles
+                        )
                     }
                 )
             }
@@ -253,7 +263,8 @@ fun DriverSelectionScreen(
                         pubkey = model.pubkey,
                         displayName = model.displayName,
                         pickupMiles = quote.pickupMiles,
-                        fareUsd = quote.fareUsd
+                        fareUsd = quote.fareUsd,
+                        fareSats = quote.toEventFareSats(priceService)
                     )
                 }
                 onSendToAll(offerData, rideMiles)
@@ -264,15 +275,15 @@ fun DriverSelectionScreen(
                 .height(56.dp)
         ) {
             Icon(
-                Icons.Default.Campaign,
+                Icons.Default.Flare,
                 contentDescription = null,
                 modifier = Modifier.size(18.dp)
             )
             Spacer(modifier = Modifier.width(8.dp))
             if (!routingComplete) {
-                Text("Calculating routes...")
+                Text("Calculating fares...")
             } else {
-                Text("Broadcast RoadFlare ($broadcastCount)")
+                Text("Send RoadFlare ($broadcastCount)")
             }
         }
 
@@ -311,4 +322,10 @@ private fun formatFareUsd(
             else "$${String.format("%.2f", fareUsd)}"
         }
     }
+}
+
+private fun RoadflareDriverQuote.toEventFareSats(priceService: BitcoinPriceService): Long {
+    return fareSats
+        ?: priceService.usdToSats(fareUsd)
+        ?: maxOf((fareUsd * 1000.0).roundToLong(), 1L)
 }

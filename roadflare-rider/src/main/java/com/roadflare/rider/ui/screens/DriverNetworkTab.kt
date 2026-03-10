@@ -46,71 +46,7 @@ data class DriverLocationState(
     val keyVersion: Int
 )
 
-/**
- * Fare estimate result for RoadFlare rides.
- *
- * @param satoshis Fare amount in satoshis
- * @param distanceMiles Distance in miles (pickup to destination)
- * @param pickupDistanceMiles Distance from driver to pickup
- * @param isAccurate True if using exact driver location, false if using fallback
- */
-data class RoadflareFareEstimate(
-    val satoshis: Long,
-    val distanceMiles: Double,
-    val pickupDistanceMiles: Double?,
-    val isAccurate: Boolean
-)
-
-/** RoadFlare fare defaults */
-private const val ROADFLARE_BASE_FARE_USD = 2.50
-private const val ROADFLARE_MINIMUM_FARE_USD = 5.0
-private const val DEFAULT_ROADFLARE_FARE_RATE = 1.50
-
-/**
- * Calculate fare estimate for a RoadFlare ride.
- * Uses USD-based calculation.
- *
- * @param riderLocation Rider's current location (pickup point)
- * @param destination Ride destination
- * @param driverLocation Driver's current location (if available)
- * @return Fare estimate with distance and accuracy flag
- */
-fun calculateRoadflareFare(
-    riderLocation: Location,
-    destination: Location,
-    driverLocation: DriverLocationState?,
-    ratePerMile: Double = DEFAULT_ROADFLARE_FARE_RATE,
-    priceService: com.ridestr.common.bitcoin.BitcoinPriceService? = null
-): RoadflareFareEstimate {
-    // Calculate ride distance (pickup to destination)
-    val rideDistanceKm = riderLocation.distanceToKm(destination)
-    val rideDistanceMiles = rideDistanceKm * 0.621371
-
-    // Calculate pickup distance if driver location is available
-    val pickupDistanceMiles = if (driverLocation != null &&
-        driverLocation.status == RoadflareLocationEvent.Status.ONLINE) {
-        val driverLoc = Location(driverLocation.lat, driverLocation.lon)
-        val pickupKm = driverLoc.distanceToKm(riderLocation)
-        pickupKm * 0.621371
-    } else null
-
-    // Calculate fare in USD first
-    val totalMiles = rideDistanceMiles + (pickupDistanceMiles ?: 0.0)
-    val fareUsd = maxOf(
-        ROADFLARE_BASE_FARE_USD + (totalMiles * ratePerMile),
-        ROADFLARE_MINIMUM_FARE_USD
-    )
-
-    // Convert USD to sats using live BTC price
-    val fareSats = priceService?.usdToSats(fareUsd) ?: (fareUsd * 1000.0).toLong() // Fallback estimate
-
-    return RoadflareFareEstimate(
-        satoshis = fareSats,
-        distanceMiles = rideDistanceMiles,
-        pickupDistanceMiles = pickupDistanceMiles,
-        isAccurate = pickupDistanceMiles != null
-    )
-}
+// Fare calculation handled by RoadflareFarePolicy in :common (per-driver, config-aware)
 
 /**
  * RoadFlare tab showing rider's favorite drivers list.
