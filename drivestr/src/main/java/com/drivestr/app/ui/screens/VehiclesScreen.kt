@@ -14,7 +14,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import com.drivestr.app.viewmodels.DriverStage
+import com.drivestr.app.presence.DriverStage
 import com.ridestr.common.data.Vehicle
 import kotlinx.coroutines.launch
 

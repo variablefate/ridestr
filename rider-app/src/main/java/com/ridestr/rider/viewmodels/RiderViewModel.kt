@@ -3613,10 +3613,20 @@ class RiderViewModel @Inject constructor(
         // Subscribe to Kind 5 deletions of this driver's availability.
         // Catches: driver accepts another ride and deletes availability without going offline first.
         // Direct offers use precise e-tag + k-tag match; RoadFlare falls back to broad k-tag + timestamp guard.
+        //
+        // For RoadFlare (no availabilityEventId): use current time as `since` so stale deletions
+        // from previous rides aren't delivered. The broad k-tag match would otherwise pick up
+        // old Kind 5 events, and with the timestamp guard seeded at 0 they'd pass through
+        // before the availability subscription has a chance to arm it.
+        val deletionSince = if (driverAvailabilityEventId != null) {
+            (System.currentTimeMillis() / 1000) - RideshareExpiration.DRIVER_AVAILABILITY_LOOKBACK_SECONDS
+        } else {
+            System.currentTimeMillis() / 1000
+        }
         subs.set(SubKeys.SELECTED_DRIVER_AVAIL_DELETION, nostrService.subscribeToAvailabilityDeletions(
             driverPubKey = driverPubKey,
             availabilityEventId = driverAvailabilityEventId,
-            since = (System.currentTimeMillis() / 1000) - RideshareExpiration.DRIVER_AVAILABILITY_LOOKBACK_SECONDS
+            since = deletionSince
         ) { deletionTimestamp ->
             // Timestamp guard: ignore deletions older than the latest availability event.
             // Critical for RoadFlare (broad k-tag) path to prevent stale deletion replay.

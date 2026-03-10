@@ -12,7 +12,7 @@ The driver Android app allows users to go online, receive ride offers, navigate 
 
 | File | Purpose | Key State Fields |
 |------|---------|------------------|
-| `DriverViewModel.kt` | Central state machine (~2800 lines) | `driverStage`, `currentRide`, `currentOffer`, `driverStateHistory` |
+| `DriverViewModel.kt` | Central state machine (~2800 lines) | `stage` (uses `DriverStage` from `presence/`), `currentRide`, `currentOffer`, `driverStateHistory` |
 | `OnboardingViewModel.kt` | Key generation/import flow | `uiState`, `isLoggedIn` |
 | `ProfileViewModel.kt` | Profile editing | `name`, `profilePicture` |
 
@@ -32,12 +32,21 @@ The driver Android app allows users to go online, receive ride offers, navigate 
 | `ProfileSetupScreen.kt` | Profile name and picture setup |
 | `KeyBackupScreen.kt` | nsec backup display |
 
+### Presence (`java/com/drivestr/app/presence/`)
+
+| File | Purpose |
+|------|---------|
+| `DriverStage.kt` | `DriverStage` enum (`OFFLINE`, `ROADFLARE_ONLY`, `AVAILABLE`, `RIDE_ACCEPTED`, etc.) — moved from `DriverViewModel.kt` |
+| `DriverPresenceStore.kt` | Hilt singleton holding `StateFlow<DriverPresenceGate?>` — runtime gate for background listener |
+| `DriverPresenceGate.kt` | Typed gate enum (`AVAILABLE`, `ROADFLARE_ONLY`, `IN_RIDE`) — consumed by `RoadflareListenerService` |
+| `DriverPresenceMapper.kt` | 3 mapping functions: `roadflareStatus` (Stage→Kind 30014), `serviceBaseStatus` (Stage→DriverStatus?), `listenerGateStatus` (DriverStatus→Gate) |
+
 ### Services (`java/com/drivestr/app/service/`)
 
 | File | Purpose |
 |------|---------|
-| `DriverOnlineService.kt` | Foreground service - keeps driver online, refreshes availability |
-| `RoadflareListenerService.kt` | Foreground service - background RoadFlare ride request alerts (Kind 3173 with roadflare tag) |
+| `DriverOnlineService.kt` | Foreground service - keeps driver online, refreshes availability. Injects `DriverPresenceStore` and uses typed `DriverPresenceGate` |
+| `RoadflareListenerService.kt` | Foreground service - background RoadFlare ride request alerts (Kind 3173 with roadflare tag). Injects `DriverPresenceStore`, uses `context.stopService()` in `stop()`, cleanup in `onDestroy()` |
 
 ### Entry Point
 
@@ -109,7 +118,7 @@ Any state → cancelCurrentRide() → CANCELLED → goOnline() → AVAILABLE
 | `DriverViewModel` | `RideHistoryRepository` | Save completed ride | `rideHistoryRepo.addRide()` |
 | `DriverViewModel` | `VehicleRepository` | Get primary vehicle | `vehicleRepo.primaryVehicle` |
 | `MainActivity` | `LogoutManager` | Centralized logout cleanup | `LogoutManager.performFullCleanup(...)` |
-| `MainActivity` | `DriverViewModel` | ViewModel logout cleanup | `viewModel.performLogoutCleanup()` |
+| `MainActivity` | `DriverViewModel` | ViewModel logout cleanup (safely stops both services via `context.stopService()`) | `viewModel.performLogoutCleanup()` |
 | `MainActivity` | `ProfileSyncManager` | Register sync adapters | `profileSyncManager.registerSyncable()` |
 | `MainActivity` | `Nip60WalletSync` | Wire to WalletService | `walletService.setNip60Sync()` |
 | `MainActivity` | `VehicleRepository` | Vehicle data for UI | `vehicleRepository.vehicles.value` |
@@ -118,6 +127,9 @@ Any state → cancelCurrentRide() → CANCELLED → goOnline() → AVAILABLE
 | `DriverViewModel` | `DriverRoadflareRepository` | RoadFlare follower/key state | `driverRoadflareRepository.state` |
 | `RoadflareListenerService` | `NostrService` | Subscribe to RoadFlare offers | `nostrService.subscribeToOffers()` |
 | `RoadflareListenerService` | `DriverRoadflareRepository` | Filter muted riders | `repo.getMutedPubkeys()` |
+| `DriverOnlineService` | `DriverPresenceStore` | Read typed presence gate | `presenceStore.gate.value` |
+| `RoadflareListenerService` | `DriverPresenceStore` | Read typed presence gate | `presenceStore.gate.value` |
+| `DriverViewModel` | `DriverPresenceStore` | Update driver stage | `presenceStore.update(stage)` |
 | `EarningsScreen` | `RideHistoryRepository` | Display past rides | `rideHistoryRepo.rides.value` |
 | `VehiclesScreen` | `VehicleRepository` | CRUD operations | `vehicleRepo.addVehicle()` |
 | `MainActivity` | `RoadflareKeyManager` | Follower approval/removal | `roadflareKeyManager.handleMuteFollower()` |

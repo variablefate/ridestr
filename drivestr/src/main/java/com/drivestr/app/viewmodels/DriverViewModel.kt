@@ -2,12 +2,16 @@ package com.drivestr.app.viewmodels
 
 import android.app.Application
 import android.content.Context
+import android.content.Intent
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
+import com.drivestr.app.presence.DriverPresenceMapper
+import com.drivestr.app.presence.DriverStage
 import com.drivestr.app.service.DriverOnlineService
 import com.drivestr.app.service.DriverStatus
+import com.drivestr.app.service.RoadflareListenerService
 import com.ridestr.common.settings.SettingsRepository
 import com.ridestr.common.settings.SettingsUiState
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -69,20 +73,6 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
-
-/**
- * Driver state machine stages.
- */
-enum class DriverStage {
-    OFFLINE,            // Not available for rides
-    ROADFLARE_ONLY,     // Broadcasting RoadFlare location, receiving RoadFlare offers only
-    AVAILABLE,          // Broadcasting availability, waiting for ride requests
-    RIDE_ACCEPTED,      // Accepted a ride, waiting for rider confirmation
-    EN_ROUTE_TO_PICKUP, // Driving to pick up the rider
-    ARRIVED_AT_PICKUP,  // At the pickup location, waiting for rider
-    IN_RIDE,            // Rider is in the car, driving to destination
-    RIDE_COMPLETED      // Ride finished, ready for payment
-}
 
 /**
  * ViewModel for Driver mode.
@@ -869,7 +859,7 @@ class DriverViewModel @Inject constructor(
             closeRoadflareOfferSubscription()
             // RoadFlare broadcasting already running — don't restart
             // Update service status from ROADFLARE_ONLY to AVAILABLE (service is authoritative)
-            DriverOnlineService.updateStatus(context, DriverStatus.Available(0))
+            DriverOnlineService.updateStatus(context, DriverPresenceMapper.serviceBaseStatus(DriverStage.AVAILABLE)!!)
         } else {
             // Fresh start: launch foreground service and RoadFlare broadcasting
             DriverOnlineService.start(context)
@@ -1022,7 +1012,7 @@ class DriverViewModel @Inject constructor(
             lastBroadcastTimeMs = 0L
 
             // Stop the foreground service
-            // Note: driverOnlineStatus is now set by DriverOnlineService (authoritative)
+            // Note: presence gate is now set by DriverOnlineService via DriverPresenceStore
             DriverOnlineService.stop(context)
 
             // THEN update state after deletion completes (atomic to prevent interleaving)
@@ -1560,8 +1550,7 @@ class DriverViewModel @Inject constructor(
             }
 
             // Notify service of arrival (updates notification)
-            val riderName: String? = null // RideOfferData doesn't contain rider name
-            DriverOnlineService.updateStatus(context, DriverStatus.ArrivedAtPickup(riderName))
+            DriverOnlineService.updateStatus(context, DriverPresenceMapper.serviceBaseStatus(DriverStage.ARRIVED_AT_PICKUP)!!)
 
             // Save ride state for persistence
             saveRideState()
@@ -2214,8 +2203,7 @@ class DriverViewModel @Inject constructor(
             }
 
             // Notify service of ride in progress (updates notification)
-            val riderName: String? = null // RideOfferData doesn't contain rider name
-            DriverOnlineService.updateStatus(context, DriverStatus.RideInProgress(riderName))
+            DriverOnlineService.updateStatus(context, DriverPresenceMapper.serviceBaseStatus(DriverStage.IN_RIDE)!!)
 
             _uiState.value = state.copy(
                 stage = DriverStage.IN_RIDE,
@@ -2584,8 +2572,7 @@ class DriverViewModel @Inject constructor(
             eventId?.let { trackEventForCleanup(it, "DRIVER_RIDE_STATE") }
 
             // Notify service of status change (updates notification)
-            val riderName: String? = null // RideOfferData doesn't contain rider name
-            DriverOnlineService.updateStatus(context, DriverStatus.EnRouteToPickup(riderName))
+            DriverOnlineService.updateStatus(context, DriverPresenceMapper.serviceBaseStatus(DriverStage.EN_ROUTE_TO_PICKUP)!!)
 
             _uiState.value = _uiState.value.copy(
                 stage = DriverStage.EN_ROUTE_TO_PICKUP,
@@ -2849,7 +2836,7 @@ class DriverViewModel @Inject constructor(
             broadcastRoadflareOfflineStatus()
             stopRoadflareBroadcasting()
         } else {
-            DriverOnlineService.updateStatus(context, DriverStatus.Available(0))
+            DriverOnlineService.updateStatus(context, DriverPresenceMapper.serviceBaseStatus(DriverStage.AVAILABLE)!!)
         }
 
         // Reset ALL ride state BEFORE resuming subscriptions (prevents stale offers being cleared)
@@ -4130,18 +4117,7 @@ class DriverViewModel @Inject constructor(
                     null
                 }
             },
-            statusProvider = {
-                when (_uiState.value.stage) {
-                    DriverStage.OFFLINE -> RoadflareLocationEvent.Status.OFFLINE
-                    DriverStage.ROADFLARE_ONLY,
-                    DriverStage.AVAILABLE -> RoadflareLocationEvent.Status.ONLINE
-                    DriverStage.RIDE_ACCEPTED,
-                    DriverStage.EN_ROUTE_TO_PICKUP,
-                    DriverStage.ARRIVED_AT_PICKUP,
-                    DriverStage.IN_RIDE,
-                    DriverStage.RIDE_COMPLETED -> RoadflareLocationEvent.Status.ON_RIDE
-                }
-            }
+            statusProvider = { DriverPresenceMapper.roadflareStatus(_uiState.value.stage) }
         )
 
         Log.d(TAG, "RoadFlare location broadcasting started")
@@ -4164,6 +4140,11 @@ class DriverViewModel @Inject constructor(
         subs.closeAll()
         bitcoinPriceService.cleanup()
         roadflareLocationBroadcaster?.destroy()
+        // Stop services safely — stopService() is a no-op if not running
+        // Do NOT use DriverOnlineService.stop() — it uses startService(ACTION_STOP)
+        // which starts the service + flashes foreground notification just to stop it
+        getApplication<Application>().stopService(Intent(getApplication(), DriverOnlineService::class.java))
+        getApplication<Application>().stopService(Intent(getApplication(), RoadflareListenerService::class.java))
     }
 
     // ========================================

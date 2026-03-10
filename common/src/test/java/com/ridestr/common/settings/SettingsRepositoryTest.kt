@@ -61,7 +61,6 @@ class SettingsRepositoryTest {
         assertFalse(repository.isOnboardingCompleted())
         assertFalse(repository.isWalletSetupDone())
         assertFalse(repository.getEncryptionFallbackWarned())
-        assertNull(repository.driverOnlineStatus.value)
     }
 
     // ========================================
@@ -299,13 +298,11 @@ class SettingsRepositoryTest {
 
         repository.toggleDisplayCurrency()
         repository.setNotificationSoundEnabled(false)
-        repository.setDriverOnlineStatus("AVAILABLE")
 
         repository.clearAllData()
 
         assertEquals(DisplayCurrency.USD, repository.getDisplayCurrency())
         assertTrue(repository.getNotificationSoundEnabled())
-        assertNull(repository.driverOnlineStatus.value)
     }
 
     // ========================================
@@ -351,41 +348,7 @@ class SettingsRepositoryTest {
     }
 
     // ========================================
-    // 17. driverOnlineStatus is synchronous (non-persisted)
-    // ========================================
-
-    @Test
-    fun `driverOnlineStatus is synchronous and non-persisted`() = testScope.runTest {
-        repository.awaitInitialLoad()
-
-        assertNull(repository.driverOnlineStatus.value)
-        repository.setDriverOnlineStatus("AVAILABLE")
-        assertEquals("AVAILABLE", repository.driverOnlineStatus.value)
-        repository.setDriverOnlineStatus(null)
-        assertNull(repository.driverOnlineStatus.value)
-    }
-
-    // ========================================
-    // 18. driverOnlineStatus not included in backup
-    // ========================================
-
-    @Test
-    fun `driverOnlineStatus not included in backup or restore`() = testScope.runTest {
-        repository.awaitInitialLoad()
-
-        repository.setDriverOnlineStatus("AVAILABLE")
-        val backup = repository.toBackupData()
-        // SettingsBackup has no driverOnlineStatus field
-
-        repository.clearAllData()
-        assertNull(repository.driverOnlineStatus.value)
-
-        repository.restoreFromBackup(backup)
-        assertNull(repository.driverOnlineStatus.value)
-    }
-
-    // ========================================
-    // 19. Synchronous getters work after awaitInitialLoad
+    // 17. Synchronous getters work after awaitInitialLoad
     // ========================================
 
     @Test

@@ -740,17 +740,6 @@ class SettingsRepository(
     }
 
     // ========================================
-    // Driver Online Status (non-persisted MutableStateFlow)
-    // ========================================
-
-    private val _driverOnlineStatus = MutableStateFlow<String?>(null)
-    val driverOnlineStatus: StateFlow<String?> = _driverOnlineStatus.asStateFlow()
-
-    fun setDriverOnlineStatus(status: String?) {
-        _driverOnlineStatus.value = status
-    }
-
-    // ========================================
     // Syncable Settings Hash (for auto-backup observer)
     // ========================================
 
@@ -822,7 +811,6 @@ class SettingsRepository(
     suspend fun clearAllData() {
         val updated = dataStore.updateData { emptyPreferences() }
         _preferences.value = updated
-        _driverOnlineStatus.value = null
     }
 
     // ========================================

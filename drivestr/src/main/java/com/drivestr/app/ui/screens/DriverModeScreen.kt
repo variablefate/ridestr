@@ -31,7 +31,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import com.drivestr.app.viewmodels.DriverStage
+import com.drivestr.app.presence.DriverStage
 import com.drivestr.app.viewmodels.DriverUiState
 import com.drivestr.app.viewmodels.DriverViewModel
 import com.drivestr.app.viewmodels.PaymentStatus

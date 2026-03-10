@@ -219,9 +219,5 @@ class SettingsDataStoreMigrationTest {
 
         val repo = createRepositoryWithMigration()
         repo.awaitInitialLoad()
-
-        // driverOnlineStatus is runtime-only MutableStateFlow, NOT DataStore-backed.
-        // Even if the key exists in SharedPreferences, it should be null.
-        assertNull(repo.driverOnlineStatus.value)
     }
 }

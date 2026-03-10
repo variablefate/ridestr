@@ -14,6 +14,9 @@ import com.ridestr.common.notification.AlertType
 import com.ridestr.common.notification.NotificationCoordinator
 import com.ridestr.common.notification.NotificationHelper
 import com.ridestr.common.notification.SoundManager
+import com.drivestr.app.presence.DriverPresenceGate
+import com.drivestr.app.presence.DriverPresenceMapper
+import com.drivestr.app.presence.DriverPresenceStore
 import com.ridestr.common.settings.SettingsRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -164,6 +167,7 @@ class DriverOnlineService : Service() {
 
     // Settings for sound/vibration preferences
     @Inject lateinit var settingsRepository: SettingsRepository
+    @Inject lateinit var presenceStore: DriverPresenceStore
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -172,7 +176,7 @@ class DriverOnlineService : Service() {
         runBlocking { settingsRepository.awaitInitialLoad() }
         // Clear any stale status from previous process death (handles force-kill)
         // Will be set correctly in onStartCommand
-        settingsRepository.setDriverOnlineStatus(null)
+        presenceStore.setGate(null)
         Log.d(TAG, "Service created")
     }
 
@@ -186,8 +190,8 @@ class DriverOnlineService : Service() {
                 coordinator.updateStatus(DriverStatus.Available(0))
                 coordinator.clearAlerts()
                 newRequestRevertJob?.cancel()
-                // Service is authoritative - set status immediately (closes race window)
-                settingsRepository.setDriverOnlineStatus("AVAILABLE")
+                // Service is authoritative - set gate immediately (closes race window)
+                presenceStore.setGate(DriverPresenceGate.AVAILABLE)
                 updateNotification()
             }
             ACTION_START_ROADFLARE_ONLY -> {
@@ -197,24 +201,15 @@ class DriverOnlineService : Service() {
                 newRequestRevertJob?.cancel()
                 // Set ROADFLARE_ONLY immediately - avoids race window where start() sets
                 // AVAILABLE then updateStatus() sets ROADFLARE_ONLY (Finding #1 fix)
-                settingsRepository.setDriverOnlineStatus("ROADFLARE_ONLY")
+                presenceStore.setGate(DriverPresenceGate.ROADFLARE_ONLY)
                 updateNotification()
             }
             ACTION_UPDATE_STATUS -> {
                 val status = intent.getSerializableExtra(EXTRA_STATUS) as? DriverStatus
                 if (status != null) {
                     handleStatusUpdate(status)
-                    // Map DriverStatus to settings string (service is authoritative)
-                    val statusString = when (status) {
-                        is DriverStatus.Available -> "AVAILABLE"
-                        is DriverStatus.RoadflareOnly -> "ROADFLARE_ONLY"
-                        is DriverStatus.EnRouteToPickup,
-                        is DriverStatus.ArrivedAtPickup,
-                        is DriverStatus.RideInProgress -> "IN_RIDE"
-                        is DriverStatus.NewRequest -> "AVAILABLE"  // Still available, just got a request
-                        is DriverStatus.Cancelled -> "AVAILABLE"   // Returns to available after cancel
-                    }
-                    settingsRepository.setDriverOnlineStatus(statusString)
+                    // Map DriverStatus to typed gate (service is authoritative)
+                    presenceStore.setGate(DriverPresenceMapper.listenerGateStatus(status))
                 }
             }
             ACTION_ADD_ALERT -> {
@@ -232,8 +227,8 @@ class DriverOnlineService : Service() {
                 Log.d(TAG, "Received STOP action")
                 coordinator.clearAlerts()
                 newRequestRevertJob?.cancel()
-                // Clear status before stopping (service is authoritative)
-                settingsRepository.setDriverOnlineStatus(null)
+                // Clear gate before stopping (service is authoritative)
+                presenceStore.setGate(null)
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
@@ -253,8 +248,8 @@ class DriverOnlineService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         serviceScope.cancel()
-        // Clear status on service destroy (handles normal stop)
-        settingsRepository.setDriverOnlineStatus(null)
+        // Clear gate on service destroy (handles normal stop)
+        presenceStore.setGate(null)
         Log.d(TAG, "Service destroyed")
     }
 

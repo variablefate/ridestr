@@ -13,6 +13,8 @@ import com.ridestr.common.data.DriverRoadflareRepository
 import com.ridestr.common.nostr.NostrService
 import com.ridestr.common.nostr.events.RideOfferEvent
 import com.ridestr.common.nostr.events.RideshareEventKinds
+import com.drivestr.app.presence.DriverPresenceGate
+import com.drivestr.app.presence.DriverPresenceStore
 import com.ridestr.common.notification.NotificationHelper
 import com.ridestr.common.notification.SoundManager
 import com.ridestr.common.settings.SettingsRepository
@@ -50,7 +52,6 @@ class RoadflareListenerService : Service() {
 
     companion object {
         private const val ACTION_START = "com.drivestr.app.service.ROADFLARE_START"
-        private const val ACTION_STOP = "com.drivestr.app.service.ROADFLARE_STOP"
 
         const val NOTIFICATION_ID_ROADFLARE_LISTENER = 3001
         const val NOTIFICATION_ID_ROADFLARE_REQUEST = 3002
@@ -75,18 +76,17 @@ class RoadflareListenerService : Service() {
 
         /**
          * Stop the RoadFlare listener service.
+         * Uses stopService() which is a no-op if not running.
          */
         fun stop(context: Context) {
             Log.d(TAG, "Stopping RoadflareListenerService")
-            val intent = Intent(context, RoadflareListenerService::class.java).apply {
-                action = ACTION_STOP
-            }
-            context.startService(intent)
+            context.stopService(Intent(context, RoadflareListenerService::class.java))
         }
 
     }
 
     @Inject lateinit var settingsRepository: SettingsRepository
+    @Inject lateinit var presenceStore: DriverPresenceStore
 
     private var nostrService: NostrService? = null
     private var driverRoadflareRepo: DriverRoadflareRepository? = null
@@ -119,18 +119,13 @@ class RoadflareListenerService : Service() {
                 Log.d(TAG, "Received START action")
                 startListening()
             }
-            ACTION_STOP -> {
-                Log.d(TAG, "Received STOP action")
-                stopListening()
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
-            }
         }
         return START_STICKY
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        stopForeground(STOP_FOREGROUND_REMOVE)
         stopListening()
         serviceScope.cancel()
         Log.d(TAG, "Service destroyed")
@@ -258,9 +253,9 @@ class RoadflareListenerService : Service() {
     private fun showRoadflareNotification(riderName: String?, fareSats: Double?, eventId: String) {
         // Check if driver is online (AVAILABLE or IN_RIDE) - DriverViewModel handles these
         // Only show notification when OFFLINE or ROADFLARE_ONLY
-        val driverStatus = settingsRepository.driverOnlineStatus.value
-        if (driverStatus == "AVAILABLE" || driverStatus == "IN_RIDE") {
-            Log.d(TAG, "Driver is online ($driverStatus), skipping notification (DriverViewModel will handle)")
+        val gate = presenceStore.gate.value
+        if (gate == DriverPresenceGate.AVAILABLE || gate == DriverPresenceGate.IN_RIDE) {
+            Log.d(TAG, "Driver is online ($gate), skipping notification (DriverViewModel will handle)")
             return
         }
 
