@@ -46,7 +46,6 @@ import com.google.android.gms.tasks.CancellationTokenSource
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
-import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.ridestr.common.nostr.events.AdminConfig
 import com.ridestr.common.util.FareCalculator
 import com.ridestr.common.nostr.events.DriverAvailabilityData
@@ -73,6 +72,9 @@ import com.ridestr.common.ui.ManualCoordinateInput
 import com.ridestr.common.ui.RecentsSection
 import com.ridestr.common.data.FollowedDriversRepository
 import com.ridestr.common.nostr.events.FollowedDriver
+import com.ridestr.common.roadflare.FareState
+import com.ridestr.common.roadflare.RoadflareFarePolicy
+import com.ridestr.common.roadflare.RoadflareDriverUiModel
 import com.ridestr.rider.viewmodels.RideStage
 import com.ridestr.rider.viewmodels.RiderUiState
 import com.ridestr.rider.viewmodels.RiderViewModel
@@ -116,12 +118,6 @@ fun RiderModeScreen(
     val scope = rememberCoroutineScope()
     val uiState by viewModel.uiState.collectAsState()
     val remoteConfig by viewModel.remoteConfig.collectAsState()
-    // Max RoadFlare fare for "too far" filtering (null = no route, skip cap)
-    val maxRoadflareFareUsd = uiState.routeResult?.let { route ->
-        val rideMiles = route.distanceKm * FareCalculator.KM_TO_MILES
-        val normalFareUsd = FareCalculator.calculateFareUsd(rideMiles, remoteConfig.fareRateUsdPerMile, remoteConfig.minimumFareUsd)
-        normalFareUsd + FareCalculator.ROADFLARE_MAX_SURCHARGE_USD
-    }
     // Payment method selection for batch RoadFlare send
     val roadflarePaymentMethods = settings.roadflarePaymentMethods
     var pendingBatchAction by remember { mutableStateOf<PendingBatchAction?>(null) }
@@ -641,10 +637,7 @@ fun RiderModeScreen(
                     onRefreshSavedLocations = onRefreshSavedLocations,
                     // RoadFlare parameters
                     followedDriversRepository = followedDriversRepository,
-                    nostrService = viewModel.getNostrService(),
-                    roadflareRatePerMile = remoteConfig.roadflareFareRateUsdPerMile,
-                    maxRoadflareFareUsd = maxRoadflareFareUsd,
-                    roadflareMinimumFareUsd = remoteConfig.roadflareMinimumFareUsd,
+                    remoteConfig = remoteConfig,
                     onSendRoadflareOffer = viewModel::sendRoadflareOffer,
                     onSendRoadflareToAll = { drivers, locations ->
                         if (roadflarePaymentMethods.isEmpty()) {
@@ -791,10 +784,7 @@ private fun IdleContent(
     onRefreshSavedLocations: (suspend () -> Unit)? = null,
     // RoadFlare parameters
     followedDriversRepository: FollowedDriversRepository? = null,
-    nostrService: com.ridestr.common.nostr.NostrService? = null,
-    roadflareRatePerMile: Double = AdminConfig.DEFAULT_ROADFLARE_FARE_RATE,
-    maxRoadflareFareUsd: Double? = null,
-    roadflareMinimumFareUsd: Double = AdminConfig.DEFAULT_ROADFLARE_MINIMUM_FARE,
+    remoteConfig: AdminConfig = AdminConfig(),
     onSendRoadflareOffer: (String, Location?) -> Unit = { _, _ -> },
     onSendRoadflareToAll: (List<FollowedDriver>, Map<String, Location>) -> Unit = { _, _ -> }
 ) {
@@ -848,17 +838,14 @@ private fun IdleContent(
         ) {
             RoadflareDriverSelectionSheet(
                 drivers = roadflareDrivers,
-                followedDriversRepository = followedDriversRepository,
+                followedDriversRepository = followedDriversRepository!!,
                 pickupLocation = uiState.pickupLocation,
                 routeResult = uiState.routeResult,
                 isSending = uiState.rideSession.isSendingOffer,
-                nostrService = nostrService,
                 displayCurrency = displayCurrency,
                 onToggleCurrency = onToggleCurrency,
                 priceService = priceService,
-                roadflareRatePerMile = roadflareRatePerMile,
-                maxRoadflareFareUsd = maxRoadflareFareUsd,
-                roadflareMinimumFareUsd = roadflareMinimumFareUsd,
+                remoteConfig = remoteConfig,
                 onSelectDriver = { driverPubKey, driverLocation ->
                     onSendRoadflareOffer(driverPubKey, driverLocation)
                     showRoadflareSheet = false
@@ -3490,13 +3477,10 @@ private fun RoadflareDriverSelectionSheet(
     pickupLocation: Location?,
     routeResult: RouteResult?,
     isSending: Boolean,
-    nostrService: com.ridestr.common.nostr.NostrService?,
     displayCurrency: DisplayCurrency,
     onToggleCurrency: () -> Unit,
     priceService: BitcoinPriceService,
-    roadflareRatePerMile: Double = AdminConfig.DEFAULT_ROADFLARE_FARE_RATE,
-    maxRoadflareFareUsd: Double? = null,
-    roadflareMinimumFareUsd: Double = AdminConfig.DEFAULT_ROADFLARE_MINIMUM_FARE,
+    remoteConfig: AdminConfig,
     onSelectDriver: (String, Location?) -> Unit,
     onSendToAll: (List<FollowedDriver>, Map<String, Location>) -> Unit,
     onDismiss: () -> Unit
@@ -3507,80 +3491,9 @@ private fun RoadflareDriverSelectionSheet(
     val cachedLocations by followedDriversRepository.driverLocations.collectAsState()
     val driverNames by followedDriversRepository.driverNames.collectAsState()
 
-    // Track last createdAt per driver to reject out-of-order events
-    val lastLocationCreatedAt = remember { mutableStateMapOf<String, Long>() }
-
-    // Subscribe to driver locations
-    var locationSubId by remember { mutableStateOf<String?>(null) }
-
-    DisposableEffect(drivers, nostrService) {
-        if (nostrService == null) return@DisposableEffect onDispose {}
-
-        // Fetch driver profile names (prefer displayName over username)
-        // Guard to avoid duplicate subscriptions when name already cached
-        drivers.forEach { driver ->
-            if (!driverNames.containsKey(driver.pubkey)) {
-                nostrService.subscribeToProfile(driver.pubkey) { profile ->
-                    val fullName = profile.displayName ?: profile.name
-                    fullName?.let { name ->
-                        followedDriversRepository.cacheDriverName(driver.pubkey, name.split(" ").firstOrNull() ?: name)
-                    }
-                }
-            }
-        }
-
-        // Subscribe to driver locations - need drivers with keys
-        val driversWithKeys = drivers.filter { it.roadflareKey != null }
-        if (driversWithKeys.isNotEmpty()) {
-            locationSubId = nostrService.subscribeToRoadflareLocations(
-                driverPubkeys = driversWithKeys.map { it.pubkey }
-            ) { event, relayUrl ->
-                // Find the driver and decrypt their location
-                val driver = driversWithKeys.find { it.pubkey == event.pubKey }
-                if (driver?.roadflareKey != null) {
-                    val locationData = decryptRoadflareLocation(
-                        roadflarePrivKey = driver.roadflareKey!!.privateKey,
-                        driverPubKey = event.pubKey,
-                        event = event
-                    )
-                    if (locationData != null) {
-                        val eventCreatedAt = event.createdAt
-
-                        // Check if event has expired (NIP-40 expiration tag)
-                        val isExpired = com.ridestr.common.nostr.events.RoadflareLocationEvent.isExpired(event)
-
-                        // Check if this is older than what we already have (out-of-order)
-                        val lastSeen = lastLocationCreatedAt[event.pubKey] ?: 0L
-                        val isOutOfOrder = eventCreatedAt < lastSeen
-
-                        if (!isExpired && !isOutOfOrder) {
-                            lastLocationCreatedAt[event.pubKey] = eventCreatedAt
-
-                            // Update location in shared cache (including OFFLINE status)
-                            // Note: Don't remove on OFFLINE - RoadflareTab needs timestamp for "Last seen" display
-                            followedDriversRepository.updateDriverLocation(
-                                pubkey = event.pubKey,
-                                lat = locationData.location.lat,
-                                lon = locationData.location.lon,
-                                status = locationData.tagStatus,
-                                timestamp = eventCreatedAt,
-                                keyVersion = locationData.keyVersion
-                            )
-                            if (locationData.tagStatus == com.ridestr.common.nostr.events.RoadflareLocationEvent.Status.OFFLINE) {
-                                android.util.Log.d("RoadflareSelection", "Driver ${event.pubKey.take(8)} went offline")
-                            }
-                        } else {
-                            android.util.Log.d("RoadflareSelection", "Rejected stale/out-of-order 30014: expired=$isExpired, outOfOrder=$isOutOfOrder")
-                        }
-                    }
-                }
-            }
-        }
-
-        onDispose {
-            locationSubId?.let { nostrService.closeSubscription(it) }
-        }
-    }
+    // Location subscriptions and profile fetching are now managed by
+    // RoadflareDriverPresenceCoordinator (ViewModel-scoped, survives sheet close/reopen)
+    val rideMiles = routeResult?.let { it.distanceKm * FareCalculator.KM_TO_MILES } ?: 0.0
 
     Column(
         modifier = Modifier
@@ -3699,34 +3612,54 @@ private fun RoadflareDriverSelectionSheet(
                         cachedState.status == com.ridestr.common.nostr.events.RoadflareLocationEvent.Status.ONLINE &&
                         (nowSec - cachedState.timestamp) < staleThresholdSec
 
-                    // Calculate fare if we have location
-                    val fareSats = if (driverLocation != null && pickupLocation != null) {
-                        calculateRoadflareFareSats(pickupLocation, driverLocation, routeResult, roadflareRatePerMile)
+                    // Calculate per-driver fare using shared policy (haversine estimate)
+                    val quote = if (driverLocation != null && pickupLocation != null) {
+                        RoadflareFarePolicy.quoteDriver(
+                            pickupLat = pickupLocation.lat,
+                            pickupLon = pickupLocation.lon,
+                            driverLat = driverLocation.lat,
+                            driverLon = driverLocation.lon,
+                            rideMiles = rideMiles,
+                            config = remoteConfig,
+                            pickupDistanceMiles = null,  // haversine — exact routing at send time
+                            fareState = FareState.ESTIMATED,
+                            bitcoinPriceService = priceService
+                        )
                     } else null
 
-                    val fare = if (fareSats != null) {
-                        formatFare(fareSats, displayCurrency, priceService)
-                    } else null
+                    // Format fare for display
+                    val formattedFare = quote?.let { q ->
+                        when (displayCurrency) {
+                            DisplayCurrency.USD -> String.format("$%.2f", q.fareUsd)
+                            DisplayCurrency.SATS -> q.fareSats?.let { "${it} sats" }
+                                ?: String.format("$%.2f", q.fareUsd)
+                        }
+                    }
 
                     // Only compute isTooFar for ONLINE drivers — offline drivers must show "Offline", not "Too far"
-                    val isTooFar = if (isOnline && maxRoadflareFareUsd != null && driverLocation != null && pickupLocation != null) {
-                        val pickupMiles = pickupLocation.distanceToKm(driverLocation) * FareCalculator.KM_TO_MILES
-                        val rideMiles = routeResult?.let { it.distanceKm * FareCalculator.KM_TO_MILES } ?: 0.0
-                        val fareUsd = FareCalculator.calculateFareUsd(
-                            pickupMiles + rideMiles, roadflareRatePerMile, roadflareMinimumFareUsd
-                        )
-                        fareUsd > maxRoadflareFareUsd
-                    } else false
+                    val isTooFar = isOnline && (quote?.isTooFar == true)
 
-                    RoadflareDriverCard(
-                        driverName = driverName,
-                        driverPubKey = driver.pubkey,
-                        isOnline = isOnline,
-                        hasKey = hasKey,
+                    val status = when {
+                        !hasKey -> RoadflareDriverUiModel.DriverStatus.PENDING_APPROVAL
+                        !isOnline -> RoadflareDriverUiModel.DriverStatus.OFFLINE
+                        isTooFar -> RoadflareDriverUiModel.DriverStatus.TOO_FAR
+                        else -> RoadflareDriverUiModel.DriverStatus.AVAILABLE
+                    }
+
+                    val model = RoadflareDriverUiModel(
+                        pubkey = driver.pubkey,
+                        displayName = driverName,
+                        status = status,
+                        formattedFare = formattedFare,
+                        pickupMiles = quote?.pickupMiles,
+                        fareState = quote?.fareState ?: FareState.ESTIMATED,
                         isTooFar = isTooFar,
-                        fare = fare,
-                        note = driver.note,
-                        enabled = hasKey && !isSending,
+                        isBroadcastEligible = hasKey && isOnline && !isTooFar,
+                        isDirectSelectable = hasKey && !isSending
+                    )
+
+                    com.ridestr.common.ui.RoadflareDriverCard(
+                        model = model,
                         onClick = {
                             onSelectDriver(driver.pubkey, driverLocation)
                         }
@@ -3755,27 +3688,27 @@ private fun RoadflareDriverSelectionSheet(
             HorizontalDivider()
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Send to all button - only include online drivers with fresh timestamps (< 5 min)
+            // Send to all button - only include online, fresh, not-too-far drivers
             val now = System.currentTimeMillis() / 1000
-            val staleThreshold = 5 * 60  // 5 minutes (matches RoadflareTab)
+            val staleThreshold = 5 * 60  // 5 minutes
 
             val eligibleDrivers = drivers.filter { driver ->
                 driver.roadflareKey != null &&
                 cachedLocations[driver.pubkey]?.let { state ->
                     val isOnline = state.status == com.ridestr.common.nostr.events.RoadflareLocationEvent.Status.ONLINE
                     val isFresh = (now - state.timestamp) < staleThreshold
-                    // Exclude too-far drivers from batch
-                    val tooFar = if (maxRoadflareFareUsd != null && pickupLocation != null) {
-                        val loc = Location(lat = state.lat, lon = state.lon)
-                        val pickupMiles = pickupLocation.distanceToKm(loc) * FareCalculator.KM_TO_MILES
-                        val rideMiles = routeResult?.let { it.distanceKm * FareCalculator.KM_TO_MILES } ?: 0.0
-                        val fareUsd = FareCalculator.calculateFareUsd(
-                            pickupMiles + rideMiles, roadflareRatePerMile, roadflareMinimumFareUsd
+                    val tooFar = if (pickupLocation != null) {
+                        val quote = RoadflareFarePolicy.quoteDriver(
+                            pickupLocation.lat, pickupLocation.lon,
+                            state.lat, state.lon,
+                            rideMiles, remoteConfig,
+                            fareState = FareState.ESTIMATED,
+                            bitcoinPriceService = priceService
                         )
-                        fareUsd > maxRoadflareFareUsd
+                        quote.isTooFar
                     } else false
                     isOnline && isFresh && !tooFar
-                } ?: false  // Exclude drivers with no location data
+                } ?: false
             }
             // Convert CachedDriverLocation map to Location map for the callback
             val eligibleLocations = cachedLocations.filterKeys { pubkey ->
@@ -3811,162 +3744,5 @@ private fun RoadflareDriverSelectionSheet(
     }
 }
 
-/**
- * Card for a RoadFlare driver in the selection sheet.
- */
-@Composable
-private fun RoadflareDriverCard(
-    driverName: String,
-    driverPubKey: String,
-    isOnline: Boolean,
-    hasKey: Boolean,
-    isTooFar: Boolean = false,
-    fare: String?,
-    note: String?,
-    enabled: Boolean,
-    onClick: () -> Unit
-) {
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(enabled = enabled, onClick = onClick),
-        colors = CardDefaults.cardColors(
-            containerColor = if (enabled)
-                MaterialTheme.colorScheme.surfaceVariant
-            else
-                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-        )
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.weight(1f)
-            ) {
-                // Status indicator
-                Box(
-                    modifier = Modifier
-                        .size(12.dp)
-                        .background(
-                            color = when {
-                                !hasKey -> MaterialTheme.colorScheme.outline          // Pending approval
-                                !isOnline -> MaterialTheme.colorScheme.outline        // Offline
-                                isTooFar -> Color(0xFFE65100)                         // Online but too far
-                                else -> MaterialTheme.colorScheme.primary             // Online and in range
-                            },
-                            shape = RoundedCornerShape(6.dp)
-                        )
-                )
-                Spacer(modifier = Modifier.width(12.dp))
-
-                Column {
-                    Text(
-                        text = driverName,
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = FontWeight.Medium,
-                        color = if (enabled)
-                            MaterialTheme.colorScheme.onSurface
-                        else
-                            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                    )
-                    Text(
-                        text = when {
-                            !hasKey -> "Pending approval"
-                            !isOnline -> "Offline"
-                            isTooFar -> "Too far"
-                            else -> "Available"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = when {
-                            !hasKey -> MaterialTheme.colorScheme.outline
-                            !isOnline -> MaterialTheme.colorScheme.onSurfaceVariant
-                            isTooFar -> Color(0xFFE65100)
-                            else -> MaterialTheme.colorScheme.primary
-                        }
-                    )
-                    if (isTooFar) {
-                        Text(
-                            text = "Excluded from broadcast. Request directly.",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    if (!note.isNullOrBlank()) {
-                        Text(
-                            text = note,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-            }
-
-            // Fare display — show when online or too-far (so rider sees why)
-            if (fare != null && (isOnline || isTooFar)) {
-                Column(horizontalAlignment = Alignment.End) {
-                    Text(
-                        text = fare,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Text(
-                        text = "est. fare",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            } else if (!hasKey) {
-                Icon(
-                    Icons.Default.HourglassEmpty,
-                    contentDescription = "Pending",
-                    modifier = Modifier.size(24.dp),
-                    tint = MaterialTheme.colorScheme.outline
-                )
-            }
-        }
-    }
-}
-
-/**
- * Calculate RoadFlare fare in sats.
- */
-private fun calculateRoadflareFareSats(
-    pickup: Location,
-    driverLocation: Location,
-    routeResult: RouteResult?,
-    ratePerMile: Double = AdminConfig.DEFAULT_ROADFLARE_FARE_RATE
-): Double {
-    val ROADFLARE_RATE_PER_MILE = ratePerMile
-    val METERS_PER_MILE = 1609.34
-
-    // Driver distance to pickup (haversine)
-    val R = 6371000.0
-    val dLat = Math.toRadians(pickup.lat - driverLocation.lat)
-    val dLon = Math.toRadians(pickup.lon - driverLocation.lon)
-    val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-            Math.cos(Math.toRadians(driverLocation.lat)) * Math.cos(Math.toRadians(pickup.lat)) *
-            Math.sin(dLon / 2) * Math.sin(dLon / 2)
-    val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
-    val driverToPickupMeters = R * c
-    val driverToPickupMiles = driverToPickupMeters / METERS_PER_MILE
-
-    // Ride distance
-    val rideMiles = routeResult?.let { it.distanceKm * 0.621371 } ?: 0.0
-
-    // Total fare with minimum fare enforcement
-    val baseFare = 2.50
-    val minimumFareUsd = 5.0
-    val calculatedFare = baseFare + (driverToPickupMiles * ROADFLARE_RATE_PER_MILE) + (rideMiles * ROADFLARE_RATE_PER_MILE)
-    val totalFareUsd = maxOf(calculatedFare, minimumFareUsd)
-    // Convert USD to sats using live BTC price
-    val sats = BitcoinPriceService.getInstance().usdToSats(totalFareUsd)
-    return sats?.toDouble() ?: (totalFareUsd * 1000.0) // Fallback: ~$100k BTC
-}
+// Inline RoadflareDriverCard and calculateRoadflareFareSats removed —
+// replaced by shared RoadflareDriverCard from :common and RoadflareFarePolicy

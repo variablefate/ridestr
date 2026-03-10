@@ -23,7 +23,18 @@ data class DriverInfo(
     val displayName: String,
     val vehicleDescription: String? = null,
     val etaMinutes: Int? = null,
-    val distanceMiles: Double? = null
+    val distanceMiles: Double? = null,
+    val quotedFareUsd: Double? = null
+)
+
+/**
+ * Per-driver offer data for sent offers.
+ */
+data class DriverOfferData(
+    val pubkey: String,
+    val displayName: String,
+    val pickupMiles: Double,
+    val fareUsd: Double
 )
 
 /**
@@ -49,14 +60,15 @@ data class RideSession(
     val pickupLon: Double,
     val dropoffLat: Double,
     val dropoffLon: Double,
-    val fareEstimateUsd: Double,
-    val fareEstimateSats: Long? = null,
+    val rideReferenceFareUsd: Double,
+    val rideReferenceFareSats: Long? = null,
+    val selectedFareUsd: Double? = null,
     val selectedDriver: DriverInfo? = null,
     val pendingDrivers: List<String> = emptyList(),
     val chatMessages: List<ChatMessage> = emptyList(),
     val createdAt: Long = System.currentTimeMillis(),
     val paymentMethod: PaymentMethod = PaymentMethod.FIAT_CASH,
-    val schemaVersion: Int = 1
+    val schemaVersion: Int = 2
 )
 
 /**
@@ -94,25 +106,31 @@ class RideSessionManager(
     private val contactedDrivers = mutableMapOf<String, String>() // pubkey -> offerEventId
     private val acceptedDrivers = mutableListOf<DriverInfo>()
     private val acceptanceSubscriptionIds = mutableListOf<String>()
+    private val sentOffers = mutableMapOf<String, DriverOfferData>()
     private var batchJob: Job? = null
     private var hasSentOffers = false
     private var driverNames: Map<String, String> = emptyMap()
 
     /**
-     * Initiate a RoadFlare ride request by sending offers to all followed drivers,
+     * Initiate a RoadFlare ride request by sending offers to followed drivers,
      * batched by proximity (closest first, BATCH_SIZE at a time).
+     * Each driver gets their own per-driver fare in the offer.
      */
     fun sendRoadflareToAll(
-        drivers: List<Pair<String, Double>>, // pubkey, distanceMiles
-        driverNames: Map<String, String>,
+        drivers: List<DriverOfferData>,
         pickup: Location,
         destination: Location,
-        fareEstimate: Double,
-        fareEstimateSats: Long?,
+        rideReferenceFareUsd: Double,
         paymentMethod: PaymentMethod,
         fiatPaymentMethods: List<String>
     ) {
         val rideId = java.util.UUID.randomUUID().toString()
+
+        // Store sent offers for acceptance recovery
+        sentOffers.clear()
+        drivers.forEach { sentOffers[it.pubkey] = it }
+        this.driverNames = drivers.associate { it.pubkey to it.displayName }
+
         _currentRide.value = RideSession(
             rideId = rideId,
             state = RideState.CREATED,
@@ -120,21 +138,19 @@ class RideSessionManager(
             pickupLon = pickup.lon,
             dropoffLat = destination.lat,
             dropoffLon = destination.lon,
-            fareEstimateUsd = fareEstimate,
-            fareEstimateSats = fareEstimateSats,
-            pendingDrivers = drivers.map { it.first },
+            rideReferenceFareUsd = rideReferenceFareUsd,
+            pendingDrivers = drivers.map { it.pubkey },
             paymentMethod = paymentMethod
         )
         hasSentOffers = true
-        this.driverNames = driverNames
         updateStage()
 
         Log.d(TAG, "Sending RoadFlare to ${drivers.size} drivers, batch size=$BATCH_SIZE")
-        val sorted = drivers.sortedBy { it.second }
+        val sorted = drivers.sortedBy { it.pickupMiles }
         batchJob = scope.launch {
             sendRoadflareBatches(
-                sorted, driverNames, pickup, destination,
-                fareEstimate, paymentMethod.value, fiatPaymentMethods
+                sorted, pickup, destination,
+                paymentMethod.value, fiatPaymentMethods
             )
         }
     }
@@ -144,11 +160,9 @@ class RideSessionManager(
      * to give closer drivers time to respond before contacting farther ones.
      */
     private suspend fun sendRoadflareBatches(
-        sortedDrivers: List<Pair<String, Double>>,
-        driverNames: Map<String, String>,
+        sortedDrivers: List<DriverOfferData>,
         pickup: Location,
         destination: Location,
-        fareEstimate: Double,
         paymentMethod: String,
         fiatPaymentMethods: List<String>
     ) {
@@ -156,19 +170,19 @@ class RideSessionManager(
         for ((index, chunk) in chunks.withIndex()) {
             if (!coroutineContext.isActive) break
 
-            for ((pubkey, distance) in chunk) {
-                Log.d(TAG, "Sending offer to ${driverNames[pubkey] ?: pubkey.take(8)} (${String.format("%.1f", distance)} mi)")
+            for (offer in chunk) {
+                Log.d(TAG, "Sending offer to ${offer.displayName} (${String.format("%.1f", offer.pickupMiles)} mi, $${String.format("%.2f", offer.fareUsd)})")
                 val eventId = nostrService.sendRideOffer(
-                    driverPubKey = pubkey,
+                    driverPubKey = offer.pubkey,
                     pickup = pickup,
                     destination = destination,
-                    fareEstimate = fareEstimate,
+                    fareEstimate = offer.fareUsd,
                     paymentMethod = paymentMethod,
                     isRoadflare = true,
                     fiatPaymentMethods = fiatPaymentMethods
                 )
                 if (eventId != null) {
-                    contactedDrivers[pubkey] = eventId
+                    contactedDrivers[offer.pubkey] = eventId
                     // Subscribe to acceptances for this offer
                     val subId = nostrService.subscribeToAcceptancesForOffer(eventId) { acceptance ->
                         onAcceptanceReceived(acceptance)
@@ -187,13 +201,16 @@ class RideSessionManager(
 
     /**
      * Called when a driver acceptance event arrives from the relay.
-     * Builds DriverInfo from the acceptance data and adds to the accepted list.
+     * Recovers quoted fare from sentOffers for per-driver fare display.
      */
     private fun onAcceptanceReceived(acceptance: RideAcceptanceData) {
         Log.d(TAG, "Acceptance received from ${acceptance.driverPubKey}")
+        val offer = sentOffers[acceptance.driverPubKey]
         val driverInfo = DriverInfo(
             pubkey = acceptance.driverPubKey,
-            displayName = driverNames[acceptance.driverPubKey] ?: acceptance.driverPubKey.take(8)
+            displayName = offer?.displayName ?: driverNames[acceptance.driverPubKey] ?: acceptance.driverPubKey.take(8),
+            distanceMiles = offer?.pickupMiles,
+            quotedFareUsd = offer?.fareUsd
         )
         handleBatchAcceptance(driverInfo, acceptance)
     }
@@ -216,6 +233,7 @@ class RideSessionManager(
     /**
      * Rider confirms a specific driver for the ride.
      * Sends the Nostr confirmation event (Kind 3175) and NIP-09 deletion for non-chosen offers.
+     * Sets selectedFareUsd from the driver's quoted fare.
      */
     fun confirmDriver(driver: DriverInfo) {
         Log.d(TAG, "Confirming driver: ${driver.displayName}")
@@ -255,7 +273,8 @@ class RideSessionManager(
 
         _currentRide.value = ride.copy(
             state = RideState.CONFIRMED,
-            selectedDriver = driver
+            selectedDriver = driver,
+            selectedFareUsd = driver.quotedFareUsd
         )
         updateStage()
     }
@@ -297,6 +316,7 @@ class RideSessionManager(
         contactedDrivers.clear()
         acceptedDrivers.clear()
         acceptanceDataMap.clear()
+        sentOffers.clear()
         acceptanceSubscriptionIds.forEach { nostrService.closeSubscription(it) }
         acceptanceSubscriptionIds.clear()
         driverNames = emptyMap()

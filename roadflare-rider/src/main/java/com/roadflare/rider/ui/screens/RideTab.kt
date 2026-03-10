@@ -23,7 +23,10 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
+import com.ridestr.common.bitcoin.BitcoinPriceService
+import com.ridestr.common.nostr.events.AdminConfig
 import com.ridestr.common.nostr.events.Location
+import com.ridestr.common.settings.DisplayCurrency
 import com.ridestr.common.ui.FavoritesSection
 import com.ridestr.common.ui.LocationSearchField
 import com.ridestr.common.ui.RecentsSection
@@ -39,8 +42,9 @@ import kotlinx.coroutines.tasks.await
 /**
  * RoadFlare tab — the main ride request entry point.
  *
- * IDLE state shows the full geocoder with autocomplete, fare estimate,
- * and "Send RoadFlare" button. Other states show ride progress.
+ * IDLE state shows the full geocoder with autocomplete and "Send RoadFlare" button.
+ * Tapping "Send RoadFlare" opens a full-screen DriverSelectionScreen.
+ * Other stages show ride progress (requesting, choosing, matched, etc.).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -51,43 +55,95 @@ fun RoadFlareTab(
     val rideStage by viewModel.rideStage.collectAsState()
     val currentRide by viewModel.currentRide.collectAsState()
     val chatMessages by viewModel.chatMessages.collectAsState()
+    val fareEstimate by viewModel.fareEstimate.collectAsState()
+    val isCalculatingFare by viewModel.isCalculatingFare.collectAsState()
+    val drivers by viewModel.drivers.collectAsState()
+    val driverLocations by viewModel.driverLocations.collectAsState()
+    val driverNames by viewModel.driverNames.collectAsState()
+    val pickupLocation by viewModel.pickupLocation.collectAsState()
+    val destLocation by viewModel.destLocation.collectAsState()
+    val remoteConfig by viewModel.remoteConfig.collectAsState()
+    val settings by viewModel.settings.collectAsState()
+
+    var showDriverSelection by remember { mutableStateOf(false) }
 
     Column(
         modifier = modifier
             .fillMaxSize()
             .padding(16.dp)
     ) {
-        when (rideStage) {
-            RideStage.IDLE -> IdleContent(viewModel = viewModel)
-            RideStage.REQUESTING -> RequestingContent(
+        when {
+            // Full-screen driver selection
+            showDriverSelection && pickupLocation != null && destLocation != null && fareEstimate != null -> {
+                val driverQuotes by viewModel.driverQuoteCoordinator.driverQuotes.collectAsState()
+                val routingComplete by viewModel.driverQuoteCoordinator.routingComplete.collectAsState()
+
+                DriverSelectionScreen(
+                    drivers = drivers,
+                    driverLocations = driverLocations,
+                    driverNames = driverNames,
+                    driverQuotes = driverQuotes,
+                    routingComplete = routingComplete,
+                    pickupLocation = pickupLocation!!,
+                    destLocation = destLocation!!,
+                    rideMiles = fareEstimate!!.distanceMiles,
+                    rideDurationMinutes = fareEstimate?.durationMinutes,
+                    remoteConfig = remoteConfig,
+                    displayCurrency = settings.displayCurrency,
+                    priceService = BitcoinPriceService.getInstance(),
+                    isSending = rideStage != RideStage.IDLE,
+                    onSendToDriver = { pk, fare, pickupMiles, rideMiles ->
+                        showDriverSelection = false
+                        viewModel.sendRoadflareToDriver(pk, fare, pickupMiles, rideMiles)
+                    },
+                    onSendToAll = { driverOffers, rideMiles ->
+                        showDriverSelection = false
+                        viewModel.sendRoadflareToAll(driverOffers, rideMiles)
+                    },
+                    onBack = { showDriverSelection = false }
+                )
+            }
+
+            rideStage == RideStage.IDLE -> IdleContent(
+                viewModel = viewModel,
+                sendRoadflareEnabled = fareEstimate != null && !isCalculatingFare
+                    && drivers.isNotEmpty(),
+                onSendRoadflare = { showDriverSelection = true }
+            )
+            rideStage == RideStage.REQUESTING -> RequestingContent(
                 ride = currentRide,
                 onCancel = { viewModel.rideSessionManager.cancelRide() }
             )
-            RideStage.CHOOSING_DRIVER -> ChoosingDriverContent(
+            rideStage == RideStage.CHOOSING_DRIVER -> ChoosingDriverContent(
                 acceptedDrivers = viewModel.rideSessionManager.getAcceptedDrivers(),
-                fareEstimateUsd = currentRide?.fareEstimateUsd,
-                fareEstimateSats = currentRide?.fareEstimateSats,
+                rideReferenceFareUsd = currentRide?.rideReferenceFareUsd,
+                displayCurrency = settings.displayCurrency,
+                priceService = BitcoinPriceService.getInstance(),
                 onSelectDriver = { driver ->
                     viewModel.rideSessionManager.confirmDriver(driver)
                 },
                 onCancel = { viewModel.rideSessionManager.cancelRide() }
             )
-            RideStage.MATCHED,
-            RideStage.DRIVER_EN_ROUTE,
-            RideStage.DRIVER_ARRIVED -> MatchedContent(
+            rideStage == RideStage.MATCHED ||
+            rideStage == RideStage.DRIVER_EN_ROUTE ||
+            rideStage == RideStage.DRIVER_ARRIVED -> MatchedContent(
                 ride = currentRide,
                 stage = rideStage,
+                displayCurrency = settings.displayCurrency,
+                priceService = BitcoinPriceService.getInstance(),
                 onCancel = { viewModel.rideSessionManager.cancelRide() }
             )
-            RideStage.IN_RIDE -> InRideContent(
+            rideStage == RideStage.IN_RIDE -> InRideContent(
                 ride = currentRide,
                 messages = chatMessages
             )
-            RideStage.COMPLETED -> CompletedContent(
+            rideStage == RideStage.COMPLETED -> CompletedContent(
                 ride = currentRide,
+                displayCurrency = settings.displayCurrency,
+                priceService = BitcoinPriceService.getInstance(),
                 onDone = { viewModel.rideSessionManager.clearRide() }
             )
-            RideStage.CANCELLED -> CancelledContent(
+            rideStage == RideStage.CANCELLED -> CancelledContent(
                 onDone = { viewModel.rideSessionManager.clearRide() }
             )
         }
@@ -96,7 +152,9 @@ fun RoadFlareTab(
 
 @Composable
 private fun IdleContent(
-    viewModel: RiderViewModel
+    viewModel: RiderViewModel,
+    sendRoadflareEnabled: Boolean,
+    onSendRoadflare: () -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -110,7 +168,6 @@ private fun IdleContent(
     val isSearchingDest by viewModel.isSearchingDest.collectAsState()
     val fareEstimate by viewModel.fareEstimate.collectAsState()
     val isCalculatingFare by viewModel.isCalculatingFare.collectAsState()
-    val drivers by viewModel.drivers.collectAsState()
 
     // Local text state for the search fields
     var pickupQuery by remember { mutableStateOf("") }
@@ -329,7 +386,7 @@ private fun IdleContent(
                     }
                 }
 
-                // Route info (when both locations are set)
+                // Route info (distance + duration only — no fare, fares vary by driver)
                 if (pickupLocation != null && destLocation != null) {
                     Spacer(modifier = Modifier.height(16.dp))
                     HorizontalDivider()
@@ -364,18 +421,6 @@ private fun IdleContent(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text(
-                                    text = "$${String.format("%.2f", route.fareUsd)}",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    text = "Est. Fare",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
                         }
                     }
 
@@ -399,6 +444,7 @@ private fun IdleContent(
         }
 
         // Driver count warning
+        val drivers by viewModel.drivers.collectAsState()
         if (drivers.isEmpty()) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -417,14 +463,13 @@ private fun IdleContent(
 
         Spacer(modifier = Modifier.weight(1f))
 
-        // Send RoadFlare button
+        // Send RoadFlare button — opens driver selection screen
         Button(
-            onClick = { viewModel.sendRoadflare() },
+            onClick = onSendRoadflare,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(56.dp),
-            enabled = pickupLocation != null && destLocation != null
-                    && drivers.isNotEmpty() && !isCalculatingFare
+            enabled = sendRoadflareEnabled
         ) {
             Icon(Icons.Default.Flare, contentDescription = null)
             Spacer(modifier = Modifier.width(8.dp))
@@ -468,8 +513,9 @@ private fun RequestingContent(
 @Composable
 private fun ChoosingDriverContent(
     acceptedDrivers: List<DriverInfo>,
-    fareEstimateUsd: Double?,
-    fareEstimateSats: Long?,
+    rideReferenceFareUsd: Double?,
+    displayCurrency: DisplayCurrency,
+    priceService: BitcoinPriceService,
     onSelectDriver: (DriverInfo) -> Unit,
     onCancel: () -> Unit
 ) {
@@ -489,37 +535,11 @@ private fun ChoosingDriverContent(
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-
-        // Trip fare card
-        fareEstimateUsd?.let { fare ->
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer
-                )
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "Trip Fare",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
-                    )
-                    Text(
-                        text = "$${String.format("%.2f", fare)}",
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
-                    )
-                    fareEstimateSats?.let { sats ->
-                        Text(
-                            text = "~${String.format("%,d", sats)} sats",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer
-                        )
-                    }
-                }
-            }
-        }
+        Text(
+            text = "Quoted fares vary by driver",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
 
         acceptedDrivers.forEach { driver ->
             Card(
@@ -527,31 +547,50 @@ private fun ChoosingDriverContent(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = driver.displayName,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                    driver.vehicleDescription?.let {
-                        Text(text = it, style = MaterialTheme.typography.bodyMedium)
-                    }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        driver.etaMinutes?.let {
+                        Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "$it min away",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.primary
+                                text = driver.displayName,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
                             )
+                            driver.vehicleDescription?.let {
+                                Text(text = it, style = MaterialTheme.typography.bodyMedium)
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                driver.etaMinutes?.let {
+                                    Text(
+                                        text = "$it min away",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                                driver.distanceMiles?.let {
+                                    Text(
+                                        text = String.format("%.1f mi", it),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
                         }
-                        driver.distanceMiles?.let {
-                            Text(
-                                text = String.format("%.1f mi", it),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                        // Per-driver fare
+                        driver.quotedFareUsd?.let { fareUsd ->
+                            Column(horizontalAlignment = Alignment.End) {
+                                Text(
+                                    text = formatFareAmount(fareUsd, displayCurrency, priceService),
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
                         }
                     }
                 }
@@ -573,6 +612,8 @@ private fun ChoosingDriverContent(
 private fun MatchedContent(
     ride: RideSession?,
     stage: RideStage,
+    displayCurrency: DisplayCurrency,
+    priceService: BitcoinPriceService,
     onCancel: () -> Unit
 ) {
     Column(
@@ -615,8 +656,9 @@ private fun MatchedContent(
         }
 
         ride?.let {
+            val fareUsd = it.selectedFareUsd ?: it.rideReferenceFareUsd
             Text(
-                text = "Fare: $${String.format("%.2f", it.fareEstimateUsd)}",
+                text = "Fare: ${formatFareAmount(fareUsd, displayCurrency, priceService)}",
                 style = MaterialTheme.typography.titleMedium
             )
         }
@@ -670,6 +712,8 @@ private fun InRideContent(
 @Composable
 private fun CompletedContent(
     ride: RideSession?,
+    displayCurrency: DisplayCurrency,
+    priceService: BitcoinPriceService,
     onDone: () -> Unit
 ) {
     Column(
@@ -683,9 +727,10 @@ private fun CompletedContent(
             fontWeight = FontWeight.Bold
         )
         ride?.let {
+            val fareUsd = it.selectedFareUsd ?: it.rideReferenceFareUsd
             Spacer(modifier = Modifier.height(16.dp))
             Text(
-                text = "Total: $${String.format("%.2f", it.fareEstimateUsd)}",
+                text = "Total: ${formatFareAmount(fareUsd, displayCurrency, priceService)}",
                 style = MaterialTheme.typography.titleLarge
             )
         }
@@ -713,6 +758,26 @@ private fun CancelledContent(
         Spacer(modifier = Modifier.height(32.dp))
         Button(onClick = onDone) {
             Text("Done")
+        }
+    }
+}
+
+/**
+ * Format a USD fare amount respecting the display currency preference.
+ */
+@Composable
+private fun formatFareAmount(
+    fareUsd: Double,
+    displayCurrency: DisplayCurrency,
+    priceService: BitcoinPriceService
+): String {
+    val btcPrice by priceService.btcPriceUsd.collectAsState()
+    return when (displayCurrency) {
+        DisplayCurrency.USD -> "$${String.format("%.2f", fareUsd)}"
+        DisplayCurrency.SATS -> {
+            val sats = priceService.usdToSats(fareUsd)
+            if (sats != null) "${String.format("%,d", sats)} sats"
+            else "$${String.format("%.2f", fareUsd)}"
         }
     }
 }

@@ -26,13 +26,9 @@ import com.ridestr.common.data.FollowedDriversRepository
 import com.ridestr.common.nostr.NostrService
 import com.ridestr.common.nostr.events.FollowedDriver
 import com.ridestr.common.nostr.events.Location
-import com.ridestr.common.nostr.events.RoadflareLocationData
 import com.ridestr.common.nostr.events.RoadflareLocationEvent
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
-import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
-import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
 import com.vitorpamplona.quartz.nip19Bech32.toNpub
-import kotlinx.coroutines.runBlocking
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -147,9 +143,6 @@ fun DriverNetworkTab(
     // Payment methods dialog state
     var showPaymentMethodsDialog by remember { mutableStateOf(false) }
 
-    // Track last createdAt per driver to reject out-of-order events (Part C fix)
-    val lastLocationCreatedAt = remember { mutableStateMapOf<String, Long>() }
-
     // DEBUG: Log rider's followed drivers state (debug builds only)
     LaunchedEffect(drivers) {
         if (BuildConfig.DEBUG) {
@@ -167,116 +160,9 @@ fun DriverNetworkTab(
         }
     }
 
-    // Fetch driver profiles to get their display names (first name only)
-    LaunchedEffect(drivers, nostrService) {
-        if (nostrService == null) return@LaunchedEffect
-
-        // Fetch profile for each driver we don't have a name for yet
-        drivers.forEach { driver ->
-            if (!driverNames.containsKey(driver.pubkey)) {
-                nostrService.subscribeToProfile(driver.pubkey) { profile ->
-                    val fullName = profile.displayName ?: profile.name
-                    // Extract first name only (like ride offers do)
-                    val firstName = fullName?.split(" ")?.firstOrNull()
-                    if (!firstName.isNullOrBlank()) {
-                        followedDriversRepository.cacheDriverName(driver.pubkey, firstName)
-                    }
-                }
-            }
-        }
-    }
-
-    // Subscription management
-    var subscriptionId by remember { mutableStateOf<String?>(null) }
-
-    // Subscribe to driver location broadcasts
-    LaunchedEffect(drivers, nostrService) {
-        // Close existing subscription
-        subscriptionId?.let { oldId ->
-            nostrService?.closeRoadflareSubscription(oldId)
-        }
-        subscriptionId = null
-
-        if (nostrService == null || drivers.isEmpty()) {
-            Log.d(TAG, "Subscription skip: nostrService=${nostrService != null}, drivers.size=${drivers.size}")
-            return@LaunchedEffect
-        }
-
-        // Only subscribe to drivers who have shared their RoadFlare key
-        val driversWithKeys = drivers.filter { it.roadflareKey != null }
-        if (driversWithKeys.isEmpty()) {
-            Log.d(TAG, "Subscription skip: no drivers with keys (total drivers: ${drivers.size})")
-            return@LaunchedEffect
-        }
-
-        val driverPubkeys = driversWithKeys.map { it.pubkey }
-        Log.d(TAG, "=== SUBSCRIBING TO ROADFLARE LOCATIONS ===")
-        Log.d(TAG, "Drivers with keys: ${driverPubkeys.size}")
-        for (pubkey in driverPubkeys) {
-            Log.d(TAG, "  subscribing to: ${pubkey.take(8)}")
-        }
-
-        subscriptionId = nostrService.subscribeToRoadflareLocations(driverPubkeys) { event, relayUrl ->
-            Log.d(TAG, "*** RECEIVED RoadFlare location event from ${event.pubKey.take(8)} kind=${event.kind} via $relayUrl")
-
-            // Find the driver and their RoadFlare key
-            val driverPubKey = event.pubKey
-            val driver = driversWithKeys.find { it.pubkey == driverPubKey }
-            val roadflareKey = driver?.roadflareKey
-
-            if (roadflareKey == null) {
-                Log.w(TAG, "No RoadFlare key for driver ${driverPubKey.take(8)}")
-                return@subscribeToRoadflareLocations
-            }
-
-            // Decrypt the location using the shared RoadFlare key
-            val locationData = decryptRoadflareLocation(
-                roadflarePrivKey = roadflareKey.privateKey,
-                driverPubKey = driverPubKey,
-                event = event
-            )
-
-            if (locationData != null) {
-                val eventCreatedAt = event.createdAt  // Use event timestamp consistently
-
-                // Check if event has expired (NIP-40 expiration tag)
-                val isExpired = RoadflareLocationEvent.isExpired(event)
-
-                // Check if this is older than what we already have (out-of-order)
-                val lastSeen = lastLocationCreatedAt[driverPubKey] ?: 0L
-                val isOutOfOrder = eventCreatedAt < lastSeen
-
-                if (!isExpired && !isOutOfOrder) {
-                    lastLocationCreatedAt[driverPubKey] = eventCreatedAt
-                    Log.d(TAG, "Updated driver ${driverPubKey.take(8)} status=${locationData.tagStatus} (was: ${cachedLocations[driverPubKey]?.status})")
-
-                    followedDriversRepository.updateDriverLocation(
-                        pubkey = driverPubKey,
-                        lat = locationData.location.lat,
-                        lon = locationData.location.lon,
-                        status = locationData.tagStatus,
-                        timestamp = eventCreatedAt,
-                        keyVersion = locationData.keyVersion
-                    )
-                } else {
-                    Log.d(TAG, "Rejected stale/out-of-order 30014 from ${driverPubKey.take(8)}: expired=$isExpired, outOfOrder=$isOutOfOrder (event=$eventCreatedAt, lastSeen=$lastSeen)")
-                }
-            } else {
-                Log.w(TAG, "Failed to decrypt location from ${driverPubKey.take(8)}")
-            }
-        }
-        Log.d(TAG, "Subscription created: subscriptionId=$subscriptionId")
-    }
-
-    // Clean up subscription on disposal
-    DisposableEffect(Unit) {
-        onDispose {
-            subscriptionId?.let { id ->
-                nostrService?.closeRoadflareSubscription(id)
-                Log.d(TAG, "Closed location subscription on dispose")
-            }
-        }
-    }
+    // NOTE: Location subscriptions and profile fetching are now managed by
+    // RoadflareDriverPresenceCoordinator in the ViewModel (activity-scoped).
+    // This tab reads from repository StateFlows only.
 
     var showRemoveDialog by remember { mutableStateOf<FollowedDriver?>(null) }
 
@@ -809,48 +695,7 @@ private fun formatLastSeen(timestamp: Long): String {
     }
 }
 
-/**
- * Decrypt a RoadFlare location event using the shared RoadFlare private key.
- *
- * NIP-44 ECDH math:
- * - Driver encrypted with: ECDH(driver_identity_priv, roadflare_pub)
- * - We decrypt with: ECDH(roadflare_priv, driver_identity_pub)
- * - These produce the same shared secret (ECDH is commutative)
- */
-internal fun decryptRoadflareLocation(
-    roadflarePrivKey: String,
-    driverPubKey: String,
-    event: com.vitorpamplona.quartz.nip01Core.core.Event
-): RoadflareLocationData? {
-    return try {
-        // Create a temporary signer using the shared RoadFlare private key
-        val keyPair = KeyPair(privKey = roadflarePrivKey.hexToByteArray())
-        val tempSigner = NostrSignerInternal(keyPair)
-
-        // Decrypt using the RoadFlare private key + driver's identity pubkey
-        RoadflareLocationEvent.parseAndDecrypt(
-            roadflarePrivKey = roadflarePrivKey,
-            driverPubKey = driverPubKey,
-            event = event,
-            decryptFn = { ciphertext, counterpartyPubKey ->
-                try {
-                    // NIP-44 decrypt: uses tempSigner's private key + counterpartyPubKey
-                    // Using runBlocking since nip44Decrypt is a suspend function
-                    // and this callback runs on relay background thread
-                    runBlocking {
-                        tempSigner.nip44Decrypt(ciphertext, counterpartyPubKey)
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "NIP-44 decrypt failed", e)
-                    null
-                }
-            }
-        )
-    } catch (e: Exception) {
-        Log.e(TAG, "Failed to decrypt RoadFlare location", e)
-        null
-    }
-}
+// decryptRoadflareLocation moved to RoadflareDriverPresenceCoordinator in :common
 
 /**
  * Dialog for selecting RoadFlare alternate payment methods.

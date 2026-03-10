@@ -11,12 +11,16 @@ import com.ridestr.common.data.SavedLocationRepository
 import com.ridestr.common.location.GeocodingResult
 import com.ridestr.common.location.GeocodingService
 import com.ridestr.common.nostr.NostrService
+import com.ridestr.common.nostr.events.AdminConfig
 import com.ridestr.common.nostr.events.Location
 import com.ridestr.common.nostr.events.PaymentMethod
+import com.ridestr.common.roadflare.RoadflareDriverPresenceCoordinator
+import com.ridestr.common.roadflare.RoadflareFarePolicy
 import com.ridestr.common.routing.NostrTileDiscoveryService
 import com.ridestr.common.routing.TileDownloadService
 import com.ridestr.common.routing.TileManager
 import com.ridestr.common.routing.ValhallaRoutingService
+import com.ridestr.common.settings.RemoteConfigManager
 import com.ridestr.common.settings.SettingsRepository
 import com.ridestr.common.settings.SettingsUiState
 import com.ridestr.common.sync.ProfileSyncManager
@@ -24,12 +28,14 @@ import com.ridestr.common.util.FareCalculator
 import com.roadflare.rider.state.RideStage
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Thin ViewModel projector for the rider's main screen.
@@ -38,6 +44,8 @@ import kotlinx.coroutines.launch
  * - [RideSessionManager] — ride lifecycle, batched offers, NIP-09 cleanup
  * - [ChatCoordinator] — in-ride encrypted chat
  * - [FareCoordinator] — fare calculation and route estimation
+ * - [RoadflareDriverPresenceCoordinator] — ViewModel-scoped location subscriptions
+ * - [DriverQuoteCoordinator] — progressive per-driver fare refinement
  *
  * This ViewModel exposes combined state flows for the UI and acts as
  * the integration point between coordinators.
@@ -62,17 +70,37 @@ class RiderViewModel @Inject constructor(
     val tileDownloadService = TileDownloadService(application, tileManager)
     val nostrTileDiscoveryService = NostrTileDiscoveryService(application, nostrService.relayManager)
 
+    // Remote config (admin fare rates)
+    private val remoteConfigManager = RemoteConfigManager(application, nostrService.relayManager)
+    val remoteConfig: StateFlow<AdminConfig> = remoteConfigManager.config
+
     // Coordinators — constructed with shared services
     val rideSessionManager = RideSessionManager(nostrService)
     val chatCoordinator = ChatCoordinator(nostrService)
+    private val valhallaRoutingService = ValhallaRoutingService(application)
     val fareCoordinator = FareCoordinator(
         fareCalculator = FareCalculator,
         bitcoinPriceService = BitcoinPriceService.getInstance(),
-        valhallaRoutingService = ValhallaRoutingService(application)
+        valhallaRoutingService = valhallaRoutingService
     )
+
+    // ViewModel-scoped presence coordinator (replaces tab-scoped subscriptions)
+    private val presenceCoordinator = RoadflareDriverPresenceCoordinator(
+        nostrService, followedDriversRepository, viewModelScope
+    )
+
+    // Progressive per-driver fare refinement
+    val driverQuoteCoordinator = DriverQuoteCoordinator(
+        valhallaRoutingService, tileManager, followedDriversRepository, viewModelScope
+    )
+
+    // Track current tile region to avoid re-init on same region
+    private var currentTileRegion: String? = null
 
     init {
         nostrService.ensureConnected()
+        viewModelScope.launch { remoteConfigManager.fetchConfig() }
+        presenceCoordinator.start()
     }
 
     /** Current UI stage derived from the ride state machine. */
@@ -185,12 +213,14 @@ class RiderViewModel @Inject constructor(
         _pickupLocation.value = null
         _pickupSearchResults.value = emptyList()
         _fareEstimate.value = null
+        driverQuoteCoordinator.cancel()
     }
 
     fun clearDest() {
         _destLocation.value = null
         _destSearchResults.value = emptyList()
         _fareEstimate.value = null
+        driverQuoteCoordinator.cancel()
     }
 
     fun swapLocations() {
@@ -222,15 +252,41 @@ class RiderViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Ensure Valhalla is initialized for the pickup area before route calculation.
+     */
+    private suspend fun ensureValhallaInitialized(lat: Double, lon: Double) {
+        val tileSource = withContext(Dispatchers.IO) {
+            tileManager.getTileForLocation(lat, lon)
+        } ?: return  // No tile coverage — haversine fallback is fine
+        val regionId = tileSource.region.id
+        if (regionId != currentTileRegion) {
+            withContext(Dispatchers.IO) {
+                valhallaRoutingService.initializeWithTileSource(tileSource)
+            }
+            currentTileRegion = regionId
+        }
+    }
+
     private fun recalculateFare() {
         val pickup = _pickupLocation.value ?: return
         val dest = _destLocation.value ?: return
         viewModelScope.launch {
             _isCalculatingFare.value = true
             try {
-                _fareEstimate.value = fareCoordinator.calculateRoute(pickup, dest)
+                ensureValhallaInitialized(pickup.lat, pickup.lon)
+                val route = fareCoordinator.calculateRoute(pickup, dest)
+                _fareEstimate.value = route
+
+                // Prewarm driver quotes (so selection screen opens with data)
+                driverQuoteCoordinator.start(
+                    pickup, route.distanceMiles,
+                    remoteConfigManager.config.value,
+                    BitcoinPriceService.getInstance()
+                )
             } catch (_: Exception) {
                 _fareEstimate.value = null
+                driverQuoteCoordinator.cancel()
             } finally {
                 _isCalculatingFare.value = false
             }
@@ -244,47 +300,49 @@ class RiderViewModel @Inject constructor(
     fun getPubKeyHex(): String? = nostrService.getPubKeyHex()
 
     /**
-     * Send a RoadFlare to all followed drivers.
-     * Uses already-selected pickup/destination and pre-calculated fare.
+     * Send to a single driver with their specific fare.
+     * Called from DriverSelectionScreen when user taps a driver card.
      */
-    fun sendRoadflare() {
+    fun sendRoadflareToDriver(driverPubkey: String, fareUsd: Double, pickupMiles: Double, rideMiles: Double) {
         val pickup = _pickupLocation.value ?: return
         val dest = _destLocation.value ?: return
-        val route = _fareEstimate.value
+        val names = followedDriversRepository.driverNames.value
+        val config = remoteConfigManager.config.value
 
-        viewModelScope.launch {
-            val currentDrivers = followedDriversRepository.drivers.value
-            val currentNames = followedDriversRepository.driverNames.value
-            val currentLocations = followedDriversRepository.driverLocations.value
+        rideSessionManager.sendRoadflareToAll(
+            drivers = listOf(
+                DriverOfferData(
+                    pubkey = driverPubkey,
+                    displayName = names[driverPubkey] ?: driverPubkey.take(8),
+                    pickupMiles = pickupMiles,
+                    fareUsd = fareUsd
+                )
+            ),
+            pickup = pickup,
+            destination = dest,
+            rideReferenceFareUsd = RoadflareFarePolicy.rideReferenceFareUsd(rideMiles, config),
+            paymentMethod = PaymentMethod.FIAT_CASH,
+            fiatPaymentMethods = settingsRepository.getRoadflarePaymentMethods()
+        )
+    }
 
-            if (currentDrivers.isEmpty()) return@launch
+    /**
+     * Send to all eligible drivers with per-driver fares.
+     * Called from DriverSelectionScreen broadcast button.
+     */
+    fun sendRoadflareToAll(eligibleDrivers: List<DriverOfferData>, rideMiles: Double) {
+        val pickup = _pickupLocation.value ?: return
+        val dest = _destLocation.value ?: return
+        val config = remoteConfigManager.config.value
 
-            // Build driver list with distances from pickup
-            val driversWithDistance = currentDrivers.map { driver ->
-                val cachedLoc = currentLocations[driver.pubkey]
-                val distanceMiles = if (cachedLoc != null) {
-                    pickup.distanceToKm(Location(cachedLoc.lat, cachedLoc.lon)) * 0.621371
-                } else {
-                    Double.MAX_VALUE
-                }
-                driver.pubkey to distanceMiles
-            }
-
-            val fareUsd = route?.fareUsd ?: fareCoordinator.calculateRoute(pickup, dest).fareUsd
-            val fareSats = route?.fareSats
-            val fiatPaymentMethods = settingsRepository.getRoadflarePaymentMethods()
-
-            rideSessionManager.sendRoadflareToAll(
-                drivers = driversWithDistance,
-                driverNames = currentNames,
-                pickup = pickup,
-                destination = dest,
-                fareEstimate = fareUsd,
-                fareEstimateSats = fareSats,
-                paymentMethod = PaymentMethod.FIAT_CASH,
-                fiatPaymentMethods = fiatPaymentMethods
-            )
-        }
+        rideSessionManager.sendRoadflareToAll(
+            drivers = eligibleDrivers,
+            pickup = pickup,
+            destination = dest,
+            rideReferenceFareUsd = RoadflareFarePolicy.rideReferenceFareUsd(rideMiles, config),
+            paymentMethod = PaymentMethod.FIAT_CASH,
+            fiatPaymentMethods = settingsRepository.getRoadflarePaymentMethods()
+        )
     }
 
     /**
@@ -295,6 +353,8 @@ class RiderViewModel @Inject constructor(
         super.onCleared()
         rideSessionManager.destroy()
         chatCoordinator.destroy()
+        presenceCoordinator.stop()
+        driverQuoteCoordinator.cancel()
     }
 
     suspend fun performLogout() {

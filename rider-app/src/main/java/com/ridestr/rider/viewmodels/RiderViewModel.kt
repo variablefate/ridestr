@@ -57,6 +57,8 @@ import com.ridestr.common.state.riderStageFromDriverStatus
 import com.ridestr.common.util.PeriodicRefreshJob
 import com.ridestr.common.util.FareCalculator
 import com.ridestr.common.util.RideHistoryBuilder
+import com.ridestr.common.data.FollowedDriversRepository
+import com.ridestr.common.roadflare.RoadflareDriverPresenceCoordinator
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -177,6 +179,12 @@ class RiderViewModel @Inject constructor(
     private val tileManager = TileManager.getInstance(application)
     private val savedLocationRepository = SavedLocationRepository.getInstance(application)
     private val rideHistoryRepository = RideHistoryRepository.getInstance(application)
+    private val followedDriversRepository = FollowedDriversRepository.getInstance(application)
+
+    // RoadFlare presence coordinator — ViewModel-scoped location subscription + profile fetching
+    private val presenceCoordinator = RoadflareDriverPresenceCoordinator(
+        nostrService, followedDriversRepository, viewModelScope
+    )
 
     // Track which tile region is currently loaded
     private var currentTileRegion: String? = null
@@ -620,6 +628,9 @@ class RiderViewModel @Inject constructor(
         startStaleDriverCleanup()
         // Start Bitcoin price auto-refresh (every 5 minutes)
         bitcoinPriceService.startAutoRefresh()
+
+        // Start RoadFlare location subscription + profile fetching (ViewModel-scoped)
+        presenceCoordinator.start()
 
         // Fetch remote config (fare rates, recommended mints) from admin pubkey
         viewModelScope.launch {
@@ -5308,6 +5319,7 @@ class RiderViewModel @Inject constructor(
         broadcastTimeoutJob?.cancel()
         bridgePendingPollJob?.cancel()
         roadflareBatchJob?.cancel()
+        presenceCoordinator.stop()
         subs.closeAll()
         bitcoinPriceService.cleanup()
     }
