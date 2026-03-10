@@ -27,9 +27,12 @@ import kotlinx.coroutines.flow.asStateFlow
  * Usage:
  * ```kotlin
  * val broadcaster = RoadflareLocationBroadcaster(repository, nostrService, signer)
- * broadcaster.startBroadcasting(locationProvider) // Start when app is active
+ * broadcaster.startBroadcasting(
+ *     locationProvider = { getCurrentLocation() },
+ *     statusProvider = { deriveStatusFromStage() }
+ * )
  * broadcaster.stopBroadcasting() // Stop when app is backgrounded
- * broadcaster.setOnRide(true) // Update status when on a ride
+ * broadcaster.requestImmediateBroadcast() // Force fresh broadcast after mode switch
  * ```
  */
 class RoadflareLocationBroadcaster(
@@ -56,19 +59,28 @@ class RoadflareLocationBroadcaster(
     private val _lastBroadcastTime = MutableStateFlow<Long?>(null)
     val lastBroadcastTime: StateFlow<Long?> = _lastBroadcastTime.asStateFlow()
 
-    private var isOnRide = false
+    private var statusProvider: (() -> String)? = null
+    private var storedLocationProvider: (suspend () -> Location?)? = null
     private var lastLocation: Location? = null
 
     /**
      * Start broadcasting location at regular intervals.
      *
      * @param locationProvider Function that returns the current location, or null if unavailable
+     * @param statusProvider Function that returns the current status string (e.g., ONLINE, ON_RIDE, OFFLINE).
+     *   Called at each broadcast — no mutable flag to get out of sync.
      */
-    fun startBroadcasting(locationProvider: suspend () -> Location?) {
+    fun startBroadcasting(
+        locationProvider: suspend () -> Location?,
+        statusProvider: () -> String = { RoadflareLocationEvent.Status.ONLINE }
+    ) {
         if (broadcastJob?.isActive == true) {
             Log.d(TAG, "Already broadcasting, ignoring start request")
             return
         }
+
+        this.storedLocationProvider = locationProvider
+        this.statusProvider = statusProvider
 
         Log.d(TAG, "Starting location broadcasting")
         _isBroadcasting.value = true
@@ -97,25 +109,20 @@ class RoadflareLocationBroadcaster(
     }
 
     /**
-     * Set whether the driver is currently on a ride.
-     * This affects the status field in broadcasts.
-     *
-     * When clearing on-ride status (false), forces an immediate broadcast
-     * to replace the stale ON_RIDE event on relays. Bypasses the minimum
-     * interval guard because status transitions are critical — a stale
-     * ON_RIDE event makes the driver appear permanently unavailable.
+     * Request an immediate broadcast with current status and fresh location.
+     * Use after mode switches when broadcaster is already running.
+     * On fresh starts, the broadcast loop already fires immediately.
+     * If forgotten, status self-corrects on next periodic cycle (≤2 min).
      */
-    fun setOnRide(onRide: Boolean) {
-        val wasOnRide = isOnRide
-        isOnRide = onRide
-        Log.d(TAG, "On ride status: $onRide")
-
-        // Force immediate ONLINE broadcast when clearing on-ride status
-        if (wasOnRide && !onRide && _isBroadcasting.value) {
-            scope.launch {
-                Log.d(TAG, "Forcing immediate ONLINE broadcast after ride ended")
-                broadcastLocation()
+    fun requestImmediateBroadcast() {
+        if (!_isBroadcasting.value) return
+        scope.launch {
+            Log.d(TAG, "Immediate broadcast requested")
+            val freshLocation = storedLocationProvider?.invoke()
+            if (freshLocation != null) {
+                lastLocation = freshLocation
             }
+            broadcastLocation()
         }
     }
 
@@ -187,11 +194,8 @@ class RoadflareLocationBroadcaster(
         val roadflareKey = state.roadflareKey ?: return
         val androidLocation = lastLocation ?: return
 
-        // Determine status
-        val status = when {
-            isOnRide -> RoadflareLocationEvent.Status.ON_RIDE
-            else -> RoadflareLocationEvent.Status.ONLINE
-        }
+        // Determine status from caller-provided provider (no mutable flag)
+        val status = statusProvider?.invoke() ?: RoadflareLocationEvent.Status.ONLINE
 
         Log.d(TAG, "Broadcasting location: ${androidLocation.latitude}, ${androidLocation.longitude}, status=$status")
 
@@ -201,7 +205,7 @@ class RoadflareLocationBroadcaster(
             lon = androidLocation.longitude,
             timestamp = System.currentTimeMillis() / 1000,
             status = status,
-            onRide = isOnRide
+            onRide = (status == RoadflareLocationEvent.Status.ON_RIDE)
         )
 
         try {

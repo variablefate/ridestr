@@ -859,6 +859,11 @@ class DriverViewModel @Inject constructor(
         // Start availability broadcasting and full offer subscriptions
         resumeOfferSubscriptions(location)
 
+        // Check if broadcaster was already running BEFORE potentially restarting it.
+        // If already running, startBroadcasting() will early-return, so we need
+        // requestImmediateBroadcast() to publish the updated AVAILABLE status.
+        val wasAlreadyBroadcasting = roadflareLocationBroadcaster?.isBroadcasting?.value == true
+
         if (wasRoadflareOnly) {
             // Close roadflare-only subscription (full subscribeToOffers replaces it)
             closeRoadflareOfferSubscription()
@@ -874,7 +879,13 @@ class DriverViewModel @Inject constructor(
                 startRoadflareBroadcasting()
             }
         }
-        // Note: driverOnlineStatus is now set by DriverOnlineService (authoritative)
+
+        // Stage is AVAILABLE — if broadcaster was already running (e.g., ROADFLARE_ONLY → AVAILABLE,
+        // or finishAndGoOnline → wallet warning path), fire immediate broadcast with fresh status.
+        // Fresh starts broadcast immediately via the loop's first iteration.
+        if (wasAlreadyBroadcasting) {
+            roadflareLocationBroadcaster?.requestImmediateBroadcast()
+        }
     }
 
     /**
@@ -924,6 +935,11 @@ class DriverViewModel @Inject constructor(
         // sets ROADFLARE_ONLY - during which RoadFlare requests could be dropped
         DriverOnlineService.startRoadflareOnly(context)
 
+        // Check if broadcaster was already running before we try to (re)start it.
+        // If already running, startBroadcasting() will early-return, so we need
+        // requestImmediateBroadcast() to publish the updated ROADFLARE_ONLY status.
+        val wasAlreadyBroadcasting = roadflareLocationBroadcaster?.isBroadcasting?.value == true
+
         // Sync RoadFlare state from Nostr if local state is missing (cross-device sync)
         // then start RoadFlare broadcasting + offer subscription (RoadFlare-tagged only)
         viewModelScope.launch {
@@ -937,6 +953,12 @@ class DriverViewModel @Inject constructor(
                 location = null,
                 status = DriverAvailabilityEvent.STATUS_AVAILABLE
             )
+        }
+
+        // Stage is ROADFLARE_ONLY — if broadcaster was already running (e.g., coming back
+        // from AVAILABLE), fire immediate broadcast. Fresh starts broadcast via the loop.
+        if (wasAlreadyBroadcasting) {
+            roadflareLocationBroadcaster?.requestImmediateBroadcast()
         }
     }
 
@@ -1243,8 +1265,9 @@ class DriverViewModel @Inject constructor(
 
         stageBeforeRide = null
 
-        // Reset RoadFlare on-ride flag BEFORE going online
-        updateRoadflareOnRideStatus(false)
+        // No explicit RoadFlare status update needed here — statusProvider derives
+        // status from DriverStage. Downstream goOnline()/goRoadflareOnly() handles
+        // immediate broadcast after stage is set to the correct mode.
 
         // Restore pre-ride mode using PRE-RESET captured state
         if (restoreRoadflareOnly) {
@@ -1451,9 +1474,6 @@ class DriverViewModel @Inject constructor(
                 driverMintUrl = driverMintUrl
             )
         )
-
-        // Update RoadFlare broadcaster to indicate on-ride status
-        updateRoadflareOnRideStatus(true)
 
         // Save ride state for persistence
         saveRideState()
@@ -2202,9 +2222,6 @@ class DriverViewModel @Inject constructor(
                 statusMessage = "Ride in progress..."
             )
 
-            // Update RoadFlare broadcaster to indicate on-ride status
-            updateRoadflareOnRideStatus(true)
-
             // Save ride state for persistence
             saveRideState()
         }
@@ -2319,8 +2336,8 @@ class DriverViewModel @Inject constructor(
         // Close all ride subscriptions and jobs since ride is ending
         closeAllRideSubscriptionsAndJobs()
 
-        // Reset RoadFlare on-ride status (broadcasts "ONLINE" instead of "ON_RIDE")
-        updateRoadflareOnRideStatus(false)
+        // No explicit RoadFlare status update — RIDE_COMPLETED maps to ON_RIDE via statusProvider.
+        // Driver is still on completion screen and not accepting offers.
 
         viewModelScope.launch {
             // Correlation ID for payment tracking
@@ -2519,7 +2536,6 @@ class DriverViewModel @Inject constructor(
 
         closeAllRideSubscriptionsAndJobs()
         clearDriverStateHistory()
-        updateRoadflareOnRideStatus(false)
 
         // Reset ALL ride state
         resetRideUiState(
@@ -2527,6 +2543,10 @@ class DriverViewModel @Inject constructor(
             statusMessage = "Ride cancelled - no response from rider",
             error = "Rider may have cancelled - no confirmation received"
         )
+
+        // Stage is now AVAILABLE — statusProvider will derive ONLINE.
+        // Fire immediate broadcast to replace stale ON_RIDE event on relays.
+        roadflareLocationBroadcaster?.requestImmediateBroadcast()
 
         // Clear persisted ride state — ride was persisted on accept,
         // so timeout must clear it to prevent stale restore on app restart
@@ -2829,8 +2849,6 @@ class DriverViewModel @Inject constructor(
             broadcastRoadflareOfflineStatus()
             stopRoadflareBroadcasting()
         } else {
-            // Returning to AVAILABLE - reset on-ride status
-            updateRoadflareOnRideStatus(false)
             DriverOnlineService.updateStatus(context, DriverStatus.Available(0))
         }
 
@@ -2840,6 +2858,11 @@ class DriverViewModel @Inject constructor(
             statusMessage = if (newStage == DriverStage.AVAILABLE) "Rider cancelled - waiting for new requests" else "Rider cancelled ride",
             error = reason ?: "Rider cancelled the ride"
         )
+
+        // Stage is now set — fire immediate broadcast to replace stale ON_RIDE on relays
+        if (newStage == DriverStage.AVAILABLE) {
+            roadflareLocationBroadcaster?.requestImmediateBroadcast()
+        }
 
         // Resume broadcasting and subscriptions if returning to AVAILABLE
         if (newStage == DriverStage.AVAILABLE && state.currentLocation != null) {
@@ -4093,18 +4116,33 @@ class DriverViewModel @Inject constructor(
         }
 
         // Start broadcasting with a location provider that reads current location from UI state
-        roadflareLocationBroadcaster?.startBroadcasting {
-            val location = _uiState.value.currentLocation
-            if (location != null) {
-                // Convert our Location to Android Location for the broadcaster
-                android.location.Location("").apply {
-                    latitude = location.lat
-                    longitude = location.lon
+        // and a status provider that derives status from the current DriverStage
+        roadflareLocationBroadcaster?.startBroadcasting(
+            locationProvider = {
+                val location = _uiState.value.currentLocation
+                if (location != null) {
+                    // Convert our Location to Android Location for the broadcaster
+                    android.location.Location("").apply {
+                        latitude = location.lat
+                        longitude = location.lon
+                    }
+                } else {
+                    null
                 }
-            } else {
-                null
+            },
+            statusProvider = {
+                when (_uiState.value.stage) {
+                    DriverStage.OFFLINE -> RoadflareLocationEvent.Status.OFFLINE
+                    DriverStage.ROADFLARE_ONLY,
+                    DriverStage.AVAILABLE -> RoadflareLocationEvent.Status.ONLINE
+                    DriverStage.RIDE_ACCEPTED,
+                    DriverStage.EN_ROUTE_TO_PICKUP,
+                    DriverStage.ARRIVED_AT_PICKUP,
+                    DriverStage.IN_RIDE,
+                    DriverStage.RIDE_COMPLETED -> RoadflareLocationEvent.Status.ON_RIDE
+                }
             }
-        }
+        )
 
         Log.d(TAG, "RoadFlare location broadcasting started")
     }
@@ -4115,15 +4153,6 @@ class DriverViewModel @Inject constructor(
     private fun stopRoadflareBroadcasting() {
         roadflareLocationBroadcaster?.stopBroadcasting()
         Log.d(TAG, "RoadFlare location broadcasting stopped")
-    }
-
-    /**
-     * Update RoadFlare broadcaster's on-ride status.
-     * Call when entering or exiting a ride.
-     */
-    private fun updateRoadflareOnRideStatus(isOnRide: Boolean) {
-        roadflareLocationBroadcaster?.setOnRide(isOnRide)
-        Log.d(TAG, "RoadFlare on-ride status: $isOnRide")
     }
 
     fun performLogoutCleanup() {

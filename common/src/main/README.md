@@ -118,7 +118,7 @@ CREATED → ACCEPTED → CONFIRMED → EN_ROUTE → ARRIVED → IN_PROGRESS → 
 | File | Purpose | Key Methods |
 |------|---------|-------------|
 | `RoadflareKeyManager.kt` | Nostr keypair lifecycle + key rotation | `approveFollower()`, `handleMuteFollower()`, `rotateKey()`, `ensureFollowersHaveCurrentKey()` |
-| `RoadflareLocationBroadcaster.kt` | Timer-based location broadcast (2 min interval) | `startBroadcasting()`, `stopBroadcasting()`, `setOnRide()`, `broadcastNow()` |
+| `RoadflareLocationBroadcaster.kt` | Timer-based location broadcast (2 min interval) | `startBroadcasting(locationProvider, statusProvider)`, `stopBroadcasting()`, `requestImmediateBroadcast()`, `broadcastNow()` |
 
 ### Routing (`java/com/ridestr/common/routing/`)
 
