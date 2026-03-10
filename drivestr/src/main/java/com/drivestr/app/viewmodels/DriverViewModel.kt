@@ -7,6 +7,7 @@ import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
+import com.drivestr.app.presence.AvailabilitySpec
 import com.drivestr.app.presence.DriverPresenceMapper
 import com.drivestr.app.presence.DriverStage
 import com.drivestr.app.service.DriverOnlineService
@@ -939,10 +940,7 @@ class DriverViewModel @Inject constructor(
 
             // Publish locationless Kind 30173 so availability subscription works
             // (Driver is trackable by pubkey but invisible to geographic searches)
-            nostrService.broadcastAvailability(
-                location = null,
-                status = DriverAvailabilityEvent.STATUS_AVAILABLE
-            )
+            publishAvailability(AvailabilitySpec.RoadflarePresence)
         }
 
         // Stage is ROADFLARE_ONLY — if broadcaster was already running (e.g., coming back
@@ -984,19 +982,13 @@ class DriverViewModel @Inject constructor(
             // Broadcast offline status based on previous mode
             if (wasRoadflareOnly) {
                 // ROADFLARE_ONLY: locationless offline (preserves privacy)
-                val eventId = nostrService.broadcastAvailability(
-                    location = null,
-                    status = DriverAvailabilityEvent.STATUS_OFFLINE
-                )
+                val eventId = publishAvailability(AvailabilitySpec.OfflineLocationless)
                 if (eventId != null) {
                     Log.d(TAG, "Broadcast locationless offline status: $eventId")
                 }
             } else if (lastLocation != null) {
                 // AVAILABLE: offline with location (needed for geographic removal)
-                val eventId = nostrService.broadcastAvailability(
-                    location = lastLocation,
-                    status = DriverAvailabilityEvent.STATUS_OFFLINE
-                )
+                val eventId = publishAvailability(AvailabilitySpec.OfflineWithLocation(lastLocation))
                 if (eventId != null) {
                     Log.d(TAG, "Broadcast offline status: $eventId")
                     // Don't add to publishedAvailabilityEventIds - we want this to persist
@@ -1175,10 +1167,7 @@ class DriverViewModel @Inject constructor(
             }
 
             // Broadcast offline status so riders/followers see driver is unavailable
-            nostrService.broadcastAvailability(
-                location = null,
-                status = DriverAvailabilityEvent.STATUS_OFFLINE
-            )
+            publishAvailability(AvailabilitySpec.OfflineLocationless)
 
             // Reset ALL ride state
             resetRideUiState(
@@ -2985,6 +2974,17 @@ class DriverViewModel @Inject constructor(
         _uiState.value = _uiState.value.copy(error = null)
     }
 
+    private suspend fun publishAvailability(spec: AvailabilitySpec): String? {
+        val args = spec.toPublishArgs()
+        return nostrService.broadcastAvailability(
+            location = args.location,
+            status = args.status,
+            vehicle = args.vehicle,
+            mintUrl = args.mintUrl,
+            paymentMethods = args.paymentMethods
+        )
+    }
+
     private fun startBroadcasting(location: Location) {
         Log.d(TAG, "=== START BROADCASTING ===")
         Log.d(TAG, "Location: ${location.lat}, ${location.lon}")
@@ -3021,12 +3021,12 @@ class DriverViewModel @Inject constructor(
                 Log.d(TAG, "Broadcasting availability at ${currentLocation.lat}, ${currentLocation.lon}")
                 val mintUrl = walletService?.getSavedMintUrl()
                 val paymentMethods = settingsRepository.getPaymentMethods()
-                val eventId = nostrService.broadcastAvailability(
+                val eventId = publishAvailability(AvailabilitySpec.Available(
                     location = currentLocation,
                     vehicle = activeVehicle,
                     mintUrl = mintUrl,
                     paymentMethods = paymentMethods
-                )
+                ))
 
                 if (eventId != null) {
                     Log.d(TAG, "Broadcast SUCCESS: ${eventId.take(16)}... (total: ${publishedAvailabilityEventIds.size + 1})")
