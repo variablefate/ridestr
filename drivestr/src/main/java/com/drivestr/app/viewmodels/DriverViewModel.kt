@@ -860,7 +860,7 @@ class DriverViewModel @Inject constructor(
             closeRoadflareOfferSubscription()
             // RoadFlare broadcasting already running — don't restart
             // Update service status from ROADFLARE_ONLY to AVAILABLE (service is authoritative)
-            DriverOnlineService.updateStatus(context, DriverPresenceMapper.serviceBaseStatus(DriverStage.AVAILABLE)!!)
+            DriverOnlineService.updatePresence(context, DriverPresenceMapper.presenceMode(DriverStage.AVAILABLE))
         } else {
             // Fresh start: launch foreground service and RoadFlare broadcasting
             DriverOnlineService.start(context)
@@ -1539,7 +1539,7 @@ class DriverViewModel @Inject constructor(
             }
 
             // Notify service of arrival (updates notification)
-            DriverOnlineService.updateStatus(context, DriverPresenceMapper.serviceBaseStatus(DriverStage.ARRIVED_AT_PICKUP)!!)
+            DriverOnlineService.updatePresence(context, DriverPresenceMapper.presenceMode(DriverStage.ARRIVED_AT_PICKUP))
 
             // Save ride state for persistence
             saveRideState()
@@ -2192,7 +2192,7 @@ class DriverViewModel @Inject constructor(
             }
 
             // Notify service of ride in progress (updates notification)
-            DriverOnlineService.updateStatus(context, DriverPresenceMapper.serviceBaseStatus(DriverStage.IN_RIDE)!!)
+            DriverOnlineService.updatePresence(context, DriverPresenceMapper.presenceMode(DriverStage.IN_RIDE))
 
             _uiState.value = state.copy(
                 stage = DriverStage.IN_RIDE,
@@ -2561,7 +2561,7 @@ class DriverViewModel @Inject constructor(
             eventId?.let { trackEventForCleanup(it, "DRIVER_RIDE_STATE") }
 
             // Notify service of status change (updates notification)
-            DriverOnlineService.updateStatus(context, DriverPresenceMapper.serviceBaseStatus(DriverStage.EN_ROUTE_TO_PICKUP)!!)
+            DriverOnlineService.updatePresence(context, DriverPresenceMapper.presenceMode(DriverStage.EN_ROUTE_TO_PICKUP))
 
             _uiState.value = _uiState.value.copy(
                 stage = DriverStage.EN_ROUTE_TO_PICKUP,
@@ -2825,7 +2825,7 @@ class DriverViewModel @Inject constructor(
             broadcastRoadflareOfflineStatus()
             stopRoadflareBroadcasting()
         } else {
-            DriverOnlineService.updateStatus(context, DriverPresenceMapper.serviceBaseStatus(DriverStage.AVAILABLE)!!)
+            DriverOnlineService.updatePresence(context, DriverPresenceMapper.presenceMode(DriverStage.AVAILABLE))
         }
 
         // Reset ALL ride state BEFORE resuming subscriptions (prevents stale offers being cleared)

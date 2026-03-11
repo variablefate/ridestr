@@ -1,15 +1,16 @@
 package com.drivestr.app.presence
 
-import com.drivestr.app.service.DriverStatus
 import com.ridestr.common.nostr.events.RoadflareLocationEvent
 
 /**
  * Centralizes pure stage-to-status derivations across driver presence channels.
  *
- * Three channels:
+ * Two channels:
  * - Kind 30014 (RoadFlare location) via [roadflareStatus]
- * - Foreground service base state via [serviceBaseStatus]
- * - Background listener gate via [listenerGateStatus]
+ * - Base operational mode via [presenceMode]
+ *
+ * Gate derivation (DriverStatus → DriverPresenceGate) is handled by the service layer
+ * via gateForStatus() in DriverOnlineService.kt.
  *
  * NOT mapped here (intentionally):
  * - Kind 30173 availability (context-dependent: location, vehicle, mint, payment methods)
@@ -31,33 +32,19 @@ object DriverPresenceMapper {
     }
 
     /**
-     * Channel 2: Base foreground service status.
-     * Returns null for stages where the service should be stopped or is transient.
-     * Does NOT handle NewRequest, Cancelled, or Available(requestCount).
+     * Channel 2: Base operational mode.
+     * Returns OFF for stages where the service should be stopped or is transient.
+     * Does NOT handle NewRequest, Cancelled, or Available(requestCount) — those are
+     * notification overlays that stay in DriverStatus.
      */
-    fun serviceBaseStatus(stage: DriverStage): DriverStatus? = when (stage) {
-        DriverStage.OFFLINE -> null
-        DriverStage.ROADFLARE_ONLY -> DriverStatus.RoadflareOnly
-        DriverStage.AVAILABLE -> DriverStatus.Available(0)
-        DriverStage.RIDE_ACCEPTED -> null  // Transient — EN_ROUTE follows immediately
-        DriverStage.EN_ROUTE_TO_PICKUP -> DriverStatus.EnRouteToPickup(null)
-        DriverStage.ARRIVED_AT_PICKUP -> DriverStatus.ArrivedAtPickup(null)
-        DriverStage.IN_RIDE -> DriverStatus.RideInProgress(null)
-        DriverStage.RIDE_COMPLETED -> null  // Completion screen, service stopped later
-    }
-
-    /**
-     * Channel 3: Listener gate — determines whether the background
-     * RoadflareListenerService should show notifications or defer to the main app.
-     * Exhaustive on DriverStatus (sealed class).
-     */
-    fun listenerGateStatus(status: DriverStatus): DriverPresenceGate = when (status) {
-        is DriverStatus.Available -> DriverPresenceGate.AVAILABLE
-        is DriverStatus.RoadflareOnly -> DriverPresenceGate.ROADFLARE_ONLY
-        is DriverStatus.EnRouteToPickup,
-        is DriverStatus.ArrivedAtPickup,
-        is DriverStatus.RideInProgress -> DriverPresenceGate.IN_RIDE
-        is DriverStatus.NewRequest -> DriverPresenceGate.AVAILABLE
-        is DriverStatus.Cancelled -> DriverPresenceGate.AVAILABLE
+    internal fun presenceMode(stage: DriverStage): PresenceMode = when (stage) {
+        DriverStage.OFFLINE -> PresenceMode.OFF
+        DriverStage.ROADFLARE_ONLY -> PresenceMode.ROADFLARE_ONLY
+        DriverStage.AVAILABLE -> PresenceMode.AVAILABLE
+        DriverStage.RIDE_ACCEPTED -> PresenceMode.OFF        // Transient — EN_ROUTE follows immediately
+        DriverStage.EN_ROUTE_TO_PICKUP -> PresenceMode.EN_ROUTE
+        DriverStage.ARRIVED_AT_PICKUP -> PresenceMode.AT_PICKUP
+        DriverStage.IN_RIDE -> PresenceMode.IN_RIDE
+        DriverStage.RIDE_COMPLETED -> PresenceMode.OFF       // Completion screen, service stopped later
     }
 }

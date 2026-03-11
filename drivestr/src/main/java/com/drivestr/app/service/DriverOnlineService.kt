@@ -15,8 +15,8 @@ import com.ridestr.common.notification.NotificationCoordinator
 import com.ridestr.common.notification.NotificationHelper
 import com.ridestr.common.notification.SoundManager
 import com.drivestr.app.presence.DriverPresenceGate
-import com.drivestr.app.presence.DriverPresenceMapper
 import com.drivestr.app.presence.DriverPresenceStore
+import com.drivestr.app.presence.PresenceMode
 import com.ridestr.common.settings.SettingsRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -41,6 +41,27 @@ sealed class DriverStatus : Serializable {
     data class RideInProgress(val riderName: String?) : DriverStatus()
     object Cancelled : DriverStatus()
     object RoadflareOnly : DriverStatus()
+}
+
+/** Translates base operational mode to the corresponding DriverStatus for notification display. */
+internal fun PresenceMode.toDriverStatus(): DriverStatus = when (this) {
+    PresenceMode.ROADFLARE_ONLY -> DriverStatus.RoadflareOnly
+    PresenceMode.AVAILABLE -> DriverStatus.Available(0)
+    PresenceMode.EN_ROUTE -> DriverStatus.EnRouteToPickup(null)
+    PresenceMode.AT_PICKUP -> DriverStatus.ArrivedAtPickup(null)
+    PresenceMode.IN_RIDE -> DriverStatus.RideInProgress(null)
+    PresenceMode.OFF -> error("OFF should not be sent to service")
+}
+
+/** Maps any DriverStatus (including overlays) to the listener gate. Service is authoritative. */
+internal fun gateForStatus(status: DriverStatus): DriverPresenceGate = when (status) {
+    is DriverStatus.Available,
+    is DriverStatus.NewRequest,
+    is DriverStatus.Cancelled -> DriverPresenceGate.AVAILABLE
+    is DriverStatus.RoadflareOnly -> DriverPresenceGate.ROADFLARE_ONLY
+    is DriverStatus.EnRouteToPickup,
+    is DriverStatus.ArrivedAtPickup,
+    is DriverStatus.RideInProgress -> DriverPresenceGate.IN_RIDE
 }
 
 /**
@@ -111,6 +132,14 @@ class DriverOnlineService : Service() {
             } else {
                 context.startService(intent)
             }
+        }
+
+        /**
+         * Update the notification for a base presence mode (non-overlay).
+         * Translates PresenceMode to DriverStatus internally.
+         */
+        internal fun updatePresence(context: Context, mode: PresenceMode) {
+            updateStatus(context, mode.toDriverStatus())
         }
 
         /**
@@ -187,29 +216,18 @@ class DriverOnlineService : Service() {
         when (intent?.action) {
             ACTION_START -> {
                 Log.d(TAG, "Received START action")
-                coordinator.updateStatus(DriverStatus.Available(0))
-                coordinator.clearAlerts()
-                newRequestRevertJob?.cancel()
-                // Service is authoritative - set gate immediately (closes race window)
-                presenceStore.setGate(DriverPresenceGate.AVAILABLE)
-                updateNotification()
+                applyBasePresence(PresenceMode.AVAILABLE)
             }
             ACTION_START_ROADFLARE_ONLY -> {
                 Log.d(TAG, "Received START_ROADFLARE_ONLY action")
-                coordinator.updateStatus(DriverStatus.RoadflareOnly)
-                coordinator.clearAlerts()
-                newRequestRevertJob?.cancel()
-                // Set ROADFLARE_ONLY immediately - avoids race window where start() sets
-                // AVAILABLE then updateStatus() sets ROADFLARE_ONLY (Finding #1 fix)
-                presenceStore.setGate(DriverPresenceGate.ROADFLARE_ONLY)
-                updateNotification()
+                applyBasePresence(PresenceMode.ROADFLARE_ONLY)
             }
             ACTION_UPDATE_STATUS -> {
                 val status = intent.getSerializableExtra(EXTRA_STATUS) as? DriverStatus
                 if (status != null) {
                     handleStatusUpdate(status)
                     // Map DriverStatus to typed gate (service is authoritative)
-                    presenceStore.setGate(DriverPresenceMapper.listenerGateStatus(status))
+                    presenceStore.setGate(gateForStatus(status))
                 }
             }
             ACTION_ADD_ALERT -> {
@@ -234,6 +252,15 @@ class DriverOnlineService : Service() {
             }
         }
         return START_STICKY
+    }
+
+    /** Applies a base presence mode: sets status, clears overlays, updates gate and notification. */
+    private fun applyBasePresence(mode: PresenceMode) {
+        coordinator.updateStatus(mode.toDriverStatus())
+        coordinator.clearAlerts()
+        newRequestRevertJob?.cancel()
+        presenceStore.setGate(gateForStatus(mode.toDriverStatus()))
+        updateNotification()
     }
 
     private fun ensureForeground() {

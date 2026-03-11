@@ -1,9 +1,8 @@
 package com.drivestr.app.presence
 
-import com.drivestr.app.service.DriverStatus
 import com.ridestr.common.nostr.events.RoadflareLocationEvent
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
+import org.junit.Assert.assertNotEquals
 import org.junit.Test
 
 class DriverPresenceMapperTest {
@@ -46,60 +45,39 @@ class DriverPresenceMapperTest {
     }
 
     // ========================================
-    // Channel 2: serviceBaseStatus (DriverStage → DriverStatus?)
+    // Channel 2: presenceMode (DriverStage → PresenceMode)
     // ========================================
 
     @Test
-    fun `serviceBaseStatus returns null for non-service stages`() {
-        assertNull(DriverPresenceMapper.serviceBaseStatus(DriverStage.OFFLINE))
-        assertNull(DriverPresenceMapper.serviceBaseStatus(DriverStage.RIDE_ACCEPTED))
-        assertNull(DriverPresenceMapper.serviceBaseStatus(DriverStage.RIDE_COMPLETED))
+    fun `presenceMode returns OFF for non-service stages`() {
+        assertEquals(PresenceMode.OFF, DriverPresenceMapper.presenceMode(DriverStage.OFFLINE))
+        assertEquals(PresenceMode.OFF, DriverPresenceMapper.presenceMode(DriverStage.RIDE_ACCEPTED))
+        assertEquals(PresenceMode.OFF, DriverPresenceMapper.presenceMode(DriverStage.RIDE_COMPLETED))
     }
 
     @Test
-    fun `serviceBaseStatus maps ROADFLARE_ONLY to RoadflareOnly`() {
-        assertEquals(DriverStatus.RoadflareOnly, DriverPresenceMapper.serviceBaseStatus(DriverStage.ROADFLARE_ONLY))
+    fun `presenceMode maps ROADFLARE_ONLY`() {
+        assertEquals(PresenceMode.ROADFLARE_ONLY, DriverPresenceMapper.presenceMode(DriverStage.ROADFLARE_ONLY))
     }
 
     @Test
-    fun `serviceBaseStatus maps AVAILABLE to Available with zero count`() {
-        val result = DriverPresenceMapper.serviceBaseStatus(DriverStage.AVAILABLE)
-        assertEquals(DriverStatus.Available(0), result)
+    fun `presenceMode maps AVAILABLE`() {
+        assertEquals(PresenceMode.AVAILABLE, DriverPresenceMapper.presenceMode(DriverStage.AVAILABLE))
     }
 
     @Test
-    fun `serviceBaseStatus maps ride stages to correct DriverStatus subtypes`() {
-        assert(DriverPresenceMapper.serviceBaseStatus(DriverStage.EN_ROUTE_TO_PICKUP) is DriverStatus.EnRouteToPickup)
-        assert(DriverPresenceMapper.serviceBaseStatus(DriverStage.ARRIVED_AT_PICKUP) is DriverStatus.ArrivedAtPickup)
-        assert(DriverPresenceMapper.serviceBaseStatus(DriverStage.IN_RIDE) is DriverStatus.RideInProgress)
-    }
-
-    // ========================================
-    // Channel 3: listenerGateStatus (DriverStatus → DriverPresenceGate)
-    // ========================================
-
-    @Test
-    fun `listenerGateStatus maps Available to AVAILABLE`() {
-        assertEquals(DriverPresenceGate.AVAILABLE, DriverPresenceMapper.listenerGateStatus(DriverStatus.Available(0)))
-        assertEquals(DriverPresenceGate.AVAILABLE, DriverPresenceMapper.listenerGateStatus(DriverStatus.Available(5)))
+    fun `presenceMode maps ride stages`() {
+        assertEquals(PresenceMode.EN_ROUTE, DriverPresenceMapper.presenceMode(DriverStage.EN_ROUTE_TO_PICKUP))
+        assertEquals(PresenceMode.AT_PICKUP, DriverPresenceMapper.presenceMode(DriverStage.ARRIVED_AT_PICKUP))
+        assertEquals(PresenceMode.IN_RIDE, DriverPresenceMapper.presenceMode(DriverStage.IN_RIDE))
     }
 
     @Test
-    fun `listenerGateStatus maps RoadflareOnly to ROADFLARE_ONLY`() {
-        assertEquals(DriverPresenceGate.ROADFLARE_ONLY, DriverPresenceMapper.listenerGateStatus(DriverStatus.RoadflareOnly))
-    }
-
-    @Test
-    fun `listenerGateStatus maps ride statuses to IN_RIDE`() {
-        assertEquals(DriverPresenceGate.IN_RIDE, DriverPresenceMapper.listenerGateStatus(DriverStatus.EnRouteToPickup(null)))
-        assertEquals(DriverPresenceGate.IN_RIDE, DriverPresenceMapper.listenerGateStatus(DriverStatus.ArrivedAtPickup("Alice")))
-        assertEquals(DriverPresenceGate.IN_RIDE, DriverPresenceMapper.listenerGateStatus(DriverStatus.RideInProgress(null)))
-    }
-
-    @Test
-    fun `listenerGateStatus maps overlay statuses to AVAILABLE`() {
-        assertEquals(DriverPresenceGate.AVAILABLE, DriverPresenceMapper.listenerGateStatus(DriverStatus.NewRequest(1, "$5.00", "2.3 km")))
-        assertEquals(DriverPresenceGate.AVAILABLE, DriverPresenceMapper.listenerGateStatus(DriverStatus.Cancelled))
+    fun `presenceMode is exhaustive over all DriverStage values`() {
+        DriverStage.entries.forEach { stage ->
+            // Should not throw — exhaustive when expression
+            DriverPresenceMapper.presenceMode(stage)
+        }
     }
 
     // ========================================
@@ -131,6 +109,17 @@ class DriverPresenceMapperTest {
             assert(rfStatus != RoadflareLocationEvent.Status.ONLINE) {
                 "$stage should not produce ONLINE roadflare status"
             }
+        }
+    }
+
+    @Test
+    fun `OFF presenceMode stages never produce ONLINE roadflare status`() {
+        val offStages = DriverStage.entries.filter {
+            DriverPresenceMapper.presenceMode(it) == PresenceMode.OFF
+        }
+        offStages.forEach { stage ->
+            assertNotEquals("$stage (OFF) should not be ONLINE",
+                RoadflareLocationEvent.Status.ONLINE, DriverPresenceMapper.roadflareStatus(stage))
         }
     }
 }

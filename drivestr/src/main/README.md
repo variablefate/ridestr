@@ -39,13 +39,15 @@ The driver Android app allows users to go online, receive ride offers, navigate 
 | `DriverStage.kt` | `DriverStage` enum (`OFFLINE`, `ROADFLARE_ONLY`, `AVAILABLE`, `RIDE_ACCEPTED`, etc.) — moved from `DriverViewModel.kt` |
 | `DriverPresenceStore.kt` | Hilt singleton holding `StateFlow<DriverPresenceGate?>` — runtime gate for background listener |
 | `DriverPresenceGate.kt` | Typed gate enum (`AVAILABLE`, `ROADFLARE_ONLY`, `IN_RIDE`) — consumed by `RoadflareListenerService` |
-| `DriverPresenceMapper.kt` | 3 mapping functions: `roadflareStatus` (Stage→Kind 30014), `serviceBaseStatus` (Stage→DriverStatus?), `listenerGateStatus` (DriverStatus→Gate) |
+| `PresenceMode.kt` | `PresenceMode` enum (`OFF`, `ROADFLARE_ONLY`, `AVAILABLE`, `EN_ROUTE`, `AT_PICKUP`, `IN_RIDE`) — base operational mode, no service/notification concerns |
+| `AvailabilitySpec.kt` | Typed intent for Kind 30173 availability publishes (`Available`, `RoadflarePresence`, `OfflineWithLocation`, `OfflineLocationless`) |
+| `DriverPresenceMapper.kt` | 2 mapping functions: `roadflareStatus` (Stage→Kind 30014), `presenceMode` (Stage→PresenceMode). Gate derivation handled by service via `gateForStatus()` |
 
 ### Services (`java/com/drivestr/app/service/`)
 
 | File | Purpose |
 |------|---------|
-| `DriverOnlineService.kt` | Foreground service - keeps driver online, refreshes availability. Injects `DriverPresenceStore` and uses typed `DriverPresenceGate` |
+| `DriverOnlineService.kt` | Foreground service - keeps driver online, refreshes availability. Injects `DriverPresenceStore`, uses typed `DriverPresenceGate`. Internal: `updatePresence()` companion, `gateForStatus()` + `toDriverStatus()` top-level, `applyBasePresence()` private helper |
 | `RoadflareListenerService.kt` | Foreground service - background RoadFlare ride request alerts (Kind 3173 with roadflare tag). Injects `DriverPresenceStore`, uses `context.stopService()` in `stop()`, cleanup in `onDestroy()` |
 
 ### Entry Point
