@@ -83,7 +83,6 @@ class DriverOnlineService : Service() {
         private const val ACTION_ADD_ALERT = "com.drivestr.app.service.ADD_ALERT"
         private const val ACTION_CLEAR_ALERTS = "com.drivestr.app.service.CLEAR_ALERTS"
         private const val ACTION_UPDATE_PRESENCE = "com.drivestr.app.service.UPDATE_PRESENCE"
-        private const val ACTION_STOP = "com.drivestr.app.service.STOP"
         private const val EXTRA_STATUS = "status"
         private const val EXTRA_ALERT = "alert"
         private const val EXTRA_PRESENCE_MODE = "presence_mode"
@@ -193,10 +192,7 @@ class DriverOnlineService : Service() {
          */
         fun stop(context: Context) {
             Log.d(TAG, "Stopping DriverOnlineService")
-            val intent = Intent(context, DriverOnlineService::class.java).apply {
-                action = ACTION_STOP
-            }
-            context.startService(intent)
+            context.stopService(Intent(context, DriverOnlineService::class.java))
         }
     }
 
@@ -261,15 +257,6 @@ class DriverOnlineService : Service() {
                 coordinator.clearAlerts()
                 updateNotification()
             }
-            ACTION_STOP -> {
-                Log.d(TAG, "Received STOP action")
-                coordinator.clearAlerts()
-                newRequestRevertJob?.cancel()
-                // Clear gate before stopping (service is authoritative)
-                presenceStore.setGate(null)
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
-            }
         }
         return START_STICKY
     }
@@ -294,9 +281,11 @@ class DriverOnlineService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        coordinator.clearAlerts()
+        newRequestRevertJob?.cancel()
         serviceScope.cancel()
-        // Clear gate on service destroy (handles normal stop)
         presenceStore.setGate(null)
+        stopForeground(STOP_FOREGROUND_REMOVE)
         Log.d(TAG, "Service destroyed")
     }
 

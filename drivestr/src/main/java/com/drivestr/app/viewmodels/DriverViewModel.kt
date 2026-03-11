@@ -2,7 +2,6 @@ package com.drivestr.app.viewmodels
 
 import android.app.Application
 import android.content.Context
-import android.content.Intent
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.SavedStateHandle
@@ -4141,10 +4140,8 @@ class DriverViewModel @Inject constructor(
         bitcoinPriceService.cleanup()
         roadflareLocationBroadcaster?.destroy()
         // Stop services safely — stopService() is a no-op if not running
-        // Do NOT use DriverOnlineService.stop() — it uses startService(ACTION_STOP)
-        // which starts the service + flashes foreground notification just to stop it
-        getApplication<Application>().stopService(Intent(getApplication(), DriverOnlineService::class.java))
-        getApplication<Application>().stopService(Intent(getApplication(), RoadflareListenerService::class.java))
+        DriverOnlineService.stop(getApplication())
+        RoadflareListenerService.stop(getApplication())
     }
 
     // ========================================

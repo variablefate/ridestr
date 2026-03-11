@@ -102,7 +102,6 @@ class RiderActiveService : Service() {
         private const val ACTION_UPDATE_STATUS = "com.roadflare.rider.service.UPDATE_STATUS"
         private const val ACTION_ADD_ALERT = "com.roadflare.rider.service.ADD_ALERT"
         private const val ACTION_CLEAR_ALERTS = "com.roadflare.rider.service.CLEAR_ALERTS"
-        private const val ACTION_STOP = "com.roadflare.rider.service.STOP"
         private const val EXTRA_STATUS = "status"
         private const val EXTRA_ALERT = "alert"
 
@@ -176,10 +175,7 @@ class RiderActiveService : Service() {
          */
         fun stop(context: Context) {
             Log.d(TAG, "Stopping RiderActiveService")
-            val intent = Intent(context, RiderActiveService::class.java).apply {
-                action = ACTION_STOP
-            }
-            context.startService(intent)
+            context.stopService(Intent(context, RiderActiveService::class.java))
         }
     }
 
@@ -233,19 +229,15 @@ class RiderActiveService : Service() {
                 alertStack.clear()
                 updateNotification()
             }
-            ACTION_STOP -> {
-                Log.d(TAG, "Received STOP action")
-                alertStack.clear()
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
-            }
         }
         return START_STICKY
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        alertStack.clear()
         serviceScope.cancel()
+        stopForeground(STOP_FOREGROUND_REMOVE)
         Log.d(TAG, "Service destroyed")
     }
 
