@@ -5,16 +5,15 @@ import com.ridestr.common.nostr.events.RoadflareLocationEvent
 /**
  * Centralizes pure stage-to-status derivations across driver presence channels.
  *
- * Two channels:
+ * Three channels:
  * - Kind 30014 (RoadFlare location) via [roadflareStatus]
  * - Base operational mode via [presenceMode]
- *
- * Gate derivation (DriverStatus → DriverPresenceGate) is handled by the service layer
- * via gateForStatus() in DriverOnlineService.kt.
+ * - Base presence gate via [presenceGate]
  *
  * NOT mapped here (intentionally):
  * - Kind 30173 availability (context-dependent: location, vehicle, mint, payment methods)
  * - Notification overlays: NewRequest, Cancelled, Available(requestCount)
+ * - Overlay gate derivation: gateForStatus() in DriverOnlineService.kt
  * - Service lifecycle: start(), stop()
  */
 object DriverPresenceMapper {
@@ -46,5 +45,19 @@ object DriverPresenceMapper {
         DriverStage.ARRIVED_AT_PICKUP -> PresenceMode.AT_PICKUP
         DriverStage.IN_RIDE -> PresenceMode.IN_RIDE
         DriverStage.RIDE_COMPLETED -> PresenceMode.OFF       // Completion screen, service stopped later
+    }
+
+    /**
+     * Channel 3: Base presence gate for the background listener.
+     * Returns null for OFF (store uses null = offline/service not running).
+     * Does NOT handle overlay statuses — those use gateForStatus() in DriverOnlineService.
+     */
+    internal fun presenceGate(mode: PresenceMode): DriverPresenceGate? = when (mode) {
+        PresenceMode.OFF -> null
+        PresenceMode.ROADFLARE_ONLY -> DriverPresenceGate.ROADFLARE_ONLY
+        PresenceMode.AVAILABLE -> DriverPresenceGate.AVAILABLE
+        PresenceMode.EN_ROUTE,
+        PresenceMode.AT_PICKUP,
+        PresenceMode.IN_RIDE -> DriverPresenceGate.IN_RIDE
     }
 }

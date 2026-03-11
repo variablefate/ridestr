@@ -41,7 +41,7 @@ The driver Android app allows users to go online, receive ride offers, navigate 
 | `DriverPresenceGate.kt` | Typed gate enum (`AVAILABLE`, `ROADFLARE_ONLY`, `IN_RIDE`) — consumed by `RoadflareListenerService` |
 | `PresenceMode.kt` | `PresenceMode` enum (`OFF`, `ROADFLARE_ONLY`, `AVAILABLE`, `EN_ROUTE`, `AT_PICKUP`, `IN_RIDE`) — base operational mode, no service/notification concerns |
 | `AvailabilitySpec.kt` | Typed intent for Kind 30173 availability publishes (`Available`, `RoadflarePresence`, `OfflineWithLocation`, `OfflineLocationless`) |
-| `DriverPresenceMapper.kt` | 2 mapping functions: `roadflareStatus` (Stage→Kind 30014), `presenceMode` (Stage→PresenceMode). Gate derivation handled by service via `gateForStatus()` |
+| `DriverPresenceMapper.kt` | 3 mapping functions: `roadflareStatus` (Stage→Kind 30014), `presenceMode` (Stage→PresenceMode), `presenceGate` (PresenceMode→Gate?). Overlay gate stays in service via `gateForStatus()` |
 
 ### Services (`java/com/drivestr/app/service/`)
 

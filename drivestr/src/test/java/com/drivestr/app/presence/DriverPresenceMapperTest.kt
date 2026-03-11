@@ -3,6 +3,8 @@ package com.drivestr.app.presence
 import com.ridestr.common.nostr.events.RoadflareLocationEvent
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class DriverPresenceMapperTest {
@@ -77,6 +79,52 @@ class DriverPresenceMapperTest {
         DriverStage.entries.forEach { stage ->
             // Should not throw — exhaustive when expression
             DriverPresenceMapper.presenceMode(stage)
+        }
+    }
+
+    // ========================================
+    // Channel 3: presenceGate (PresenceMode → DriverPresenceGate?)
+    // ========================================
+
+    @Test
+    fun `presenceGate returns null for OFF`() {
+        assertNull(DriverPresenceMapper.presenceGate(PresenceMode.OFF))
+    }
+
+    @Test
+    fun `presenceGate maps ROADFLARE_ONLY`() {
+        assertEquals(DriverPresenceGate.ROADFLARE_ONLY, DriverPresenceMapper.presenceGate(PresenceMode.ROADFLARE_ONLY))
+    }
+
+    @Test
+    fun `presenceGate maps AVAILABLE`() {
+        assertEquals(DriverPresenceGate.AVAILABLE, DriverPresenceMapper.presenceGate(PresenceMode.AVAILABLE))
+    }
+
+    @Test
+    fun `presenceGate maps ride modes to IN_RIDE`() {
+        val rideModes = listOf(PresenceMode.EN_ROUTE, PresenceMode.AT_PICKUP, PresenceMode.IN_RIDE)
+        rideModes.forEach { mode ->
+            assertEquals("$mode should map to IN_RIDE", DriverPresenceGate.IN_RIDE, DriverPresenceMapper.presenceGate(mode))
+        }
+    }
+
+    @Test
+    fun `presenceGate is exhaustive over all PresenceMode values`() {
+        PresenceMode.entries.forEach { mode ->
+            // Should not throw — exhaustive when expression
+            DriverPresenceMapper.presenceGate(mode)
+        }
+    }
+
+    @Test
+    fun `presenceGate null only when mode is OFF`() {
+        PresenceMode.entries.forEach { mode ->
+            if (mode == PresenceMode.OFF) {
+                assertNull("OFF should produce null gate", DriverPresenceMapper.presenceGate(mode))
+            } else {
+                assertNotNull("$mode should produce non-null gate", DriverPresenceMapper.presenceGate(mode))
+            }
         }
     }
 

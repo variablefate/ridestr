@@ -15,6 +15,7 @@ import com.ridestr.common.notification.NotificationCoordinator
 import com.ridestr.common.notification.NotificationHelper
 import com.ridestr.common.notification.SoundManager
 import com.drivestr.app.presence.DriverPresenceGate
+import com.drivestr.app.presence.DriverPresenceMapper
 import com.drivestr.app.presence.DriverPresenceStore
 import com.drivestr.app.presence.PresenceMode
 import com.ridestr.common.settings.SettingsRepository
@@ -81,9 +82,11 @@ class DriverOnlineService : Service() {
         private const val ACTION_UPDATE_STATUS = "com.drivestr.app.service.UPDATE_STATUS"
         private const val ACTION_ADD_ALERT = "com.drivestr.app.service.ADD_ALERT"
         private const val ACTION_CLEAR_ALERTS = "com.drivestr.app.service.CLEAR_ALERTS"
+        private const val ACTION_UPDATE_PRESENCE = "com.drivestr.app.service.UPDATE_PRESENCE"
         private const val ACTION_STOP = "com.drivestr.app.service.STOP"
         private const val EXTRA_STATUS = "status"
         private const val EXTRA_ALERT = "alert"
+        private const val EXTRA_PRESENCE_MODE = "presence_mode"
 
         /**
          * Start the foreground service (driver going online in AVAILABLE mode).
@@ -136,10 +139,20 @@ class DriverOnlineService : Service() {
 
         /**
          * Update the notification for a base presence mode (non-overlay).
-         * Translates PresenceMode to DriverStatus internally.
+         * Sends PresenceMode directly so the service can derive the gate without
+         * round-tripping through DriverStatus.
          */
         internal fun updatePresence(context: Context, mode: PresenceMode) {
-            updateStatus(context, mode.toDriverStatus())
+            Log.d(TAG, "Updating presence mode: $mode")
+            val intent = Intent(context, DriverOnlineService::class.java).apply {
+                action = ACTION_UPDATE_PRESENCE
+                putExtra(EXTRA_PRESENCE_MODE, mode)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
         }
 
         /**
@@ -230,6 +243,13 @@ class DriverOnlineService : Service() {
                     presenceStore.setGate(gateForStatus(status))
                 }
             }
+            ACTION_UPDATE_PRESENCE -> {
+                val mode = intent.getSerializableExtra(EXTRA_PRESENCE_MODE) as? PresenceMode
+                if (mode != null) {
+                    handleStatusUpdate(mode.toDriverStatus())
+                    presenceStore.setGate(DriverPresenceMapper.presenceGate(mode))
+                }
+            }
             ACTION_ADD_ALERT -> {
                 val alert = intent.getSerializableExtra(EXTRA_ALERT) as? AlertType
                 if (alert != null) {
@@ -259,7 +279,7 @@ class DriverOnlineService : Service() {
         coordinator.updateStatus(mode.toDriverStatus())
         coordinator.clearAlerts()
         newRequestRevertJob?.cancel()
-        presenceStore.setGate(gateForStatus(mode.toDriverStatus()))
+        presenceStore.setGate(DriverPresenceMapper.presenceGate(mode))
         updateNotification()
     }
 
