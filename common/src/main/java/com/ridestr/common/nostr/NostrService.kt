@@ -794,6 +794,9 @@ class NostrService internal constructor(
         fiatPaymentMethods: List<String> = emptyList()
     ): String? = rideshareDomainService.sendRideOffer(driverPubKey, driverAvailabilityEventId, pickup, destination, fareEstimate, pickupRouteKm, pickupRouteMin, rideRouteKm, rideRouteMin, mintUrl, paymentMethod, isRoadflare, fiatPaymentMethods)
 
+    /** Typed offer dispatch — delegates to RideshareDomainService. */
+    suspend fun sendOffer(spec: RideOfferSpec): String? = rideshareDomainService.sendOffer(spec)
+
     /**
      * Confirm a ride with precise pickup location (encrypted).
      * @param acceptance The driver's acceptance

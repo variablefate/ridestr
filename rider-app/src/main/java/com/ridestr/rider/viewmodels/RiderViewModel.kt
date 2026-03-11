@@ -15,6 +15,8 @@ import com.ridestr.common.nostr.events.RideHistoryEntry
 import com.ridestr.common.location.GeocodingResult
 import com.ridestr.common.location.GeocodingService
 import com.ridestr.common.nostr.NostrService
+import com.ridestr.common.nostr.RideOfferSpec
+import com.ridestr.common.nostr.RouteMetrics
 import com.ridestr.common.nostr.SubscriptionManager
 import com.ridestr.common.nostr.events.DriverAvailabilityData
 import com.ridestr.common.nostr.events.RideshareExpiration
@@ -1597,29 +1599,43 @@ class RiderViewModel @Inject constructor(
 
     /**
      * Send a ride offer event via NostrService.
-     * Wraps the common nostrService.sendRideOffer() call used by direct and RoadFlare offers.
-     * NOT used by broadcastRideRequest() which calls a different NostrService method.
+     * Wraps the common nostrService.sendOffer() call used by direct and RoadFlare offers.
+     * NOT used by broadcastRideRequest() which calls a different spec variant.
      */
     private suspend fun sendOfferToNostr(
         params: OfferParams,
         pickupRoute: RouteResult?
     ): String? {
         val riderMintUrl = walletService?.getSavedMintUrl()
-        return nostrService.sendRideOffer(
-            driverPubKey = params.driverPubKey,
-            driverAvailabilityEventId = params.driverAvailabilityEventId,
-            pickup = params.pickup,
-            destination = params.destination,
-            fareEstimate = params.fareEstimate,
-            pickupRouteKm = pickupRoute?.distanceKm,
-            pickupRouteMin = pickupRoute?.let { it.durationSeconds / 60.0 },
-            rideRouteKm = params.rideRoute?.distanceKm,
-            rideRouteMin = params.rideRoute?.let { it.durationSeconds / 60.0 },
-            mintUrl = riderMintUrl,
-            paymentMethod = params.paymentMethod,
-            isRoadflare = params.isRoadflare,
-            fiatPaymentMethods = params.fiatPaymentMethods
-        )
+        val pickupMetrics = pickupRoute?.let { RouteMetrics.fromSeconds(it.distanceKm, it.durationSeconds) }
+        val rideMetrics = params.rideRoute?.let { RouteMetrics.fromSeconds(it.distanceKm, it.durationSeconds) }
+        val spec = if (params.isRoadflare) {
+            RideOfferSpec.RoadFlare(
+                driverPubKey = params.driverPubKey,
+                pickup = params.pickup,
+                destination = params.destination,
+                fareEstimate = params.fareEstimate,
+                pickupRoute = pickupMetrics,
+                rideRoute = rideMetrics,
+                mintUrl = riderMintUrl,
+                paymentMethod = params.paymentMethod,
+                fiatPaymentMethods = params.fiatPaymentMethods
+            )
+        } else {
+            RideOfferSpec.Direct(
+                driverPubKey = params.driverPubKey,
+                driverAvailabilityEventId = params.driverAvailabilityEventId ?: "",
+                pickup = params.pickup,
+                destination = params.destination,
+                fareEstimate = params.fareEstimate,
+                pickupRoute = pickupMetrics,
+                rideRoute = rideMetrics,
+                mintUrl = riderMintUrl,
+                paymentMethod = params.paymentMethod,
+                fiatPaymentMethods = params.fiatPaymentMethods
+            )
+        }
+        return nostrService.sendOffer(spec)
     }
 
     /**
@@ -2718,23 +2734,19 @@ class RiderViewModel @Inject constructor(
             val paymentHash = PaymentCrypto.computePaymentHash(preimage)
             if (BuildConfig.DEBUG) Log.d(TAG, "Generated HTLC payment hash for broadcast: ${paymentHash.take(16)}...")
 
-            // Send APPROXIMATE locations for privacy in broadcast
-            val approxPickup = pickup.approximate()
-            val approxDestination = destination.approximate()
-            Log.d(TAG, "Broadcasting with approximate locations - pickup: ${approxPickup.lat},${approxPickup.lon}, dest: ${approxDestination.lat},${approxDestination.lon}")
-
             val riderMintUrl = walletService?.getSavedMintUrl()
             val paymentMethod = settingsRepository.getDefaultPaymentMethod()
 
-            val eventId = nostrService.broadcastRideRequest(
-                pickup = approxPickup,
-                destination = approxDestination,
+            // Precise locations — RideOfferEvent.createBroadcast() handles approximation internally
+            val spec = RideOfferSpec.Broadcast(
+                pickup = pickup,
+                destination = destination,
                 fareEstimate = fareEstimate,
-                routeDistanceKm = routeResult.distanceKm,
-                routeDurationMin = routeResult.durationSeconds / 60.0,
+                routeDistance = RouteMetrics.fromSeconds(routeResult.distanceKm, routeResult.durationSeconds),
                 mintUrl = riderMintUrl,
                 paymentMethod = paymentMethod
             )
+            val eventId = nostrService.sendOffer(spec)
 
             if (eventId != null) {
                 Log.d(TAG, "Broadcast ride request: $eventId")

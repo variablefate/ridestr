@@ -2,6 +2,7 @@ package com.roadflare.rider.viewmodels
 
 import android.util.Log
 import com.ridestr.common.nostr.NostrService
+import com.ridestr.common.nostr.RideOfferSpec
 import com.ridestr.common.nostr.events.Location
 import com.ridestr.common.nostr.events.PaymentMethod
 import com.ridestr.common.nostr.events.RideAcceptanceData
@@ -178,15 +179,18 @@ class RideSessionManager(
                         "(${String.format("%.1f", offer.pickupMiles)} mi, " +
                         "$${String.format("%.2f", offer.fareUsd)}, ${offer.fareSats} sats)"
                 )
-                val eventId = nostrService.sendRideOffer(
+                val spec = RideOfferSpec.RoadFlare(
                     driverPubKey = offer.pubkey,
                     pickup = pickup,
                     destination = destination,
                     fareEstimate = offer.fareSats.toDouble(),
+                    pickupRoute = null,
+                    rideRoute = null,
+                    mintUrl = null,
                     paymentMethod = paymentMethod,
-                    isRoadflare = true,
                     fiatPaymentMethods = fiatPaymentMethods
                 )
+                val eventId = nostrService.sendOffer(spec)
                 if (eventId != null) {
                     contactedDrivers[offer.pubkey] = eventId
                     // Subscribe to acceptances for this offer

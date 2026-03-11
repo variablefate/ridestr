@@ -283,6 +283,49 @@ class RideshareDomainService(
         }
     }
 
+    /** Typed dispatch — single authority for RideOfferSpec → existing methods. */
+    suspend fun sendOffer(spec: RideOfferSpec): String? = when (spec) {
+        is RideOfferSpec.Direct -> sendRideOffer(
+            driverPubKey = spec.driverPubKey,
+            driverAvailabilityEventId = spec.driverAvailabilityEventId,
+            pickup = spec.pickup,
+            destination = spec.destination,
+            fareEstimate = spec.fareEstimate,
+            pickupRouteKm = spec.pickupRoute?.distanceKm,
+            pickupRouteMin = spec.pickupRoute?.durationMin,
+            rideRouteKm = spec.rideRoute?.distanceKm,
+            rideRouteMin = spec.rideRoute?.durationMin,
+            mintUrl = spec.mintUrl,
+            paymentMethod = spec.paymentMethod,
+            isRoadflare = false,
+            fiatPaymentMethods = spec.fiatPaymentMethods
+        )
+        is RideOfferSpec.RoadFlare -> sendRideOffer(
+            driverPubKey = spec.driverPubKey,
+            driverAvailabilityEventId = null,
+            pickup = spec.pickup,
+            destination = spec.destination,
+            fareEstimate = spec.fareEstimate,
+            pickupRouteKm = spec.pickupRoute?.distanceKm,
+            pickupRouteMin = spec.pickupRoute?.durationMin,
+            rideRouteKm = spec.rideRoute?.distanceKm,
+            rideRouteMin = spec.rideRoute?.durationMin,
+            mintUrl = spec.mintUrl,
+            paymentMethod = spec.paymentMethod,
+            isRoadflare = true,
+            fiatPaymentMethods = spec.fiatPaymentMethods
+        )
+        is RideOfferSpec.Broadcast -> broadcastRideRequest(
+            pickup = spec.pickup,
+            destination = spec.destination,
+            fareEstimate = spec.fareEstimate,
+            routeDistanceKm = spec.routeDistance.distanceKm,
+            routeDurationMin = spec.routeDistance.durationMin,
+            mintUrl = spec.mintUrl,
+            paymentMethod = spec.paymentMethod
+        )
+    }
+
     /**
      * Broadcast a public ride request (visible to all drivers in the pickup area).
      * This is the new primary flow where riders broadcast and drivers choose to accept.
