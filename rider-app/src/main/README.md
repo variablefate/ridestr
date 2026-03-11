@@ -31,11 +31,18 @@ The rider Android app allows users to request rides, track driver location in re
 | `RoadflareTab.kt` | RoadFlare tab - favorite drivers list, driver status badges, fare estimates, payment methods dialog (uses `ReorderablePaymentMethodList` for priority ordering) |
 | `AddDriverScreen.kt` | Add driver via QR scan (Quickie) or manual npub/hex entry |
 
+### Presence (`java/com/ridestr/rider/presence/`)
+
+| File | Purpose |
+|------|---------|
+| `RiderPresenceMode.kt` | `RiderPresenceMode` enum (`SEARCHING`, `DRIVER_ACCEPTED`, `DRIVER_EN_ROUTE`, `DRIVER_ARRIVED`, `IN_RIDE`) — base operational mode |
+| `RiderPresenceMapper.kt` | `presenceMode(RideStage)` mapper. Single channel, no gate (rider has no background listener) |
+
 ### Services (`java/com/ridestr/rider/service/`)
 
 | File | Purpose |
 |------|---------|
-| `RiderActiveService.kt` | Foreground service - keeps app alive during active rides |
+| `RiderActiveService.kt` | Foreground service - keeps app alive during active rides. Internal: `updatePresence()` companion, `toRiderStatus()` top-level |
 
 ### Entry Point
 

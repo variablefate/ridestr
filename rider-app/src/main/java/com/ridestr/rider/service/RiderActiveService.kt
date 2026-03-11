@@ -17,6 +17,7 @@ import javax.inject.Inject
 import kotlinx.coroutines.runBlocking
 import com.ridestr.rider.MainActivity
 import com.ridestr.rider.notification.RiderNotificationTextProvider
+import com.ridestr.rider.presence.RiderPresenceMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -38,6 +39,15 @@ sealed class RiderStatus : Serializable {
     object Cancelled : RiderStatus()
 }
 
+/** Translates base presence mode to the corresponding RiderStatus for notification display. */
+internal fun RiderPresenceMode.toRiderStatus(driverName: String? = null): RiderStatus = when (this) {
+    RiderPresenceMode.SEARCHING -> RiderStatus.Searching
+    RiderPresenceMode.DRIVER_ACCEPTED -> RiderStatus.DriverAccepted(driverName)
+    RiderPresenceMode.DRIVER_EN_ROUTE -> RiderStatus.DriverEnRoute(driverName)
+    RiderPresenceMode.DRIVER_ARRIVED -> RiderStatus.DriverArrived(driverName)
+    RiderPresenceMode.IN_RIDE -> RiderStatus.RideInProgress(driverName)
+}
+
 /**
  * Foreground service that keeps the rider app alive when backgrounded.
  * Shows a single persistent notification that updates based on ride status.
@@ -54,9 +64,11 @@ class RiderActiveService : Service() {
         private const val ACTION_UPDATE_STATUS = "com.ridestr.rider.service.UPDATE_STATUS"
         private const val ACTION_ADD_ALERT = "com.ridestr.rider.service.ADD_ALERT"
         private const val ACTION_CLEAR_ALERTS = "com.ridestr.rider.service.CLEAR_ALERTS"
-        private const val ACTION_STOP = "com.ridestr.rider.service.STOP"
+        private const val ACTION_UPDATE_PRESENCE = "com.ridestr.rider.service.UPDATE_PRESENCE"
         private const val EXTRA_STATUS = "status"
         private const val EXTRA_ALERT = "alert"
+        private const val EXTRA_PRESENCE_MODE = "presence_mode"
+        private const val EXTRA_DRIVER_NAME = "driver_name"
 
         /**
          * Start the foreground service in searching mode.
@@ -82,6 +94,24 @@ class RiderActiveService : Service() {
             val intent = Intent(context, RiderActiveService::class.java).apply {
                 action = ACTION_UPDATE_STATUS
                 putExtra(EXTRA_STATUS, status)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        }
+
+        /**
+         * Update the notification for a base presence mode (non-overlay).
+         * Sends RiderPresenceMode directly so the service translates to RiderStatus.
+         */
+        internal fun updatePresence(context: Context, mode: RiderPresenceMode, driverName: String? = null) {
+            Log.d(TAG, "Updating presence mode: $mode")
+            val intent = Intent(context, RiderActiveService::class.java).apply {
+                action = ACTION_UPDATE_PRESENCE
+                putExtra(EXTRA_PRESENCE_MODE, mode)
+                driverName?.let { putExtra(EXTRA_DRIVER_NAME, it) }
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
@@ -128,10 +158,7 @@ class RiderActiveService : Service() {
          */
         fun stop(context: Context) {
             Log.d(TAG, "Stopping RiderActiveService")
-            val intent = Intent(context, RiderActiveService::class.java).apply {
-                action = ACTION_STOP
-            }
-            context.startService(intent)
+            context.stopService(Intent(context, RiderActiveService::class.java))
         }
     }
 
@@ -169,6 +196,13 @@ class RiderActiveService : Service() {
                     handleStatusUpdate(status)
                 }
             }
+            ACTION_UPDATE_PRESENCE -> {
+                val mode = intent.getSerializableExtra(EXTRA_PRESENCE_MODE) as? RiderPresenceMode
+                if (mode != null) {
+                    val driverName = intent.getStringExtra(EXTRA_DRIVER_NAME)
+                    handleStatusUpdate(mode.toRiderStatus(driverName))
+                }
+            }
             ACTION_ADD_ALERT -> {
                 val alert = intent.getSerializableExtra(EXTRA_ALERT) as? AlertType
                 if (alert != null) {
@@ -179,12 +213,6 @@ class RiderActiveService : Service() {
                 Log.d(TAG, "Clearing alert stack")
                 coordinator.clearAlerts()
                 updateNotification()
-            }
-            ACTION_STOP -> {
-                Log.d(TAG, "Received STOP action")
-                coordinator.clearAlerts()
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
             }
         }
         return START_STICKY
@@ -201,7 +229,9 @@ class RiderActiveService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        coordinator.clearAlerts()
         serviceScope.cancel()
+        stopForeground(STOP_FOREGROUND_REMOVE)
         Log.d(TAG, "Service destroyed")
     }
 

@@ -31,6 +31,8 @@ import com.ridestr.common.nostr.events.RideshareChatData
 import com.ridestr.common.nostr.events.UserProfile
 import com.ridestr.common.nostr.events.geohash
 import com.ridestr.common.notification.AlertType
+import com.ridestr.rider.presence.RiderPresenceMapper
+import com.ridestr.rider.presence.RiderPresenceMode
 import com.ridestr.rider.service.RiderActiveService
 import com.ridestr.rider.service.RiderStatus
 import kotlin.random.Random
@@ -1010,17 +1012,8 @@ class RiderViewModel @Inject constructor(
         val context = getApplication<Application>()
         val driverName = _uiState.value.driverProfiles[acceptance.driverPubKey]?.bestName()?.split(" ")?.firstOrNull()
 
-        when (stage) {
-            RideStage.RIDE_CONFIRMED -> {
-                RiderActiveService.updateStatus(context, RiderStatus.DriverEnRoute(driverName))
-            }
-            RideStage.DRIVER_ARRIVED -> {
-                RiderActiveService.updateStatus(context, RiderStatus.DriverArrived(driverName))
-            }
-            RideStage.IN_PROGRESS -> {
-                RiderActiveService.updateStatus(context, RiderStatus.RideInProgress(driverName))
-            }
-            else -> { /* No service needed for other stages */ }
+        RiderPresenceMapper.presenceMode(stage)?.let { mode ->
+            RiderActiveService.updatePresence(context, mode, driverName)
         }
 
         // Check for pending bridge payments for this ride (app restart recovery)
@@ -3911,7 +3904,7 @@ class RiderViewModel @Inject constructor(
                     // Update service status - keep DriverAccepted until driver sends EN_ROUTE_PICKUP
                     // AtoB Pattern: Don't transition notification until driver confirms state
                     val driverName = _uiState.value.driverProfiles[acceptance.driverPubKey]?.bestName()?.split(" ")?.firstOrNull()
-                    RiderActiveService.updateStatus(getApplication(), RiderStatus.DriverAccepted(driverName))
+                    RiderActiveService.updatePresence(getApplication(), RiderPresenceMode.DRIVER_ACCEPTED, driverName)
 
                     // AtoB Pattern: Don't transition to RIDE_CONFIRMED yet - wait for driver's
                     // EN_ROUTE_PICKUP status. The driver is the single source of truth.
@@ -4125,7 +4118,7 @@ class RiderViewModel @Inject constructor(
                 // NOW safe to close availability subscription - driver has acknowledged the ride
                 // and is actively driving. Any cancellation from here uses Kind 3179.
                 closeDriverAvailabilitySubscription()
-                RiderActiveService.updateStatus(context, RiderStatus.DriverEnRoute(driverName))
+                RiderActiveService.updatePresence(context, RiderPresenceMode.DRIVER_EN_ROUTE, driverName)
                 _uiState.update { current ->
                     current.copy(
                         statusMessage = "Driver is on the way!",
@@ -4139,7 +4132,7 @@ class RiderViewModel @Inject constructor(
             }
             DriverStatusType.ARRIVED -> {
                 Log.d(TAG, "Driver has arrived! (derived stage: $derivedStage)")
-                RiderActiveService.updateStatus(context, RiderStatus.DriverArrived(driverName))
+                RiderActiveService.updatePresence(context, RiderPresenceMode.DRIVER_ARRIVED, driverName)
                 currentRiderPhase = RiderRideStateEvent.Phase.AWAITING_PIN
                 _uiState.update { current ->
                     current.copy(
@@ -4154,7 +4147,7 @@ class RiderViewModel @Inject constructor(
             }
             DriverStatusType.IN_PROGRESS -> {
                 Log.d(TAG, "Ride is in progress (derived stage: $derivedStage)")
-                RiderActiveService.updateStatus(context, RiderStatus.RideInProgress(driverName))
+                RiderActiveService.updatePresence(context, RiderPresenceMode.IN_RIDE, driverName)
                 currentRiderPhase = RiderRideStateEvent.Phase.IN_RIDE
                 _uiState.update { current ->
                     current.copy(
@@ -5133,7 +5126,7 @@ class RiderViewModel @Inject constructor(
         val driverName = driverPubKey?.let { _uiState.value.driverProfiles[it]?.bestName()?.split(" ")?.firstOrNull() }
 
         // Update service - handles notification update and sound
-        RiderActiveService.updateStatus(context, RiderStatus.DriverArrived(driverName))
+        RiderActiveService.updatePresence(context, RiderPresenceMode.DRIVER_ARRIVED, driverName)
 
         // Update UI state
         _uiState.update { current ->
