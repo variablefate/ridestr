@@ -499,11 +499,7 @@ private fun MainTabScreen() {
             )
             3 -> SettingsContent(
                 distanceUnit = settingsState.distanceUnit,
-                notificationSoundEnabled = settingsState.notificationSoundEnabled,
-                notificationVibrationEnabled = settingsState.notificationVibrationEnabled,
                 onSetDistanceUnit = { unit -> viewModel.onSetDistanceUnit(unit) },
-                onSetNotificationSoundEnabled = { enabled -> viewModel.onSetNotificationSoundEnabled(enabled) },
-                onSetNotificationVibrationEnabled = { enabled -> viewModel.onSetNotificationVibrationEnabled(enabled) },
                 onOpenTiles = { secondaryScreen = SecondaryScreen.TileManagement },
                 onOpenDevOptions = { secondaryScreen = SecondaryScreen.DeveloperOptions },
                 onSyncProfile = {

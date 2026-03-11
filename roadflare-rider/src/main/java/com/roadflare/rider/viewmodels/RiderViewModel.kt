@@ -379,8 +379,6 @@ class RiderViewModel @Inject constructor(
 
     fun onToggleDisplayCurrency() = viewModelScope.launch { settingsRepository.toggleDisplayCurrency() }
     fun onToggleDistanceUnit() = viewModelScope.launch { settingsRepository.toggleDistanceUnit() }
-    fun onSetNotificationSoundEnabled(enabled: Boolean) = viewModelScope.launch { settingsRepository.setNotificationSoundEnabled(enabled) }
-    fun onSetNotificationVibrationEnabled(enabled: Boolean) = viewModelScope.launch { settingsRepository.setNotificationVibrationEnabled(enabled) }
     fun onSetRoadflarePaymentMethods(methods: List<String>) = viewModelScope.launch { settingsRepository.setRoadflarePaymentMethods(methods) }
     fun onAddRelay(url: String) = viewModelScope.launch { settingsRepository.addRelay(url) }
     fun onRemoveRelay(url: String) = viewModelScope.launch { settingsRepository.removeRelay(url) }

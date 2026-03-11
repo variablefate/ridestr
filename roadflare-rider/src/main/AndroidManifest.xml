@@ -9,20 +9,6 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
-    <!-- Foreground service permissions for keeping ride active -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
-
-    <!-- Battery optimization exemption - allows reliable background network operations -->
-    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
-
-    <!-- Notification permission for Android 13+ -->
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-
-    <!-- Vibration permission -->
-    <uses-permission android:name="android.permission.VIBRATE" />
-
     <application
         android:name=".RoadFlareApplication"
         android:allowBackup="true"
@@ -45,11 +31,6 @@
             </intent-filter>
         </activity>
 
-        <!-- Foreground service for active ride -->
-        <service
-            android:name=".service.RiderActiveService"
-            android:exported="false"
-            android:foregroundServiceType="location|dataSync" />
     </application>
 
 </manifest>

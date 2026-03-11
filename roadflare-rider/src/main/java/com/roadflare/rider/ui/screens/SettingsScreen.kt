@@ -24,11 +24,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun SettingsScreen(
     distanceUnit: DistanceUnit,
-    notificationSoundEnabled: Boolean,
-    notificationVibrationEnabled: Boolean,
     onSetDistanceUnit: (DistanceUnit) -> Unit,
-    onSetNotificationSoundEnabled: (Boolean) -> Unit,
-    onSetNotificationVibrationEnabled: (Boolean) -> Unit,
     onBack: () -> Unit,
     onOpenTiles: () -> Unit,
     onOpenDevOptions: () -> Unit,
@@ -54,11 +50,7 @@ fun SettingsScreen(
     ) { padding ->
         SettingsContent(
             distanceUnit = distanceUnit,
-            notificationSoundEnabled = notificationSoundEnabled,
-            notificationVibrationEnabled = notificationVibrationEnabled,
             onSetDistanceUnit = onSetDistanceUnit,
-            onSetNotificationSoundEnabled = onSetNotificationSoundEnabled,
-            onSetNotificationVibrationEnabled = onSetNotificationVibrationEnabled,
             onOpenTiles = onOpenTiles,
             onOpenDevOptions = onOpenDevOptions,
             modifier = Modifier.padding(padding)
@@ -72,11 +64,7 @@ fun SettingsScreen(
 @Composable
 fun SettingsContent(
     distanceUnit: DistanceUnit,
-    notificationSoundEnabled: Boolean,
-    notificationVibrationEnabled: Boolean,
     onSetDistanceUnit: (DistanceUnit) -> Unit,
-    onSetNotificationSoundEnabled: (Boolean) -> Unit,
-    onSetNotificationVibrationEnabled: (Boolean) -> Unit,
     onOpenTiles: () -> Unit,
     onOpenDevOptions: () -> Unit,
     onSyncProfile: (suspend () -> Unit)? = null,
@@ -107,32 +95,6 @@ fun SettingsContent(
                 },
                 checkedLabel = "Miles",
                 uncheckedLabel = "km"
-            )
-
-            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-
-            // Notifications Section Header
-            Text(
-                text = "Notifications",
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(vertical = 8.dp)
-            )
-
-            // Notification Sound Setting
-            SettingsSwitchRow(
-                title = "Sound",
-                description = "Play sound for ride updates",
-                checked = notificationSoundEnabled,
-                onCheckedChange = { enabled -> onSetNotificationSoundEnabled(enabled) }
-            )
-
-            // Notification Vibration Setting
-            SettingsSwitchRow(
-                title = "Vibration",
-                description = "Vibrate for ride updates",
-                checked = notificationVibrationEnabled,
-                onCheckedChange = { enabled -> onSetNotificationVibrationEnabled(enabled) }
             )
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
