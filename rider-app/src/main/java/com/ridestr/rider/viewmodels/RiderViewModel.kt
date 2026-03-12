@@ -995,7 +995,7 @@ class RiderViewModel @Inject constructor(
                 if (remaining <= 0) {
                     // Already expired — cancel immediately and return to prevent re-subscriptions
                     Log.w(TAG, "Post-confirm ack timeout expired during process death — cancelling")
-                    handleDriverCancellation("No response from driver")
+                    handleDriverCancellation("No response from driver", source = "postConfirmAck")
                     return  // CRITICAL: do not continue into re-subscriptions/service updates
                 } else {
                     startPostConfirmAckTimeout(postConfirmAckDeadlineMs)
@@ -1692,6 +1692,8 @@ class RiderViewModel @Inject constructor(
                 driverAvailabilityEventId,
                 initialAvailabilityTimestamp = driverAvailabilityCreatedAt
             )
+            Log.d(TAG, "[AVAIL-DIAG] Subscriptions armed: acceptance + availability for driver ${driverPubKey.take(8)}, " +
+                "offerEventId=$eventId, availEventId=$driverAvailabilityEventId, seed=$driverAvailabilityCreatedAt")
             if (!fromRestore) {
                 startAcceptanceTimeout()
             }
@@ -3539,6 +3541,9 @@ class RiderViewModel @Inject constructor(
 
     private fun subscribeToAcceptance(offerEventId: String, expectedDriverPubKey: String) {
         subs.set(SubKeys.ACCEPTANCE, nostrService.subscribeToAcceptance(offerEventId, expectedDriverPubKey) { acceptance ->
+            Log.d(TAG, "[AVAIL-DIAG] Kind 3174 acceptance received: stage=${_uiState.value.rideSession.rideStage}, " +
+                "eventId=${acceptance.eventId}, driver=${acceptance.driverPubKey.take(8)}, " +
+                "expectedDriver=${expectedDriverPubKey.take(8)}")
             Log.d(TAG, "Driver accepted ride: ${acceptance.eventId}")
 
             // Cancel the acceptance timeout - driver responded
@@ -3579,7 +3584,7 @@ class RiderViewModel @Inject constructor(
                 }
                 autoConfirmRide(acceptance)
             } else {
-                Log.d(TAG, "Ignoring duplicate acceptance - already in stage ${_uiState.value.rideSession.rideStage}")
+                Log.d(TAG, "[AVAIL-DIAG] Acceptance ignored — already in stage ${_uiState.value.rideSession.rideStage}")
             }
         })
     }
@@ -3605,9 +3610,12 @@ class RiderViewModel @Inject constructor(
         Log.d(TAG, "Monitoring availability for selected driver ${driverPubKey.take(8)}")
 
         subs.set(SubKeys.SELECTED_DRIVER_AVAILABILITY, nostrService.subscribeToDriverAvailability(driverPubKey) { availability ->
+            Log.d(TAG, "[AVAIL-DIAG] Kind 30173 received: stage=${_uiState.value.rideSession.rideStage}, " +
+                "isAvailable=${availability.isAvailable}, createdAt=${availability.createdAt}, " +
+                "seed=$selectedDriverLastAvailabilityTimestamp, status=${availability.status}")
             // Reject out-of-order events - late OFFLINE events shouldn't override newer ONLINE
             if (availability.createdAt < selectedDriverLastAvailabilityTimestamp) {
-                Log.d(TAG, "Ignoring out-of-order availability event (${availability.createdAt} < $selectedDriverLastAvailabilityTimestamp)")
+                Log.d(TAG, "[AVAIL-DIAG] Kind 30173 STALE — rejected (${availability.createdAt} < $selectedDriverLastAvailabilityTimestamp)")
                 return@subscribeToDriverAvailability
             }
             selectedDriverLastAvailabilityTimestamp = availability.createdAt
@@ -3620,18 +3628,30 @@ class RiderViewModel @Inject constructor(
                 eventCreatedAt = availability.createdAt,
                 lastSeenTimestamp = selectedDriverLastAvailabilityTimestamp
             )
+            Log.d(TAG, "[AVAIL-DIAG] Availability policy decision: $action")
             when (action) {
                 AvailabilityMonitorPolicy.Action.IGNORE -> return@subscribeToDriverAvailability
-                AvailabilityMonitorPolicy.Action.SHOW_UNAVAILABLE -> {
-                    Log.w(TAG, "Selected driver ${driverPubKey.take(8)} is no longer available (status: ${availability.status})")
-                    _uiState.update { current ->
-                        current.copy(
-                            statusMessage = "Driver is no longer available",
-                            rideSession = current.rideSession.copy(showDriverUnavailableDialog = true)
-                        )
+                AvailabilityMonitorPolicy.Action.DEFER_CHECK -> {
+                    Log.d(TAG, "Deferring availability-offline reaction — waiting ${DELETION_GRACE_PERIOD_MS}ms for possible acceptance")
+                    pendingDeletionJob?.cancel()
+                    pendingDeletionJob = viewModelScope.launch {
+                        delay(DELETION_GRACE_PERIOD_MS)
+                        val stageAfterDelay = _uiState.value.rideSession.rideStage
+                        Log.w(TAG, "[AVAIL-DIAG] Availability grace period expired: stageAfterDelay=$stageAfterDelay")
+                        if (stageAfterDelay == RideStage.WAITING_FOR_ACCEPTANCE) {
+                            Log.w(TAG, "Selected driver ${driverPubKey.take(8)} is no longer available (status: ${availability.status})")
+                            _uiState.update { current ->
+                                current.copy(
+                                    statusMessage = "Driver is no longer available",
+                                    rideSession = current.rideSession.copy(showDriverUnavailableDialog = true)
+                                )
+                            }
+                        } else {
+                            Log.d(TAG, "Ignoring deferred availability-offline — stage advanced to $stageAfterDelay")
+                        }
                     }
                 }
-                AvailabilityMonitorPolicy.Action.DEFER_CHECK -> {} // Not returned by onAvailabilityEvent
+                AvailabilityMonitorPolicy.Action.SHOW_UNAVAILABLE -> {} // Only used after grace period
             }
         })
 
@@ -3653,10 +3673,12 @@ class RiderViewModel @Inject constructor(
             availabilityEventId = driverAvailabilityEventId,
             since = deletionSince
         ) { deletionTimestamp ->
+            Log.d(TAG, "[AVAIL-DIAG] Kind 5 received: stage=${_uiState.value.rideSession.rideStage}, " +
+                "deletionTs=$deletionTimestamp, seed=$selectedDriverLastAvailabilityTimestamp")
             // Timestamp guard: ignore deletions older than the latest availability event.
             // MUST remain before policy check — guards the timestamp mutation above.
             if (deletionTimestamp < selectedDriverLastAvailabilityTimestamp) {
-                Log.d(TAG, "Ignoring stale availability deletion ($deletionTimestamp < $selectedDriverLastAvailabilityTimestamp)")
+                Log.d(TAG, "[AVAIL-DIAG] Kind 5 STALE — rejected ($deletionTimestamp < $selectedDriverLastAvailabilityTimestamp)")
                 return@subscribeToAvailabilityDeletions
             }
 
@@ -3676,6 +3698,7 @@ class RiderViewModel @Inject constructor(
                     pendingDeletionJob = viewModelScope.launch {
                         delay(DELETION_GRACE_PERIOD_MS)
                         val stageAfterDelay = _uiState.value.rideSession.rideStage
+                        Log.w(TAG, "[AVAIL-DIAG] Grace period expired: stageAfterDelay=$stageAfterDelay")
                         if (stageAfterDelay == RideStage.WAITING_FOR_ACCEPTANCE) {
                             Log.w(TAG, "Driver ${driverPubKey.take(8)} deleted availability — no acceptance arrived")
                             _uiState.update { current ->
@@ -3751,7 +3774,7 @@ class RiderViewModel @Inject constructor(
             val session = _uiState.value.rideSession
             if (session.confirmationEventId != null && session.rideStage == RideStage.DRIVER_ACCEPTED) {
                 Log.w(TAG, "No driver response after confirmation — auto-cancelling")
-                handleDriverCancellation("No response from driver")
+                handleDriverCancellation("No response from driver", source = "postConfirmAckTimeout")
             }
         }
     }
@@ -4218,7 +4241,7 @@ class RiderViewModel @Inject constructor(
                 Log.w(TAG, "  Current state confirmationEventId: ${state.rideSession.confirmationEventId}")
                 Log.w(TAG, "  Current rideStage: ${state.rideSession.rideStage}")
                 updateRideSession { copy(lastDriverStatus = action.status) }
-                handleDriverCancellation()
+                handleDriverCancellation(source = "driverRideState-CANCELLED")
             }
         }
     }
@@ -4708,17 +4731,6 @@ class RiderViewModel @Inject constructor(
     }
 
     /**
-     * Handle driver cancellation (called from driver ride state CANCELLED status).
-     * Delegates to the full handleDriverCancellation(reason) for consistent cleanup.
-     */
-    private fun handleDriverCancellation() {
-        // CRITICAL: Delegate to the full cancellation handler for proper cleanup
-        // This ensures chatRefreshJob is stopped and all subscriptions are closed,
-        // preventing phantom cancellations where old events affect new rides.
-        handleDriverCancellation(null)
-    }
-
-    /**
      * Subscribe to chat messages for this ride.
      * Creates new subscription before closing old one to avoid gaps in message delivery.
      */
@@ -4875,7 +4887,7 @@ class RiderViewModel @Inject constructor(
             // Mark as processed AFTER validation passes
             processedCancellationEventIds.add(cancellation.eventId)
             Log.w(TAG, "  >>> VALIDATION PASSED - processing cancellation (marked as processed) <<<")
-            handleDriverCancellation(cancellation.reason)
+            handleDriverCancellation(cancellation.reason, source = "kind3179")
         }
         subs.set(SubKeys.CANCELLATION, newSubId)
 
@@ -5059,7 +5071,8 @@ class RiderViewModel @Inject constructor(
     /**
      * Handle ride cancellation from driver.
      */
-    private fun handleDriverCancellation(reason: String?) {
+    private fun handleDriverCancellation(reason: String? = null, source: String = "unknown") {
+        Log.w(TAG, "[AVAIL-DIAG] handleDriverCancellation: reason=$reason, source=$source")
         // DEBUG: Log cancellation handling
         Log.w(TAG, "=== HANDLE DRIVER CANCELLATION ===")
         Log.w(TAG, "  Reason: $reason")

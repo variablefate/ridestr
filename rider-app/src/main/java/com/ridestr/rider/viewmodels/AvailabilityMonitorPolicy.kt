@@ -11,8 +11,8 @@ internal object AvailabilityMonitorPolicy {
 
     enum class Action {
         IGNORE,            // Out-of-order, wrong stage, or post-acceptance
-        SHOW_UNAVAILABLE,  // Driver went offline during WAITING_FOR_ACCEPTANCE
-        DEFER_CHECK        // Deletion during WAITING_FOR_ACCEPTANCE — re-check after grace period
+        SHOW_UNAVAILABLE,  // Used by ViewModel after grace period expires with no acceptance
+        DEFER_CHECK        // Offline or deletion during WAITING_FOR_ACCEPTANCE — re-check after grace period
     }
 
     /** React to a Kind 30173 availability event. */
@@ -24,7 +24,7 @@ internal object AvailabilityMonitorPolicy {
     ): Action {
         if (eventCreatedAt < lastSeenTimestamp) return Action.IGNORE
         if (stage != RideStage.WAITING_FOR_ACCEPTANCE) return Action.IGNORE
-        return if (isAvailable) Action.IGNORE else Action.SHOW_UNAVAILABLE
+        return if (isAvailable) Action.IGNORE else Action.DEFER_CHECK
     }
 
     /** React to a Kind 5 deletion of driver availability. */

@@ -9,14 +9,14 @@ class AvailabilityMonitorPolicyTest {
     // --- onAvailabilityEvent ---
 
     @Test
-    fun `availability offline during WAITING_FOR_ACCEPTANCE shows unavailable`() {
+    fun `availability offline during WAITING_FOR_ACCEPTANCE defers check`() {
         val action = AvailabilityMonitorPolicy.onAvailabilityEvent(
             stage = RideStage.WAITING_FOR_ACCEPTANCE,
             isAvailable = false,
             eventCreatedAt = 1000L,
             lastSeenTimestamp = 999L
         )
-        assertEquals(AvailabilityMonitorPolicy.Action.SHOW_UNAVAILABLE, action)
+        assertEquals(AvailabilityMonitorPolicy.Action.DEFER_CHECK, action)
     }
 
     @Test
