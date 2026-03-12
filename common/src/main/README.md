@@ -205,7 +205,7 @@ Reusable composables extracted from both apps' SettingsScreen files.
 | `NostrService` | `NostrCryptoHelper` | NIP-44 encryption | `cryptoHelper.encryptForUser()` |
 | `NostrService` | `ProfileBackupService` | Profile & backup operations | `profileBackupService.publishProfile()` |
 | `NostrService` | `RoadflareDomainService` | RoadFlare operations | `roadflareDomainService.publishRoadflareLocation()` |
-| `NostrService` | `RideshareDomainService` | Ride protocol operations | `rideshareDomainService.sendRideOffer()` |
+| `NostrService` | `RideshareDomainService` | Ride protocol operations | `rideshareDomainService.sendOffer(spec)` |
 | `CashuBackend` | `CashuTokenCodec` | Token encoding/decoding | `CashuTokenCodec.encodeHtlcProofsAsToken()` |
 | `CashuBackend` | Cashu Mint (HTTP) | Token operations | `POST /v1/mint/quote` |
 | `Nip60WalletSync` | `NostrService` | Proof publishing | Kind 7375 events |

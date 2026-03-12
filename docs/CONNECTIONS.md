@@ -408,10 +408,10 @@ sequenceDiagram
 
 | Offer Type | RiderViewModel Method | NostrService Method | RideOfferEvent Method |
 |------------|----------------------|---------------------|----------------------|
-| Direct | `sendRideOffer()` | `sendRideOffer()` | `create()` |
-| Broadcast | `broadcastRideRequest()` | `broadcastRideRequest()` | `createBroadcast()` |
-| RoadFlare (single) | `sendRoadflareOffer()` | `sendRideOffer()` | `create()` (isRoadflare=true) |
-| RoadFlare (batch) | `sendRoadflareToAll(drivers, locations, paymentMethod)` | `sendRideOffer()` | `create()` (isRoadflare=true, batched with NIP-09 cancellation) |
+| Direct | `sendRideOffer()` | `sendOffer(RideOfferSpec.Direct(...))` | `create()` |
+| Broadcast | `broadcastRideRequest()` | `sendOffer(RideOfferSpec.Broadcast(...))` | `createBroadcast()` |
+| RoadFlare (single) | `sendRoadflareOffer()` | `sendOffer(RideOfferSpec.RoadFlare(...))` | `create()` |
+| RoadFlare (batch) | `sendRoadflareToAll(...)` | `sendOffer(RideOfferSpec.RoadFlare(...))` (batched) | `create()` |
 
 ---
 
@@ -644,7 +644,7 @@ Nostr Layer (Phase 5 Domain Decomposition)
 ├── RideshareDomainService (~900 lines)
 │   ├── Depends on: RelayManager, KeyManager
 │   ├── Availability: broadcastAvailability(), subscribeToDrivers(), subscribeToDriverAvailability() (Kind 30173)
-│   ├── Offers: sendRideOffer(), broadcastRideRequest(), subscribeToBroadcastRideRequests(), subscribeToOffers() (Kind 3173)
+│   ├── Offers: sendOffer(spec), sendRideOffer(), broadcastRideRequest(), subscribeToBroadcastRideRequests(), subscribeToOffers() (Kind 3173)
 │   ├── Acceptance: acceptRide(), acceptBroadcastRide(), subscribeToAcceptance(), subscribeToAcceptancesForOffer() (Kind 3174)
 │   ├── Confirmation: subscribeToConfirmation() (Kind 3175)
 │   ├── DriverState: publishDriverRideState(), subscribeToDriverRideState() (Kind 30180)

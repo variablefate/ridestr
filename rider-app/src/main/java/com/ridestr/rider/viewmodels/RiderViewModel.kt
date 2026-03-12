@@ -1624,7 +1624,7 @@ class RiderViewModel @Inject constructor(
         } else {
             RideOfferSpec.Direct(
                 driverPubKey = params.driverPubKey,
-                driverAvailabilityEventId = params.driverAvailabilityEventId ?: "",
+                driverAvailabilityEventId = params.driverAvailabilityEventId,
                 pickup = params.pickup,
                 destination = params.destination,
                 fareEstimate = params.fareEstimate,

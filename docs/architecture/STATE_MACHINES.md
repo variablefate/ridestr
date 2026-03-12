@@ -397,6 +397,8 @@ Three ways to enter the ride state machine, each with different discovery and pr
 | **Broadcast Offer** | Medium (~1km approx) | `broadcastRideRequest()` | `acceptBroadcastRequest()` |
 | **RoadFlare Offer** | High (encrypted) | `sendRoadflareOffer()` | `acceptOffer()` (isRoadflare=true) |
 
+> **Note:** All offer types now use `nostrService.sendOffer(RideOfferSpec)` as the underlying transport API. The method names above are ViewModel entry points.
+
 ### Direct Offer Flow
 ```
 Rider: IDLE → [sendRideOffer()] → WAITING_FOR_ACCEPTANCE

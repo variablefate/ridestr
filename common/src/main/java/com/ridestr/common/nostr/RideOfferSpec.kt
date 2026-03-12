@@ -11,10 +11,11 @@ import com.ridestr.common.nostr.events.Location
  */
 sealed class RideOfferSpec {
 
-    /** Direct offer to a specific driver discovered via Kind 30173 availability. */
+    /** Direct offer to a specific driver discovered via Kind 30173 availability.
+     *  availabilityEventId is nullable: boost/restore after process death loses it. */
     data class Direct(
         val driverPubKey: String,
-        val driverAvailabilityEventId: String,  // Required — Direct must reference availability
+        val driverAvailabilityEventId: String?,  // Nullable — lost after process death boost
         val pickup: Location,
         val destination: Location,
         val fareEstimate: Double,

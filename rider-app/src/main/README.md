@@ -138,7 +138,7 @@ Fixes for driver status bouncing between offline/online:
 
 | From (this module) | To (common module) | How/Why | Example Call |
 |--------------------|-------------------|---------|--------------|
-| `RiderViewModel` | `NostrService` | Publish ride request | `nostrService.broadcastRideRequest()` |
+| `RiderViewModel` | `NostrService` | Publish ride offers (direct, RoadFlare, broadcast) | `nostrService.sendOffer(spec)` |
 | `RiderViewModel` | `NostrService` | Subscribe to acceptances | `nostrService.subscribeToAcceptances()` |
 | `RiderViewModel` | `NostrService` | Publish rider state | `nostrService.publishRiderRideState()` |
 | `RiderViewModel` | `WalletService` | Verify wallet before offer | `walletService.ensureWalletReady(fareWithBuffer)` |
@@ -154,7 +154,6 @@ Fixes for driver status bouncing between offline/online:
 | `WalletScreen` | `WalletService` | Display balance | `walletService.balance.value` |
 | `HistoryScreen` | `RideHistoryRepository` | Display past rides | `rideHistoryRepo.rides.value` |
 | `HistoryScreen` | `RideHistoryRepository` | Manual backup | `rideHistoryRepo.backupToNostr()` |
-| `RiderViewModel` | `NostrService` | Send RoadFlare to all drivers | `sendRoadflareToAll()` |
 | `MainActivity` | `FollowedDriversRepository` | Followed drivers for RoadFlare tab | `followedDriversRepo.drivers` |
 | `MainActivity` | `NostrService` | Subscribe to key shares (Kind 3186) | `nostrService.subscribeToRoadflareKeyShares()` |
 | `RoadflareTab` | `ReorderablePaymentMethodList` | Drag-to-reorder payment methods in dialog | `ReorderablePaymentMethodList(allMethods, enabledMethods, ...)` |

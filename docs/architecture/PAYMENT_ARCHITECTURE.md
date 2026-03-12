@@ -461,7 +461,7 @@ This ensures:
 
 ### RiderViewModel Integration
 
-**Preimage Generation** (`sendOfferToDriver()` / `broadcastRideRequest()`):
+**Preimage Generation** (rider offer entrypoints, Cashu payment paths only):
 ```kotlin
 val preimage = PaymentCrypto.generatePreimage()
 val paymentHash = PaymentCrypto.computePaymentHash(preimage)

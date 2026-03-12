@@ -778,6 +778,7 @@ class NostrService internal constructor(
      *
      * @return The event ID if successful, null on failure
      */
+    @Deprecated("Use sendOffer(RideOfferSpec) instead")
     suspend fun sendRideOffer(
         driverPubKey: String,
         driverAvailabilityEventId: String? = null,
@@ -825,6 +826,7 @@ class NostrService internal constructor(
      * @param routeDurationMin Route duration in minutes
      * @return The event ID if successful, null on failure
      */
+    @Deprecated("Use sendOffer(RideOfferSpec) instead")
     suspend fun broadcastRideRequest(
         pickup: Location,
         destination: Location,

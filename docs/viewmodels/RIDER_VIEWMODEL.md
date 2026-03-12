@@ -26,7 +26,10 @@ This document provides a complete reference of all functions, state fields, and 
 | Function | Purpose | Triggers State Change |
 |----------|---------|----------------------|
 | `broadcastRideRequest()` | Send ride request to all nearby drivers | IDLE -> BROADCASTING_REQUEST |
-| `sendRideOffer(driver)` | Send direct ride offer to specific driver | IDLE -> WAITING_FOR_ACCEPTANCE |
+| `sendRideOffer()` | Send direct ride offer to specific driver | IDLE -> WAITING_FOR_ACCEPTANCE |
+| `sendRoadflareOffer()` | Send RoadFlare offer to a followed driver | IDLE -> WAITING_FOR_ACCEPTANCE |
+| `sendRoadflareOfferWithAlternatePayment()` | Send RoadFlare offer with non-Cashu payment | IDLE -> WAITING_FOR_ACCEPTANCE |
+| `sendRoadflareToAll()` | Batch send to all followed drivers (sorted by proximity) | IDLE -> WAITING_FOR_ACCEPTANCE |
 | `cancelOffer()` | Cancel pending offer or broadcast request | WAITING_FOR_ACCEPTANCE / BROADCASTING_REQUEST -> IDLE |
 | `clearRide()` | Cancel current ride and reset state | Any -> IDLE |
 | `boostFare()` | Increase fare offer by $1 or 1000 sats | Updates `fareEstimate` |
@@ -282,10 +285,14 @@ Cleared in `clearRiderStateHistory()` when ride ends.
 
 ## Function Call Graph
 
-### Ride Request Flow
+### Ride Request Flow (primary paths — see function table above for full method list)
 ```
-broadcastRideRequest() OR sendRideOffer()
-    -> nostrService.publishRideOffer()
+Direct:    sendRideOffer() → sendOfferToNostr() → nostrService.sendOffer(spec)
+RoadFlare: sendRoadflareOffer() → sendOfferToNostr() → nostrService.sendOffer(spec)
+             (batch path sendRoadflareToAll() has additional intermediate helpers)
+Broadcast: broadcastRideRequest() → nostrService.sendOffer(spec) (no helper)
+
+All paths then:
     -> subscribeToAcceptance()
     -> [on acceptance] handleAcceptance()
         -> autoConfirmRide()
