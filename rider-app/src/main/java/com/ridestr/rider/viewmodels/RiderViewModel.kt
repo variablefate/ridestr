@@ -132,6 +132,9 @@ class RiderViewModel @Inject constructor(
         private const val ACCEPTANCE_TIMEOUT_MS = 15_000L
         // Time to wait for any driver to accept broadcast request (2 minutes)
         private const val BROADCAST_TIMEOUT_MS = 120_000L
+        // Grace period before reacting to Kind 5 availability deletion during WAITING_FOR_ACCEPTANCE.
+        // Allows acceptance (Kind 3174) to arrive before showing false "driver unavailable" dialog.
+        private const val DELETION_GRACE_PERIOD_MS = 3000L
 
         // Demo location coordinates for testing
         // Demo coordinates - Las Vegas
@@ -269,6 +272,7 @@ class RiderViewModel @Inject constructor(
     private var bridgePendingPollJob: Job? = null
     private var escrowRetryDeadlineJob: Job? = null
     private var postConfirmAckTimeoutJob: Job? = null
+    private var pendingDeletionJob: Job? = null
     private var currentSubscriptionGeohash: String? = null
     // Generation counter for EOSE reconciliation — prevents stale reconciliation after resubscribe
     private val driverSubscriptionGeneration = AtomicInteger(0)
@@ -613,6 +617,8 @@ class RiderViewModel @Inject constructor(
         escrowRetryDeadlineJob = null
         postConfirmAckTimeoutJob?.cancel()
         postConfirmAckTimeoutJob = null
+        pendingDeletionJob?.cancel()
+        pendingDeletionJob = null
 
         // RoadFlare batch state — prevent stale offers to drivers from finished ride
         roadflareBatchJob?.cancel()
@@ -1569,13 +1575,32 @@ class RiderViewModel @Inject constructor(
      * Cancels the pending offer and returns to driver selection.
      */
     fun dismissDriverUnavailable() {
-        Log.d(TAG, "Rider acknowledged driver unavailable - cancelling offer")
-        // Hide the dialog
-        updateRideSession { copy(showDriverUnavailableDialog = false) }
-        // Cancel the offer (this will handle cleanup and return to IDLE)
-        cancelOffer()
-        // Clear the selected driver
-        clearSelectedDriver()
+        var shouldCancel = false
+        _uiState.update { current ->
+            val stage = current.rideSession.rideStage
+            shouldCancel = stage == RideStage.WAITING_FOR_ACCEPTANCE
+            if (shouldCancel) {
+                // Transition to IDLE inside CAS — acceptance handler's CAS retry
+                // will see IDLE and set shouldConfirm = false.
+                current.copy(
+                    rideSession = current.rideSession.copy(
+                        showDriverUnavailableDialog = false,
+                        rideStage = RideStage.IDLE
+                    )
+                )
+            } else {
+                current.copy(
+                    rideSession = current.rideSession.copy(showDriverUnavailableDialog = false)
+                )
+            }
+        }
+        if (shouldCancel) {
+            Log.d(TAG, "Rider acknowledged driver unavailable - cancelling offer")
+            cancelOffer()
+            clearSelectedDriver()
+        } else {
+            Log.d(TAG, "Dismissing stale driver-unavailable dialog — stage already advanced")
+        }
     }
 
     // ==================== Offer Helpers (Phase 2) ====================
@@ -2426,8 +2451,8 @@ class RiderViewModel @Inject constructor(
         cancelAcceptanceTimeout()
         subs.close(SubKeys.ACCEPTANCE)
         subs.closeGroup(SubKeys.BATCH_ACCEPTANCE)
-        // NOTE: Don't close availability subscription yet - keep monitoring through DRIVER_ACCEPTED
-        // in case driver goes offline before we send confirmation (Kind 3179 won't work without confId)
+        // Availability callbacks are stage-gated to WAITING_FOR_ACCEPTANCE only.
+        // Subs closed in autoConfirmRide(); pendingDeletionJob cancelled below.
 
         // Atomic stage transition: only proceed if still WAITING_FOR_ACCEPTANCE
         // shouldConfirm is re-derived each CAS retry (StateFlow.update re-runs lambda on contention)
@@ -2442,7 +2467,8 @@ class RiderViewModel @Inject constructor(
                         rideStage = RideStage.DRIVER_ACCEPTED,
                         // Update to actual accepting driver (may differ from first driver in batch)
                         roadflareTargetDriverPubKey = acceptance.driverPubKey,
-                        roadflareTargetDriverLocation = null  // Clear stale location
+                        roadflareTargetDriverLocation = null,  // Clear stale location
+                        showDriverUnavailableDialog = false  // Clear any latched dialog from grace period
                     )
                 )
             } else {
@@ -2451,6 +2477,8 @@ class RiderViewModel @Inject constructor(
         }
 
         if (shouldConfirm) {
+            pendingDeletionJob?.cancel()
+            pendingDeletionJob = null
             // INVARIANT: must stay inside if(shouldConfirm) CAS winner block
             cancelNonAcceptedBatchOffers(acceptance.driverPubKey)
             autoConfirmRide(acceptance)
@@ -3515,8 +3543,8 @@ class RiderViewModel @Inject constructor(
 
             // Cancel the acceptance timeout - driver responded
             cancelAcceptanceTimeout()
-            // NOTE: Don't close availability subscription yet - keep monitoring through DRIVER_ACCEPTED
-            // in case driver goes offline before confirmation is sent (Kind 3179 won't work without confId)
+            // Availability callbacks are stage-gated to WAITING_FOR_ACCEPTANCE only.
+            // Subs closed in autoConfirmRide(); pendingDeletionJob cancelled below.
 
             // Atomic stage transition: only proceed if still WAITING_FOR_ACCEPTANCE
             // shouldConfirm is re-derived each CAS retry (StateFlow.update re-runs lambda on contention)
@@ -3529,7 +3557,8 @@ class RiderViewModel @Inject constructor(
                         rideSession = current.rideSession.copy(
                             acceptance = acceptance,
                             rideStage = RideStage.DRIVER_ACCEPTED,
-                            acceptanceTimeoutStartMs = null
+                            acceptanceTimeoutStartMs = null,
+                            showDriverUnavailableDialog = false  // Clear any latched dialog from grace period
                         )
                     )
                 } else {
@@ -3538,6 +3567,8 @@ class RiderViewModel @Inject constructor(
             }
 
             if (shouldConfirm) {
+                pendingDeletionJob?.cancel()
+                pendingDeletionJob = null
                 subs.closeGroup(SubKeys.BATCH_ACCEPTANCE)  // Clean up batch subs — winner chosen
                 // Batch guard: only populated in batch flow (sendRoadflareOfferSilent)
                 if (contactedDrivers.isNotEmpty()) {
@@ -3566,11 +3597,10 @@ class RiderViewModel @Inject constructor(
         closeDriverAvailabilitySubscription()
 
         // Restore timestamp guard AFTER close resets it to 0L
-        if (initialAvailabilityTimestamp > 0L) {
-            selectedDriverLastAvailabilityTimestamp = initialAvailabilityTimestamp
-            // Also persist seed value so it's available even if app killed before callback
-            prefs.edit().putLong(KEY_DRIVER_AVAIL_TIMESTAMP, initialAvailabilityTimestamp).apply()
-        }
+        val seedValue = AvailabilityMonitorPolicy.seedTimestamp(initialAvailabilityTimestamp)
+        selectedDriverLastAvailabilityTimestamp = seedValue
+        // Persisted so process-death restore keeps the stale-event guard intact.
+        prefs.edit().putLong(KEY_DRIVER_AVAIL_TIMESTAMP, seedValue).apply()
 
         Log.d(TAG, "Monitoring availability for selected driver ${driverPubKey.take(8)}")
 
@@ -3584,27 +3614,16 @@ class RiderViewModel @Inject constructor(
             // Persist for app restart recovery
             prefs.edit().putLong(KEY_DRIVER_AVAIL_TIMESTAMP, availability.createdAt).apply()
 
-            val currentStage = _uiState.value.rideSession.rideStage
-
-            // Only care about this if we're waiting for acceptance OR in early ride stages
-            // CRITICAL: Also check DRIVER_ACCEPTED because driver may cancel before confirmation
-            // arrives (the confirmation hasn't been sent yet, so Kind 3179 cancellation won't work)
-            if (currentStage !in listOf(RideStage.WAITING_FOR_ACCEPTANCE, RideStage.DRIVER_ACCEPTED)) {
-                Log.d(TAG, "Ignoring driver availability - not in pre-confirmation stage (stage=$currentStage)")
-                return@subscribeToDriverAvailability
-            }
-
-            // Check if driver went offline or became unavailable
-            if (!availability.isAvailable) {
-                Log.w(TAG, "Selected driver ${driverPubKey.take(8)} is no longer available (status: ${availability.status})")
-
-                if (currentStage == RideStage.DRIVER_ACCEPTED) {
-                    // Driver cancelled after accepting but before we confirmed
-                    // This is effectively a cancellation - clean up and return to IDLE
-                    Log.w(TAG, "Driver went offline during DRIVER_ACCEPTED - treating as cancellation")
-                    handleDriverCancellation("Driver went offline")
-                } else {
-                    // Still waiting for acceptance - show dialog
+            val action = AvailabilityMonitorPolicy.onAvailabilityEvent(
+                stage = _uiState.value.rideSession.rideStage,
+                isAvailable = availability.isAvailable,
+                eventCreatedAt = availability.createdAt,
+                lastSeenTimestamp = selectedDriverLastAvailabilityTimestamp
+            )
+            when (action) {
+                AvailabilityMonitorPolicy.Action.IGNORE -> return@subscribeToDriverAvailability
+                AvailabilityMonitorPolicy.Action.SHOW_UNAVAILABLE -> {
+                    Log.w(TAG, "Selected driver ${driverPubKey.take(8)} is no longer available (status: ${availability.status})")
                     _uiState.update { current ->
                         current.copy(
                             statusMessage = "Driver is no longer available",
@@ -3612,6 +3631,7 @@ class RiderViewModel @Inject constructor(
                         )
                     }
                 }
+                AvailabilityMonitorPolicy.Action.DEFER_CHECK -> {} // Not returned by onAvailabilityEvent
             }
         })
 
@@ -3634,30 +3654,42 @@ class RiderViewModel @Inject constructor(
             since = deletionSince
         ) { deletionTimestamp ->
             // Timestamp guard: ignore deletions older than the latest availability event.
-            // Critical for RoadFlare (broad k-tag) path to prevent stale deletion replay.
-            // Harmless for direct offer (e-tag) path since the event ID already ensures precision.
+            // MUST remain before policy check — guards the timestamp mutation above.
             if (deletionTimestamp < selectedDriverLastAvailabilityTimestamp) {
                 Log.d(TAG, "Ignoring stale availability deletion ($deletionTimestamp < $selectedDriverLastAvailabilityTimestamp)")
                 return@subscribeToAvailabilityDeletions
             }
 
-            val currentStage = _uiState.value.rideSession.rideStage
-            if (currentStage !in listOf(RideStage.WAITING_FOR_ACCEPTANCE, RideStage.DRIVER_ACCEPTED)) {
-                Log.d(TAG, "Ignoring driver availability deletion - stage=$currentStage")
-                return@subscribeToAvailabilityDeletions
-            }
-
-            Log.w(TAG, "Selected driver ${driverPubKey.take(8)} deleted availability - treating as unavailable")
-
-            if (currentStage == RideStage.DRIVER_ACCEPTED) {
-                handleDriverCancellation("Driver is no longer available")
-            } else {
-                _uiState.update { current ->
-                    current.copy(
-                        statusMessage = "Driver is no longer available",
-                        rideSession = current.rideSession.copy(showDriverUnavailableDialog = true)
-                    )
+            val action = AvailabilityMonitorPolicy.onDeletionEvent(
+                stage = _uiState.value.rideSession.rideStage,
+                deletionTimestamp = deletionTimestamp,
+                lastSeenTimestamp = selectedDriverLastAvailabilityTimestamp
+            )
+            when (action) {
+                AvailabilityMonitorPolicy.Action.IGNORE -> {
+                    Log.d(TAG, "Ignoring availability deletion - stage=${_uiState.value.rideSession.rideStage}")
+                    return@subscribeToAvailabilityDeletions
                 }
+                AvailabilityMonitorPolicy.Action.DEFER_CHECK -> {
+                    Log.d(TAG, "Deferring deletion reaction — waiting ${DELETION_GRACE_PERIOD_MS}ms for possible acceptance")
+                    pendingDeletionJob?.cancel()
+                    pendingDeletionJob = viewModelScope.launch {
+                        delay(DELETION_GRACE_PERIOD_MS)
+                        val stageAfterDelay = _uiState.value.rideSession.rideStage
+                        if (stageAfterDelay == RideStage.WAITING_FOR_ACCEPTANCE) {
+                            Log.w(TAG, "Driver ${driverPubKey.take(8)} deleted availability — no acceptance arrived")
+                            _uiState.update { current ->
+                                current.copy(
+                                    statusMessage = "Driver is no longer available",
+                                    rideSession = current.rideSession.copy(showDriverUnavailableDialog = true)
+                                )
+                            }
+                        } else {
+                            Log.d(TAG, "Ignoring deferred deletion — stage advanced to $stageAfterDelay")
+                        }
+                    }
+                }
+                AvailabilityMonitorPolicy.Action.SHOW_UNAVAILABLE -> {} // Not returned by onDeletionEvent
             }
         })
     }
@@ -3669,6 +3701,8 @@ class RiderViewModel @Inject constructor(
     private fun closeDriverAvailabilitySubscription() {
         subs.close(SubKeys.SELECTED_DRIVER_AVAILABILITY)
         subs.close(SubKeys.SELECTED_DRIVER_AVAIL_DELETION)
+        pendingDeletionJob?.cancel()
+        pendingDeletionJob = null
         // Reset timestamp when subscription closes - new subscription should accept fresh events
         selectedDriverLastAvailabilityTimestamp = 0L
     }
@@ -3909,9 +3943,9 @@ class RiderViewModel @Inject constructor(
                     // Close acceptance subscription - we don't need it anymore
                     subs.close(SubKeys.ACCEPTANCE)
 
-                    // Keep availability subscription OPEN - don't close until EN_ROUTE_PICKUP
-                    // Driver may go offline after confirmation but before acknowledging.
-                    // The availability subscription detects this and triggers cancellation.
+                    // Close availability monitoring — post-acceptance safety relies on
+                    // Kind 3179 cancellation + post-confirm ack timeout, not availability presence.
+                    closeDriverAvailabilitySubscription()
 
                     // Update service status - keep DriverAccepted until driver sends EN_ROUTE_PICKUP
                     // AtoB Pattern: Don't transition notification until driver confirms state
@@ -5334,6 +5368,7 @@ class RiderViewModel @Inject constructor(
         broadcastTimeoutJob?.cancel()
         bridgePendingPollJob?.cancel()
         roadflareBatchJob?.cancel()
+        pendingDeletionJob?.cancel()
         presenceCoordinator.stop()
         subs.closeAll()
         bitcoinPriceService.cleanup()
