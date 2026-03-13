@@ -521,7 +521,10 @@ fun DrivestrApp(settingsRepository: SettingsRepository) {
         val target = effectiveRelays.toSet()
         (currentNostr - target).forEach { nostrService.relayManager.removeRelay(it) }
         (target - currentNostr).forEach { nostrService.relayManager.addRelay(it) }
-        if (currentNostr != target) nostrService.relayManager.ensureConnected()
+        if (currentNostr != target) {
+            nostrService.relayManager.ensureConnected()
+            driverViewModel.refreshSubscriptions()
+        }
     }
 
     // Check if already logged in on first composition (only if not already at MAIN)

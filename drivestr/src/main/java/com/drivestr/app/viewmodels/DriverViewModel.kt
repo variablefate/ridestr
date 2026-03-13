@@ -504,23 +504,57 @@ class DriverViewModel @Inject constructor(
     }
 
     /**
+     * Re-arm offer/deletion subscriptions for the current stage.
+     * Called from onResume() and after relay settings changes (which trigger ensureConnected()
+     * and may prune stale subscriptions).
+     */
+    fun refreshSubscriptions() {
+        val state = _uiState.value
+        when (state.stage) {
+            DriverStage.AVAILABLE -> {
+                Log.d(TAG, "refreshSubscriptions: AVAILABLE — re-arming offers + broadcast + deletion + acceptance watchers")
+                subscribeToOffers()
+                state.currentLocation?.let { subscribeToBroadcastRequests(it) }
+                updateDeletionSubscription()
+                rearmBroadcastAcceptanceWatchers()
+                _locationRefreshRequested.value = true
+            }
+            DriverStage.ROADFLARE_ONLY -> {
+                Log.d(TAG, "refreshSubscriptions: ROADFLARE_ONLY — re-arming RoadFlare offers + deletion")
+                subscribeToRoadflareOffers()
+                updateDeletionSubscription()
+                _locationRefreshRequested.value = true
+            }
+            else -> {}
+        }
+    }
+
+    /**
+     * Re-arm acceptance watchers for all pending broadcast requests.
+     * After stale subscription cleanup, group entries in SubscriptionManager may reference
+     * dead relay-side subscriptions. Clear the group and rebuild from pending requests.
+     */
+    private fun rearmBroadcastAcceptanceWatchers() {
+        val pending = _uiState.value.rideSession.pendingBroadcastRequests
+        if (pending.isEmpty()) return
+        subs.closeGroup(SubKeys.REQUEST_ACCEPTANCES)
+        Log.d(TAG, "Re-arming acceptance watchers for ${pending.size} pending broadcast requests")
+        for (request in pending) {
+            subscribeToAcceptancesForRequest(request.eventId)
+        }
+    }
+
+    /**
      * Called when app returns to foreground.
      * Ensures relay connections are active and resubscribes to chat and cancellation if needed.
      */
     fun onResume() {
         Log.d(TAG, "onResume - ensuring relay connections and refreshing subscriptions")
         nostrService.ensureConnected()
-
-        val state = _uiState.value
-
-        // If driver is AVAILABLE or ROADFLARE_ONLY, request location refresh
-        // The UI will fetch GPS and call handleLocationUpdate()
-        if (state.stage == DriverStage.AVAILABLE || state.stage == DriverStage.ROADFLARE_ONLY) {
-            Log.d(TAG, "Driver is ${state.stage}, requesting location refresh")
-            _locationRefreshRequested.value = true
-        }
+        refreshSubscriptions()
 
         // If we have an active ride with a confirmation, refresh subscriptions
+        val state = _uiState.value
         val session = state.rideSession
         val confId = session.confirmationEventId
         if (confId != null && state.stage in listOf(
