@@ -3102,6 +3102,9 @@ class RiderViewModel @Inject constructor(
             Log.w(TAG, "    at ${frame.className}.${frame.methodName}(${frame.fileName}:${frame.lineNumber})")
         }
 
+        // Release HTLC protection for refund (capture paymentHash before reset)
+        session.activePaymentHash?.let { walletService?.clearHtlcRideProtected(it) }
+
         // Synchronous cleanup
         closeAllRideSubscriptionsAndJobs()
         clearRiderStateHistory()
@@ -3999,6 +4002,9 @@ class RiderViewModel @Inject constructor(
 
                     // Save ride state for persistence
                     saveRideState()
+
+                    // Protect HTLC from auto-refund now that ride is confirmed
+                    _uiState.value.rideSession.activePaymentHash?.let { walletService?.setHtlcRideProtected(it) }
 
                     // Start post-confirm ack timeout (after save so deadline is persisted)
                     startPostConfirmAckTimeout(postConfirmDeadline)
@@ -5002,12 +5008,28 @@ class RiderViewModel @Inject constructor(
         val driver = session.selectedDriver
         val driverProfile = driver?.let { state.driverProfiles[it.driverPubKey] }
 
-        // Mark HTLC as claimed by the driver (prevents false refund attempts)
+        // Conditionally mark HTLC based on driver's claim result
         val paymentHash = session.activePaymentHash
         if (paymentHash != null) {
-            val marked = walletService?.markHtlcClaimedByPaymentHash(paymentHash) ?: false
-            if (marked) {
-                Log.d(TAG, "Marked HTLC escrow as claimed for ride completion")
+            val completedAction = statusData.history.filterIsInstance<DriverRideAction.Status>()
+                .lastOrNull { it.status == DriverStatusType.COMPLETED }
+            val claimSuccess = completedAction?.claimSuccess
+
+            if (claimSuccess == true) {
+                // Driver confirmed claim succeeded — mark HTLC as claimed
+                val marked = walletService?.markHtlcClaimedByPaymentHash(paymentHash) ?: false
+                if (marked) Log.d(TAG, "Marked HTLC escrow as claimed for ride completion")
+            } else if (claimSuccess == false) {
+                // Driver claim failed — keep HTLC LOCKED for rider refund
+                walletService?.clearHtlcRideProtected(paymentHash)
+                Log.w(TAG, "Driver claim failed for HTLC ${paymentHash.take(16)}... — keeping LOCKED for refund")
+            } else {
+                // null = old driver app without claimSuccess field
+                // Conservative: for SAME_MINT rides, keep LOCKED (money safety)
+                if (session.paymentPath == PaymentPath.SAME_MINT) {
+                    walletService?.clearHtlcRideProtected(paymentHash)
+                    Log.w(TAG, "Old driver (no claimSuccess) + SAME_MINT — keeping LOCKED for safety")
+                }
             }
         }
 
@@ -5079,6 +5101,9 @@ class RiderViewModel @Inject constructor(
         Log.w(TAG, "  Current confirmationEventId: ${_uiState.value.rideSession.confirmationEventId}")
         Log.w(TAG, "  Current rideStage: ${_uiState.value.rideSession.rideStage}")
         Log.w(TAG, "  driverRideStateSubscriptionId: ${subs.get(SubKeys.DRIVER_RIDE_STATE)}")
+
+        // Release HTLC protection for refund (capture paymentHash before reset)
+        _uiState.value.rideSession.activePaymentHash?.let { walletService?.clearHtlcRideProtected(it) }
 
         // Synchronous cleanup
         closeAllRideSubscriptionsAndJobs()

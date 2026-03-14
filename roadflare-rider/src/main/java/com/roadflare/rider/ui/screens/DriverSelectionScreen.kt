@@ -16,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.annotation.VisibleForTesting
 import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.data.CachedDriverLocation
 import com.ridestr.common.nostr.events.AdminConfig
@@ -29,7 +30,6 @@ import com.ridestr.common.roadflare.RoadflareDriverUiModel.DriverStatus
 import com.ridestr.common.settings.DisplayCurrency
 import com.ridestr.common.ui.RoadflareDriverCard
 import com.roadflare.rider.viewmodels.DriverOfferData
-import kotlin.math.roundToLong
 
 /**
  * Full-screen driver selection for roadflare-rider.
@@ -58,51 +58,31 @@ fun DriverSelectionScreen(
     onBack: () -> Unit
 ) {
     val now = System.currentTimeMillis() / 1000
-    val staleThresholdSec = 5 * 60
+    val staleThresholdSec = 5L * 60
+
+    val btcPrice by priceService.btcPriceUsd.collectAsState()
+    val priceAvailable = btcPrice != null
 
     // Map drivers to UI models
-    val driverModels = remember(drivers, driverLocations, driverNames, driverQuotes, isSending, now) {
+    val driverModels = remember(drivers, driverLocations, driverNames, driverQuotes, isSending, now, displayCurrency, btcPrice) {
         drivers.map { driver ->
             val cached = driverLocations[driver.pubkey]
             val quote = driverQuotes[driver.pubkey]
-            val hasKey = driver.roadflareKey != null
-            val isOnline = cached != null &&
-                cached.status == RoadflareLocationEvent.Status.ONLINE &&
-                (now - cached.timestamp) < staleThresholdSec
-            val isOnRide = cached?.status == RoadflareLocationEvent.Status.ON_RIDE
-
-            val status = when {
-                !hasKey -> DriverStatus.PENDING_APPROVAL
-                isOnRide -> DriverStatus.ON_RIDE
-                !isOnline -> DriverStatus.OFFLINE
-                quote?.isTooFar == true -> DriverStatus.TOO_FAR
-                else -> DriverStatus.AVAILABLE
-            }
-
-            val fareState = quote?.fareState ?: FareState.CALCULATING
-            val isTooFar = quote?.isTooFar == true
-
-            val formattedFare = if (quote != null && fareState != FareState.CALCULATING) {
+            val formattedFare = if (quote != null && (quote.fareState) != FareState.CALCULATING) {
                 formatFareUsd(quote.fareUsd, displayCurrency, priceService)
             } else null
 
-            val isBroadcastEligible = hasKey && isOnline && !isTooFar &&
-                fareState != FareState.CALCULATING &&
-                cached != null && (now - cached.timestamp) < staleThresholdSec
-
-            val isDirectSelectable = hasKey && !isSending &&
-                fareState != FareState.CALCULATING
-
-            RoadflareDriverUiModel(
+            deriveDriverUiModel(
                 pubkey = driver.pubkey,
                 displayName = driverNames[driver.pubkey] ?: driver.pubkey.take(8) + "...",
-                status = status,
-                formattedFare = formattedFare,
-                pickupMiles = if (fareState != FareState.CALCULATING) quote?.pickupMiles else null,
-                fareState = fareState,
-                isTooFar = isTooFar,
-                isBroadcastEligible = isBroadcastEligible,
-                isDirectSelectable = isDirectSelectable
+                hasKey = driver.roadflareKey != null,
+                cached = cached,
+                quote = quote,
+                isSending = isSending,
+                now = now,
+                staleThresholdSec = staleThresholdSec,
+                priceAvailable = priceAvailable,
+                formattedFare = formattedFare
             )
         }
     }
@@ -236,13 +216,15 @@ fun DriverSelectionScreen(
                     model = model,
                     onClick = {
                         val quote = driverQuotes[model.pubkey] ?: return@RoadflareDriverCard
+                        val sats = computeEventFareSats(quote.fareSats, quote.fareUsd, priceService)
+                            ?: return@RoadflareDriverCard
                         onSendToDriver(
                             DriverOfferData(
                                 pubkey = model.pubkey,
                                 displayName = model.displayName,
                                 pickupMiles = quote.pickupMiles,
                                 fareUsd = quote.fareUsd,
-                                fareSats = quote.toEventFareSats(priceService)
+                                fareSats = sats
                             ),
                             rideMiles
                         )
@@ -259,12 +241,14 @@ fun DriverSelectionScreen(
                 val eligible = driverModels.filter { it.isBroadcastEligible }
                 val offerData = eligible.mapNotNull { model ->
                     val quote = driverQuotes[model.pubkey] ?: return@mapNotNull null
+                    val sats = computeEventFareSats(quote.fareSats, quote.fareUsd, priceService)
+                        ?: return@mapNotNull null
                     DriverOfferData(
                         pubkey = model.pubkey,
                         displayName = model.displayName,
                         pickupMiles = quote.pickupMiles,
                         fareUsd = quote.fareUsd,
-                        fareSats = quote.toEventFareSats(priceService)
+                        fareSats = sats
                     )
                 }
                 onSendToAll(offerData, rideMiles)
@@ -324,8 +308,58 @@ private fun formatFareUsd(
     }
 }
 
-private fun RoadflareDriverQuote.toEventFareSats(priceService: BitcoinPriceService): Long {
-    return fareSats
-        ?: priceService.usdToSats(fareUsd)
-        ?: maxOf((fareUsd * 1000.0).roundToLong(), 1L)
+@VisibleForTesting
+internal fun computeEventFareSats(
+    fareSats: Long?,
+    fareUsd: Double,
+    priceService: BitcoinPriceService
+): Long? = fareSats ?: priceService.usdToSats(fareUsd)
+
+@VisibleForTesting
+internal fun deriveDriverUiModel(
+    pubkey: String,
+    displayName: String,
+    hasKey: Boolean,
+    cached: CachedDriverLocation?,
+    quote: RoadflareDriverQuote?,
+    isSending: Boolean,
+    now: Long,
+    staleThresholdSec: Long,
+    priceAvailable: Boolean,
+    formattedFare: String? = null
+): RoadflareDriverUiModel {
+    val isOnline = cached != null &&
+        cached.status == RoadflareLocationEvent.Status.ONLINE &&
+        (now - cached.timestamp) < staleThresholdSec
+    val isOnRide = cached?.status == RoadflareLocationEvent.Status.ON_RIDE
+
+    val status = when {
+        !hasKey -> DriverStatus.PENDING_APPROVAL
+        isOnRide -> DriverStatus.ON_RIDE
+        !isOnline -> DriverStatus.OFFLINE
+        quote?.isTooFar == true -> DriverStatus.TOO_FAR
+        else -> DriverStatus.AVAILABLE
+    }
+
+    val fareState = quote?.fareState ?: FareState.CALCULATING
+    val isTooFar = quote?.isTooFar == true
+
+    val isBroadcastEligible = hasKey && isOnline && !isTooFar &&
+        fareState != FareState.CALCULATING && priceAvailable &&
+        cached != null && (now - cached.timestamp) < staleThresholdSec
+
+    val isDirectSelectable = hasKey && !isSending &&
+        fareState != FareState.CALCULATING && priceAvailable
+
+    return RoadflareDriverUiModel(
+        pubkey = pubkey,
+        displayName = displayName,
+        status = status,
+        formattedFare = formattedFare,
+        pickupMiles = if (fareState != FareState.CALCULATING) quote?.pickupMiles else null,
+        fareState = fareState,
+        isTooFar = isTooFar,
+        isBroadcastEligible = isBroadcastEligible,
+        isDirectSelectable = isDirectSelectable
+    )
 }

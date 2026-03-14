@@ -97,6 +97,7 @@ class RiderViewModel @Inject constructor(
         nostrService.ensureConnected()
         viewModelScope.launch { remoteConfigManager.fetchConfig() }
         presenceCoordinator.start()
+        BitcoinPriceService.getInstance().startAutoRefresh()
     }
 
     /** Current UI stage derived from the ride state machine. */

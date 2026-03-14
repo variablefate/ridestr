@@ -1876,6 +1876,21 @@ class WalletService(
         return false
     }
 
+    /** Set rideProtected flag to prevent auto-refund during active ride. */
+    fun setHtlcRideProtected(paymentHash: String): Boolean {
+        val htlc = findHtlcByPaymentHash(paymentHash) ?: return false
+        if (!htlc.isActive()) return false
+        walletStorage.updatePendingHtlc(htlc.escrowId) { it.copy(rideProtected = true) }
+        return true
+    }
+
+    /** Clear rideProtected flag (for refund after cancellation). */
+    fun clearHtlcRideProtected(paymentHash: String): Boolean {
+        val htlc = findHtlcByPaymentHash(paymentHash) ?: return false
+        walletStorage.updatePendingHtlc(htlc.escrowId) { it.copy(rideProtected = false) }
+        return true
+    }
+
     /**
      * Info about a refunded HTLC.
      */

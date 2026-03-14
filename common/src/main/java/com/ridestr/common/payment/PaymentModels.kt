@@ -231,7 +231,8 @@ data class PendingHtlc(
     val preimage: String? = null,  // For refund if mint requires it (NUT-14 future-proofing)
     val rideId: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
-    val status: PendingHtlcStatus = PendingHtlcStatus.LOCKED
+    val status: PendingHtlcStatus = PendingHtlcStatus.LOCKED,
+    val rideProtected: Boolean = false  // True while HTLC is in active ride — suppresses auto-refund
 ) {
     /** Check if the locktime has passed and refund is available.
      *  Adds 120-second buffer to account for clock skew between device and mint. */
@@ -239,6 +240,10 @@ data class PendingHtlc(
 
     /** Check if this HTLC is still active (not claimed or refunded) */
     fun isActive(): Boolean = status == PendingHtlcStatus.LOCKED
+
+    /** Check if rideProtected flag is stale (4+ hours old — no ride lasts that long) */
+    fun isProtectionStale(): Boolean =
+        rideProtected && (System.currentTimeMillis() - createdAt > 4 * 60 * 60 * 1000)
 }
 
 /**

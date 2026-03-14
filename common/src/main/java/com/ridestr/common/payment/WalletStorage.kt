@@ -322,7 +322,10 @@ class WalletStorage(private val context: Context) {
      * Get only refundable HTLCs (locktime expired and still active).
      */
     fun getRefundableHtlcs(): List<PendingHtlc> {
-        return getPendingHtlcs().filter { it.isRefundable() && it.isActive() }
+        return getPendingHtlcs().filter {
+            it.isRefundable() && it.isActive() &&
+            (!it.rideProtected || it.isProtectionStale())
+        }
     }
 
     /**
@@ -340,6 +343,18 @@ class WalletStorage(private val context: Context) {
         }
         prefs.edit().putString(KEY_PENDING_HTLCS, jsonArray.toString()).apply()
         Log.d(TAG, "Updated HTLC status: $escrowId -> $status")
+    }
+
+    /**
+     * Update a pending HTLC by applying a transform function.
+     */
+    fun updatePendingHtlc(escrowId: String, transform: (PendingHtlc) -> PendingHtlc) {
+        val htlcs = getPendingHtlcs().map { htlc ->
+            if (htlc.escrowId == escrowId) transform(htlc) else htlc
+        }
+        val jsonArray = JSONArray()
+        for (h in htlcs) { jsonArray.put(pendingHtlcToJson(h)) }
+        prefs.edit().putString(KEY_PENDING_HTLCS, jsonArray.toString()).apply()
     }
 
     /**
@@ -385,6 +400,7 @@ class WalletStorage(private val context: Context) {
             htlc.rideId?.let { put("ride_id", it) }
             put("created_at", htlc.createdAt)
             put("status", htlc.status.name)
+            put("rideProtected", htlc.rideProtected)
         }
     }
 
@@ -404,7 +420,8 @@ class WalletStorage(private val context: Context) {
                     PendingHtlcStatus.valueOf(json.optString("status", "LOCKED"))
                 } catch (e: Exception) {
                     PendingHtlcStatus.LOCKED
-                }
+                },
+                rideProtected = json.optBoolean("rideProtected", false)
             )
         } catch (e: Exception) {
             Log.e(TAG, "Failed to parse pending HTLC", e)

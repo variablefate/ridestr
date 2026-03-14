@@ -165,13 +165,15 @@ object DriverRideStateEvent {
         status: String,
         location: Location? = null,
         finalFare: Long? = null,
-        invoice: String? = null
+        invoice: String? = null,
+        claimSuccess: Boolean? = null
     ): DriverRideAction.Status {
         return DriverRideAction.Status(
             status = status,
             approxLocation = location?.approximate(),
             finalFare = finalFare,
             invoice = invoice,
+            claimSuccess = claimSuccess,
             at = System.currentTimeMillis() / 1000
         )
     }
@@ -222,6 +224,7 @@ sealed class DriverRideAction {
         val approxLocation: Location? = null,
         val finalFare: Long? = null,
         val invoice: String? = null,
+        val claimSuccess: Boolean? = null,
         override val at: Long
     ) : DriverRideAction() {
         override fun toJson(): JSONObject = JSONObject().apply {
@@ -231,6 +234,7 @@ sealed class DriverRideAction {
             approxLocation?.let { put("approx_location", it.toJson()) }
             finalFare?.let { put("final_fare", it) }
             invoice?.let { put("invoice", it) }
+            claimSuccess?.let { put("claim_success", it) }
         }
     }
 
@@ -297,12 +301,14 @@ sealed class DriverRideAction {
                         } else null
                         val finalFare = if (json.has("final_fare")) json.getLong("final_fare") else null
                         val invoice = if (json.has("invoice")) json.getString("invoice") else null
+                        val claimSuccess = if (json.has("claim_success")) json.getBoolean("claim_success") else null
 
                         Status(
                             status = status,
                             approxLocation = approxLocation,
                             finalFare = finalFare,
                             invoice = invoice,
+                            claimSuccess = claimSuccess,
                             at = at
                         )
                     }

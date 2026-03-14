@@ -404,6 +404,8 @@ fun DriverModeScreen(
                             "Payment authorization not received from rider."
                         uiState.rideSession.paymentWarningStatus == PaymentStatus.MISSING_ESCROW_TOKEN ->
                             "Escrow token not received. Payment cannot be claimed."
+                        uiState.rideSession.paymentWarningStatus == PaymentStatus.MISSING_PAYMENT_HASH ->
+                            "Payment data lost (app restarted). Cannot claim escrow payment."
                         else -> "There was an issue with the payment."
                     })
                 },

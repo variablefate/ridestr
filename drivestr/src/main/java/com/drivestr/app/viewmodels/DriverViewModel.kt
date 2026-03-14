@@ -291,14 +291,16 @@ class DriverViewModel @Inject constructor(
         status: String,
         location: Location? = null,
         finalFare: Long? = null,
-        invoice: String? = null
+        invoice: String? = null,
+        claimSuccess: Boolean? = null
     ): String? {
         // Add status action to history
         val statusAction = DriverRideStateEvent.createStatusAction(
             status = status,
             location = location,
             finalFare = finalFare,
-            invoice = invoice
+            invoice = invoice,
+            claimSuccess = claimSuccess
         )
 
         // CRITICAL: Use mutex to prevent race condition with PIN submissions
@@ -617,6 +619,11 @@ class DriverViewModel @Inject constructor(
                 put("paymentPath", session.paymentPath.name)
                 put("driverMintUrl", session.driverMintUrl ?: "")
 
+                // HTLC escrow state (critical for payment after app restart)
+                session.activePaymentHash?.let { put("activePaymentHash", it) }
+                session.activePreimage?.let { put("activePreimage", it) }
+                session.activeEscrowToken?.let { put("activeEscrowToken", it) }
+
                 // Precise pickup if available
                 session.precisePickupLocation?.let {
                     put("precisePickupLat", it.lat)
@@ -710,6 +717,13 @@ class DriverViewModel @Inject constructor(
                 PaymentPath.determine(offer.mintUrl, savedDriverMintUrl, offer.paymentMethod)
             }
 
+            // Restore HTLC escrow state (critical for payment after app restart)
+            val activePaymentHash = if (data.has("activePaymentHash")) data.getString("activePaymentHash") else null
+            val activePreimage = if (data.has("activePreimage")) data.getString("activePreimage") else null
+            val activeEscrowToken = if (data.has("activeEscrowToken")) data.getString("activeEscrowToken") else null
+            // Derive canSettleEscrow from field presence — never persist the boolean
+            val canSettleEscrow = activePreimage != null && activeEscrowToken != null
+
             // Reconstruct precise pickup if available
             val precisePickup = if (data.has("precisePickupLat")) {
                 Location(
@@ -766,7 +780,11 @@ class DriverViewModel @Inject constructor(
                         chatMessages = chatMessages,
                         paymentPath = paymentPath,
                         driverMintUrl = savedDriverMintUrl,
-                        riderMintUrl = offer.mintUrl
+                        riderMintUrl = offer.mintUrl,
+                        activePaymentHash = activePaymentHash,
+                        activePreimage = activePreimage,
+                        activeEscrowToken = activeEscrowToken,
+                        canSettleEscrow = canSettleEscrow
                     )
                 )
             }
@@ -2050,16 +2068,19 @@ class DriverViewModel @Inject constructor(
                     Log.w(TAG, "No encrypted escrow token in preimage share")
                 }
 
-                // Update state with escrow info
-                val canSettle = preimage != null && escrowToken != null
-                Log.d(TAG, "Updating state: canSettleEscrow=$canSettle")
+                // Update state with escrow info — don't overwrite existing escrowToken with null
+                val effectiveEscrowToken = escrowToken ?: session.activeEscrowToken
+                val canSettle = preimage != null && effectiveEscrowToken != null
+                Log.d(TAG, "Updating state: canSettleEscrow=$canSettle (escrowToken from ${if (escrowToken != null) "preimageShare" else "confirmation"})")
                 updateRideSession { copy(
                     activePreimage = preimage,
-                    activeEscrowToken = escrowToken,
+                    activeEscrowToken = effectiveEscrowToken,
                     canSettleEscrow = canSettle,
                     showPaymentWarningDialog = if (canSettle) false else showPaymentWarningDialog,
                     paymentWarningStatus = if (canSettle) null else paymentWarningStatus
                 ) }
+                // Persist HTLC fields immediately — no other save point covers this method
+                saveRideState()
 
                 if (canSettle) {
                     Log.d(TAG, "=== ESCROW READY FOR SETTLEMENT ===")
@@ -2250,7 +2271,13 @@ class DriverViewModel @Inject constructor(
             session.paymentPath == PaymentPath.FIAT_CASH -> PaymentStatus.NO_PAYMENT_EXPECTED
             session.paymentPath == PaymentPath.NO_PAYMENT -> PaymentStatus.NO_PAYMENT_EXPECTED
             // HTLC escrow checks (SAME_MINT only from here down)
-            session.activePaymentHash == null -> PaymentStatus.NO_PAYMENT_EXPECTED
+            session.activePaymentHash == null -> {
+                if (session.paymentPath == PaymentPath.SAME_MINT) {
+                    PaymentStatus.MISSING_PAYMENT_HASH
+                } else {
+                    PaymentStatus.NO_PAYMENT_EXPECTED
+                }
+            }
             session.canSettleEscrow -> PaymentStatus.READY_TO_CLAIM
             session.activePreimage == null && session.activeEscrowToken == null -> PaymentStatus.WAITING_FOR_PREIMAGE
             session.activePreimage == null -> PaymentStatus.MISSING_PREIMAGE
@@ -2355,6 +2382,7 @@ class DriverViewModel @Inject constructor(
 
             // Attempt to settle HTLC escrow if we have preimage and token
             var settlementMessage = ""
+            var claimSuccess: Boolean? = null  // null = no HTLC payment expected
             if (session.canSettleEscrow && session.activePreimage != null && session.activeEscrowToken != null) {
                 Log.d(TAG, "[RIDE $rideCorrelationId] Claiming HTLC: paymentHash=${session.activePaymentHash?.take(16)}...")
                 try {
@@ -2364,6 +2392,7 @@ class DriverViewModel @Inject constructor(
                         paymentHash = session.activePaymentHash
                     )
 
+                    claimSuccess = claimResult is HtlcClaimResult.Success
                     settlementMessage = when (claimResult) {
                         is HtlcClaimResult.Success -> {
                             Log.d(TAG, "[RIDE $rideCorrelationId] Claim SUCCESS: received ${claimResult.settlement.amountSats} sats")
@@ -2387,11 +2416,13 @@ class DriverViewModel @Inject constructor(
                         }
                     }
                 } catch (e: Exception) {
+                    claimSuccess = false
                     Log.e(TAG, "[RIDE $rideCorrelationId] Claim ERROR: ${e.message}", e)
                     settlementMessage = " (payment error)"
                 }
             } else if (session.activePaymentHash != null && session.paymentPath == PaymentPath.SAME_MINT) {
                 // SAME_MINT: Had payment hash but no preimage/token - log for debugging
+                claimSuccess = false
                 Log.w(TAG, "[RIDE $rideCorrelationId] Cannot settle - preimage=${session.activePreimage != null}, token=${session.activeEscrowToken != null}")
                 settlementMessage = " (no payment received)"
             }
@@ -2402,7 +2433,8 @@ class DriverViewModel @Inject constructor(
                     riderPubKey = offer.riderPubKey,
                     status = DriverStatusType.COMPLETED,
                     location = state.currentLocation,
-                    finalFare = offer.fareEstimate.toLong()
+                    finalFare = offer.fareEstimate.toLong(),
+                    claimSuccess = claimSuccess
                 )
                 // Track for cleanup on ride completion
                 eventId?.let { trackEventForCleanup(it, "DRIVER_RIDE_STATE") }
@@ -2473,6 +2505,8 @@ class DriverViewModel @Inject constructor(
                 activePaymentHash = paymentHash,
                 activeEscrowToken = escrowToken
             ) }
+            // Persist HTLC fields immediately — app could be killed before autoStartRouteToPickup() saves
+            saveRideState()
 
             // STATE_MACHINE: Update state to CONFIRMED after receiving confirmation
             // RideContext.withConfirmation() already supports paymentHash and escrowToken
@@ -4220,6 +4254,7 @@ enum class PaymentStatus {
     WAITING_FOR_PREIMAGE,   // Not yet shared (ride still in progress)
     MISSING_PREIMAGE,       // Escrow token received but no preimage
     MISSING_ESCROW_TOKEN,   // Preimage received but no escrow token
+    MISSING_PAYMENT_HASH,   // SAME_MINT ride but payment hash lost (process death)
     UNKNOWN_ERROR
 }
 
