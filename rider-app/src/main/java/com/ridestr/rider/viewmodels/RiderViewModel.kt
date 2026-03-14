@@ -4000,11 +4000,13 @@ class RiderViewModel @Inject constructor(
                         )
                     }
 
+                    // Protect HTLC from auto-refund now that ride is confirmed (before save — if app dies
+                    // before saveRideState(), ride may restore stale DRIVER_ACCEPTED state from earlier save,
+                    // but HTLC is protected and funds are safe)
+                    _uiState.value.rideSession.activePaymentHash?.let { walletService?.setHtlcRideProtected(it) }
+
                     // Save ride state for persistence
                     saveRideState()
-
-                    // Protect HTLC from auto-refund now that ride is confirmed
-                    _uiState.value.rideSession.activePaymentHash?.let { walletService?.setHtlcRideProtected(it) }
 
                     // Start post-confirm ack timeout (after save so deadline is persisted)
                     startPostConfirmAckTimeout(postConfirmDeadline)
@@ -4376,6 +4378,9 @@ class RiderViewModel @Inject constructor(
                 if (newAttempts >= MAX_PIN_ATTEMPTS) {
                     // Brute force protection - cancel the ride
                     Log.e(TAG, "Max PIN attempts reached! Cancelling ride for security.")
+
+                    // Release HTLC protection for refund (capture paymentHash before reset)
+                    _uiState.value.rideSession.activePaymentHash?.let { walletService?.clearHtlcRideProtected(it) }
 
                     closeAllRideSubscriptionsAndJobs()
                     clearRiderStateHistory()
