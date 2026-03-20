@@ -16,7 +16,7 @@ import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
  * This handles:
  * 1. Generating new RoadFlare keypairs (separate from identity key)
  * 2. Key rotation when followers are muted/removed
- * 3. Distributing keys to followers via Kind 3186
+ * 3. Distributing keys to followers via Kind 30186 (+ legacy 3186)
  * 4. Cross-device sync via Kind 30012
  *
  * KEY DESIGN: The RoadFlare keypair is NOT the driver's identity key.
@@ -116,7 +116,7 @@ class RoadflareKeyManager(
      * 1. A new follower is added (driver approves)
      * 2. Key rotation (send to all remaining followers)
      *
-     * Uses short expiration (5 minutes) to reduce relay storage.
+     * Publishes both Kind 30186 (persistent, replaceable) and Kind 3186 (legacy, 5-min expiry).
      *
      * @param signer The driver's identity signer
      * @param followerPubkey The follower's Nostr pubkey
@@ -146,7 +146,7 @@ class RoadflareKeyManager(
         )
 
         if (eventId != null) {
-            Log.d(TAG, "Sent key v${key.version} to follower ${followerPubkey.take(8)}... (expires in 5 min)")
+            Log.d(TAG, "Sent key v${key.version} to follower ${followerPubkey.take(8)}... (Kind 30186 persistent + Kind 3186 legacy)")
             return true
         } else {
             Log.e(TAG, "Failed to send key to follower ${followerPubkey.take(8)}...")

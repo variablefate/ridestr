@@ -5,11 +5,13 @@ import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
 import org.json.JSONObject
 
 /**
- * Kind 3186: RoadFlare Key Share (Regular)
+ * RoadFlare Key Share events.
  *
- * Ephemeral DM sharing the RoadFlare private key with a follower.
- * Sent when driver clicks "Accept" on a pending follower.
- * Uses short expiration (5 minutes) to reduce relay storage.
+ * Two kinds are published for backwards compatibility:
+ * - Kind 30186 (Parameterized Replaceable): Persistent key share, stays on relay.
+ *   d-tag = follower pubkey. No expiration. Preferred by new clients.
+ * - Kind 3186 (Regular): Legacy ephemeral key share, 5-min expiration.
+ *   Published alongside 30186 for old clients that haven't updated.
  *
  * Content is NIP-44 encrypted to the follower's identity pubkey.
  * Includes `keyUpdatedAt` timestamp for stale key detection.
@@ -19,7 +21,7 @@ import org.json.JSONObject
  */
 object RoadflareKeyShareEvent {
 
-    /** Default expiration time for key share events (5 minutes) */
+    /** Default expiration time for legacy key share events (5 minutes) */
     const val DEFAULT_EXPIRATION_SECONDS = 5 * 60L
 
     /**
@@ -71,6 +73,56 @@ object RoadflareKeyShareEvent {
     }
 
     /**
+     * Create and sign a REPLACEABLE RoadFlare key share event (Kind 30186).
+     * Persistent — stays on the relay until replaced by a newer version.
+     * d-tag = follower pubkey (one replaceable slot per driver→follower pair).
+     * No expiration tag.
+     *
+     * @param signer The NostrSigner (driver's identity) to sign the event
+     * @param followerPubKey The follower's Nostr pubkey (encryption target + d-tag)
+     * @param roadflareKey The RoadFlare key to share (privateKey, publicKey, version)
+     * @param keyUpdatedAt Timestamp when the key was last updated/rotated
+     */
+    suspend fun createReplaceable(
+        signer: NostrSigner,
+        followerPubKey: String,
+        roadflareKey: RoadflareKey,
+        keyUpdatedAt: Long
+    ): Event? {
+        val now = System.currentTimeMillis() / 1000
+
+        // Build the content JSON (same format as legacy Kind 3186)
+        val contentJson = JSONObject().apply {
+            put("roadflareKey", roadflareKey.toJson())
+            put("keyUpdatedAt", keyUpdatedAt)
+            put("driverPubKey", signer.pubKey)
+        }
+
+        // Encrypt to follower using NIP-44
+        val encryptedContent = try {
+            signer.nip44Encrypt(contentJson.toString(), followerPubKey)
+        } catch (e: Exception) {
+            return null
+        }
+
+        // d-tag = follower pubkey (parameterized replaceable)
+        // p-tag = follower pubkey (for subscription filtering)
+        // t-tag = roadflare-key (for discoverability)
+        val tags = arrayOf(
+            arrayOf("d", followerPubKey),
+            arrayOf(RideshareTags.PUBKEY_REF, followerPubKey),
+            arrayOf(RideshareTags.HASHTAG, "roadflare-key")
+        )
+
+        return signer.sign<Event>(
+            createdAt = now,
+            kind = RideshareEventKinds.ROADFLARE_REPLACEABLE_KEY_SHARE,
+            tags = tags,
+            content = encryptedContent
+        )
+    }
+
+    /**
      * Parse and decrypt a RoadFlare key share event.
      *
      * @param signer The NostrSigner (follower's identity) to decrypt the content
@@ -81,7 +133,9 @@ object RoadflareKeyShareEvent {
         signer: NostrSigner,
         event: Event
     ): RoadflareKeyShareData? {
-        if (event.kind != RideshareEventKinds.ROADFLARE_KEY_SHARE) return null
+        // Accept both Kind 30186 (replaceable, preferred) and Kind 3186 (legacy)
+        if (event.kind != RideshareEventKinds.ROADFLARE_REPLACEABLE_KEY_SHARE &&
+            event.kind != RideshareEventKinds.ROADFLARE_KEY_SHARE) return null
 
         // Check if we're the intended recipient
         val recipientTag = event.tags.find { it.size >= 2 && it[0] == RideshareTags.PUBKEY_REF }
@@ -129,7 +183,8 @@ object RoadflareKeyShareEvent {
      * Useful for filtering subscriptions.
      */
     fun isKeyShareFor(event: Event, pubKey: String): Boolean {
-        if (event.kind != RideshareEventKinds.ROADFLARE_KEY_SHARE) return false
+        if (event.kind != RideshareEventKinds.ROADFLARE_REPLACEABLE_KEY_SHARE &&
+            event.kind != RideshareEventKinds.ROADFLARE_KEY_SHARE) return false
         val recipientTag = event.tags.find { it.size >= 2 && it[0] == RideshareTags.PUBKEY_REF }
         return recipientTag?.get(1) == pubKey
     }

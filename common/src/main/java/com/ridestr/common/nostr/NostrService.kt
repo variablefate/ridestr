@@ -1244,7 +1244,7 @@ class NostrService internal constructor(
     ): String = roadflareDomainService.subscribeToRoadflareLocations(driverPubkeys, onLocation)
 
     /**
-     * Publish RoadFlare key share to a follower (Kind 3186).
+     * Publish RoadFlare key share to a follower (Kind 30186 + legacy 3186).
      */
     suspend fun publishRoadflareKeyShare(
         signer: NostrSigner,
@@ -1254,7 +1254,7 @@ class NostrService internal constructor(
     ): String? = roadflareDomainService.publishRoadflareKeyShare(signer, followerPubKey, roadflareKey, keyUpdatedAt)
 
     /**
-     * Subscribe to RoadFlare key shares sent to us (Kind 3186).
+     * Subscribe to RoadFlare key shares sent to us (Kind 30186 + legacy 3186).
      */
     fun subscribeToRoadflareKeyShares(
         onKeyShare: (event: com.vitorpamplona.quartz.nip01Core.core.Event, relayUrl: String) -> Unit

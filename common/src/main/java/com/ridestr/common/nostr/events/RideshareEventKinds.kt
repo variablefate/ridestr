@@ -174,15 +174,24 @@ object RideshareEventKinds {
     const val ROADFLARE_REQUEST = 3185
 
     /**
-     * Kind 3186: RoadFlare Key Share (Regular)
-     * Ephemeral DM sharing the RoadFlare private key with a follower.
-     * Sent when driver clicks "Accept" on a pending follower.
-     * Content is NIP-44 encrypted to follower's identity pubkey.
-     * Contains: roadflareKey (privateKey, publicKey, version), keyUpdatedAt, driverPubKey.
+     * Kind 3186: RoadFlare Key Share (Regular) — LEGACY
+     * @deprecated Use ROADFLARE_REPLACEABLE_KEY_SHARE (30186) instead.
+     * Still published alongside Kind 30186 for backwards compatibility with
+     * older Android Ridestr rider clients that haven't updated yet.
      * Uses "expiration" tag with short TTL (5 minutes).
-     * Follower stores key in Kind 30011, sends Kind 3188 confirmation.
      */
     const val ROADFLARE_KEY_SHARE = 3186
+
+    /**
+     * Kind 30186: RoadFlare Key Share (Parameterized Replaceable)
+     * Persistent key share — stays on relay until replaced by a newer version.
+     * d-tag = follower's pubkey (one slot per driver→follower pair).
+     * Content is NIP-44 encrypted to follower's identity pubkey.
+     * Contains: roadflareKey (privateKey, publicKey, version), keyUpdatedAt, driverPubKey.
+     * No expiration — relay keeps latest version indefinitely.
+     * Follower can fetch on-demand at any time, no timing dependency.
+     */
+    const val ROADFLARE_REPLACEABLE_KEY_SHARE = 30186
 
     /**
      * Kind 3187: RoadFlare Follow Notification Event (Regular)

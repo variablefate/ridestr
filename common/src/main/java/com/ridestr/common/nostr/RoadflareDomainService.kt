@@ -337,18 +337,19 @@ class RoadflareDomainService(
         }
     }
 
-    // ==================== Key Share (Kind 3186) ====================
+    // ==================== Key Share (Kind 30186 + legacy 3186) ====================
 
     /**
-     * Publish RoadFlare key share to a follower (Kind 3186).
-     * Encrypted to the follower's identity pubkey.
-     * Uses short expiration (5 minutes) to reduce relay storage.
+     * Publish RoadFlare key share to a follower.
+     * Publishes BOTH kinds for backwards compatibility:
+     * - Kind 30186 (replaceable): Stays on relay permanently, new clients prefer this
+     * - Kind 3186 (legacy): 5-min expiration, for old clients that haven't updated
      *
      * @param signer The driver's identity signer
      * @param followerPubKey The follower's Nostr pubkey
      * @param roadflareKey The RoadFlare key to share
      * @param keyUpdatedAt Timestamp when the key was last updated/rotated
-     * @return Event ID if successful, null on failure
+     * @return Event ID of the replaceable event if successful, null on failure
      */
     suspend fun publishRoadflareKeyShare(
         signer: NostrSigner,
@@ -361,25 +362,38 @@ class RoadflareDomainService(
             return null
         }
 
-        return try {
-            val event = RoadflareKeyShareEvent.create(signer, followerPubKey, roadflareKey, keyUpdatedAt)
-            if (event != null) {
-                Log.d(TAG, "Publishing Kind 3186 to ${followerPubKey.take(8)}: eventId=${event.id.take(8)}, relays=${relayManager.connectedCount()}")
-                relayManager.publish(event)
-                Log.d(TAG, "Published Kind 3186 to ${followerPubKey.take(8)}: eventId=${event.id.take(8)}, v${roadflareKey.version} (expires in 5 min)")
-                event.id
+        var replaceableEventId: String? = null
+
+        // Publish Kind 30186 (replaceable, persistent — preferred by new clients)
+        try {
+            val replaceableEvent = RoadflareKeyShareEvent.createReplaceable(signer, followerPubKey, roadflareKey, keyUpdatedAt)
+            if (replaceableEvent != null) {
+                relayManager.publish(replaceableEvent)
+                replaceableEventId = replaceableEvent.id
+                Log.d(TAG, "Published Kind 30186 to ${followerPubKey.take(8)}: eventId=${replaceableEvent.id.take(8)}, v${roadflareKey.version} (persistent)")
             } else {
-                Log.e(TAG, "Failed to create Kind 3186 event for ${followerPubKey.take(8)}")
-                null
+                Log.e(TAG, "Failed to create Kind 30186 event for ${followerPubKey.take(8)}")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to publish Kind 3186 to ${followerPubKey.take(8)}", e)
-            null
+            Log.e(TAG, "Failed to publish Kind 30186 to ${followerPubKey.take(8)}", e)
         }
+
+        // Also publish Kind 3186 (legacy, 5-min expiry — for old clients)
+        try {
+            val legacyEvent = RoadflareKeyShareEvent.create(signer, followerPubKey, roadflareKey, keyUpdatedAt)
+            if (legacyEvent != null) {
+                relayManager.publish(legacyEvent)
+                Log.d(TAG, "Published Kind 3186 (legacy) to ${followerPubKey.take(8)}: eventId=${legacyEvent.id.take(8)}, v${roadflareKey.version} (expires in 5 min)")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to publish legacy Kind 3186 to ${followerPubKey.take(8)} (non-fatal)", e)
+        }
+
+        return replaceableEventId
     }
 
     /**
-     * Subscribe to RoadFlare key shares sent to us (Kind 3186).
+     * Subscribe to RoadFlare key shares sent to us (Kind 30186 + legacy 3186).
      *
      * @param onKeyShare Callback for received key share events
      * @return Subscription ID for later closing
@@ -390,7 +404,10 @@ class RoadflareDomainService(
         val myPubKey = keyManager.getPubKeyHex() ?: return ""
         Log.d(TAG, "Subscribing to RoadFlare key shares for ${myPubKey.take(16)}...")
         return relayManager.subscribe(
-            kinds = listOf(RideshareEventKinds.ROADFLARE_KEY_SHARE),
+            kinds = listOf(
+                RideshareEventKinds.ROADFLARE_REPLACEABLE_KEY_SHARE,
+                RideshareEventKinds.ROADFLARE_KEY_SHARE
+            ),
             tags = mapOf("p" to listOf(myPubKey))
         ) { event, relayUrl ->
             onKeyShare(event, relayUrl)
