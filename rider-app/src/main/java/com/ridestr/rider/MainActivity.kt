@@ -457,7 +457,8 @@ fun RidestrApp() {
                             isKeyImport = true
                             currentScreen = Screen.PROFILE_SYNC
                         } else {
-                            // New key generation - no profile to sync, go straight to setup
+                            // New key generation - refresh KeyManager so NostrService has the signer
+                            nostrService.keyManager.refreshFromStorage()
                             isKeyImport = false
                             currentScreen = if (uiState.isProfileCompleted) {
                                 Screen.LOCATION_PERMISSION

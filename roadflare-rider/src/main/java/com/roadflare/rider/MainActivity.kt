@@ -1,5 +1,6 @@
 package com.roadflare.rider
 
+import android.app.Application
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -17,7 +18,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.ridestr.common.nostr.NostrService
 import com.ridestr.common.nostr.relay.RelayConnectionState
 import com.ridestr.common.ui.AccountBottomSheet
 import com.ridestr.common.ui.AccountSafetyScreen
@@ -90,9 +93,15 @@ fun RoadFlareApp() {
             }
         }
         AppScreen.ONBOARDING -> {
+            val nostrService = NostrService.getInstance(LocalContext.current.applicationContext as Application)
             OnboardingScreen(
                 viewModel = onboardingViewModel,
-                onComplete = { onboardingViewModel.refreshState() }
+                onComplete = {
+                    // Refresh KeyManager so NostrService has the signer after key generation
+                    nostrService.keyManager.refreshFromStorage()
+                    nostrService.connect()
+                    onboardingViewModel.refreshState()
+                }
             )
         }
         AppScreen.PROFILE_SETUP -> {
