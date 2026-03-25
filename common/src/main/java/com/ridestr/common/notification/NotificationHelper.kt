@@ -23,6 +23,7 @@ object NotificationHelper {
     const val CHANNEL_RIDE_REQUEST = "ride_request"
     const val CHANNEL_RIDE_UPDATE = "ride_update"
     const val CHANNEL_RIDE_CANCELLED = "ride_cancelled"
+    const val CHANNEL_FOLLOW_REQUEST = "follow_request"
 
     // Notification IDs
     const val NOTIFICATION_ID_ONLINE_STATUS = 1001
@@ -31,6 +32,7 @@ object NotificationHelper {
     const val NOTIFICATION_ID_RIDE_CANCELLED = 1004
     const val NOTIFICATION_ID_CHAT_MESSAGE = 1005
     const val NOTIFICATION_ID_RIDER_ACTIVE = 2001  // Rider searching/ride in progress
+    const val NOTIFICATION_ID_FOLLOW_REQUEST = 3001
 
     /**
      * Create all notification channels for the driver app.
@@ -83,8 +85,17 @@ object NotificationHelper {
                 enableVibration(false)
             }
 
+            // Channel 5: Follow requests (default priority)
+            val followChannel = NotificationChannel(
+                CHANNEL_FOLLOW_REQUEST,
+                "Follow Requests",
+                NotificationManager.IMPORTANCE_DEFAULT
+            ).apply {
+                description = "Notifications when a rider adds you to their driver network"
+            }
+
             notificationManager.createNotificationChannels(
-                listOf(onlineChannel, requestChannel, updateChannel, cancelledChannel)
+                listOf(onlineChannel, requestChannel, updateChannel, cancelledChannel, followChannel)
             )
         }
     }

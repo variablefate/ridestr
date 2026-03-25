@@ -364,6 +364,21 @@ fun DrivestrApp() {
                                         // Add as pending follower - driver must approve in RoadflareTab
                                         roadflareKeyManager.handleNewFollower(notification.riderPubKey, notification.riderName)
 
+                                        // Show OS notification so driver knows about the new follower
+                                        val displayName = notification.riderName.ifEmpty { notification.riderPubKey.take(8) + "..." }
+                                        val notif = androidx.core.app.NotificationCompat.Builder(context, com.ridestr.common.notification.NotificationHelper.CHANNEL_FOLLOW_REQUEST)
+                                            .setSmallIcon(android.R.drawable.ic_menu_add)
+                                            .setContentTitle("New Follow Request")
+                                            .setContentText("$displayName wants to add you to their driver network")
+                                            .setPriority(androidx.core.app.NotificationCompat.PRIORITY_DEFAULT)
+                                            .setAutoCancel(true)
+                                            .build()
+                                        com.ridestr.common.notification.NotificationHelper.showNotification(
+                                            context,
+                                            com.ridestr.common.notification.NotificationHelper.NOTIFICATION_ID_FOLLOW_REQUEST + notification.riderPubKey.hashCode(),
+                                            notif
+                                        )
+
                                         // Backup updated state to Nostr
                                         profileSyncManager.backupProfileData()
                                     }
