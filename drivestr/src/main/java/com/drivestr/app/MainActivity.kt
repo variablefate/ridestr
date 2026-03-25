@@ -366,16 +366,25 @@ fun DrivestrApp() {
 
                                         // Show OS notification so driver knows about the new follower
                                         val displayName = notification.riderName.ifEmpty { notification.riderPubKey.take(8) + "..." }
+                                        val tapIntent = android.content.Intent(context, MainActivity::class.java).apply {
+                                            flags = android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP or android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
+                                            putExtra("open_tab", "ROADFLARE")
+                                        }
+                                        val pendingIntent = android.app.PendingIntent.getActivity(
+                                            context, notification.riderPubKey.hashCode(),
+                                            tapIntent, android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT
+                                        )
                                         val notif = androidx.core.app.NotificationCompat.Builder(context, com.ridestr.common.notification.NotificationHelper.CHANNEL_FOLLOW_REQUEST)
                                             .setSmallIcon(android.R.drawable.ic_menu_add)
                                             .setContentTitle("New Follow Request")
                                             .setContentText("$displayName wants to add you to their driver network")
                                             .setPriority(androidx.core.app.NotificationCompat.PRIORITY_DEFAULT)
+                                            .setContentIntent(pendingIntent)
                                             .setAutoCancel(true)
                                             .build()
                                         com.ridestr.common.notification.NotificationHelper.showNotification(
                                             context,
-                                            com.ridestr.common.notification.NotificationHelper.NOTIFICATION_ID_FOLLOW_REQUEST + notification.riderPubKey.hashCode(),
+                                            com.ridestr.common.notification.NotificationHelper.NOTIFICATION_ID_FOLLOW_REQUEST + kotlin.math.abs(notification.riderPubKey.hashCode() % 10000),
                                             notif
                                         )
 
