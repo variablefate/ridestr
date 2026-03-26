@@ -847,7 +847,8 @@ private fun RoadflareOnlyContent(
                         if (offer.isRoadflare && offer.paymentMethod != "cashu" &&
                             offer.fiatPaymentMethods.isNotEmpty() &&
                             com.ridestr.common.nostr.events.PaymentMethod.findBestCommonFiatMethod(
-                                offer.fiatPaymentMethods, driverFiatMethods
+                                offer.fiatPaymentMethods,
+                                effectiveRoadflareDriverMethods(driverFiatMethods)
                             ) == null
                         ) {
                             onSetNoMatchWarning(offer.eventId)
@@ -1113,7 +1114,8 @@ private fun AvailableContent(
                             if (offer.isRoadflare && offer.paymentMethod != "cashu" &&
                                 offer.fiatPaymentMethods.isNotEmpty() &&
                                 com.ridestr.common.nostr.events.PaymentMethod.findBestCommonFiatMethod(
-                                    offer.fiatPaymentMethods, driverFiatMethods
+                                    offer.fiatPaymentMethods,
+                                    effectiveRoadflareDriverMethods(driverFiatMethods)
                                 ) == null
                             ) {
                                 onSetNoMatchWarning(offer.eventId)
@@ -1978,7 +1980,8 @@ private fun RideOfferCard(
                     if (offer.isRoadflare && offer.paymentMethod != "cashu") {
                         val bestMatch = if (offer.fiatPaymentMethods.isNotEmpty()) {
                             com.ridestr.common.nostr.events.PaymentMethod.findBestCommonFiatMethod(
-                                offer.fiatPaymentMethods, driverFiatMethods
+                                offer.fiatPaymentMethods,
+                                effectiveRoadflareDriverMethods(driverFiatMethods)
                             )
                         } else null
                         val methodDisplay = com.ridestr.common.nostr.events.PaymentMethod.fromString(offer.paymentMethod)?.displayName ?: offer.paymentMethod
@@ -2500,4 +2503,9 @@ private fun NoCommonPaymentMethodDialog(
             }
         }
     )
+}
+
+private fun effectiveRoadflareDriverMethods(driverFiatMethods: List<String>): List<String> {
+    val bitcoin = com.ridestr.common.nostr.events.PaymentMethod.BITCOIN.value
+    return (driverFiatMethods + bitcoin).distinctBy { it.trim().lowercase() }
 }

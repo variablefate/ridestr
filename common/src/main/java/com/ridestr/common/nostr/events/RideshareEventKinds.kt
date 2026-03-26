@@ -239,12 +239,13 @@ enum class PaymentMethod(val value: String, val displayName: String = value) {
     PAYPAL("paypal", "PayPal"),
     CASH_APP("cash_app", "Cash App"),
     VENMO("venmo", "Venmo"),
-    CASH("cash", "Cash"),
-    STRIKE("strike", "Strike");
+    STRIKE("strike", "Strike"),
+    BITCOIN("bitcoin", "Bitcoin"),
+    CASH("cash", "Cash");
 
     companion object {
         /** Alternate payment methods available for RoadFlare rides only */
-        val ROADFLARE_ALTERNATE_METHODS = listOf(ZELLE, PAYPAL, CASH_APP, VENMO, CASH, STRIKE)
+        val ROADFLARE_ALTERNATE_METHODS = listOf(ZELLE, PAYPAL, CASH_APP, VENMO, STRIKE, BITCOIN, CASH)
 
         fun fromString(s: String): PaymentMethod? =
             entries.find { it.value == s }
@@ -297,6 +298,7 @@ enum class PaymentPath {
             // Handle non-ecash payment methods
             if (paymentMethod == "fiat_cash") return FIAT_CASH
             if (paymentMethod == "lightning") return CROSS_MINT  // Always Lightning bridge
+            if (paymentMethod == PaymentMethod.BITCOIN.value) return FIAT_CASH
 
             // For cashu: check mint compatibility
             if (paymentMethod == "cashu") {

@@ -76,6 +76,16 @@ class PaymentMethodPriorityTest {
     }
 
     @Test
+    fun `findBestCommonFiatMethod matches bitcoin when both sides include it`() {
+        val riderMethods = listOf("zelle", "bitcoin", "cash")
+        val driverMethods = listOf("bitcoin")
+
+        val result = PaymentMethod.findBestCommonFiatMethod(riderMethods, driverMethods)
+
+        assertEquals("bitcoin", result)
+    }
+
+    @Test
     fun `RideOfferData defaults fiatPaymentMethods to empty list`() {
         val offer = RideOfferData(
             eventId = "test",

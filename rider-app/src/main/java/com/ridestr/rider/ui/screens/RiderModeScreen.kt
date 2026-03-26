@@ -354,7 +354,7 @@ fun RiderModeScreen(
             text = {
                 Column {
                     Text(
-                        "Select and order payment methods for RoadFlare rides when you don't have enough bitcoin.",
+                        "Select and order alternative payment methods for RoadFlare rides.",
                         style = MaterialTheme.typography.bodyMedium
                     )
                     Spacer(modifier = Modifier.height(16.dp))

@@ -60,9 +60,10 @@ class InteropProtocolTest {
 
     @Test
     fun `PaymentMethod fromString returns null for unknown value`() {
-        assertNull(PaymentMethod.fromString("bitcoin"))
+        assertEquals(PaymentMethod.BITCOIN, PaymentMethod.fromString("bitcoin"))
         assertNull(PaymentMethod.fromString(""))
         assertNull(PaymentMethod.fromString("ZELLE"))  // case-sensitive
+        assertNull(PaymentMethod.fromString("wire_transfer"))
     }
 
     @Test
@@ -72,7 +73,36 @@ class InteropProtocolTest {
         assertEquals("paypal", PaymentMethod.PAYPAL.value)
         assertEquals("cash_app", PaymentMethod.CASH_APP.value)
         assertEquals("venmo", PaymentMethod.VENMO.value)
+        assertEquals("bitcoin", PaymentMethod.BITCOIN.value)
         assertEquals("cash", PaymentMethod.CASH.value)
+    }
+
+    @Test
+    fun `RoadFlare alternate methods keep bitcoin just above cash`() {
+        assertEquals(
+            listOf(
+                PaymentMethod.ZELLE,
+                PaymentMethod.PAYPAL,
+                PaymentMethod.CASH_APP,
+                PaymentMethod.VENMO,
+                PaymentMethod.STRIKE,
+                PaymentMethod.BITCOIN,
+                PaymentMethod.CASH
+            ),
+            PaymentMethod.ROADFLARE_ALTERNATE_METHODS
+        )
+    }
+
+    @Test
+    fun `PaymentPath treats RoadFlare bitcoin as manual settlement`() {
+        assertEquals(
+            PaymentPath.FIAT_CASH,
+            PaymentPath.determine(
+                riderMintUrl = null,
+                driverMintUrl = null,
+                paymentMethod = PaymentMethod.BITCOIN.value
+            )
+        )
     }
 
     // ==================

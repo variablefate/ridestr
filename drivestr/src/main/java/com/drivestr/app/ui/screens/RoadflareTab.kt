@@ -248,7 +248,7 @@ fun RoadflareTab(
                                         style = MaterialTheme.typography.titleMedium
                                     )
                                     Text(
-                                        text = "Non-bitcoin methods for RoadFlare",
+                                        text = "Alternative payment methods for RoadFlare",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
