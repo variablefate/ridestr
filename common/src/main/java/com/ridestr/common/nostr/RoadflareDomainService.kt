@@ -23,7 +23,7 @@ import kotlinx.coroutines.withTimeoutOrNull
  * - Kind 30011: Followed drivers (rider's favorites + keys)
  * - Kind 30012: Driver RoadFlare state (keypair, followers, muted)
  * - Kind 30014: Location broadcast (encrypted, 5-min expiry)
- * - Kind 3186: Key share (driver→follower DM, 5-min expiry)
+ * - Kind 3186: Key share (driver→follower DM, 12-hour expiry)
  * - Kind 3187: Follow notification (deprecated, real-time UX)
  * - Kind 3188: Key acknowledgement (confirm receipt or refresh request)
  *
@@ -342,7 +342,10 @@ class RoadflareDomainService(
     /**
      * Publish RoadFlare key share to a follower (Kind 3186).
      * Encrypted to the follower's identity pubkey.
-     * Uses short expiration (5 minutes) to reduce relay storage.
+     * Uses 12-hour expiration to give the rider ample time to receive it.
+     *
+     * The key persists in the rider's Kind 30011 backup after receipt.
+     * On re-add or new device, the key is restored from Kind 30011.
      *
      * @param signer The driver's identity signer
      * @param followerPubKey The follower's Nostr pubkey
@@ -364,9 +367,8 @@ class RoadflareDomainService(
         return try {
             val event = RoadflareKeyShareEvent.create(signer, followerPubKey, roadflareKey, keyUpdatedAt)
             if (event != null) {
-                Log.d(TAG, "Publishing Kind 3186 to ${followerPubKey.take(8)}: eventId=${event.id.take(8)}, relays=${relayManager.connectedCount()}")
                 relayManager.publish(event)
-                Log.d(TAG, "Published Kind 3186 to ${followerPubKey.take(8)}: eventId=${event.id.take(8)}, v${roadflareKey.version} (expires in 5 min)")
+                Log.d(TAG, "Published Kind 3186 to ${followerPubKey.take(8)}: eventId=${event.id.take(8)}, v${roadflareKey.version} (expires in 12h)")
                 event.id
             } else {
                 Log.e(TAG, "Failed to create Kind 3186 event for ${followerPubKey.take(8)}")

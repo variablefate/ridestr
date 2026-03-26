@@ -1250,7 +1250,7 @@ class NostrService internal constructor(
     ): String = roadflareDomainService.subscribeToRoadflareLocations(driverPubkeys, onLocation)
 
     /**
-     * Publish RoadFlare key share to a follower (Kind 3186).
+     * Publish RoadFlare key share to a follower (Kind 3186, 12-hour expiry).
      */
     suspend fun publishRoadflareKeyShare(
         signer: NostrSigner,

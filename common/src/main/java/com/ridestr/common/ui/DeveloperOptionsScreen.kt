@@ -384,7 +384,7 @@ fun DeveloperOptionsScreen(
                     Triple(RideshareEventKinds.ROADFLARE_FOLLOWED_DRIVERS, "30011 - Followed Drivers", "Rider's list of favorite drivers"),
                     Triple(RideshareEventKinds.ROADFLARE_DRIVER_STATE, "30012 - Driver State", "Driver's RoadFlare keypair + followers"),
                     Triple(RideshareEventKinds.ROADFLARE_LOCATION, "30014 - Location", "Driver's encrypted location broadcasts"),
-                    Triple(RideshareEventKinds.ROADFLARE_KEY_SHARE, "3186 - Key Share", "Driver → Rider key distribution"),
+                    Triple(RideshareEventKinds.ROADFLARE_KEY_SHARE, "3186 - Key Share", "Driver → Rider key distribution (12h expiry)"),
                     Triple(RideshareEventKinds.ROADFLARE_FOLLOW_NOTIFY, "3187 - Follow Notify", "Rider → Driver follow notification"),
                     Triple(RideshareEventKinds.ROADFLARE_KEY_ACK, "3188 - Key Ack", "Rider → Driver key acknowledgement")
                 )

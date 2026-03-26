@@ -175,12 +175,16 @@ object RideshareEventKinds {
 
     /**
      * Kind 3186: RoadFlare Key Share (Regular)
-     * Ephemeral DM sharing the RoadFlare private key with a follower.
+     * DM sharing the RoadFlare private key with a follower.
      * Sent when driver clicks "Accept" on a pending follower.
      * Content is NIP-44 encrypted to follower's identity pubkey.
      * Contains: roadflareKey (privateKey, publicKey, version), keyUpdatedAt, driverPubKey.
-     * Uses "expiration" tag with short TTL (5 minutes).
+     * Uses "expiration" tag with 12-hour TTL.
      * Follower stores key in Kind 30011, sends Kind 3188 confirmation.
+     *
+     * Note: The key persists in the rider's Kind 30011 backup after receipt.
+     * On re-add or new device, the key is restored from Kind 30011 — no new
+     * Kind 3186 needed unless the driver rotated keys.
      */
     const val ROADFLARE_KEY_SHARE = 3186
 
@@ -235,12 +239,13 @@ enum class PaymentMethod(val value: String, val displayName: String = value) {
     PAYPAL("paypal", "PayPal"),
     CASH_APP("cash_app", "Cash App"),
     VENMO("venmo", "Venmo"),
-    CASH("cash", "Cash"),
-    STRIKE("strike", "Strike");
+    STRIKE("strike", "Strike"),
+    BITCOIN("bitcoin", "Bitcoin"),
+    CASH("cash", "Cash");
 
     companion object {
         /** Alternate payment methods available for RoadFlare rides only */
-        val ROADFLARE_ALTERNATE_METHODS = listOf(ZELLE, PAYPAL, CASH_APP, VENMO, CASH, STRIKE)
+        val ROADFLARE_ALTERNATE_METHODS = listOf(ZELLE, PAYPAL, CASH_APP, VENMO, STRIKE, BITCOIN, CASH)
 
         fun fromString(s: String): PaymentMethod? =
             entries.find { it.value == s }
@@ -293,6 +298,7 @@ enum class PaymentPath {
             // Handle non-ecash payment methods
             if (paymentMethod == "fiat_cash") return FIAT_CASH
             if (paymentMethod == "lightning") return CROSS_MINT  // Always Lightning bridge
+            if (paymentMethod == PaymentMethod.BITCOIN.value) return FIAT_CASH
 
             // For cashu: check mint compatibility
             if (paymentMethod == "cashu") {

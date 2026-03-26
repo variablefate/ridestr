@@ -116,7 +116,7 @@ class RoadflareKeyManager(
      * 1. A new follower is added (driver approves)
      * 2. Key rotation (send to all remaining followers)
      *
-     * Uses short expiration (5 minutes) to reduce relay storage.
+     * Publishes Kind 3186 with 12-hour expiry. Key persists in rider's Kind 30011 after receipt.
      *
      * @param signer The driver's identity signer
      * @param followerPubkey The follower's Nostr pubkey
@@ -146,7 +146,7 @@ class RoadflareKeyManager(
         )
 
         if (eventId != null) {
-            Log.d(TAG, "Sent key v${key.version} to follower ${followerPubkey.take(8)}... (expires in 5 min)")
+            Log.d(TAG, "Sent key v${key.version} to follower ${followerPubkey.take(8)}... (Kind 3186, 12h expiry)")
             return true
         } else {
             Log.e(TAG, "Failed to send key to follower ${followerPubkey.take(8)}...")

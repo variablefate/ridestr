@@ -635,7 +635,7 @@ private fun formatLastSeen(timestamp: Long): String {
 
 /**
  * Dialog for selecting RoadFlare alternate payment methods.
- * These are non-bitcoin methods riders can offer to personal RoadFlare drivers.
+ * These are rider-controlled payment methods offered to personal RoadFlare drivers.
  */
 @Composable
 fun RoadflarePaymentMethodsDialog(

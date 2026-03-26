@@ -7,31 +7,38 @@ import org.json.JSONObject
 /**
  * Kind 3186: RoadFlare Key Share (Regular)
  *
- * Ephemeral DM sharing the RoadFlare private key with a follower.
+ * DM sharing the RoadFlare private key with a follower.
  * Sent when driver clicks "Accept" on a pending follower.
- * Uses short expiration (5 minutes) to reduce relay storage.
+ * Uses 12-hour expiration to give the rider ample time to receive it.
  *
  * Content is NIP-44 encrypted to the follower's identity pubkey.
  * Includes `keyUpdatedAt` timestamp for stale key detection.
  *
- * The follower stores this key in their Kind 30011 (Followed Drivers)
- * backup and sends a Kind 3188 confirmation back to the driver.
+ * ## Key Persistence Flow:
+ * 1. Driver sends Kind 3186 → rider receives via subscription
+ * 2. Rider stores key locally AND in their Kind 30011 backup
+ * 3. On new device or re-add, key is restored from Kind 30011 (not Kind 3186)
+ * 4. Kind 3186 only needed for initial handshake or key rotation
+ *
+ * ## Stale Key Detection:
+ * - Driver's Kind 30012 has public `key_updated_at` tag
+ * - Rider compares local keyUpdatedAt vs driver's tag
+ * - If stale → sends Kind 3188 "stale" ack → driver re-sends Kind 3186
  */
 object RoadflareKeyShareEvent {
 
-    /** Default expiration time for key share events (5 minutes) */
-    const val DEFAULT_EXPIRATION_SECONDS = 5 * 60L
+    /** Default expiration time for key share events (12 hours) */
+    const val DEFAULT_EXPIRATION_SECONDS = 12 * 60 * 60L
 
     /**
      * Create and sign a RoadFlare key share event.
      * The content is encrypted to the follower's identity pubkey.
-     * Uses short expiration (5 minutes) to reduce relay storage.
      *
      * @param signer The NostrSigner (driver's identity) to sign the event
      * @param followerPubKey The follower's Nostr pubkey (encryption target)
      * @param roadflareKey The RoadFlare key to share (privateKey, publicKey, version)
      * @param keyUpdatedAt Timestamp when the key was last updated/rotated
-     * @param expirationSeconds How long until the event expires (default 5 minutes)
+     * @param expirationSeconds How long until the event expires (default 12 hours)
      */
     suspend fun create(
         signer: NostrSigner,

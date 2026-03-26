@@ -247,7 +247,7 @@ fun RoadflareTab(
                                     style = MaterialTheme.typography.titleMedium
                                 )
                                 Text(
-                                    text = "Non-bitcoin methods for RoadFlare",
+                                    text = "Alternative payment methods for RoadFlare",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -442,15 +442,10 @@ private fun QrCodeContent(
     driverName: String,
     modifier: Modifier = Modifier
 ) {
-    // QR code content: nostr:npub1... with optional name parameter
-    // Format: nostr:npub1...?name=DriverName (URL encoded)
-    val qrContent = remember(driverNpub, driverName) {
-        if (driverName.isNotBlank()) {
-            val encodedName = java.net.URLEncoder.encode(driverName, "UTF-8")
-            "nostr:$driverNpub?name=$encodedName"
-        } else {
-            "nostr:$driverNpub"
-        }
+    // QR code content: roadflare.app share URL
+    // Opens a web profile card for non-app users, parseable by rider apps for the npub
+    val qrContent = remember(driverNpub) {
+        "https://roadflare.app/share/d/$driverNpub"
     }
     val qrBitmap = remember(qrContent) {
         generateQrCode(qrContent, 256)
@@ -531,9 +526,10 @@ private fun QrCodeContent(
             val context = LocalContext.current
             OutlinedButton(
                 onClick = {
+                    val shareUrl = "https://roadflare.app/share/d/$driverNpub"
                     val intent = Intent(Intent.ACTION_SEND).apply {
                         type = "text/plain"
-                        putExtra(Intent.EXTRA_TEXT, driverNpub)
+                        putExtra(Intent.EXTRA_TEXT, shareUrl)
                     }
                     context.startActivity(Intent.createChooser(intent, "Share your RoadFlare profile"))
                 }

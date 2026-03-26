@@ -1,5 +1,6 @@
 package com.roadflare.rider
 
+import android.app.Application
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import dagger.hilt.android.AndroidEntryPoint
@@ -249,9 +250,14 @@ fun RoadFlareApp(settingsRepository: SettingsRepository) {
             }
         }
         AppScreen.ONBOARDING -> {
+            val nostrService = NostrService.getInstance(LocalContext.current.applicationContext as Application)
             OnboardingScreen(
                 viewModel = onboardingViewModel,
-                onComplete = { /* Derivation handles routing via LaunchedEffect */ }
+                onComplete = {
+                    // Refresh KeyManager so NostrService has the signer after key generation
+                    nostrService.keyManager.refreshFromStorage()
+                    nostrService.connect()
+                }
             )
         }
         AppScreen.PROFILE_SYNC -> {
