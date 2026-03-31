@@ -1215,6 +1215,15 @@ fun MainScreen(
         }
     }
 
+    // Auto-sync RoadFlare state and followers after initial relay connection
+    var hasInitialSynced by remember { mutableStateOf(false) }
+    LaunchedEffect(isConnected) {
+        if (isConnected && !hasInitialSynced) {
+            hasInitialSynced = true
+            refreshRoadflareStateAndFollowers()
+        }
+    }
+
     Scaffold(
         modifier = modifier,
         topBar = {
