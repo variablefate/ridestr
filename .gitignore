@@ -94,3 +94,12 @@ commonMain/
 node_modules/
 package.json
 package-lock.json
+
+# JetBrains IDE (local markdown settings)
+.idea/markdown.xml
+
+# MCP server config (contains machine-local absolute paths)
+.mcp.json
+
+# Repowise codebase intelligence tool (generated index + local config)
+.repowise/
