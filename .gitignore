@@ -46,6 +46,10 @@ captures/
 .idea/modules.xml
 .idea/navEditor.xml
 .idea/deploymentTargetSelector.xml
+.idea/markdown.xml
+
+# VS Code
+.vscode/
 
 # Keystore files
 *.jks
@@ -81,6 +85,7 @@ vcs.xml
 
 # Claude Code
 .claude/
+!.claude/CLAUDE.md
 keystore.properties
 
 # Environment files (contain secrets)
@@ -90,16 +95,7 @@ keystore.properties
 .config/
 commonMain/
 
-# Pi coding-agent IDE extensions (npm-installed, not Raspberry Pi)
-node_modules/
+# Pi coding-agent manifest files (installed at repo root by Pi IDE tooling;
+# node_modules/ is covered in the global gitignore)
 package.json
 package-lock.json
-
-# JetBrains IDE (local markdown settings)
-.idea/markdown.xml
-
-# MCP server config (contains machine-local absolute paths)
-.mcp.json
-
-# Repowise codebase intelligence tool (generated index + local config)
-.repowise/
