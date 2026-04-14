@@ -89,3 +89,8 @@ keystore.properties
 # Local development artifacts
 .config/
 commonMain/
+
+# Pi coding-agent IDE extensions (npm-installed, not Raspberry Pi)
+node_modules/
+package.json
+package-lock.json
