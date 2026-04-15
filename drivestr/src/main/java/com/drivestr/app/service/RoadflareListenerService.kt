@@ -60,9 +60,11 @@ class RoadflareListenerService : Service() {
 
         // Base ID for driver ping notifications. Each rider gets a unique slot:
         // NOTIFICATION_ID_DRIVER_PING + abs(riderPubKey.hashCode() % 10000).
-        // Range: [14001, 24000]. Chosen to avoid collision with follow-notification IDs
-        // at NOTIFICATION_ID_FOLLOW_REQUEST + [0, 10000) = [3001, 13000].
-        // This mirrors the follow-notification pattern in MainActivity.kt:394.
+        // Range: [14001, 24000].
+        // Note: [3001, 13000] is occupied by NOTIFICATION_ID_ROADFLARE_LISTENER (3001),
+        // NOTIFICATION_ID_ROADFLARE_REQUEST (3002), and follow-request dynamic IDs
+        // (NOTIFICATION_ID_FOLLOW_REQUEST + abs(hash % 10000)). Chosen to be clear of all of these.
+        // Mirrors the follow-notification pattern in MainActivity.kt:394.
         const val NOTIFICATION_ID_DRIVER_PING = 14001
 
         // Default sats/USD rate for fare display
@@ -222,6 +224,7 @@ class RoadflareListenerService : Service() {
     }
 
     private fun subscribeToDriverPings(driverPubKey: String) {
+        pingSubscriptionId?.let { nostrService?.relayManager?.closeSubscription(it) }
         pingSubscriptionId = nostrService?.relayManager?.subscribe(
             kinds = listOf(RideshareEventKinds.ROADFLARE_DRIVER_PING),
             tags  = mapOf(
