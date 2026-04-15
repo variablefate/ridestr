@@ -24,7 +24,7 @@ This document defines all Nostr event kinds used in the Ridestr rideshare applic
 | [7375](#kind-7375-wallet-proofs) | Wallet Proofs | Regular | Wallet | Owner | Cashu proofs backup (NIP-60) |
 | [17375](#kind-17375-wallet-metadata) | Wallet Metadata | Replaceable | Wallet | Owner | Wallet settings/mint URL (NIP-60) |
 | [30182](#kind-30182-admin-config) | Admin Config | Param. Replaceable | Admin | Admin | Platform settings (fare rates, mints, versions) |
-| [30011-30014, 3186-3188](#extension-roadflare-personal-driver-network) | RoadFlare | Various | Extension | Various | Personal driver network with encrypted location |
+| [30011-30014, 3186-3189](#extension-roadflare-personal-driver-network) | RoadFlare | Various | Extension | Various | Personal driver network with encrypted location |
 
 ---
 
@@ -46,7 +46,7 @@ Any app implementing these **8 event kinds** can fully participate in core ride 
 **Payment is pluggable.** The `payment_method` field supports any value (`"cashu"`, `"lightning"`, `"fiat_cash"`, `"venmo"`, etc.). Cashu HTLC escrow and cross-mint bridge are Ridestr-specific extensions — non-Cashu apps can ignore `preimage_share`, `bridge_complete`, and `deposit_invoice_share` actions in ride state events and still interoperate on core ride coordination.
 
 **Optional extensions** (not required for interop):
-- **RoadFlare** (Kinds 30011-30014, 3186-3188): Personal driver network with encrypted location sharing and key management.
+- **RoadFlare** (Kinds 30011-30014, 3186-3189): Personal driver network with encrypted location sharing and key management.
 - **Backup** (Kinds 30174, 30177): NIP-44 self-encrypted ride history and profile sync.
 - **Admin** (Kind 30182): Platform-level fare config from a trusted admin pubkey.
 
@@ -1170,6 +1170,55 @@ RoadFlare enables riders to build a personal rideshare network from drivers they
 5. If valid, driver re-sends current key via Kind 3186
 
 _Kind 30013 (Shareable Driver List): Reserved for future use — not yet implemented._
+
+### Kind 3189: RoadFlare Driver Ping Request
+
+**Purpose**: Rider nudges an offline trusted driver to come online. Only sent to drivers in the rider's personal RoadFlare network (i.e., drivers the rider has followed and received a key from).
+
+**Type**: Regular Event (with expiration)
+
+**Author**: Rider
+
+**Tags**:
+```
+["p",          "<driver_pubkey>"]
+["t",          "roadflare-ping"]
+["auth",       "<HMAC-SHA256 hex — see Auth Tag below>"]
+["expiration", "<unix_timestamp>"]  // epoch + 1800 (30 minutes)
+```
+
+**Content** (NIP-44 encrypted to driver's Nostr identity pubkey):
+```json
+{
+  "action":    "ping",
+  "riderName": "<rider's display name>",
+  "message":   "<riderName> is currently hoping you come online!",
+  "timestamp": 1706300000
+}
+```
+
+**Auth Tag**:
+
+Proves the sender holds the driver's RoadFlare private key without exposing it.
+
+```
+key:    driver's RoadFlare private key bytes (32 bytes, from 64-char hex privateKey field)
+msg:    UTF-8 of: driverPubkey + riderPubkey + String(floor(epochSeconds / 300))
+output: lowercase hex-encoded HMAC-SHA256
+```
+
+Driver validates against three consecutive 5-minute windows (`currentWindow - 1`, `currentWindow`, `currentWindow + 1`) to tolerate clock skew and window boundary crossings. Silent drop on mismatch — no error response to sender.
+
+**Expiry**: 30 minutes (`epoch + 1800`). Relay GCs expired events; driver app enforces locally and must not trust relays to do so.
+
+**Receiver Responsibilities** (drivestr `RoadflareListenerService`):
+1. Reject if expiration tag is absent or exceeded
+2. Validate HMAC auth tag (silent drop on failure)
+3. Discard if rider is muted
+4. Suppress if driver is already `AVAILABLE` or `IN_RIDE` (ping redundant)
+5. Apply rate limits: per-rider 30 s spam throttle + global cap of 2 per 10-min rolling window
+
+_Kind 3189 is part of the RoadFlare extension (Issue #4). Drivestr implementation plan: `docs/plans/2026-04-14-issue-4-driver-ping-receiver.md`._
 
 ---
 
