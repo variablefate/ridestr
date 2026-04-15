@@ -195,7 +195,7 @@ class RoadflareDriverPingEventTest {
     }
 
     @Test
-    fun `parseAndDecrypt returns data with message and riderName on success`() = runBlocking {
+    fun `parseAndDecrypt returns riderPubKey riderName and timestamp on success`() = runBlocking {
         val signer = mockk<NostrSigner>(relaxed = true)
         val decryptedJson = JSONObject().apply {
             put("action",    "ping")
@@ -211,9 +211,56 @@ class RoadflareDriverPingEventTest {
         )
 
         assertNotNull(result)
-        assertEquals("Alice is currently hoping you come online!", result!!.message)
-        assertEquals("Alice",      result.riderName)
+        assertEquals("Alice",      result!!.riderName)
         assertEquals(riderPubKey,  result.riderPubKey)
         assertEquals(fixedEpoch,   result.timestamp)
+    }
+
+    @Test
+    fun `parseAndDecrypt returns null when action is not ping`() = runBlocking {
+        val signer = mockk<NostrSigner>(relaxed = true)
+        val decryptedJson = JSONObject().apply {
+            put("action",    "not-a-ping")
+            put("riderName", "Alice")
+            put("timestamp", fixedEpoch)
+        }.toString()
+        coEvery { signer.nip44Decrypt(any(), any()) } returns decryptedJson
+
+        val event = makeEvent(authTag = validAuthHex())
+        assertNull(
+            RoadflareDriverPingEvent.parseAndDecrypt(
+                signer, event, driverPubKey, roadflarePrivKeyHex, fixedEpoch
+            )
+        )
+    }
+
+    @Test
+    fun `parseAndDecrypt ignores sender-controlled message field`() = runBlocking {
+        // Security: any follower with the RoadFlare key could craft a custom client
+        // and set message to arbitrary text. The parsed data must not carry that field;
+        // the notification body must be built locally from riderName only.
+        val signer = mockk<NostrSigner>(relaxed = true)
+        val decryptedJson = JSONObject().apply {
+            put("action",    "ping")
+            put("riderName", "Alice")
+            put("message",   "CLICK HERE: evil.com")  // attacker-controlled
+            put("timestamp", fixedEpoch)
+        }.toString()
+        coEvery { signer.nip44Decrypt(any(), any()) } returns decryptedJson
+
+        val event = makeEvent(authTag = validAuthHex())
+        val result = RoadflareDriverPingEvent.parseAndDecrypt(
+            signer, event, driverPubKey, roadflarePrivKeyHex, fixedEpoch
+        )
+
+        assertNotNull(result)
+        assertEquals("Alice", result!!.riderName)
+
+        // Simulate what the service does: build body from riderName only.
+        val notificationBody = "${result.riderName} is hoping you come online"
+        assertFalse(
+            "Notification body must not contain attacker-supplied message",
+            notificationBody.contains("evil.com")
+        )
     }
 }

@@ -109,11 +109,28 @@ object RoadflareDriverPingEvent {
         return try {
             val decrypted = signer.nip44Decrypt(event.content, event.pubKey)
             val json = JSONObject(decrypted)
+
+            // Require action == "ping"; reject anything else as malformed.
+            // Silent drop — same failure path as HMAC failure.
+            val action = json.optString("action", "")
+            if (action != "ping") {
+                Log.d(TAG, "Invalid action in driver ping payload: '$action'")
+                return null
+            }
+
+            // "message" field is intentionally not parsed. The notification body is
+            // constructed locally in the service from riderName only — the sender's
+            // message field is untrusted and must never reach the notification copy.
+            // riderName is sanitised here (truncate + strip control chars) to prevent
+            // injection even through the weaker sender-controlled display name.
+            val safeRiderName = json.optString("riderName", "")
+                .take(64)
+                .filter { it >= ' ' }
+
             RoadflareDriverPingData(
                 riderPubKey = event.pubKey,
-                message     = json.optString("message",   ""),
-                riderName   = json.optString("riderName", ""),
-                timestamp   = json.optLong("timestamp",   nowEpoch)
+                riderName   = safeRiderName,
+                timestamp   = json.optLong("timestamp", nowEpoch)
             )
         } catch (e: Exception) {
             Log.e(TAG, "Failed to decrypt driver ping from ${event.pubKey.take(8)}", e)
@@ -141,10 +158,16 @@ object RoadflareDriverPingEvent {
         joinToString("") { "%02x".format(it.toInt() and 0xFF) }
 }
 
-/** Parsed content from a validated Kind 3189 driver ping event. */
+/**
+ * Parsed content from a validated Kind 3189 driver ping event.
+ *
+ * Security note: the raw payload's `message` field is intentionally absent here.
+ * Any receiver that needs to display a notification MUST build the body locally
+ * from [riderName] — never from a sender-supplied string. [riderName] is already
+ * sanitised (64-char truncation, control-char strip) at parse time.
+ */
 data class RoadflareDriverPingData(
     val riderPubKey: String,  // event.pubKey — Nostr sender
-    val message: String,       // pre-formatted notification body from "message" field
-    val riderName: String,     // rider's display name from "riderName" field
-    val timestamp: Long        // unix epoch from "timestamp" field
+    val riderName: String,    // rider's display name (sanitised); use to build notification body locally
+    val timestamp: Long       // unix epoch from "timestamp" field
 )

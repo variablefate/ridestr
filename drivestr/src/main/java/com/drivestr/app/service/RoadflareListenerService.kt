@@ -379,11 +379,14 @@ class RoadflareListenerService : Service() {
         val vibrationEnabled = settingsRepository.getNotificationVibrationEnabled()
         SoundManager.playRideRequestAlert(this, soundEnabled, vibrationEnabled)
 
+        // Build notification body locally — never use a sender-supplied string.
+        // riderName is already sanitised (truncated + control-char stripped) at parse time.
+        val body = "${pingData.riderName} is hoping you come online"
         val notification = NotificationHelper.buildDriverStatusNotification(
             context       = this,
             contentIntent = createContentIntent(),
             title         = "Driver Ping",
-            content       = pingData.message,
+            content       = body,
             isHighPriority = true,
             isOngoing     = false,
             channel       = NotificationHelper.CHANNEL_DRIVER_PING
@@ -400,7 +403,7 @@ class RoadflareListenerService : Service() {
             notificationId = notificationId,
             notification   = notification
         )
-        Log.d(TAG, "Showed driver ping notification (id=$notificationId): ${pingData.message.take(60)}")
+        Log.d(TAG, "Showed driver ping notification (id=$notificationId): ${body.take(60)}")
     }
 
     private fun stopListening() {

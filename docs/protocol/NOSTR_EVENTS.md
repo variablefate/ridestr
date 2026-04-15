@@ -1192,10 +1192,13 @@ _Kind 30013 (Shareable Driver List): Reserved for future use — not yet impleme
 {
   "action":    "ping",
   "riderName": "<rider's display name>",
-  "message":   "<riderName> is currently hoping you come online!",
   "timestamp": 1706300000
 }
 ```
+
+> **Security — `message` field removed (deprecated):** An earlier version of this spec included a `message` field containing a pre-formatted notification string. This was removed because NIP-44 + HMAC auth only proves "approved follower," not "honest sender." Any follower with the RoadFlare key can craft a custom client and set `message` to arbitrary text, which would appear verbatim on the driver's lock screen as a system notification.
+>
+> **Receiver behaviour:** The `message` field MUST be ignored if present (iOS may send it during the transition window). The notification body MUST be constructed locally: `"<sanitised riderName> is hoping you come online"`. `riderName` is itself sanitised at parse time (64-char truncation, control-character strip) to limit the attack surface of the remaining sender-controlled display-name field.
 
 **Auth Tag**:
 
