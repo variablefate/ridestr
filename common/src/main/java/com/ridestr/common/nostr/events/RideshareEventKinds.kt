@@ -212,6 +212,20 @@ object RideshareEventKinds {
     const val ROADFLARE_KEY_ACK = 3188
 
     /**
+     * Kind 3189: RoadFlare Driver Ping Request (Regular)
+     * Sent by a rider to nudge an offline trusted driver to come online.
+     * Content is NIP-44 encrypted to the driver's Nostr identity pubkey.
+     *
+     * Auth proof: HMAC-SHA256(key = driver's RoadFlare privateKey bytes,
+     *   msg = driverPubkey + riderPubkey + str(floor(epochSeconds / 300)))
+     * Driver validates against currentWindow ± 1 (5-minute buckets, clock-skew tolerance).
+     * Uses "expiration" NIP-40 tag (epoch + RideshareExpiration.ROADFLARE_DRIVER_PING_MINUTES * 60).
+     *
+     * Protocol spec: roadflare-ios plan docs/superpowers/plans/2026-04-14-issue-4-driver-ping.md §1
+     */
+    const val ROADFLARE_DRIVER_PING = 3189
+
+    /**
      * Kind 30175: Vehicle Backup Event (Parameterized Replaceable)
      * @deprecated Use PROFILE_BACKUP (30177) instead. Vehicles are now part of unified profile backup.
      */
@@ -340,6 +354,7 @@ object RideshareTags {
     const val GEOHASH = "g"
     const val RIDESHARE_TAG = "rideshare"
     const val EXPIRATION = "expiration"  // NIP-40
+    const val AUTH = "auth"        // HMAC auth proof (Kind 3189)
 }
 
 /**
@@ -371,9 +386,10 @@ object RideshareExpiration {
     const val RIDE_CANCELLATION_HOURS = 24
 
     // RoadFlare events
-    const val ROADFLARE_LOCATION_MINUTES = 5     // Real-time location, short TTL
-    const val ROADFLARE_REQUEST_MINUTES = 15     // Same as ride offer
-    const val ROADFLARE_SHAREABLE_LIST_DAYS = 30 // Shareable driver lists
+    const val ROADFLARE_LOCATION_MINUTES = 5       // Real-time location, short TTL
+    const val ROADFLARE_REQUEST_MINUTES = 15       // Same as ride offer
+    const val ROADFLARE_DRIVER_PING_MINUTES = 30   // Driver ping nudge (Kind 3189)
+    const val ROADFLARE_SHAREABLE_LIST_DAYS = 30   // Shareable driver lists
 
     // Helper function for days
     fun daysFromNow(days: Int): Long =

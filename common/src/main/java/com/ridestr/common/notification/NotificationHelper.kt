@@ -24,6 +24,7 @@ object NotificationHelper {
     const val CHANNEL_RIDE_UPDATE = "ride_update"
     const val CHANNEL_RIDE_CANCELLED = "ride_cancelled"
     const val CHANNEL_FOLLOW_REQUEST = "follow_request"
+    const val CHANNEL_DRIVER_PING    = "driver_ping"
 
     // Notification IDs
     const val NOTIFICATION_ID_ONLINE_STATUS = 1001
@@ -94,8 +95,19 @@ object NotificationHelper {
                 description = "Notifications when a rider adds you to their driver network"
             }
 
+            // Channel 6: Driver pings — friendly nudge from followers to come online
+            val pingChannel = NotificationChannel(
+                CHANNEL_DRIVER_PING,
+                "Driver Pings",
+                NotificationManager.IMPORTANCE_DEFAULT
+            ).apply {
+                description = "Notifications when a follower asks you to come online"
+                setSound(null, null)       // SoundManager handles audio
+                enableVibration(false)     // SoundManager handles vibration
+            }
+
             notificationManager.createNotificationChannels(
-                listOf(onlineChannel, requestChannel, updateChannel, cancelledChannel, followChannel)
+                listOf(onlineChannel, requestChannel, updateChannel, cancelledChannel, followChannel, pingChannel)
             )
         }
     }
