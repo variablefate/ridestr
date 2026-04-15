@@ -13,6 +13,8 @@ import com.ridestr.common.data.DriverRoadflareRepository
 import com.ridestr.common.nostr.NostrService
 import com.ridestr.common.nostr.events.RideOfferEvent
 import com.ridestr.common.nostr.events.RideshareEventKinds
+import com.ridestr.common.nostr.events.RoadflareDriverPingData
+import com.ridestr.common.nostr.events.RoadflareDriverPingEvent
 import com.drivestr.app.presence.DriverPresenceGate
 import com.drivestr.app.presence.DriverPresenceStore
 import com.ridestr.common.notification.NotificationHelper
@@ -56,6 +58,13 @@ class RoadflareListenerService : Service() {
         const val NOTIFICATION_ID_ROADFLARE_LISTENER = 3001
         const val NOTIFICATION_ID_ROADFLARE_REQUEST = 3002
 
+        // Base ID for driver ping notifications. Each rider gets a unique slot:
+        // NOTIFICATION_ID_DRIVER_PING + abs(riderPubKey.hashCode() % 10000).
+        // Range: [14001, 24000]. Chosen to avoid collision with follow-notification IDs
+        // at NOTIFICATION_ID_FOLLOW_REQUEST + [0, 10000) = [3001, 13000].
+        // This mirrors the follow-notification pattern in MainActivity.kt:394.
+        const val NOTIFICATION_ID_DRIVER_PING = 14001
+
         // Default sats/USD rate for fare display
         private const val DEFAULT_SATS_PER_DOLLAR = 2000.0
 
@@ -94,6 +103,8 @@ class RoadflareListenerService : Service() {
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var subscriptionJob: Job? = null
     private var subscriptionId: String? = null
+    private var pingSubscriptionId: String? = null
+    private val pingRateLimiter = DriverPingRateLimiter()
 
     // Track received requests to avoid duplicate notifications
     private val seenRequests = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
@@ -163,6 +174,9 @@ class RoadflareListenerService : Service() {
                 // Subscribe to Kind 3173 events where we're in p-tags and have roadflare tag
                 subscribeToRoadflareRequests(driverPubKey)
 
+                // Subscribe to Kind 3189 driver pings
+                subscribeToDriverPings(driverPubKey)
+
             } catch (e: Exception) {
                 Log.e(TAG, "Error starting listener", e)
             }
@@ -205,6 +219,71 @@ class RoadflareListenerService : Service() {
         }
 
         Log.d(TAG, "Subscribed with ID: $subscriptionId")
+    }
+
+    private fun subscribeToDriverPings(driverPubKey: String) {
+        pingSubscriptionId = nostrService?.relayManager?.subscribe(
+            kinds = listOf(RideshareEventKinds.ROADFLARE_DRIVER_PING),
+            tags  = mapOf("p" to listOf(driverPubKey))
+        ) { event, _ ->
+            // Event-id dedup: seenRequests is shared with Kind 3173 — event IDs are globally unique
+            if (!seenRequests.add(event.id)) return@subscribe
+
+            serviceScope.launch {
+                processPingEvent(event, driverPubKey)
+            }
+        }
+        Log.d(TAG, "Subscribed to driver pings: $pingSubscriptionId")
+    }
+
+    private suspend fun processPingEvent(
+        event: Event,
+        driverPubKey: String
+    ) {
+        val signer = nostrService?.keyManager?.getSigner() ?: return
+        val roadflareKey = driverRoadflareRepo?.getRoadflareKey() ?: run {
+            Log.d(TAG, "No RoadFlare key — cannot validate ping HMAC; dropping")
+            return
+        }
+
+        // Validate HMAC + expiry + decrypt (null = any failure = silent drop)
+        val pingData = RoadflareDriverPingEvent.parseAndDecrypt(
+            signer              = signer,
+            event               = event,
+            driverPubKey        = driverPubKey,
+            roadflarePrivKeyHex = roadflareKey.privateKey
+        ) ?: return
+
+        // Mute check — after HMAC auth, before notification (spec §1.5).
+        // Live fetch from repository so mute changes take effect immediately without
+        // requiring a service restart (unlike the Kind 3173 snapshot approach).
+        // O(n) in muted-count per event; acceptable up to ~200 muted pubkeys.
+        // Revisit with a cached snapshot if drivers report >1000 followers or high muted counts.
+        val mutedPubkeys = driverRoadflareRepo?.getMutedPubkeys() ?: emptySet()
+        if (event.pubKey in mutedPubkeys) {
+            Log.d(TAG, "Discarding authenticated ping from muted rider ${event.pubKey.take(8)}")
+            return
+        }
+
+        // Suppression ordering (MUST be: mute → presence gate → tryAccept):
+        // Rate-limit slots must not be consumed by events that would be suppressed by mute
+        // or by driver presence (AVAILABLE / IN_RIDE), so both gates run BEFORE tryAccept().
+        val gate = presenceStore.gate.value
+        // gate is StateFlow<DriverPresenceGate?> — null = state unknown (app just started), treat as offline → show notification.
+        // AVAILABLE / IN_RIDE: suppress — driver is publicly visible, ping is redundant.
+        // ROADFLARE_ONLY: do NOT suppress — driver is privately broadcasting to followers only; ping is still relevant.
+        if (gate == DriverPresenceGate.AVAILABLE || gate == DriverPresenceGate.IN_RIDE) {
+            Log.d(TAG, "Driver is online ($gate) — skipping ping notification")
+            return
+        }
+
+        // Rate limit + per-rider dedup — called last, after all suppression checks
+        if (!pingRateLimiter.tryAccept(event.pubKey)) {
+            Log.d(TAG, "Driver ping rate-limited from ${event.pubKey.take(8)}")
+            return
+        }
+
+        showPingNotification(pingData)
     }
 
     private suspend fun processRoadflareRequest(event: Event) {
@@ -295,12 +374,46 @@ class RoadflareListenerService : Service() {
         Log.d(TAG, "Showed notification: $content")
     }
 
+    private fun showPingNotification(pingData: RoadflareDriverPingData) {
+        val soundEnabled     = settingsRepository.getNotificationSoundEnabled()
+        val vibrationEnabled = settingsRepository.getNotificationVibrationEnabled()
+        SoundManager.playRideRequestAlert(this, soundEnabled, vibrationEnabled)
+
+        val notification = NotificationHelper.buildDriverStatusNotification(
+            context       = this,
+            contentIntent = createContentIntent(),
+            title         = "Driver Ping",
+            content       = pingData.message,
+            isHighPriority = true,
+            isOngoing     = false,
+            channel       = NotificationHelper.CHANNEL_DRIVER_PING
+        )
+        // Per-rider stable ID (base + abs(pubkeyHash % 10_000)) — mirrors MainActivity.kt:394.
+        // Each rider gets a distinct tray slot so two accepted pings within the 10-min window
+        // are visible simultaneously. Birthday paradox: ~130 unique riders for 1% collision
+        // probability; acceptable for typical follower counts (<50). Collisions cause one
+        // notification to replace another in the tray — no crash, no data loss.
+        val notificationId = NOTIFICATION_ID_DRIVER_PING +
+            kotlin.math.abs(pingData.riderPubKey.hashCode() % 10000)
+        NotificationHelper.showNotification(
+            context        = this,
+            notificationId = notificationId,
+            notification   = notification
+        )
+        Log.d(TAG, "Showed driver ping notification (id=$notificationId): ${pingData.message.take(60)}")
+    }
+
     private fun stopListening() {
         subscriptionJob?.cancel()
         subscriptionId?.let { id ->
             nostrService?.relayManager?.closeSubscription(id)
         }
         subscriptionId = null
+        pingSubscriptionId?.let { id ->
+            nostrService?.relayManager?.closeSubscription(id)
+        }
+        pingSubscriptionId = null
+        pingRateLimiter.reset()   // clear slots so a service restart begins from a clean state
         // Don't disconnect the singleton — other components share relay connections
         seenRequests.clear()
         riderNameCache.clear()
