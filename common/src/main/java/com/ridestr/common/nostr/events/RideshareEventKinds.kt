@@ -219,7 +219,7 @@ object RideshareEventKinds {
      * Auth proof: HMAC-SHA256(key = driver's RoadFlare privateKey bytes,
      *   msg = driverPubkey + riderPubkey + str(floor(epochSeconds / 300)))
      * Driver validates against currentWindow ± 1 (5-minute buckets, clock-skew tolerance).
-     * Uses "expiration" NIP-40 tag (epoch + 1800, 30-minute TTL).
+     * Uses "expiration" NIP-40 tag (epoch + RideshareExpiration.ROADFLARE_DRIVER_PING_MINUTES * 60).
      *
      * Protocol spec: roadflare-ios plan docs/superpowers/plans/2026-04-14-issue-4-driver-ping.md §1
      */
@@ -386,9 +386,10 @@ object RideshareExpiration {
     const val RIDE_CANCELLATION_HOURS = 24
 
     // RoadFlare events
-    const val ROADFLARE_LOCATION_MINUTES = 5     // Real-time location, short TTL
-    const val ROADFLARE_REQUEST_MINUTES = 15     // Same as ride offer
-    const val ROADFLARE_SHAREABLE_LIST_DAYS = 30 // Shareable driver lists
+    const val ROADFLARE_LOCATION_MINUTES = 5       // Real-time location, short TTL
+    const val ROADFLARE_REQUEST_MINUTES = 15       // Same as ride offer
+    const val ROADFLARE_DRIVER_PING_MINUTES = 30   // Driver ping nudge (Kind 3189)
+    const val ROADFLARE_SHAREABLE_LIST_DAYS = 30   // Shareable driver lists
 
     // Helper function for days
     fun daysFromNow(days: Int): Long =

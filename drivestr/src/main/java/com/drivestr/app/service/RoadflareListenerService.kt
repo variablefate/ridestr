@@ -388,12 +388,16 @@ class RoadflareListenerService : Service() {
         // Build notification body locally — never use a sender-supplied string.
         // riderName is already sanitised (truncated + control-char stripped) at parse time.
         val body = "${pingData.riderName.ifEmpty { "Someone" }} is hoping you come online"
+        // isHighPriority = false: on API 26+ channel importance is the sole heads-up gate
+        // and CHANNEL_DRIVER_PING is IMPORTANCE_DEFAULT (silent tray notification pattern,
+        // SoundManager already handled the alert tone above). Passing true would set a
+        // PRIORITY_HIGH that Android silently ignores and misreads caller intent.
         val notification = NotificationHelper.buildDriverStatusNotification(
             context       = this,
             contentIntent = createContentIntent(),
             title         = "Driver Ping",
             content       = body,
-            isHighPriority = true,
+            isHighPriority = false,
             isOngoing     = false,
             channel       = NotificationHelper.CHANNEL_DRIVER_PING
         )
