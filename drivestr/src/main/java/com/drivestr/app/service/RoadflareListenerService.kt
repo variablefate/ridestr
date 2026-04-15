@@ -224,7 +224,10 @@ class RoadflareListenerService : Service() {
     private fun subscribeToDriverPings(driverPubKey: String) {
         pingSubscriptionId = nostrService?.relayManager?.subscribe(
             kinds = listOf(RideshareEventKinds.ROADFLARE_DRIVER_PING),
-            tags  = mapOf("p" to listOf(driverPubKey))
+            tags  = mapOf(
+                "p" to listOf(driverPubKey),
+                "t" to listOf(RoadflareDriverPingEvent.T_TAG)
+            )
         ) { event, _ ->
             // Event-id dedup: seenRequests is shared with Kind 3173 — event IDs are globally unique
             if (!seenRequests.add(event.id)) return@subscribe
@@ -381,7 +384,7 @@ class RoadflareListenerService : Service() {
 
         // Build notification body locally — never use a sender-supplied string.
         // riderName is already sanitised (truncated + control-char stripped) at parse time.
-        val body = "${pingData.riderName} is hoping you come online"
+        val body = "${pingData.riderName.ifEmpty { "Someone" }} is hoping you come online"
         val notification = NotificationHelper.buildDriverStatusNotification(
             context       = this,
             contentIntent = createContentIntent(),
