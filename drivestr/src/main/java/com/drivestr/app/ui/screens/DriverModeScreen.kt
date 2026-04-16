@@ -40,9 +40,10 @@ import com.google.android.gms.location.Priority
 import com.google.android.gms.tasks.CancellationTokenSource
 import com.ridestr.common.data.Vehicle
 import com.ridestr.common.data.VehicleRepository
+import com.ridestr.common.fiat.usdAmountOrNull
 import com.ridestr.common.nostr.events.BroadcastRideOfferData
-import com.ridestr.common.nostr.events.PaymentPath
 import com.ridestr.common.nostr.events.Location
+import com.ridestr.common.nostr.events.PaymentPath
 import com.ridestr.common.nostr.events.RideOfferData
 import com.ridestr.common.nostr.events.RideshareChatData
 import com.ridestr.common.location.GeocodingService
@@ -1962,6 +1963,7 @@ private fun RideOfferCard(
     // Calculate earnings metrics (only if we have both routes)
     val earningsPerHour: String?
     val earningsPerDistance: String?
+    val authoritativeUsdFare = offer.fiatFare?.usdAmountOrNull()
 
     if (pickupRoute != null && rideRoute != null && pickupDurationMin != null && rideDurationMin != null) {
         val totalTimeHours = (pickupDurationMin + rideDurationMin) / 60.0
@@ -1973,12 +1975,24 @@ private fun RideOfferCard(
         }
 
         earningsPerHour = if (totalTimeHours > 0) {
-            formatEarnings(offer.fareEstimate / totalTimeHours, displayCurrency, btcPrice, "/hr")
+            formatEarnings(
+                satsPerUnit = offer.fareEstimate / totalTimeHours,
+                displayCurrency = displayCurrency,
+                btcPriceUsd = btcPrice,
+                suffix = "/hr",
+                fiatAmountPerUnitUsd = authoritativeUsdFare?.div(totalTimeHours)
+            )
         } else null
 
         earningsPerDistance = if (totalDistanceForEarnings > 0) {
             val perDistanceUnit = if (distanceUnit == DistanceUnit.MILES) "/mi" else "/km"
-            formatEarnings(offer.fareEstimate / totalDistanceForEarnings, displayCurrency, btcPrice, perDistanceUnit)
+            formatEarnings(
+                satsPerUnit = offer.fareEstimate / totalDistanceForEarnings,
+                displayCurrency = displayCurrency,
+                btcPriceUsd = btcPrice,
+                suffix = perDistanceUnit,
+                fiatAmountPerUnitUsd = authoritativeUsdFare?.div(totalDistanceForEarnings)
+            )
         } else null
     } else {
         earningsPerHour = null
@@ -2223,6 +2237,7 @@ private fun BroadcastRideRequestCard(
     // Without pickup time, $/hr would be misleadingly high
     val earningsPerHour: String?
     val earningsPerDistance: String?
+    val authoritativeUsdFare = request.fiatFare?.usdAmountOrNull()
 
     if (pickupRoute != null && pickupDurationMin != null && pickupDistanceKm != null) {
         // Total time = pickup time + ride time (in hours)
@@ -2238,12 +2253,24 @@ private fun BroadcastRideRequestCard(
         }
 
         earningsPerHour = if (totalTimeHours > 0) {
-            formatEarnings(request.fareEstimate / totalTimeHours, displayCurrency, btcPrice, "/hr")
+            formatEarnings(
+                satsPerUnit = request.fareEstimate / totalTimeHours,
+                displayCurrency = displayCurrency,
+                btcPriceUsd = btcPrice,
+                suffix = "/hr",
+                fiatAmountPerUnitUsd = authoritativeUsdFare?.div(totalTimeHours)
+            )
         } else null
 
         earningsPerDistance = if (totalDistanceForEarnings > 0) {
             val perDistanceUnit = if (distanceUnit == DistanceUnit.MILES) "/mi" else "/km"
-            formatEarnings(request.fareEstimate / totalDistanceForEarnings, displayCurrency, btcPrice, perDistanceUnit)
+            formatEarnings(
+                satsPerUnit = request.fareEstimate / totalDistanceForEarnings,
+                displayCurrency = displayCurrency,
+                btcPriceUsd = btcPrice,
+                suffix = perDistanceUnit,
+                fiatAmountPerUnitUsd = authoritativeUsdFare?.div(totalDistanceForEarnings)
+            )
         } else null
     } else {
         // Don't show earnings without pickup route - they'd be misleading
@@ -2464,18 +2491,21 @@ private fun formatDistance(distanceKm: Double, unit: DistanceUnit): String {
 /**
  * Format earnings rate (sats/unit) with currency conversion.
  */
-private fun formatEarnings(
+internal fun formatEarnings(
     satsPerUnit: Double,
     displayCurrency: DisplayCurrency,
     btcPriceUsd: Int?,
-    suffix: String
+    suffix: String,
+    fiatAmountPerUnitUsd: Double? = null
 ): String {
     return when (displayCurrency) {
         DisplayCurrency.SATS -> {
             "${satsPerUnit.toInt()} sats$suffix"
         }
         DisplayCurrency.USD -> {
-            if (btcPriceUsd != null && btcPriceUsd > 0) {
+            if (fiatAmountPerUnitUsd != null) {
+                String.format("$%.2f$suffix", fiatAmountPerUnitUsd)
+            } else if (btcPriceUsd != null && btcPriceUsd > 0) {
                 // Convert sats to USD: sats / 100_000_000 * btcPriceUsd
                 val usdValue = (satsPerUnit / 100_000_000.0) * btcPriceUsd
                 String.format("$%.2f$suffix", usdValue)

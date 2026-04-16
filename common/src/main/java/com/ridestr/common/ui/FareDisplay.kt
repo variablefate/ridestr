@@ -12,6 +12,8 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import com.ridestr.common.bitcoin.BitcoinPriceService
+import com.ridestr.common.fiat.formatDisplayAmount
+import com.ridestr.common.fiat.isUsd
 import com.ridestr.common.nostr.events.FiatFare
 import com.ridestr.common.settings.DisplayCurrency
 
@@ -54,8 +56,8 @@ fun FareDisplay(
         DisplayCurrency.SATS -> "$prefix${satsAmount.toInt()} sats"
         DisplayCurrency.USD -> {
             // Prefer authoritative fiat amount when available (USD only for now)
-            if (fiatFare != null && fiatFare.currency == "USD") {
-                "$prefix\$${fiatFare.amount}"
+            if (fiatFare != null && fiatFare.isUsd()) {
+                "$prefix${fiatFare.formatDisplayAmount()}"
             } else {
                 val usdString = priceService.satsToUsdString(satsAmount.toLong())
                 if (usdString != null) {
@@ -105,8 +107,8 @@ fun formatFare(
         DisplayCurrency.SATS -> "${satsAmount.toInt()} sats"
         DisplayCurrency.USD -> {
             // Prefer authoritative fiat amount when available (USD only for now)
-            if (fiatFare != null && fiatFare.currency == "USD") {
-                "\$${fiatFare.amount}"
+            if (fiatFare != null && fiatFare.isUsd()) {
+                fiatFare.formatDisplayAmount()
             } else {
                 priceService.satsToUsdString(satsAmount.toLong())
                     ?: "${satsAmount.toInt()} sats" // Fallback if price unavailable

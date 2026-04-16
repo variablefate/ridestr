@@ -10,7 +10,9 @@ import android.os.IBinder
 import android.util.Log
 import com.drivestr.app.MainActivity
 import com.ridestr.common.data.DriverRoadflareRepository
+import com.ridestr.common.fiat.formatDisplayAmount
 import com.ridestr.common.nostr.NostrService
+import com.ridestr.common.nostr.events.FiatFare
 import com.ridestr.common.nostr.events.RideOfferEvent
 import com.ridestr.common.nostr.events.RideshareEventKinds
 import com.ridestr.common.nostr.events.RoadflareDriverPingData
@@ -28,13 +30,13 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import org.json.JSONObject
 import kotlinx.coroutines.runBlocking
 import java.text.NumberFormat
 import java.util.Locale
 import javax.inject.Inject
 
 private const val TAG = "RoadflareListenerService"
+private const val DEFAULT_SATS_PER_DOLLAR = 2000.0
 
 /**
  * Background service that listens for RoadFlare ride requests.
@@ -66,9 +68,6 @@ class RoadflareListenerService : Service() {
         // (NOTIFICATION_ID_FOLLOW_REQUEST + abs(hash % 10000)). Chosen to be clear of all of these.
         // Mirrors the follow-notification pattern in MainActivity.kt:394.
         const val NOTIFICATION_ID_DRIVER_PING = 14001
-
-        // Default sats/USD rate for fare display
-        private const val DEFAULT_SATS_PER_DOLLAR = 2000.0
 
         /**
          * Start the RoadFlare listener service.
@@ -295,16 +294,21 @@ class RoadflareListenerService : Service() {
     private suspend fun processRoadflareRequest(event: Event) {
         val riderPubKey = event.pubKey
 
-        // Try to decrypt and parse the fare
+        // Parse the full offer so this notification path uses the same authoritative fare
+        // source as the main ride flow.
         var fareSats: Double? = null
+        var fiatFare: FiatFare? = null
         try {
             val signer = nostrService?.keyManager?.getSigner()
             if (signer != null) {
-                val decrypted = signer.nip44Decrypt(event.content, riderPubKey)
-                val json = JSONObject(decrypted)
-                fareSats = json.optDouble("fare_estimate", Double.NaN)
-                if (fareSats.isNaN()) fareSats = null
-                Log.d(TAG, "Decrypted RoadFlare offer: fare = $fareSats sats")
+                val encryptedOffer = RideOfferEvent.parseEncrypted(event)
+                val offer = encryptedOffer?.let { RideOfferEvent.decrypt(signer, it) }
+                fareSats = offer?.fareEstimate
+                fiatFare = offer?.fiatFare
+                val fareForLog = fiatFare?.formatDisplayAmount()
+                    ?: fareSats?.let { "${it.toInt()} sats" }
+                    ?: "unknown"
+                Log.d(TAG, "Decrypted RoadFlare offer: fare = $fareForLog")
             }
         } catch (e: Exception) {
             Log.w(TAG, "Could not decrypt RoadFlare content: ${e.message}")
@@ -332,10 +336,10 @@ class RoadflareListenerService : Service() {
         }
 
         // Build notification message
-        showRoadflareNotification(riderFirstName, fareSats, event.id)
+        showRoadflareNotification(riderFirstName, fareSats, fiatFare)
     }
 
-    private fun showRoadflareNotification(riderName: String?, fareSats: Double?, eventId: String) {
+    private fun showRoadflareNotification(riderName: String?, fareSats: Double?, fiatFare: FiatFare?) {
         // Check if driver is online (AVAILABLE or IN_RIDE) - DriverViewModel handles these
         // Only show notification when OFFLINE or ROADFLARE_ONLY
         val gate = presenceStore.gate.value
@@ -351,15 +355,7 @@ class RoadflareListenerService : Service() {
 
         // Format the notification content
         val displayName = riderName ?: "Someone"
-        val content = if (fareSats != null && fareSats > 0) {
-            // Convert sats to USD using default rate
-            val fareUsd = fareSats / DEFAULT_SATS_PER_DOLLAR
-            val formatter = NumberFormat.getCurrencyInstance(Locale.US)
-            val fareFormatted = formatter.format(fareUsd)
-            "$displayName has broadcasted a RoadFlare for $fareFormatted!"
-        } else {
-            "$displayName has broadcasted a RoadFlare!"
-        }
+        val content = formatRoadflareNotificationContent(displayName, fareSats, fiatFare)
 
         // Build notification (dismissible - isOngoing=false)
         val notification = NotificationHelper.buildDriverStatusNotification(
@@ -444,4 +440,19 @@ class RoadflareListenerService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
     }
+}
+
+internal fun formatRoadflareNotificationContent(
+    displayName: String,
+    fareSats: Double?,
+    fiatFare: FiatFare?
+): String {
+    val fareDisplay = fiatFare?.formatDisplayAmount()
+        ?: fareSats?.takeIf { it > 0 }?.let {
+            val fareUsd = it / DEFAULT_SATS_PER_DOLLAR
+            NumberFormat.getCurrencyInstance(Locale.US).format(fareUsd)
+        }
+
+    return fareDisplay?.let { "$displayName has broadcasted a RoadFlare for $it!" }
+        ?: "$displayName has broadcasted a RoadFlare!"
 }
