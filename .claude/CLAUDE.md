@@ -136,7 +136,7 @@ See [docs/README.md](../docs/README.md) for full documentation.
 | Kind | Type | Purpose |
 |------|------|---------|
 | 30173 | Addressable | Driver Availability Broadcast + mint_url/payment_methods |
-| 3173 | Regular | Ride Offer (rider → driver) + mint_url/payment_method |
+| 3173 | Regular | Ride Offer (rider → driver) + mint_url/payment_method + fare_fiat_amount/currency (ADR-0008) |
 | 3174 | Regular | Ride Acceptance (driver → rider) + mint_url/payment_method |
 | 3175 | Regular | Ride Confirmation (rider → driver, with paymentHash + escrowToken) |
 | 30180 | Param. Replaceable | Driver Ride State (status, PIN, settlement) |
@@ -166,6 +166,7 @@ See [docs/README.md](../docs/README.md) for full documentation.
 | 3186 | Regular | Key Share (driver→follower DM, 5-min expiry) |
 | 3187 | Regular | Follow Notification (short expiry, real-time UX; p-tag query is primary) |
 | 3188 | Regular | Key Acknowledgement (confirm receipt or refresh request) |
+| 3189 | Regular | Driver Ping Request (rider asks driver to come online; HMAC-authenticated, 30-min TTL) |
 
 ## RoadFlare Architecture
 
@@ -207,6 +208,13 @@ PENDING → APPROVED → KEY_SENT → ACTIVE
 | Cross-device sync | `DriverViewModel.kt` | `ensureRoadflareStateSynced()` |
 | Stale key detection | `RoadflareTab.kt` | `checkStaleKeys()` |
 | Key refresh handler | `MainActivity.kt` | Kind 3188 handler - rider sends `status="stale"`, driver re-sends key |
+| Driver ping listener | `RoadflareListenerService.kt` | Kind 3189 subscription, HMAC validation, silent-tray notification |
+| Ping rate limiting | `DriverPingRateLimiter.kt` | 30s per-rider dedup + global 2/10min cap |
+
+### Driver Ping (Kind 3189, Issue #4)
+Riders can ping a followed driver to ask them to come online. Encoded with `roadflare-ping`
+HMAC for authentication (only approved followers can ping). Driver receives a silent
+heads-up notification (CHANNEL_DRIVER_PING). Rate limited to prevent spam.
 
 ## Payment System
 
@@ -230,6 +238,16 @@ Driver's `wallet_pubkey` in Kind 3174 ensures HTLC is locked to correct key. If 
 ### ⚠️ CRITICAL: PaymentHash is in Kind 3175, NOT Kind 3173
 
 **PaymentHash is in confirmation (Kind 3175), NOT offer (Kind 3173).** This is intentional - HTLC must lock AFTER acceptance to use driver's wallet_pubkey. Do NOT move paymentHash back to offer events.
+
+### Authoritative Fiat Fare (ADR-0008)
+
+**For fiat-rail rides only** (`payment_method` not in `{cashu, lightning}`), Kind 3173 carries `fare_fiat_amount` (decimal string) and `fare_fiat_currency` (ISO 4217). Both-or-neither rule. These are the authoritative display value — driver shows them directly without sats→USD conversion. Fixes ~$1 drift caused by independent BTC price conversions on each side.
+
+**Encoding flow:** `RiderViewModel.calculateFare()` returns `FareCalc(sats, usdAmount)` → `RiderUiState.fareEstimateUsd` → `OfferParams` → `RideOfferSpec` → `RideshareDomainService` → `RideOfferEvent.create()` JSON.
+
+**Boost behavior:** `boostFare()` clears `fareEstimateUsd` — boosted offer drops fiat fields, driver falls back to sats→USD for that one offer (acceptable drift on boost only).
+
+**Compatible with roadflare-ios per ADR-0008** (identical field names + semantics).
 
 ### Deferred HTLC Locking
 
@@ -321,7 +339,9 @@ Multi-relay delivery of acceptance events causes concurrent `autoConfirmRide()` 
 - `RideshareDomainService.kt` - Ride protocol events (Kind 3173-3179, 30173, 30180-30181)
 - `NostrCryptoHelper.kt` - NIP-44 encryption utilities
 - `ProfileBackupService.kt` - Profile and history backup (Kind 30174, 30177)
-- `RoadflareDomainService.kt` - RoadFlare events (Kind 30011, 30012, 30014, 3186, 3188)
+- `RoadflareDomainService.kt` - RoadFlare events (Kind 30011, 30012, 30014, 3186, 3188, 3189)
+- `RoadflareListenerService.kt` - Driver-side foreground service; subscribes to Kind 3189 driver pings + RoadFlare follow notifications
+- `DriverPingRateLimiter.kt` - 30s per-rider dedup + global 2/10min cap on Kind 3189 ping notifications
 
 ### State Machine
 - `common/.../state/RideState.kt` - Unified state enum
@@ -414,7 +434,7 @@ Relay message → RelayConnection.handleMessage()
 | Event | Fields |
 |-------|--------|
 | Kind 30173 (Availability) | `mint_url`, `payment_methods[]` |
-| Kind 3173 (Offer) | `mint_url`, `payment_method` |
+| Kind 3173 (Offer) | `mint_url`, `payment_method`, `fare_fiat_amount`, `fare_fiat_currency` |
 | Kind 3174 (Acceptance) | `mint_url`, `payment_method` |
 | Kind 30177 (Profile) | `settings.paymentMethods[]`, `settings.defaultPaymentMethod`, `settings.mintUrl` |
 

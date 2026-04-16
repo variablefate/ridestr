@@ -1,7 +1,7 @@
 # Ridestr Nostr Event Protocol
 
-**Version**: 1.8
-**Last Updated**: 2026-02-25
+**Version**: 1.9
+**Last Updated**: 2026-04-16
 
 This document defines all Nostr event kinds used in the Ridestr rideshare application.
 
@@ -420,7 +420,9 @@ All three tiers use Kind 3173. Detection: broadcast = has `["t", "ride-request"]
   "ride_route_min": 18,
   "mint_url": "<cashu_mint_url>",
   "payment_method": "cashu",
-  "fiat_payment_methods": ["zelle", "venmo", "paypal"]
+  "fiat_payment_methods": ["zelle", "venmo", "paypal"],
+  "fare_fiat_amount": "12.50",
+  "fare_fiat_currency": "USD"
 }
 ```
 
@@ -433,7 +435,9 @@ All three tiers use Kind 3173. Detection: broadcast = has `["t", "ride-request"]
   "route_distance_km": 12.3,
   "route_duration_min": 18,
   "mint_url": "<cashu_mint_url>",
-  "payment_method": "cashu"
+  "payment_method": "cashu",
+  "fare_fiat_amount": "12.50",
+  "fare_fiat_currency": "USD"
 }
 ```
 
@@ -445,6 +449,26 @@ All three tiers use Kind 3173. Detection: broadcast = has `["t", "ride-request"]
 
 **RoadFlare Payment Priority Fields** (Issue #46):
 - `fiat_payment_methods`: Rider's ordered RoadFlare alternate payment methods (e.g., `["zelle", "venmo"]`). Driver uses `findBestCommonFiatMethod()` to select best common method. Omitted when empty. Not included in broadcast offers (privacy — broadcast content is plaintext).
+
+**Authoritative Fiat Fare Fields** (ADR-0008, April 2026):
+- `fare_fiat_amount`: Decimal string of the rider's exact intended fiat amount (e.g., `"12.50"`).
+- `fare_fiat_currency`: ISO 4217 currency code (e.g., `"USD"`).
+
+**Both-or-neither rule.** Either both fields are present together or both are absent. A
+partial pair MUST be treated as if neither were sent.
+
+**When encoded:** Only when `payment_method` is a fiat rail (i.e., not `"cashu"` and not
+`"lightning"`). For crypto rails, sats is canonical and these fields MUST be absent.
+
+**Why:** Both rider and driver convert sats↔USD using their own local BTC price. Even small
+price drift between offer creation and display caused ~\$1 discrepancies. When present,
+`fare_fiat_amount` is the authoritative display value for the receiver — no BTC conversion
+needed. `fare_estimate` (sats) is retained for backward compatibility; older clients that
+don't parse the fiat fields fall back to sats→USD conversion (with the original drift, but
+no breakage).
+
+**Compatibility:** Fields are additive. Older clients silently ignore unknown JSON keys.
+Compatible with roadflare-ios per ADR-0008 (identical field names and semantics).
 
 **Note**: Precise coordinates are NOT shared in the offer. Only revealed progressively after confirmation.
 
