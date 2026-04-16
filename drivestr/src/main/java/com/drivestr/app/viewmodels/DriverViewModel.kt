@@ -2453,10 +2453,12 @@ class DriverViewModel @Inject constructor(
                 eventId?.let { trackEventForCleanup(it, "DRIVER_RIDE_STATE") }
             }
 
+            val completedFareDisplay = offer.fiatFare?.let { "\$${it.amount}" }
+                ?: "${offer.fareEstimate.toInt()} sats"
             _uiState.update { current ->
                 current.copy(
                     stage = DriverStage.RIDE_COMPLETED,
-                    statusMessage = "Ride completed! Fare: ${offer.fareEstimate.toInt()} sats$settlementMessage",
+                    statusMessage = "Ride completed! Fare: $completedFareDisplay$settlementMessage",
                     rideSession = current.rideSession.copy(
                         activePaymentHash = null,
                         activePreimage = null,
@@ -3240,7 +3242,8 @@ class DriverViewModel @Inject constructor(
             // Only for NEW offers, not fare boosts
             if (!isFareBoost) {
                 val context = getApplication<Application>()
-                val fareDisplay = "${offer.fareEstimate.toInt()} sats"
+                val fareDisplay = offer.fiatFare?.let { "\$${it.amount}" }
+                    ?: "${offer.fareEstimate.toInt()} sats"
                 val fallbackLabel = if (offer.isRoadflare) "RoadFlare request" else "Direct offer"
                 val distanceDisplay = offer.rideRouteKm?.let { "${String.format("%.1f", it)} km ride" } ?: fallbackLabel
                 DriverOnlineService.updateStatus(
@@ -3595,7 +3598,8 @@ class DriverViewModel @Inject constructor(
                 // Don't notify for fare boosts (same rider increasing their offer)
                 if (!isFareBoost) {
                     // Calculate distance display for notification
-                    val fareDisplay = "${request.fareEstimate.toInt()} sats"
+                    val fareDisplay = request.fiatFare?.let { "\$${it.amount}" }
+                        ?: "${request.fareEstimate.toInt()} sats"
                     val driverLocation = _uiState.value.currentLocation
                     val pickupDistanceKm = driverLocation?.distanceToKm(request.pickupArea)
                     val distanceDisplay = if (pickupDistanceKm != null) {
@@ -3797,7 +3801,8 @@ class DriverViewModel @Inject constructor(
                     fareEstimate = request.fareEstimate,
                     createdAt = request.createdAt,
                     mintUrl = request.mintUrl,
-                    paymentMethod = request.paymentMethod
+                    paymentMethod = request.paymentMethod,
+                    fiatFare = request.fiatFare
                 )
 
                 setupAcceptedRide(
