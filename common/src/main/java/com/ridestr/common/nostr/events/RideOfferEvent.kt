@@ -215,6 +215,12 @@ object RideOfferEvent {
             val mintUrl = json.optString("mint_url", null).takeIf { !it.isNullOrBlank() }
             val paymentMethod = json.optString("payment_method", "cashu")
 
+            // Parse authoritative fiat fare fields (per ADR-0008 - both-or-neither rule)
+            val fareFiatAmount = if (json.has("fare_fiat_amount")) json.getString("fare_fiat_amount") else null
+            val fareFiatCurrency = if (json.has("fare_fiat_currency")) json.getString("fare_fiat_currency") else null
+            val fiatFare = if (fareFiatAmount != null && fareFiatCurrency != null)
+                FiatFare(fareFiatAmount, fareFiatCurrency) else null
+
             // Check for RoadFlare tag
             val isRoadflare = isRoadflare(event)
 
@@ -230,7 +236,8 @@ object RideOfferEvent {
                 geohashes = geohashes,
                 mintUrl = mintUrl,
                 paymentMethod = paymentMethod,
-                isRoadflare = isRoadflare
+                isRoadflare = isRoadflare,
+                fiatFare = fiatFare
             )
         } catch (e: Exception) {
             null
@@ -321,6 +328,12 @@ object RideOfferEvent {
                 }
             }
 
+            // Parse authoritative fiat fare fields (per ADR-0008 - both-or-neither rule)
+            val fareFiatAmount = if (json.has("fare_fiat_amount")) json.getString("fare_fiat_amount") else null
+            val fareFiatCurrency = if (json.has("fare_fiat_currency")) json.getString("fare_fiat_currency") else null
+            val fiatFare = if (fareFiatAmount != null && fareFiatCurrency != null)
+                FiatFare(fareFiatAmount, fareFiatCurrency) else null
+
             RideOfferData(
                 eventId = encryptedData.eventId,
                 riderPubKey = encryptedData.riderPubKey,
@@ -339,7 +352,8 @@ object RideOfferEvent {
                 mintUrl = mintUrl,
                 paymentMethod = paymentMethod,
                 isRoadflare = encryptedData.isRoadflare,
-                fiatPaymentMethods = fiatPaymentMethods
+                fiatPaymentMethods = fiatPaymentMethods,
+                fiatFare = fiatFare
             )
         } catch (e: Exception) {
             Log.e(TAG, "Failed to decrypt direct offer", e)
@@ -462,7 +476,9 @@ data class RideOfferData(
     // RoadFlare flag - true if from rider's favorite driver network
     val isRoadflare: Boolean = false,
     // RoadFlare fiat payment methods in rider's priority order (Issue #46)
-    val fiatPaymentMethods: List<String> = emptyList()
+    val fiatPaymentMethods: List<String> = emptyList(),
+    // Authoritative fiat fare amount + currency for fiat-rail rides (per ADR-0008)
+    val fiatFare: FiatFare? = null
 )
 
 /**
@@ -482,5 +498,17 @@ data class BroadcastRideOfferData(
     val mintUrl: String? = null,
     val paymentMethod: String = "cashu",
     // RoadFlare flag - true if from rider's favorite driver network (higher priority)
-    val isRoadflare: Boolean = false
+    val isRoadflare: Boolean = false,
+    // Authoritative fiat fare amount + currency for fiat-rail rides (per ADR-0008)
+    val fiatFare: FiatFare? = null
 )
+
+/**
+ * Authoritative fiat fare amount + ISO 4217 currency, per ADR-0008.
+ * Present in Kind 3173 ride offer events for fiat-rail rides (payment_method != bitcoin/cashu/lightning).
+ * Both fields MUST be present together or both absent.
+ *
+ * @param amount Decimal string (e.g., "12.50") — preserves rider's exact intended amount
+ * @param currency ISO 4217 code (e.g., "USD")
+ */
+data class FiatFare(val amount: String, val currency: String)

@@ -1325,6 +1325,7 @@ private fun RideAcceptedContent(
                         displayCurrency = displayCurrency,
                         onToggleCurrency = onToggleCurrency,
                         priceService = priceService,
+                        fiatFare = offer.fiatFare,
                         style = MaterialTheme.typography.titleMedium,
                         prefix = "Fare: "
                     )
@@ -1465,6 +1466,7 @@ private fun EnRouteContent(
                 displayCurrency = displayCurrency,
                 onToggleCurrency = onToggleCurrency,
                 priceService = priceService,
+                fiatFare = offer.fiatFare,
                 style = MaterialTheme.typography.titleMedium,
                 prefix = "Fare: "
             )
@@ -1765,6 +1767,7 @@ private fun InRideContent(
                 displayCurrency = displayCurrency,
                 onToggleCurrency = onToggleCurrency,
                 priceService = priceService,
+                fiatFare = offer.fiatFare,
                 style = MaterialTheme.typography.titleMedium,
                 prefix = "Fare: "
             )
@@ -1872,6 +1875,7 @@ private fun RideCompletedContent(
                     displayCurrency = displayCurrency,
                     onToggleCurrency = onToggleCurrency,
                     priceService = priceService,
+                    fiatFare = it.fiatFare,
                     style = MaterialTheme.typography.titleLarge,
                     prefix = "Fare: "
                 )
@@ -2003,6 +2007,7 @@ private fun RideOfferCard(
                             displayCurrency = displayCurrency,
                             onToggleCurrency = onToggleCurrency,
                             priceService = priceService,
+                            fiatFare = offer.fiatFare,
                             style = MaterialTheme.typography.headlineSmall
                         )
                     }
@@ -2273,6 +2278,7 @@ private fun BroadcastRideRequestCard(
                             displayCurrency = displayCurrency,
                             onToggleCurrency = onToggleCurrency,
                             priceService = priceService,
+                            fiatFare = request.fiatFare,
                             style = MaterialTheme.typography.headlineSmall
                         )
                     }
