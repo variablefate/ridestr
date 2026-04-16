@@ -1,8 +1,12 @@
 # Ridestr Module Connections
 
-**Last Updated**: 2026-02-25 (Issue #46: Payment method priority ordering, fiat_payment_methods wiring, ReorderablePaymentMethodList)
+**Last Updated**: 2026-04-16 (ADR-0008 fiat fare fields in Kind 3173, Kind 3189 driver ping receiver)
 
 This document provides a comprehensive view of how all modules connect in the Ridestr codebase. Use this as a reference when making changes to understand what might be affected.
+
+**April 2026 Changes:**
+- Kind 3173 ride offer events now carry `fare_fiat_amount` + `fare_fiat_currency` for fiat-rail rides (per ADR-0008). Both rider-app encoding and drivestr decoding wired end-to-end. See [`docs/protocol/NOSTR_EVENTS.md#kind-3173-ride-offer`](protocol/NOSTR_EVENTS.md#kind-3173-ride-offer).
+- New Kind 3189 RoadFlare Driver Ping receiver. Drivers run `RoadflareListenerService` to receive ping notifications from approved followers asking them to come online. HMAC-authenticated, 30-min TTL, rate-limited via `DriverPingRateLimiter` (30s per-rider dedup + global 2/10min cap).
 
 **Phase 5 Changes (February 2026):**
 - NostrService split into domain services (facade pattern for backward compatibility)
