@@ -46,7 +46,10 @@ object RideOfferEvent {
         routeDurationMin: Double,
         mintUrl: String? = null,
         paymentMethod: String = "cashu",
-        isRoadflare: Boolean = false
+        isRoadflare: Boolean = false,
+        // Authoritative fiat fare per ADR-0008 - both-or-neither
+        fareFiatAmount: String? = null,
+        fareFiatCurrency: String? = null
     ): Event {
         val content = JSONObject().apply {
             put("fare_estimate", fareEstimate)
@@ -57,6 +60,11 @@ object RideOfferEvent {
             // Multi-mint support (Issue #13)
             mintUrl?.let { put("mint_url", it) }
             put("payment_method", paymentMethod)
+            // Authoritative fiat fare per ADR-0008 (both-or-neither rule)
+            if (fareFiatAmount != null && fareFiatCurrency != null) {
+                put("fare_fiat_amount", fareFiatAmount)
+                put("fare_fiat_currency", fareFiatCurrency)
+            }
         }.toString()
 
         // Build tags with geohash for geographic filtering
@@ -127,7 +135,10 @@ object RideOfferEvent {
         mintUrl: String? = null,
         paymentMethod: String = "cashu",
         isRoadflare: Boolean = false,
-        fiatPaymentMethods: List<String> = emptyList()
+        fiatPaymentMethods: List<String> = emptyList(),
+        // Authoritative fiat fare per ADR-0008 - both-or-neither
+        fareFiatAmount: String? = null,
+        fareFiatCurrency: String? = null
     ): Event {
         // Build plaintext content
         val plaintext = JSONObject().apply {
@@ -147,6 +158,11 @@ object RideOfferEvent {
             // Fiat payment methods in priority order (Issue #46)
             if (fiatPaymentMethods.isNotEmpty()) {
                 put("fiat_payment_methods", JSONArray(fiatPaymentMethods))
+            }
+            // Authoritative fiat fare per ADR-0008 (both-or-neither rule)
+            if (fareFiatAmount != null && fareFiatCurrency != null) {
+                put("fare_fiat_amount", fareFiatAmount)
+                put("fare_fiat_currency", fareFiatCurrency)
             }
         }.toString()
 

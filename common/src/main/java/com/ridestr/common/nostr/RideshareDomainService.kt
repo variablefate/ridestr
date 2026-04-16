@@ -248,7 +248,10 @@ class RideshareDomainService(
         mintUrl: String? = null,
         paymentMethod: String? = "cashu",
         isRoadflare: Boolean = false,
-        fiatPaymentMethods: List<String> = emptyList()
+        fiatPaymentMethods: List<String> = emptyList(),
+        // Authoritative fiat fare per ADR-0008 (both-or-neither)
+        fareFiatAmount: String? = null,
+        fareFiatCurrency: String? = null
     ): String? {
         val signer = keyManager.getSigner()
         if (signer == null) {
@@ -271,7 +274,9 @@ class RideshareDomainService(
                 mintUrl = mintUrl,
                 paymentMethod = paymentMethod ?: "cashu",
                 isRoadflare = isRoadflare,
-                fiatPaymentMethods = fiatPaymentMethods
+                fiatPaymentMethods = fiatPaymentMethods,
+                fareFiatAmount = fareFiatAmount,
+                fareFiatCurrency = fareFiatCurrency
             )
             relayManager.publish(event)
             val offerType = if (isRoadflare) "RoadFlare" else "ride"
@@ -298,7 +303,9 @@ class RideshareDomainService(
             mintUrl = spec.mintUrl,
             paymentMethod = spec.paymentMethod,
             isRoadflare = false,
-            fiatPaymentMethods = spec.fiatPaymentMethods
+            fiatPaymentMethods = spec.fiatPaymentMethods,
+            fareFiatAmount = spec.fareFiatAmount,
+            fareFiatCurrency = spec.fareFiatCurrency
         )
         is RideOfferSpec.RoadFlare -> sendRideOffer(
             driverPubKey = spec.driverPubKey,
@@ -313,7 +320,9 @@ class RideshareDomainService(
             mintUrl = spec.mintUrl,
             paymentMethod = spec.paymentMethod,
             isRoadflare = true,
-            fiatPaymentMethods = spec.fiatPaymentMethods
+            fiatPaymentMethods = spec.fiatPaymentMethods,
+            fareFiatAmount = spec.fareFiatAmount,
+            fareFiatCurrency = spec.fareFiatCurrency
         )
         is RideOfferSpec.Broadcast -> broadcastRideRequest(
             pickup = spec.pickup,
@@ -322,7 +331,9 @@ class RideshareDomainService(
             routeDistanceKm = spec.routeDistance.distanceKm,
             routeDurationMin = spec.routeDistance.durationMin,
             mintUrl = spec.mintUrl,
-            paymentMethod = spec.paymentMethod
+            paymentMethod = spec.paymentMethod,
+            fareFiatAmount = spec.fareFiatAmount,
+            fareFiatCurrency = spec.fareFiatCurrency
         )
     }
 
@@ -344,7 +355,10 @@ class RideshareDomainService(
         routeDistanceKm: Double,
         routeDurationMin: Double,
         mintUrl: String? = null,
-        paymentMethod: String = "cashu"
+        paymentMethod: String = "cashu",
+        // Authoritative fiat fare per ADR-0008 (both-or-neither)
+        fareFiatAmount: String? = null,
+        fareFiatCurrency: String? = null
     ): String? {
         val signer = keyManager.getSigner()
         if (signer == null) {
@@ -361,7 +375,9 @@ class RideshareDomainService(
                 routeDistanceKm = routeDistanceKm,
                 routeDurationMin = routeDurationMin,
                 mintUrl = mintUrl,
-                paymentMethod = paymentMethod
+                paymentMethod = paymentMethod,
+                fareFiatAmount = fareFiatAmount,
+                fareFiatCurrency = fareFiatCurrency
             )
             relayManager.publish(event)
             Log.d(TAG, "Broadcast ride request: ${event.id} (fare=$fareEstimate sats, method=$paymentMethod)")

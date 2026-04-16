@@ -167,7 +167,27 @@ class RiderViewModel @Inject constructor(
         val roadflareTargetLocation: Location?,
         // Fiat payment methods in rider's priority order (Issue #46)
         val fiatPaymentMethods: List<String> = emptyList(),
+        // Authoritative fiat fare per ADR-0008 (set when paymentMethod is fiat rail)
+        val fareFiatAmount: String? = null,
+        val fareFiatCurrency: String? = null,
     )
+
+    /**
+     * Result of a fare calculation. Carries both sats (always) and the original USD value
+     * used to compute it (null when BTC price was unavailable and a fallback was used).
+     * The USD value is the authoritative fiat amount per ADR-0008.
+     */
+    private data class FareCalc(val sats: Double, val usdAmount: String?)
+
+    /**
+     * Per ADR-0008, fiat fare fields are encoded only for fiat payment rails.
+     * Crypto rails (cashu/lightning) skip the fields — sats is canonical there.
+     */
+    private fun isFiatPaymentMethod(paymentMethod: String): Boolean =
+        paymentMethod !in setOf(
+            com.ridestr.common.nostr.events.PaymentMethod.CASHU.value,
+            com.ridestr.common.nostr.events.PaymentMethod.LIGHTNING.value
+        )
 
     private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val nostrService = NostrService.getInstance(application, settingsRepository.getEffectiveRelays())
@@ -559,17 +579,19 @@ class RiderViewModel @Inject constructor(
         confirmationInFlight.set(false)  // Allow confirmation for next ride
         _uiState.update { current ->
             // Recalculate fare from route at current BTC price (Issue #51)
-            val freshFare = if (current.routeResult != null) {
+            val freshCalc = if (current.routeResult != null) {
                 calculateFare(current.routeResult)
             } else {
                 null  // No route = no fare (addresses were cleared)
             }
+            val freshFare = freshCalc?.sats
             val freshFareWithFees = freshFare?.let { it * (1 + FEE_BUFFER_PERCENT) }
 
             current.copy(
                 rideSession = RiderRideSession(rideStage = stage),
                 fareEstimate = freshFare,
                 fareEstimateWithFees = freshFareWithFees,
+                fareEstimateUsd = freshCalc?.usdAmount,
                 statusMessage = statusMessage,
                 error = error
             )
@@ -1644,7 +1666,9 @@ class RiderViewModel @Inject constructor(
                 rideRoute = rideMetrics,
                 mintUrl = riderMintUrl,
                 paymentMethod = params.paymentMethod,
-                fiatPaymentMethods = params.fiatPaymentMethods
+                fiatPaymentMethods = params.fiatPaymentMethods,
+                fareFiatAmount = params.fareFiatAmount,
+                fareFiatCurrency = params.fareFiatCurrency
             )
         } else {
             RideOfferSpec.Direct(
@@ -1657,7 +1681,9 @@ class RiderViewModel @Inject constructor(
                 rideRoute = rideMetrics,
                 mintUrl = riderMintUrl,
                 paymentMethod = params.paymentMethod,
-                fiatPaymentMethods = params.fiatPaymentMethods
+                fiatPaymentMethods = params.fiatPaymentMethods,
+                fareFiatAmount = params.fareFiatAmount,
+                fareFiatCurrency = params.fareFiatCurrency
             )
         }
         return nostrService.sendOffer(spec)
@@ -1823,6 +1849,11 @@ class RiderViewModel @Inject constructor(
         val destination = state.destination ?: return
         val fareEstimate = state.fareEstimate ?: return
         val fareWithBuffer = (fareEstimate * (1 + FEE_BUFFER_PERCENT)).toLong()
+        val paymentMethod = settingsRepository.getDefaultPaymentMethod()
+        // Encode authoritative fiat fare only for fiat rails (per ADR-0008)
+        val (offerFiatAmount, offerFiatCurrency) = if (isFiatPaymentMethod(paymentMethod) && state.fareEstimateUsd != null) {
+            state.fareEstimateUsd to "USD"
+        } else null to null
 
         updateRideSession { copy(isSendingOffer = true) }
         viewModelScope.launch {
@@ -1840,10 +1871,12 @@ class RiderViewModel @Inject constructor(
                 pickup = pickup, destination = destination,
                 fareEstimate = fareEstimate, rideRoute = state.routeResult,
                 preimage = preimage, paymentHash = paymentHash,
-                paymentMethod = settingsRepository.getDefaultPaymentMethod(),
+                paymentMethod = paymentMethod,
                 isRoadflare = false, isBroadcast = false,
                 statusMessage = "Waiting for driver to accept...",
-                roadflareTargetPubKey = null, roadflareTargetLocation = null
+                roadflareTargetPubKey = null, roadflareTargetLocation = null,
+                fareFiatAmount = offerFiatAmount,
+                fareFiatCurrency = offerFiatCurrency
             )
 
             val pickupRoute = calculatePickupRoute(driver.approxLocation, pickup)
@@ -1871,14 +1904,21 @@ class RiderViewModel @Inject constructor(
         val destination = state.destination ?: return
         val rideRoute = state.routeResult
 
-        val fareEstimate = if (driverLocation != null) {
+        val fareCalc: FareCalc = if (driverLocation != null) {
             calculateRoadflareFare(pickup, driverLocation, rideRoute)
-        } else { state.fareEstimate ?: return }
+        } else {
+            FareCalc(state.fareEstimate ?: return, state.fareEstimateUsd)
+        }
+        val fareEstimate = fareCalc.sats
 
         val paymentMethod = settingsRepository.getDefaultPaymentMethod()
         val fiatMethods = if (paymentMethod != com.ridestr.common.nostr.events.PaymentMethod.CASHU.value) {
             settingsRepository.getRoadflarePaymentMethods()
         } else emptyList()
+        // Encode authoritative fiat fare only for fiat rails (per ADR-0008)
+        val (offerFiatAmount, offerFiatCurrency) = if (isFiatPaymentMethod(paymentMethod) && fareCalc.usdAmount != null) {
+            fareCalc.usdAmount to "USD"
+        } else null to null
 
         // Sync balance check — only meaningful for cashu (non-cashu skips HTLC escrow)
         if (paymentMethod == com.ridestr.common.nostr.events.PaymentMethod.CASHU.value) {
@@ -1926,7 +1966,9 @@ class RiderViewModel @Inject constructor(
                 isRoadflare = true, isBroadcast = false,
                 statusMessage = "Waiting for driver to accept...",
                 roadflareTargetPubKey = driverPubKey, roadflareTargetLocation = driverLocation,
-                fiatPaymentMethods = fiatMethods
+                fiatPaymentMethods = fiatMethods,
+                fareFiatAmount = offerFiatAmount,
+                fareFiatCurrency = offerFiatCurrency
             )
 
             val pickupRoute = calculatePickupRoute(driverLocation, pickup)
@@ -1954,9 +1996,16 @@ class RiderViewModel @Inject constructor(
         val destination = state.destination ?: return
         val rideRoute = state.routeResult
 
-        val fareEstimate = if (driverLocation != null) {
+        val fareCalc: FareCalc = if (driverLocation != null) {
             calculateRoadflareFare(pickup, driverLocation, rideRoute)
-        } else { state.fareEstimate ?: return }
+        } else {
+            FareCalc(state.fareEstimate ?: return, state.fareEstimateUsd)
+        }
+        val fareEstimate = fareCalc.sats
+        // Encode authoritative fiat fare only for fiat rails (per ADR-0008)
+        val (offerFiatAmount, offerFiatCurrency) = if (isFiatPaymentMethod(paymentMethod) && fareCalc.usdAmount != null) {
+            fareCalc.usdAmount to "USD"
+        } else null to null
 
         // Clear the pending state
         _uiState.value = _uiState.value.copy(
@@ -1983,7 +2032,9 @@ class RiderViewModel @Inject constructor(
                 isRoadflare = true, isBroadcast = false,
                 statusMessage = "Waiting for driver to accept...",
                 roadflareTargetPubKey = driverPubKey, roadflareTargetLocation = driverLocation,
-                fiatPaymentMethods = settingsRepository.getRoadflarePaymentMethods()
+                fiatPaymentMethods = settingsRepository.getRoadflarePaymentMethods(),
+                fareFiatAmount = offerFiatAmount,
+                fareFiatCurrency = offerFiatCurrency
             )
 
             val pickupRoute = calculatePickupRoute(driverLocation, pickup)
@@ -2174,7 +2225,7 @@ class RiderViewModel @Inject constructor(
                 var maxFareSats = 0.0
                 for (dwr in cappedDrivers) {
                     val loc = dwr.location ?: continue
-                    val fareSats = calculateRoadflareFareWithRoute(pickup, loc, rideRoute, dwr.pickupRoute)
+                    val fareSats = calculateRoadflareFareWithRoute(pickup, loc, rideRoute, dwr.pickupRoute).sats
                     if (fareSats > maxFareSats) maxFareSats = fareSats
                 }
                 val fareWithBuffer = (maxFareSats * (1 + FEE_BUFFER_PERCENT)).toLong()
@@ -2314,11 +2365,12 @@ class RiderViewModel @Inject constructor(
             rideRoute = state.routeResult
         }
 
-        val fareEstimate = if (driverLocation != null) {
+        val fareCalc: FareCalc = if (driverLocation != null) {
             calculateRoadflareFareWithRoute(pickup, driverLocation, rideRoute, preCalculatedRoute)
         } else {
-            state.fareEstimate ?: return
+            FareCalc(state.fareEstimate ?: return, state.fareEstimateUsd)
         }
+        val fareEstimate = fareCalc.sats
 
         // Only generate HTLC for Bitcoin payment — alternates have no escrow
         val (preimage, paymentHash) = if (paymentMethod == com.ridestr.common.nostr.events.PaymentMethod.CASHU.value) {
@@ -2334,6 +2386,10 @@ class RiderViewModel @Inject constructor(
         val fiatMethods = if (paymentMethod != com.ridestr.common.nostr.events.PaymentMethod.CASHU.value) {
             settingsRepository.getRoadflarePaymentMethods()
         } else emptyList()
+        // Encode authoritative fiat fare only for fiat rails (per ADR-0008)
+        val (offerFiatAmount, offerFiatCurrency) = if (isFiatPaymentMethod(paymentMethod) && fareCalc.usdAmount != null) {
+            fareCalc.usdAmount to "USD"
+        } else null to null
 
         val params = OfferParams(
             driverPubKey = driverPubKey,
@@ -2346,7 +2402,9 @@ class RiderViewModel @Inject constructor(
             isRoadflare = true, isBroadcast = false,
             statusMessage = "",  // Batch doesn't set status per-offer
             roadflareTargetPubKey = driverPubKey, roadflareTargetLocation = driverLocation,
-            fiatPaymentMethods = fiatMethods
+            fiatPaymentMethods = fiatMethods,
+            fareFiatAmount = offerFiatAmount,
+            fareFiatCurrency = offerFiatCurrency
         )
 
         val eventId = sendOfferToNostr(params, pickupRoute)
@@ -2498,7 +2556,7 @@ class RiderViewModel @Inject constructor(
         pickup: Location,
         driverLocation: Location,
         rideRoute: RouteResult?
-    ): Double {
+    ): FareCalc {
         return calculateRoadflareFareWithRoute(pickup, driverLocation, rideRoute, null)
     }
 
@@ -2511,7 +2569,7 @@ class RiderViewModel @Inject constructor(
         driverLocation: Location,
         rideRoute: RouteResult?,
         pickupRoute: RouteResult?
-    ): Double {
+    ): FareCalc {
         val ROADFLARE_RATE_PER_MILE = remoteConfigManager.config.value.roadflareFareRateUsdPerMile
         val METERS_PER_MILE = 1609.34
 
@@ -2537,9 +2595,13 @@ class RiderViewModel @Inject constructor(
 
         // Convert USD to sats using live BTC price
         val sats = bitcoinPriceService.usdToSats(fareUsd)
-        // Fallback: 5000 sats when no BTC price available
+        // If BTC price unavailable, fall back and drop USD (cannot state USD equivalent reliably)
         val MINIMUM_FALLBACK_SATS = 5000.0
-        return sats?.toDouble() ?: MINIMUM_FALLBACK_SATS
+        return if (sats != null) {
+            FareCalc(sats = sats.toDouble(), usdAmount = String.format("%.2f", fareUsd))
+        } else {
+            FareCalc(sats = MINIMUM_FALLBACK_SATS, usdAmount = null)
+        }
     }
 
     /**
@@ -2659,12 +2721,15 @@ class RiderViewModel @Inject constructor(
             roadflareBatchJob = null
             subs.closeGroup(SubKeys.BATCH_ACCEPTANCE)  // Clean up any batch subs
 
-            // Update fare in state - reset timeout flag since we're boosting
+            // Update fare in state - reset timeout flag since we're boosting.
+            // Clear fareEstimateUsd: boost adds sats with no clean USD equivalent,
+            // so the boosted offer drops authoritative fiat fields (driver falls back to sats→USD).
             val newFareWithFeesDouble = newFare * (1 + FEE_BUFFER_PERCENT)
             _uiState.update { current ->
                 current.copy(
                     fareEstimate = newFare,
                     fareEstimateWithFees = newFareWithFeesDouble,
+                    fareEstimateUsd = null,
                     rideSession = current.rideSession.copy(
                         directOfferBoostSats = session.directOfferBoostSats + boostAmount,
                         pendingOfferEventId = null,
@@ -2693,6 +2758,7 @@ class RiderViewModel @Inject constructor(
                 fiatPaymentMethods = if (isRoadflare && paymentMethod != com.ridestr.common.nostr.events.PaymentMethod.CASHU.value) {
                     settingsRepository.getRoadflarePaymentMethods()
                 } else emptyList()
+                // Boosted offer: no fareFiatAmount/Currency — driver falls back to sats→USD for the boosted fare
             )
 
             val eventId = sendOfferToNostr(params, pickupRoute)
@@ -2766,6 +2832,10 @@ class RiderViewModel @Inject constructor(
 
             val riderMintUrl = walletService?.getSavedMintUrl()
             val paymentMethod = settingsRepository.getDefaultPaymentMethod()
+            // Encode authoritative fiat fare only for fiat rails (per ADR-0008)
+            val (offerFiatAmount, offerFiatCurrency) = if (isFiatPaymentMethod(paymentMethod) && state.fareEstimateUsd != null) {
+                state.fareEstimateUsd to "USD"
+            } else null to null
 
             // Precise locations — RideOfferEvent.createBroadcast() handles approximation internally
             val spec = RideOfferSpec.Broadcast(
@@ -2774,7 +2844,9 @@ class RiderViewModel @Inject constructor(
                 fareEstimate = fareEstimate,
                 routeDistance = RouteMetrics.fromSeconds(routeResult.distanceKm, routeResult.durationSeconds),
                 mintUrl = riderMintUrl,
-                paymentMethod = paymentMethod
+                paymentMethod = paymentMethod,
+                fareFiatAmount = offerFiatAmount,
+                fareFiatCurrency = offerFiatCurrency
             )
             val eventId = nostrService.sendOffer(spec)
 
@@ -5346,13 +5418,15 @@ class RiderViewModel @Inject constructor(
             )
 
             if (result != null) {
-                val fareEstimate = calculateFare(result)
+                val fareCalc = calculateFare(result)
+                val fareEstimate = fareCalc.sats
                 val fareEstimateWithFees = fareEstimate * (1 + FEE_BUFFER_PERCENT)
                 _uiState.value = _uiState.value.copy(
                     isCalculatingRoute = false,
                     routeResult = result,
                     fareEstimate = fareEstimate,
-                    fareEstimateWithFees = fareEstimateWithFees
+                    fareEstimateWithFees = fareEstimateWithFees,
+                    fareEstimateUsd = fareCalc.usdAmount
                 )
             } else {
                 _uiState.value = _uiState.value.copy(
@@ -5363,7 +5437,7 @@ class RiderViewModel @Inject constructor(
         }
     }
 
-    private fun calculateFare(route: RouteResult): Double {
+    private fun calculateFare(route: RouteResult): FareCalc {
         // Convert km to miles
         val distanceMiles = route.distanceKm * KM_TO_MILES
 
@@ -5381,10 +5455,14 @@ class RiderViewModel @Inject constructor(
         // Convert USD to sats using current BTC price
         val sats = bitcoinPriceService.usdToSats(fareUsd)
 
-        // Return sats, or fallback if price unavailable
-        // For fallback, calculate minimum based on config minimum fare (assuming ~$100k BTC)
+        // If BTC price is available, the USD value matches the sats value (authoritative).
+        // If unavailable, sats falls back and we cannot reliably state the USD equivalent.
         val minimumFallbackSats = minimumFare * 1000.0  // $1 = ~1000 sats at $100k BTC
-        return sats?.toDouble() ?: maxOf(distanceMiles * FALLBACK_SATS_PER_MILE, minimumFallbackSats)
+        return if (sats != null) {
+            FareCalc(sats = sats.toDouble(), usdAmount = String.format("%.2f", fareUsd))
+        } else {
+            FareCalc(sats = maxOf(distanceMiles * FALLBACK_SATS_PER_MILE, minimumFallbackSats), usdAmount = null)
+        }
     }
 
     /**
@@ -5615,6 +5693,7 @@ data class RiderUiState(
     val routeResult: RouteResult? = null,
     val fareEstimate: Double? = null,             // Actual fare (sent to driver in offer)
     val fareEstimateWithFees: Double? = null,     // Displayed fare (fare + 2% buffer for cross-mint fees)
+    val fareEstimateUsd: String? = null,          // Authoritative USD fare (per ADR-0008) — encoded in fiat offers; null after boost/process death
     val isCalculatingRoute: Boolean = false,
     val isRoutingReady: Boolean = false,
 
