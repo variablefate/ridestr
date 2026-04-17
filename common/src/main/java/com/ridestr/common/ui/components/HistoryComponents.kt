@@ -1,4 +1,4 @@
-package com.ridestr.rider.ui.screens.components
+package com.ridestr.common.ui.components
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -76,12 +76,9 @@ fun HistoryList(
 }
 
 @Composable
-fun HistoryFilterBar(
-    onClearAll: () -> Unit,
-    modifier: Modifier = Modifier
-) {
+private fun HistoryFilterBar(onClearAll: () -> Unit) {
     Row(
-        modifier = modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -103,7 +100,7 @@ fun HistoryFilterBar(
 }
 
 @Composable
-fun HistoryEntryCard(
+private fun HistoryEntryCard(
     ride: RideHistoryEntry,
     displayCurrency: DisplayCurrency,
     btcPriceUsd: Int?,
@@ -278,7 +275,7 @@ fun HistoryEntryCard(
 }
 
 @Composable
-internal fun HistoryStatsCard(
+private fun HistoryStatsCard(
     stats: RideHistoryStats,
     rides: List<RideHistoryEntry>,
     displayCurrency: DisplayCurrency,
@@ -338,10 +335,9 @@ internal fun HistoryStatsCard(
             val completedRiderRides = rides.filter { it.role == "rider" && it.status == "completed" }
             val totalSpentDisplay = when (displayCurrency) {
                 DisplayCurrency.SATS -> "${stats.totalFareSatsPaid} sats"
-                DisplayCurrency.USD -> {
-                    completedRiderRides.sumFareUsdOrNull(btcPriceUsd)?.formatUsd()
-                        ?: "${stats.totalFareSatsPaid} sats"
-                }
+                DisplayCurrency.USD -> completedRiderRides.sumFareUsdOrNull(btcPriceUsd)
+                    ?.formatUsd()
+                    ?: "${stats.totalFareSatsPaid} sats"
             }
 
             Surface(
@@ -383,7 +379,7 @@ internal fun HistoryStatsCard(
 }
 
 @Composable
-internal fun EmptyHistoryCard() {
+private fun EmptyHistoryCard() {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -450,7 +446,7 @@ private fun HistoryStatItem(
     }
 }
 
-internal fun formatHistoryDuration(minutes: Int): String {
+private fun formatHistoryDuration(minutes: Int): String {
     return when {
         minutes < 60 -> "${minutes}m"
         minutes < 1440 -> "${minutes / 60}h ${minutes % 60}m"

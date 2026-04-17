@@ -165,7 +165,7 @@ fun EmptyDriversState(
 }
 
 @Composable
-internal fun DriverCard(
+private fun DriverCard(
     driver: FollowedDriver,
     driverName: String?,
     locationState: DriverLocationState?,
@@ -279,7 +279,7 @@ internal fun DriverCard(
 }
 
 @Composable
-internal fun DriverStatusBadge(
+private fun DriverStatusBadge(
     hasKey: Boolean,
     locationState: DriverLocationState?,
     hasStaleKey: Boolean = false,
@@ -389,13 +389,12 @@ fun RoadflarePaymentMethodsDialog(
 private fun formatDriverDistance(miles: Double): String {
     return when {
         miles < 0.1 -> "Very close"
-        miles < 1.0 -> String.format("%.1f mi away", miles)
-        miles < 10.0 -> String.format("%.1f mi away", miles)
-        else -> String.format("%.0f mi away", miles)
+        miles < 10.0 -> String.format(Locale.US, "%.1f mi away", miles)
+        else -> String.format(Locale.US, "%.0f mi away", miles)
     }
 }
 
-internal fun formatDriverLastSeen(timestamp: Long): String {
+private fun formatDriverLastSeen(timestamp: Long): String {
     val now = System.currentTimeMillis() / 1000
     val diff = now - timestamp
     return when {

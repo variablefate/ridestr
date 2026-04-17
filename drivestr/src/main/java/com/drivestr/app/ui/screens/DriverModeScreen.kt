@@ -13,7 +13,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.material.icons.Icons
@@ -46,9 +45,7 @@ import com.ridestr.common.nostr.events.BroadcastRideOfferData
 import com.ridestr.common.nostr.events.Location
 import com.ridestr.common.nostr.events.PaymentPath
 import com.ridestr.common.nostr.events.RideOfferData
-import com.ridestr.common.nostr.events.RideshareChatData
 import com.ridestr.common.location.GeocodingService
-import com.ridestr.common.routing.RouteResult
 import com.ridestr.common.settings.DisplayCurrency
 import com.ridestr.common.settings.DistanceUnit
 import com.ridestr.common.settings.SettingsUiState

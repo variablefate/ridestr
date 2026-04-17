@@ -14,7 +14,7 @@ import com.ridestr.common.nostr.events.RideHistoryEntry
 import com.ridestr.common.nostr.events.RideHistoryStats
 import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.settings.DisplayCurrency
-import com.ridestr.rider.ui.screens.components.HistoryList
+import com.ridestr.common.ui.components.HistoryList
 import kotlinx.coroutines.launch
 
 /**

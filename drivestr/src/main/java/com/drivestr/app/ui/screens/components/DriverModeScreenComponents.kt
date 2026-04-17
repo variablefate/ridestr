@@ -9,14 +9,12 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.fiat.formatUsd
 import com.ridestr.common.fiat.usdAmountOrNull
-import com.ridestr.common.location.GeocodingService
 import com.ridestr.common.nostr.events.BroadcastRideOfferData
 import com.ridestr.common.nostr.events.RideOfferData
 import com.ridestr.common.routing.RouteResult
@@ -87,7 +85,7 @@ private fun effectiveRoadflareDriverMethods(driverFiatMethods: List<String>): Li
 }
 
 @Composable
-fun RideOfferCard(
+private fun RideOfferCard(
     offer: RideOfferData,
     pickupRoute: RouteResult?,
     rideRoute: RouteResult?,
@@ -100,8 +98,6 @@ fun RideOfferCard(
     priceService: BitcoinPriceService,
     driverFiatMethods: List<String>
 ) {
-    val context = LocalContext.current
-    val geocodingService = remember { GeocodingService(context) }
     val btcPrice by priceService.btcPriceUsd.collectAsState()
 
     // Update relative time every second
@@ -111,15 +107,6 @@ fun RideOfferCard(
             relativeTime = formatRelativeTime(offer.createdAt)
             kotlinx.coroutines.delay(1000)
         }
-    }
-
-    // Geocode pickup and destination addresses
-    var pickupAddress by remember { mutableStateOf<String?>(null) }
-    var destinationAddress by remember { mutableStateOf<String?>(null) }
-
-    LaunchedEffect(offer.approxPickup, offer.destination) {
-        pickupAddress = geocodingService.reverseGeocode(offer.approxPickup.lat, offer.approxPickup.lon)
-        destinationAddress = geocodingService.reverseGeocode(offer.destination.lat, offer.destination.lon)
     }
 
     // Route info calculations
@@ -367,7 +354,7 @@ fun RideOfferCard(
  * Shows fare prominently, route info, earnings metrics, and request age.
  */
 @Composable
-fun BroadcastRideRequestCard(
+private fun BroadcastRideRequestCard(
     request: BroadcastRideOfferData,
     pickupRoute: RouteResult?,
     isProcessing: Boolean,
@@ -990,5 +977,5 @@ fun OfferInbox(
             }
         }
     }
-    } // end Column
+    }
 }

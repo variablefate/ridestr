@@ -51,7 +51,6 @@ import com.ridestr.common.util.FareCalculator
 import com.ridestr.common.nostr.events.DriverAvailabilityData
 import com.ridestr.common.nostr.events.PaymentMethod
 import com.ridestr.common.nostr.events.Location
-import com.ridestr.common.nostr.events.RideshareChatData
 import com.ridestr.common.nostr.events.UserProfile
 import com.ridestr.common.routing.RouteResult
 import com.ridestr.common.bitcoin.BitcoinPriceService
@@ -63,7 +62,6 @@ import com.ridestr.common.settings.SettingsUiState
 import com.ridestr.common.data.SavedLocation
 import com.ridestr.common.ui.ActiveRideCard
 import com.ridestr.common.ui.ChatBottomSheet
-import com.ridestr.common.ui.ChatButton
 import com.ridestr.common.ui.FareDisplay
 import com.ridestr.common.ui.FavoritesSection
 import com.ridestr.common.ui.formatFare

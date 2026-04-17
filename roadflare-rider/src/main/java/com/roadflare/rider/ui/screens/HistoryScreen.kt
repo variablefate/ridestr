@@ -13,7 +13,7 @@ import com.ridestr.common.data.RideHistoryRepository
 import com.ridestr.common.nostr.events.RideHistoryEntry
 import com.ridestr.common.nostr.events.RideHistoryStats
 import com.ridestr.common.settings.DisplayCurrency
-import com.roadflare.rider.ui.screens.components.HistoryList
+import com.ridestr.common.ui.components.HistoryList
 import kotlinx.coroutines.launch
 
 /**

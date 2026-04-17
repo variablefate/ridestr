@@ -41,15 +41,14 @@ fun formatFareAmount(
     displayCurrency: DisplayCurrency,
     priceService: BitcoinPriceService
 ): String {
+    // Subscribe so the string recomposes when the BTC price changes.
     val btcPrice by priceService.btcPriceUsd.collectAsState()
     return when (displayCurrency) {
         DisplayCurrency.USD -> fareUsd.formatUsd()
         DisplayCurrency.SATS -> {
-            val price = btcPrice?.takeIf { it > 0 }
-            if (price != null) {
-                val sats = (fareUsd * 100_000_000.0 / price).toLong()
-                String.format(Locale.US, "%,d sats", sats)
-            } else fareUsd.formatUsd()
+            val sats = btcPrice?.takeIf { it > 0 }?.let { priceService.usdToSats(fareUsd) }
+            if (sats != null) String.format(Locale.US, "%,d sats", sats)
+            else fareUsd.formatUsd()
         }
     }
 }
