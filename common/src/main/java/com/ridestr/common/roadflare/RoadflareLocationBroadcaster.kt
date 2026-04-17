@@ -20,8 +20,9 @@ import kotlinx.coroutines.flow.asStateFlow
  * to the driver's RoadFlare public key, which followers can decrypt using
  * the shared private key they received via Kind 3186.
  *
- * Broadcasting stops when:
- * - The driver has no RoadFlare key (no followers yet)
+ * Broadcasting skips when:
+ * - The driver has no RoadFlare key (not set up yet)
+ * - No location is available
  * - stopBroadcasting() is called (driver goes offline/app closed)
  *
  * Usage:
@@ -161,17 +162,12 @@ class RoadflareLocationBroadcaster(
             return
         }
 
-        // Check if we have any active followers
-        val activeFollowers = repository.getActiveFollowerPubkeys()
-        if (com.ridestr.common.BuildConfig.DEBUG) {
-            Log.d(TAG, "Broadcast check: ${activeFollowers.size} active followers")
-        }
-        if (activeFollowers.isEmpty()) {
-            if (com.ridestr.common.BuildConfig.DEBUG) {
-                Log.d(TAG, "No active followers, skipping broadcast")
-            }
-            return
-        }
+        // Note: no active-followers gate here by design. Transient empty windows
+        // (mid key rotation, cross-device restore before sync completes) would
+        // otherwise cause silent broadcast blackouts even with an established
+        // follower network. The encrypted payload is harmless when no follower
+        // can decrypt it, and the key check above already prevents broadcasting
+        // before RoadFlare is set up.
 
         // Get current location
         val location = locationProvider()
