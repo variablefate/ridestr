@@ -3024,8 +3024,8 @@ class RiderViewModel @Inject constructor(
             Log.w(TAG, "    at ${frame.className}.${frame.methodName}(${frame.fileName}:${frame.lineNumber})")
         }
 
-        // Release HTLC protection for refund (capture paymentHash before reset)
-        session.activePaymentHash?.let { walletService?.clearHtlcRideProtected(it) }
+        // Single HTLC-unlock + coordinator-reset path.
+        paymentCoordinator.onRideCancelled()
 
         // Synchronous cleanup
         closeAllRideSubscriptionsAndJobs()
@@ -4052,8 +4052,8 @@ class RiderViewModel @Inject constructor(
         Log.w(TAG, "  Current rideStage: ${_uiState.value.rideSession.rideStage}")
         Log.w(TAG, "  driverRideStateSubscriptionId: ${subs.get(SubKeys.DRIVER_RIDE_STATE)}")
 
-        // Release HTLC protection for refund (capture paymentHash before reset)
-        _uiState.value.rideSession.activePaymentHash?.let { walletService?.clearHtlcRideProtected(it) }
+        // onRideCancelled is the single authoritative HTLC-unlock + coordinator-reset path.
+        // (Was previously double-called: direct clearHtlcRideProtected() followed by onRideCancelled().)
         paymentCoordinator.onRideCancelled()
 
         // Synchronous cleanup
@@ -4460,9 +4460,7 @@ class RiderViewModel @Inject constructor(
             }
 
             PaymentEvent.MaxPinAttemptsReached -> {
-                _uiState.value.rideSession.activePaymentHash?.let {
-                    walletService?.clearHtlcRideProtected(it)
-                }
+                paymentCoordinator.onRideCancelled()  // Single HTLC-unlock + coordinator-reset path.
                 closeAllRideSubscriptionsAndJobs()
                 clearRideCoordinatorState()
                 RiderActiveService.stop(getApplication())

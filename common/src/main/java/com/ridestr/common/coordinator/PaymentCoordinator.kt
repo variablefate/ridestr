@@ -793,8 +793,8 @@ class PaymentCoordinator(
                 scope.launch { handleCompletion(driverState, driverPubKey) }
             }
             DriverStatusType.CANCELLED -> {
-                // HTLC protection released so wallet can auto-refund after expiry.
-                activePaymentHash?.let { walletService?.clearHtlcRideProtected(it) }
+                // HTLC unlock happens in the single authoritative path — the ViewModel's handler
+                // calls paymentCoordinator.onRideCancelled(), which clears HTLC protection.
                 scope.launch { _events.emit(PaymentEvent.DriverCancelled(null)) }
             }
             else -> {
@@ -941,7 +941,7 @@ class PaymentCoordinator(
 
                 if (newAttempts >= MAX_PIN_ATTEMPTS) {
                     Log.e(TAG, "Max PIN attempts reached — cancelling ride for security")
-                    activePaymentHash?.let { walletService?.clearHtlcRideProtected(it) }
+                    // HTLC unlock happens in the ViewModel's handler via onRideCancelled().
                     _events.emit(PaymentEvent.MaxPinAttemptsReached)
                 } else {
                     _events.emit(PaymentEvent.PinRejected(newAttempts, MAX_PIN_ATTEMPTS))
