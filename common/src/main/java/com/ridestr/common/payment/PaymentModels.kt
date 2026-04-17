@@ -31,32 +31,35 @@ enum class EscrowType {
 }
 
 /**
- * Current status of payment in the ride lifecycle.
+ * Driver-side HTLC claim status for a ride.
+ *
+ * Used by the driver to determine whether the Cashu HTLC escrow can be settled at ride
+ * completion, and to show appropriate warning dialogs when payment cannot be claimed.
+ *
+ * This is not a lifecycle enum — it reflects the driver's *readiness to claim*, not the
+ * overall payment lifecycle (see [EscrowType] / [EscrowDetails] for lifecycle state).
  */
 enum class PaymentStatus {
-    /** No payment initiated */
-    NONE,
+    /** Non-HTLC payment path (fiat cash, cross-mint bridge already complete, or no payment). */
+    NO_PAYMENT_EXPECTED,
 
-    /** Waiting for driver to create escrow invoice */
-    AWAITING_ESCROW,
+    /** Both preimage and escrow token have been received — claim can proceed. */
+    READY_TO_CLAIM,
 
-    /** Funds locked in HTLC (rider paid into escrow) */
-    ESCROW_LOCKED,
+    /** Ride in progress; rider has not yet shared the preimage. */
+    WAITING_FOR_PREIMAGE,
 
-    /** Preimage shared with driver after PIN verification */
-    PREIMAGE_SHARED,
+    /** Escrow token received but preimage is missing — cannot claim. */
+    MISSING_PREIMAGE,
 
-    /** Settlement in progress */
-    SETTLING,
+    /** Preimage received but escrow token is missing — cannot claim. */
+    MISSING_ESCROW_TOKEN,
 
-    /** Payment successfully settled to driver */
-    SETTLED,
+    /** SAME_MINT ride but payment hash was lost across process death — cannot claim. */
+    MISSING_PAYMENT_HASH,
 
-    /** Payment refunded to rider (timeout or cancellation) */
-    REFUNDED,
-
-    /** Payment failed */
-    FAILED
+    /** Unexpected state — neither preimage nor escrow token present on a SAME_MINT ride. */
+    UNKNOWN_ERROR
 }
 
 /**

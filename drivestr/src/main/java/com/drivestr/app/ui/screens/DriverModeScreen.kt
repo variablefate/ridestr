@@ -34,7 +34,7 @@ import androidx.core.content.ContextCompat
 import com.drivestr.app.presence.DriverStage
 import com.drivestr.app.viewmodels.DriverUiState
 import com.drivestr.app.viewmodels.DriverViewModel
-import com.drivestr.app.viewmodels.PaymentStatus
+import com.ridestr.common.payment.PaymentStatus
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.gms.tasks.CancellationTokenSource
