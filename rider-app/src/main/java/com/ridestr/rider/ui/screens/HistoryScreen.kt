@@ -18,6 +18,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.ridestr.common.data.RideHistoryRepository
+import com.ridestr.common.fiat.formatFareDisplay
+import com.ridestr.common.fiat.sumFareUsdOrNull
 import com.ridestr.common.nostr.NostrService
 import com.ridestr.common.nostr.events.RideHistoryEntry
 import com.ridestr.common.nostr.events.RideHistoryStats
@@ -159,6 +161,7 @@ fun HistoryScreen(
             item {
                 StatsCard(
                     stats = stats,
+                    rides = rides,
                     displayCurrency = displayCurrency,
                     btcPriceUsd = btcPriceUsd,
                     onToggleCurrency = onToggleCurrency
@@ -218,6 +221,7 @@ fun HistoryScreen(
 @Composable
 private fun StatsCard(
     stats: RideHistoryStats,
+    rides: List<RideHistoryEntry>,
     displayCurrency: DisplayCurrency,
     btcPriceUsd: Int?,
     onToggleCurrency: () -> Unit
@@ -275,10 +279,11 @@ private fun StatsCard(
             Spacer(modifier = Modifier.height(12.dp))
 
             // Total spent
+            val completedRiderRides = rides.filter { it.role == "rider" && it.status == "completed" }
             val totalSpentDisplay = when (displayCurrency) {
                 DisplayCurrency.SATS -> "${stats.totalFareSatsPaid} sats"
                 DisplayCurrency.USD -> {
-                    val usd = btcPriceUsd?.let { stats.totalFareSatsPaid.toDouble() * it / 100_000_000.0 }
+                    val usd = completedRiderRides.sumFareUsdOrNull(btcPriceUsd)
                     usd?.let { String.format("$%.2f", it) } ?: "${stats.totalFareSatsPaid} sats"
                 }
             }
@@ -365,13 +370,7 @@ private fun RideHistoryCard(
         dateFormat.format(Date(ride.timestamp * 1000))
     }
 
-    val fareDisplay = when (displayCurrency) {
-        DisplayCurrency.SATS -> "${ride.fareSats} sats"
-        DisplayCurrency.USD -> {
-            val usd = btcPriceUsd?.let { ride.fareSats.toDouble() * it / 100_000_000.0 }
-            usd?.let { String.format("$%.2f", it) } ?: "${ride.fareSats} sats"
-        }
-    }
+    val fareDisplay = ride.formatFareDisplay(displayCurrency, btcPriceUsd)
 
     val isCompleted = ride.status == "completed"
 

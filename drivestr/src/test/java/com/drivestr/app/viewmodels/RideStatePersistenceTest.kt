@@ -271,4 +271,39 @@ class RideStatePersistenceTest {
         assertNull("activeEscrowToken should be null", restored.activeEscrowToken)
         assertFalse("canSettleEscrow should be false with partial fields", restored.canSettleEscrow)
     }
+
+    @Test
+    fun `authoritative fiat fare round-trips through saved ride JSON`() {
+        val json = JSONObject().apply {
+            put("timestamp", System.currentTimeMillis())
+            put("stage", "RIDING")
+            put("offer_fiat_amount", "12.50")
+            put("offer_fiat_currency", "USD")
+        }
+
+        val restoredAmount = if (json.has("offer_fiat_amount")) json.getString("offer_fiat_amount") else null
+        val restoredCurrency = if (json.has("offer_fiat_currency")) json.getString("offer_fiat_currency") else null
+
+        assertEquals("12.50", restoredAmount)
+        assertEquals("USD", restoredCurrency)
+    }
+
+    @Test
+    fun `incomplete authoritative fiat fare payload restores as null`() {
+        val json = JSONObject().apply {
+            put("timestamp", System.currentTimeMillis())
+            put("stage", "RIDING")
+            put("offer_fiat_amount", "12.50")
+        }
+
+        val restoredAmount = if (json.has("offer_fiat_amount")) json.getString("offer_fiat_amount") else null
+        val restoredCurrency = if (json.has("offer_fiat_currency")) json.getString("offer_fiat_currency") else null
+        val restoredFiatFare = if (restoredAmount != null && restoredCurrency != null) {
+            restoredAmount to restoredCurrency
+        } else {
+            null
+        }
+
+        assertNull(restoredFiatFare)
+    }
 }

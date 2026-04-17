@@ -21,6 +21,7 @@ import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.data.DriverRoadflareRepository
 import com.ridestr.common.data.RideHistoryRepository
 import com.ridestr.common.data.Vehicle
+import com.ridestr.common.fiat.formatDisplayAmount
 import com.ridestr.common.roadflare.RoadflareLocationBroadcaster
 import com.ridestr.common.nostr.NostrService
 import com.ridestr.common.nostr.SubscriptionManager
@@ -36,6 +37,7 @@ import com.ridestr.common.nostr.events.DriverRideAction
 import com.ridestr.common.nostr.events.DriverRideStateEvent
 import com.ridestr.common.nostr.events.DriverRoadflareState
 import com.ridestr.common.nostr.events.DriverStatusType
+import com.ridestr.common.nostr.events.FiatFare
 import com.ridestr.common.nostr.events.Location
 import com.ridestr.common.nostr.events.PaymentPath
 import com.ridestr.common.nostr.events.RideConfirmationData
@@ -614,6 +616,11 @@ class DriverViewModel @Inject constructor(
                 put("offer_destLon", offer.destination.lon)
                 put("offer_mintUrl", offer.mintUrl ?: "")
                 put("offer_paymentMethod", offer.paymentMethod)
+                // Authoritative fiat fare (per ADR-0008) - preserves rider's exact amount across restart
+                offer.fiatFare?.let {
+                    put("offer_fiat_amount", it.amount)
+                    put("offer_fiat_currency", it.currency)
+                }
 
                 // Payment path persistence (for escrow guard after restart)
                 put("paymentPath", session.paymentPath.name)
@@ -688,6 +695,12 @@ class DriverViewModel @Inject constructor(
                 return
             }
 
+            // Restore authoritative fiat fare if persisted (per ADR-0008 - both-or-neither rule)
+            val restoredFiatAmount = if (data.has("offer_fiat_amount")) data.getString("offer_fiat_amount") else null
+            val restoredFiatCurrency = if (data.has("offer_fiat_currency")) data.getString("offer_fiat_currency") else null
+            val restoredFiatFare = if (restoredFiatAmount != null && restoredFiatCurrency != null)
+                FiatFare(restoredFiatAmount, restoredFiatCurrency) else null
+
             // Reconstruct the offer
             val offer = RideOfferData(
                 eventId = data.getString("offer_eventId"),
@@ -705,7 +718,8 @@ class DriverViewModel @Inject constructor(
                 fareEstimate = data.getDouble("offer_fareEstimate"),
                 createdAt = data.getLong("offer_createdAt"),
                 mintUrl = data.optString("offer_mintUrl", "").ifEmpty { null },
-                paymentMethod = data.optString("offer_paymentMethod", "cashu")
+                paymentMethod = data.optString("offer_paymentMethod", "cashu"),
+                fiatFare = restoredFiatFare
             )
 
             // Restore payment path (for escrow guard after restart)
@@ -1269,6 +1283,7 @@ class DriverViewModel @Inject constructor(
                         distanceMiles = RideHistoryBuilder.toDistanceMiles(offer.rideRouteKm),
                         durationMinutes = offer.rideRouteMin?.toInt() ?: 0,
                         fareSats = offer.fareEstimate.toLong(),
+                        fiatFare = offer.fiatFare,
                         status = "completed",
                         vehicleMake = vehicle?.make,
                         vehicleModel = vehicle?.model,
@@ -2440,10 +2455,12 @@ class DriverViewModel @Inject constructor(
                 eventId?.let { trackEventForCleanup(it, "DRIVER_RIDE_STATE") }
             }
 
+            val completedFareDisplay = offer.fiatFare?.let { it.formatDisplayAmount() }
+                ?: "${offer.fareEstimate.toInt()} sats"
             _uiState.update { current ->
                 current.copy(
                     stage = DriverStage.RIDE_COMPLETED,
-                    statusMessage = "Ride completed! Fare: ${offer.fareEstimate.toInt()} sats$settlementMessage",
+                    statusMessage = "Ride completed! Fare: $completedFareDisplay$settlementMessage",
                     rideSession = current.rideSession.copy(
                         activePaymentHash = null,
                         activePreimage = null,
@@ -2850,6 +2867,7 @@ class DriverViewModel @Inject constructor(
                 distanceMiles = RideHistoryBuilder.toDistanceMiles(offer.rideRouteKm),
                 durationMinutes = 0,
                 fareSats = if (claimed) offer.fareEstimate.toLong() else 0,
+                fiatFare = if (claimed) offer.fiatFare else null,
                 status = if (claimed) "cancelled_claimed" else "cancelled",
                 vehicleMake = vehicle?.make,
                 vehicleModel = vehicle?.model,
@@ -3018,6 +3036,7 @@ class DriverViewModel @Inject constructor(
                         distanceMiles = RideHistoryBuilder.toDistanceMiles(offer.rideRouteKm),
                         durationMinutes = offer.rideRouteMin?.toInt() ?: 0,
                         fareSats = offer.fareEstimate.toLong(),
+                        fiatFare = offer.fiatFare,
                         status = "completed",
                         vehicleMake = vehicle?.make,
                         vehicleModel = vehicle?.model,
@@ -3227,7 +3246,8 @@ class DriverViewModel @Inject constructor(
             // Only for NEW offers, not fare boosts
             if (!isFareBoost) {
                 val context = getApplication<Application>()
-                val fareDisplay = "${offer.fareEstimate.toInt()} sats"
+                val fareDisplay = offer.fiatFare?.let { it.formatDisplayAmount() }
+                    ?: "${offer.fareEstimate.toInt()} sats"
                 val fallbackLabel = if (offer.isRoadflare) "RoadFlare request" else "Direct offer"
                 val distanceDisplay = offer.rideRouteKm?.let { "${String.format("%.1f", it)} km ride" } ?: fallbackLabel
                 DriverOnlineService.updateStatus(
@@ -3582,7 +3602,8 @@ class DriverViewModel @Inject constructor(
                 // Don't notify for fare boosts (same rider increasing their offer)
                 if (!isFareBoost) {
                     // Calculate distance display for notification
-                    val fareDisplay = "${request.fareEstimate.toInt()} sats"
+                    val fareDisplay = request.fiatFare?.let { it.formatDisplayAmount() }
+                        ?: "${request.fareEstimate.toInt()} sats"
                     val driverLocation = _uiState.value.currentLocation
                     val pickupDistanceKm = driverLocation?.distanceToKm(request.pickupArea)
                     val distanceDisplay = if (pickupDistanceKm != null) {
@@ -3784,7 +3805,8 @@ class DriverViewModel @Inject constructor(
                     fareEstimate = request.fareEstimate,
                     createdAt = request.createdAt,
                     mintUrl = request.mintUrl,
-                    paymentMethod = request.paymentMethod
+                    paymentMethod = request.paymentMethod,
+                    fiatFare = request.fiatFare
                 )
 
                 setupAcceptedRide(

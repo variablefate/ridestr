@@ -7,7 +7,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import kotlinx.coroutines.CoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -15,6 +14,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.ridestr.common.data.RideHistoryRepository
+import com.ridestr.common.fiat.formatUsd
+import com.ridestr.common.fiat.sumFareUsdOrNull
 import com.ridestr.common.nostr.events.RideHistoryStats
 import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.payment.WalletDiagnostics
@@ -43,8 +44,27 @@ fun WalletScreen(
     onViewHistory: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val stats by rideHistoryRepository.stats.collectAsState()
-    val rides by rideHistoryRepository.rides.collectAsState()
+    val allRides by rideHistoryRepository.rides.collectAsState()
+    val rides = remember(allRides) {
+        allRides.filter { entry ->
+            entry.appOrigin == RideHistoryRepository.APP_ORIGIN_RIDESTR ||
+                (entry.appOrigin == null && entry.role == "rider")
+        }
+    }
+    val stats = remember(rides) {
+        RideHistoryStats(
+            totalRidesAsRider = rides.count { it.role == "rider" },
+            totalRidesAsDriver = rides.count { it.role == "driver" },
+            totalDistanceMiles = rides.sumOf { it.distanceMiles },
+            totalDurationMinutes = rides.sumOf { it.durationMinutes },
+            totalFareSatsEarned = rides.filter { it.role == "driver" && it.status == "completed" }
+                .sumOf { it.fareSats },
+            totalFareSatsPaid = rides.filter { it.role == "rider" && it.status == "completed" }
+                .sumOf { it.fareSats },
+            completedRides = rides.count { it.status == "completed" },
+            cancelledRides = rides.count { it.status == "cancelled" }
+        )
+    }
     val btcPriceUsd by priceService.btcPriceUsd.collectAsState()
 
     // Wallet state (if service provided)
@@ -419,20 +439,33 @@ private fun SpendingHistoryCard(
     val currentMonth = calendar.get(Calendar.MONTH)
     val currentYear = calendar.get(Calendar.YEAR)
 
-    val thisMonthSpent = rides
-        .filter { ride ->
-            val rideCalendar = Calendar.getInstance().apply {
-                timeInMillis = ride.timestamp * 1000
-            }
-            rideCalendar.get(Calendar.MONTH) == currentMonth &&
-            rideCalendar.get(Calendar.YEAR) == currentYear &&
-            ride.status == "completed"
+    val completedRiderRides = rides.filter { it.role == "rider" && it.status == "completed" }
+    val thisMonthRides = rides.filter { ride ->
+        val rideCalendar = Calendar.getInstance().apply {
+            timeInMillis = ride.timestamp * 1000
         }
-        .sumOf { it.fareSats }
+        rideCalendar.get(Calendar.MONTH) == currentMonth &&
+            rideCalendar.get(Calendar.YEAR) == currentYear &&
+            ride.role == "rider" &&
+            ride.status == "completed"
+    }
 
     // Format spending values based on display currency
-    val totalSpentDisplay = formatSats(stats.totalFareSatsPaid, displayCurrency, btcPriceUsd)
-    val thisMonthDisplay = formatSats(thisMonthSpent, displayCurrency, btcPriceUsd)
+    val totalSpentDisplay = when (displayCurrency) {
+        DisplayCurrency.SATS -> formatSats(stats.totalFareSatsPaid, displayCurrency, btcPriceUsd)
+        DisplayCurrency.USD -> {
+            val usd = completedRiderRides.sumFareUsdOrNull(btcPriceUsd)
+            usd?.formatUsd() ?: formatSats(stats.totalFareSatsPaid, displayCurrency, btcPriceUsd)
+        }
+    }
+    val thisMonthSpentSats = thisMonthRides.sumOf { it.fareSats }
+    val thisMonthDisplay = when (displayCurrency) {
+        DisplayCurrency.SATS -> formatSats(thisMonthSpentSats, displayCurrency, btcPriceUsd)
+        DisplayCurrency.USD -> {
+            val usd = thisMonthRides.sumFareUsdOrNull(btcPriceUsd)
+            usd?.formatUsd() ?: formatSats(thisMonthSpentSats, displayCurrency, btcPriceUsd)
+        }
+    }
 
     Card(
         modifier = Modifier
