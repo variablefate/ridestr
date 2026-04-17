@@ -80,12 +80,9 @@ fun formatFareAmount(
 }
 
 /**
- * IDLE-state content: location inputs, saved places, route info, "Check Driver Availability" button.
- *
  * Takes [RiderViewModel] directly because this panel wires ~10 state flows and ~10 action
  * methods (pickup/dest search, GPS, saved-location management, swap). A narrow-props
- * signature would explode to 20+ parameters; further decomposition into smaller presentation
- * components (LocationInputCard, SavedPlacesSection, RouteInfoRow) is a separate follow-up.
+ * signature would explode to 20+ parameters.
  */
 @Composable
 fun IdleContent(
@@ -316,7 +313,6 @@ fun IdleContent(
                     }
                 }
 
-                // Route info (distance + duration only — fares vary by driver).
                 if (pickupLocation != null && destLocation != null) {
                     Spacer(modifier = Modifier.height(16.dp))
                     HorizontalDivider()
@@ -406,7 +402,6 @@ fun IdleContent(
     }
 }
 
-/** REQUESTING-state content: spinner, pending-driver count, cancel button. */
 @Composable
 fun RequestingContent(
     ride: RideSession?,
@@ -440,7 +435,6 @@ fun RequestingContent(
     }
 }
 
-/** CHOOSING_DRIVER-state content: list of drivers who accepted with per-driver quoted fares. */
 @Composable
 fun ChoosingDriverContent(
     acceptedDrivers: List<DriverInfo>,
@@ -538,7 +532,6 @@ fun ChoosingDriverContent(
     }
 }
 
-/** MATCHED / DRIVER_EN_ROUTE / DRIVER_ARRIVED content: selected driver info, fare, cancel button. */
 @Composable
 fun MatchedContent(
     ride: RideSession?,
@@ -609,7 +602,6 @@ fun MatchedContent(
     }
 }
 
-/** IN_RIDE-state content: driver header + chat message count. */
 @Composable
 fun InRideContent(
     ride: RideSession?,
@@ -643,7 +635,6 @@ fun InRideContent(
     }
 }
 
-/** COMPLETED-state content: final fare summary + Done button. */
 @Composable
 fun CompletedContent(
     ride: RideSession?,
