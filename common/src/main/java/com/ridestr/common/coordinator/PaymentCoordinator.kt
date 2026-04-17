@@ -92,23 +92,21 @@ sealed class PaymentEvent {
 
     /**
      * Driver published a status update (EN_ROUTE_PICKUP, ARRIVED, IN_PROGRESS, etc.).
+     * Never fires for COMPLETED (see [DriverCompleted]) or CANCELLED (see [DriverCancelled]).
      * ViewModel derives the rider's UI stage from [status] via `riderStageFromDriverStatus()`.
      */
     data class DriverStatusUpdated(
         val status: String,
-        val driverState: DriverRideStateData,
         val confirmationEventId: String
     ) : PaymentEvent()
 
     /**
-     * Driver broadcast COMPLETED status. HTLC has been processed on the coordinator side.
-     * ViewModel should close subscriptions, save ride history, and transition to COMPLETED stage.
+     * Driver broadcast COMPLETED status. The coordinator has already processed HTLC
+     * (markHtlcClaimedByPaymentHash or clearHtlcRideProtected) and refreshed the wallet balance
+     * before emitting this event — the ViewModel should NOT repeat either side-effect. It only
+     * needs to save ride history and transition to the COMPLETED stage.
      */
-    data class DriverCompleted(
-        val finalFareSats: Long?,
-        /** True = driver confirmed claim succeeded; false = failed; null = legacy driver. */
-        val claimSuccess: Boolean?
-    ) : PaymentEvent()
+    data class DriverCompleted(val finalFareSats: Long?) : PaymentEvent()
 
     /**
      * Driver broadcast CANCELLED status via Kind 30180. ViewModel should release HTLC
@@ -782,13 +780,13 @@ class PaymentCoordinator(
             DriverStatusType.ARRIVED -> {
                 currentRiderPhase = RiderRideStateEvent.Phase.AWAITING_PIN
                 scope.launch {
-                    _events.emit(PaymentEvent.DriverStatusUpdated(action.status, driverState, confirmationEventId))
+                    _events.emit(PaymentEvent.DriverStatusUpdated(action.status, confirmationEventId))
                 }
             }
             DriverStatusType.IN_PROGRESS -> {
                 currentRiderPhase = RiderRideStateEvent.Phase.IN_RIDE
                 scope.launch {
-                    _events.emit(PaymentEvent.DriverStatusUpdated(action.status, driverState, confirmationEventId))
+                    _events.emit(PaymentEvent.DriverStatusUpdated(action.status, confirmationEventId))
                 }
             }
             DriverStatusType.COMPLETED -> {
@@ -802,7 +800,7 @@ class PaymentCoordinator(
             else -> {
                 // EN_ROUTE_PICKUP and any future statuses: ViewModel derives UI stage.
                 scope.launch {
-                    _events.emit(PaymentEvent.DriverStatusUpdated(action.status, driverState, confirmationEventId))
+                    _events.emit(PaymentEvent.DriverStatusUpdated(action.status, confirmationEventId))
                 }
             }
         }
@@ -845,7 +843,7 @@ class PaymentCoordinator(
             Log.w(TAG, "Failed to refresh balance after completion: ${e.message}")
         }
 
-        _events.emit(PaymentEvent.DriverCompleted(finalFareSats, claimSuccess))
+        _events.emit(PaymentEvent.DriverCompleted(finalFareSats))
     }
 
     private fun handlePinSubmission(

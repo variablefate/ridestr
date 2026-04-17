@@ -20,8 +20,6 @@ import com.ridestr.common.nostr.RouteMetrics
 import com.ridestr.common.nostr.SubscriptionManager
 import com.ridestr.common.nostr.events.DriverAvailabilityData
 import com.ridestr.common.nostr.events.RideshareExpiration
-import com.ridestr.common.nostr.events.DriverRideAction
-import com.ridestr.common.nostr.events.DriverRideStateData
 import com.ridestr.common.nostr.events.DriverStatusType
 import com.ridestr.common.nostr.events.Geohash
 import com.ridestr.common.nostr.events.PaymentPath
@@ -3719,7 +3717,7 @@ class RiderViewModel @Inject constructor(
      * The rider's UI stage is DERIVED from the driver's status, not set independently.
      * This eliminates state divergence between the two apps.
      */
-    private fun handleDriverStatusAction(action: DriverRideAction.Status, driverState: DriverRideStateData, confirmationEventId: String) {
+    private fun handleDriverStatusAction(status: String, confirmationEventId: String) {
         val state = _uiState.value
         val context = getApplication<Application>()
 
@@ -3730,22 +3728,18 @@ class RiderViewModel @Inject constructor(
             return
         }
 
-        // First driver status update — coordinator's own post-confirm ack timer is cancelled
-        // inside PaymentCoordinator.handleDriverStatus() when any driver status arrives.
-
         val driverPubKey = state.rideSession.acceptance?.driverPubKey
         val driverName = driverPubKey?.let { _uiState.value.driverProfiles[it]?.bestName()?.split(" ")?.firstOrNull() }
 
         // Store the authoritative driver status (AtoB: driver is custodian)
-        Log.d(TAG, "Driver status update: ${action.status}")
+        Log.d(TAG, "Driver status update: $status")
 
         // Derive rider's UI stage from driver's status
-        val derivedStageName = riderStageFromDriverStatus(action.status)
-        val derivedStage = derivedStageName?.let {
+        val derivedStage = riderStageFromDriverStatus(status)?.let {
             try { RideStage.valueOf(it) } catch (e: Exception) { null }
         }
 
-        when (action.status) {
+        when (status) {
             DriverStatusType.EN_ROUTE_PICKUP -> {
                 Log.d(TAG, "Driver is en route to pickup (derived stage: $derivedStage)")
                 // NOW safe to close availability subscription - driver has acknowledged the ride
@@ -3756,7 +3750,7 @@ class RiderViewModel @Inject constructor(
                     current.copy(
                         statusMessage = "Driver is on the way!",
                         rideSession = current.rideSession.copy(
-                            lastDriverStatus = action.status,
+                            lastDriverStatus = status,
                             rideStage = derivedStage ?: RideStage.RIDE_CONFIRMED
                         )
                     )
@@ -3770,7 +3764,7 @@ class RiderViewModel @Inject constructor(
                     current.copy(
                         statusMessage = "Driver has arrived! Tell them your PIN: ${current.rideSession.pickupPin}",
                         rideSession = current.rideSession.copy(
-                            lastDriverStatus = action.status,
+                            lastDriverStatus = status,
                             rideStage = derivedStage ?: RideStage.DRIVER_ARRIVED
                         )
                     )
@@ -3784,27 +3778,16 @@ class RiderViewModel @Inject constructor(
                     current.copy(
                         statusMessage = "Ride in progress",
                         rideSession = current.rideSession.copy(
-                            lastDriverStatus = action.status,
+                            lastDriverStatus = status,
                             rideStage = derivedStage ?: RideStage.IN_PROGRESS
                         )
                     )
                 }
                 saveRideState()
             }
-            DriverStatusType.COMPLETED -> {
-                Log.d(TAG, "Ride completed!")
-                // Store status first, then use dedicated completion handler
-                updateRideSession { copy(lastDriverStatus = action.status) }
-                handleRideCompletion(driverState)
-            }
-            DriverStatusType.CANCELLED -> {
-                Log.w(TAG, "=== CANCELLED STATUS DETECTED ===")
-                Log.w(TAG, "  Closure confirmationEventId: $confirmationEventId")
-                Log.w(TAG, "  Current state confirmationEventId: ${state.rideSession.confirmationEventId}")
-                Log.w(TAG, "  Current rideStage: ${state.rideSession.rideStage}")
-                updateRideSession { copy(lastDriverStatus = action.status) }
-                handleDriverCancellation(source = "driverRideState-CANCELLED")
-            }
+            // Note: COMPLETED and CANCELLED do NOT reach this handler — PaymentCoordinator
+            // routes them to PaymentEvent.DriverCompleted / DriverCancelled respectively
+            // before any DriverStatusUpdated event is emitted.
         }
     }
 
@@ -3979,9 +3962,12 @@ class RiderViewModel @Inject constructor(
     // ==================== Progressive Location Reveal ====================
 
     /**
-     * Handle ride completion from driver.
+     * Handle ride completion from driver. PaymentCoordinator has already processed HTLC
+     * (mark-claimed or unlock-for-refund) and refreshed the wallet balance before emitting
+     * [PaymentEvent.DriverCompleted]; this method owns only the ViewModel-side tear-down:
+     * close subscriptions, save ride history, push the COMPLETED UI state.
      */
-    private fun handleRideCompletion(statusData: DriverRideStateData) {
+    private fun handleRideCompletion(coordinatorFareSats: Long?) {
         // Close subscriptions and jobs
         closeAllRideSubscriptionsAndJobs()
         clearRideCoordinatorState()
@@ -3989,50 +3975,17 @@ class RiderViewModel @Inject constructor(
         clearSavedRideState()
 
         // Capture fare info before launching coroutine
-        val fareMessage = statusData.finalFare?.let { " Fare: ${it.toInt()} sats" } ?: ""
+        val fareMessage = coordinatorFareSats?.let { " Fare: ${it.toInt()} sats" } ?: ""
 
         // Capture state for ride history before launching coroutine
         val state = _uiState.value
         val session = state.rideSession
-        val finalFareSats = statusData.finalFare?.toLong() ?: state.fareEstimate?.toLong() ?: 0L
+        val finalFareSats = coordinatorFareSats ?: state.fareEstimate?.toLong() ?: 0L
         val driver = session.selectedDriver
         val driverProfile = driver?.let { state.driverProfiles[it.driverPubKey] }
         val ridePaymentMethod = session.activePaymentMethod ?: settingsRepository.getDefaultPaymentMethod()
 
-        // Conditionally mark HTLC based on driver's claim result
-        val paymentHash = session.activePaymentHash
-        if (paymentHash != null) {
-            val completedAction = statusData.history.filterIsInstance<DriverRideAction.Status>()
-                .lastOrNull { it.status == DriverStatusType.COMPLETED }
-            val claimSuccess = completedAction?.claimSuccess
-
-            if (claimSuccess == true) {
-                // Driver confirmed claim succeeded — mark HTLC as claimed
-                val marked = walletService?.markHtlcClaimedByPaymentHash(paymentHash) ?: false
-                if (marked) Log.d(TAG, "Marked HTLC escrow as claimed for ride completion")
-            } else if (claimSuccess == false) {
-                // Driver claim failed — unlock HTLC so the rider can receive a refund after expiry
-                walletService?.clearHtlcRideProtected(paymentHash)
-                Log.w(TAG, "Driver claim failed — HTLC unlocked for rider refund")
-            } else {
-                // null = legacy driver without claimSuccess field.
-                // Conservative: for SAME_MINT rides keep LOCKED (money safety).
-                // Coordinator already handled this case identically — do nothing here.
-                if (session.paymentPath == PaymentPath.SAME_MINT) {
-                    Log.w(TAG, "Legacy driver (no claimSuccess) + SAME_MINT — HTLC left locked for safety")
-                }
-            }
-        }
-
         viewModelScope.launch {
-            // Refresh wallet balance from NIP-60 (ensures consistency after ride)
-            try {
-                walletService?.refreshBalance()
-                Log.d(TAG, "Refreshed wallet balance after ride completion")
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to refresh wallet balance after ride: ${e.message}")
-            }
-
             // Save to ride history (rider gets exact coords + addresses for their own history)
             try {
                 val historyEntry = RideHistoryEntry(
@@ -4468,37 +4421,13 @@ class RiderViewModel @Inject constructor(
             }
 
             is PaymentEvent.DriverStatusUpdated -> {
-                val action = DriverRideAction.Status(
-                    status = event.status,
-                    at = System.currentTimeMillis() / 1000
-                )
-                handleDriverStatusAction(action, event.driverState, event.confirmationEventId)
+                handleDriverStatusAction(event.status, event.confirmationEventId)
             }
 
             is PaymentEvent.DriverCompleted -> {
-                // Coordinator already handled HTLC and balance refresh; build a synthetic
-                // DriverRideStateData so handleRideCompletion() can derive history/fareMessage.
-                val session = _uiState.value.rideSession
-                val now = System.currentTimeMillis() / 1000
-                val synthetic = DriverRideStateData(
-                    eventId = "",
-                    driverPubKey = session.acceptance?.driverPubKey ?: "",
-                    confirmationEventId = session.confirmationEventId ?: "",
-                    riderPubKey = _uiState.value.myPubKey ?: "",
-                    currentStatus = DriverStatusType.COMPLETED,
-                    history = if (event.claimSuccess != null) listOf(
-                        DriverRideAction.Status(
-                            status = DriverStatusType.COMPLETED,
-                            finalFare = event.finalFareSats,
-                            claimSuccess = event.claimSuccess,
-                            at = now
-                        )
-                    ) else emptyList(),
-                    finalFare = event.finalFareSats,
-                    invoice = null,
-                    createdAt = now
-                )
-                handleRideCompletion(synthetic)
+                // Coordinator already handled HTLC claim/unlock + wallet balance refresh.
+                // ViewModel only needs to own its teardown: close subs, save history, update UI.
+                handleRideCompletion(event.finalFareSats)
             }
 
             is PaymentEvent.DriverCancelled -> {
