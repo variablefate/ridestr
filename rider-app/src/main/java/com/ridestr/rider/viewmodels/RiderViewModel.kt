@@ -313,7 +313,6 @@ class RiderViewModel @Inject constructor(
     private var broadcastTimeoutJob: Job? = null
     private var bridgePendingPollJob: Job? = null
     private var escrowRetryDeadlineJob: Job? = null
-    private var postConfirmAckTimeoutJob: Job? = null
     private var pendingDeletionJob: Job? = null
     private var currentSubscriptionGeohash: String? = null
     // Generation counter for EOSE reconciliation — prevents stale reconciliation after resubscribe
@@ -655,8 +654,6 @@ class RiderViewModel @Inject constructor(
         bridgePendingPollJob = null
         escrowRetryDeadlineJob?.cancel()
         escrowRetryDeadlineJob = null
-        postConfirmAckTimeoutJob?.cancel()
-        postConfirmAckTimeoutJob = null
         pendingDeletionJob?.cancel()
         pendingDeletionJob = null
         paymentCoordinator.reset()
@@ -1039,7 +1036,22 @@ class RiderViewModel @Inject constructor(
         // Restore coordinator state: dedup sets, PIN context, payment path, and active confirmation ID.
         // Without this, the coordinator would re-process already-handled driver state events and
         // reset its PIN attempt counter after every process-death restore.
+        //
+        // Coordinator owns the post-confirm ack timer. Compute the effective deadline here so
+        // legacy saves (no deadline persisted) still arm a fresh timer, and an already-expired
+        // deadline triggers an immediate cancel without touching the coordinator's timer.
         if (confirmationEventId != null) {
+            val effectiveDeadline = when {
+                postConfirmAckDeadlineMs > 0 -> postConfirmAckDeadlineMs
+                stage == RideStage.DRIVER_ACCEPTED ->
+                    System.currentTimeMillis() + POST_CONFIRM_ACK_TIMEOUT_MS
+                else -> 0L
+            }
+            if (effectiveDeadline in 1..System.currentTimeMillis()) {
+                Log.w(TAG, "Post-confirm ack timeout expired during process death — cancelling")
+                handleDriverCancellation("No response from driver", source = "postConfirmAck")
+                return  // CRITICAL: do not continue into re-subscriptions/service updates
+            }
             paymentCoordinator.restoreRideState(
                 confirmationEventId = confirmationEventId,
                 paymentPath = paymentPath,
@@ -1049,27 +1061,8 @@ class RiderViewModel @Inject constructor(
                 pickupPin = pickupPin,
                 pinVerified = pinVerified,
                 destination = destination,
-                postConfirmDeadlineMs = postConfirmAckDeadlineMs
+                postConfirmDeadlineMs = effectiveDeadline
             )
-        }
-
-        // B10: Post-confirm ack timeout — restart-stable via absolute deadline
-        if (confirmationEventId != null) {
-            if (postConfirmAckDeadlineMs > 0) {
-                val remaining = postConfirmAckDeadlineMs - System.currentTimeMillis()
-                if (remaining <= 0) {
-                    // Already expired — cancel immediately and return to prevent re-subscriptions
-                    Log.w(TAG, "Post-confirm ack timeout expired during process death — cancelling")
-                    handleDriverCancellation("No response from driver", source = "postConfirmAck")
-                    return  // CRITICAL: do not continue into re-subscriptions/service updates
-                } else {
-                    startPostConfirmAckTimeout(postConfirmAckDeadlineMs)
-                }
-            } else if (stage == RideStage.DRIVER_ACCEPTED) {
-                // Legacy save without deadline — start fresh timeout
-                val deadline = System.currentTimeMillis() + POST_CONFIRM_ACK_TIMEOUT_MS
-                startPostConfirmAckTimeout(deadline)
-            }
         }
 
         // Re-subscribe to relevant events
@@ -3849,19 +3842,6 @@ class RiderViewModel @Inject constructor(
         selectedDriverLastAvailabilityTimestamp = 0L
     }
 
-    private fun startPostConfirmAckTimeout(deadlineMs: Long) {
-        postConfirmAckTimeoutJob?.cancel()
-        postConfirmAckTimeoutJob = viewModelScope.launch {
-            val delayMs = deadlineMs - System.currentTimeMillis()
-            if (delayMs > 0) delay(delayMs)
-            val session = _uiState.value.rideSession
-            if (session.confirmationEventId != null && session.rideStage == RideStage.DRIVER_ACCEPTED) {
-                Log.w(TAG, "No driver response after confirmation — auto-cancelling")
-                handleDriverCancellation("No response from driver", source = "postConfirmAckTimeout")
-            }
-        }
-    }
-
     /**
      * Automatically confirm the ride when driver accepts.
      * Generates PIN locally and sends precise pickup location to the driver.
@@ -4013,9 +3993,8 @@ class RiderViewModel @Inject constructor(
             return
         }
 
-        // First driver status update — cancel post-confirm ack timeout
-        postConfirmAckTimeoutJob?.cancel()
-        postConfirmAckTimeoutJob = null
+        // First driver status update — coordinator's own post-confirm ack timer is cancelled
+        // inside PaymentCoordinator.handleDriverStatus() when any driver status arrives.
 
         val driverPubKey = state.rideSession.acceptance?.driverPubKey
         val driverName = driverPubKey?.let { _uiState.value.driverProfiles[it]?.bestName()?.split(" ")?.firstOrNull() }
@@ -5328,6 +5307,19 @@ class RiderViewModel @Inject constructor(
                 }
             }
 
+            is PaymentEvent.ConfirmationCancelledBySelf -> {
+                // Same-ride cancel during confirmRide() suspension: targeted cancel + author-wide
+                // cleanup. This replicates the original "Case 2" guard from autoConfirmRide().
+                viewModelScope.launch {
+                    nostrService.publishRideCancellation(
+                        confirmationEventId = event.publishedEventId,
+                        otherPartyPubKey = event.driverPubKey,
+                        reason = "Rider cancelled"
+                    )?.let { myRideEventIds.add(it) }
+                }
+                cleanupRideEventsInBackground("ride cancelled during confirmation")
+            }
+
             is PaymentEvent.EscrowLockFailed -> {
                 _uiState.update { current ->
                     current.copy(
@@ -5569,8 +5561,6 @@ class RiderViewModel @Inject constructor(
                 Log.d(TAG, "RoadFlare key received from driver ${event.driverPubKey.take(8)}")
             is RoadflareRiderEvent.KeyShareIgnored ->
                 Log.d(TAG, "RoadFlare key share ignored: ${event.reason}")
-            is RoadflareRiderEvent.PingSent ->
-                Log.d(TAG, "Driver ping sent to ${event.driverPubKey.take(8)}")
         }
     }
 

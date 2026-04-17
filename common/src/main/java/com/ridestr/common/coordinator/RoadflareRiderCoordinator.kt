@@ -23,9 +23,6 @@ sealed class RoadflareRiderEvent {
 
     /** A key share event could not be verified or the driver is unknown. */
     data class KeyShareIgnored(val reason: String) : RoadflareRiderEvent()
-
-    /** Kind 3189 ping was published successfully. */
-    data class PingSent(val driverPubKey: String) : RoadflareRiderEvent()
 }
 
 /**
@@ -35,7 +32,9 @@ sealed class RoadflareRiderEvent {
  * - Kind 3186 key share reception — driver sends encrypted RoadFlare key to rider
  * - Kind 3188 key acknowledgement sending — rider acknowledges a received key,
  *   or requests a refresh for a stale one
- * - Kind 3189 driver ping sending — rider asks a followed driver to come online
+ *
+ * Kind 3189 driver ping sending is tracked by Issue #52 and will be added once
+ * NostrService exposes a `publishDriverPing()` method.
  *
  * **Lifecycle:** create in a ViewModel init block, call [startKeyShareListener], call
  * [destroy] from `onCleared()`.
@@ -190,32 +189,10 @@ class RoadflareRiderCoordinator(
         )
     }
 
-    /**
-     * Send a Kind 3189 driver ping, asking a followed driver to come online.
-     *
-     * The ping is HMAC-authenticated using the driver's stored RoadFlare private key
-     * so that only approved followers can trigger a notification on the driver's device.
-     *
-     * On success, emits [RoadflareRiderEvent.PingSent].
-     *
-     * @param driverPubKey The driver's Nostr identity pubkey (hex).
-     */
-    suspend fun pingDriver(driverPubKey: String) {
-        // TODO: implement Kind 3189 via nostrService.publishDriverPing()
-        // NostrService does not yet expose a publishDriverPing() method. When Issue #52
-        // wires up RoadflareDomainService.publishDriverPing(), replace this block with:
-        //
-        //   val eventId = nostrService.publishDriverPing(driverPubKey)
-        //   if (eventId != null) {
-        //       _events.emit(RoadflareRiderEvent.PingSent(driverPubKey))
-        //   }
-        Log.w(
-            TAG,
-            "pingDriver(${driverPubKey.take(8)}) called but nostrService.publishDriverPing() " +
-                "is not yet implemented — emitting PingSent optimistically"
-        )
-        _events.emit(RoadflareRiderEvent.PingSent(driverPubKey))
-    }
+    // TODO(#52): add `pingDriver()` once NostrService exposes a `publishDriverPing()` method.
+    // The coordinator class-level KDoc lists this capability. The method was deliberately
+    // omitted until the underlying publisher exists, to avoid a stub that lies to callers by
+    // emitting PingSent for a no-op.
 
     /**
      * Stop all subscriptions. Call from the owning ViewModel's `onCleared()`.

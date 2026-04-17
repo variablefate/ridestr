@@ -56,11 +56,24 @@ sealed class PaymentEvent {
     data class ConfirmationFailed(val message: String) : PaymentEvent()
 
     /**
-     * The coordinator published a confirmation event but detected the ride was replaced or
-     * cancelled post-suspension. ViewModel should issue a targeted Kind 3179 cancellation for
-     * [publishedEventId] only — do NOT run author-wide NIP-09 cleanup.
+     * The coordinator published a confirmation event but a NEW ride's acceptance is now active
+     * (cross-ride race). ViewModel should issue a targeted Kind 3179 cancellation for
+     * [publishedEventId] only — do NOT run author-wide NIP-09 cleanup (that would delete the
+     * new ride's live events).
      */
     data class ConfirmationStale(
+        val publishedEventId: String,
+        val driverPubKey: String
+    ) : PaymentEvent()
+
+    /**
+     * The coordinator published a confirmation event but the rider cancelled the ride while we
+     * were suspended at `confirmRide()` (same-ride cancel). ViewModel should publish a targeted
+     * Kind 3179 for [publishedEventId] AND run author-wide NIP-09 cleanup — no other ride is
+     * active, so author-wide cleanup is safe. This replicates the original "Case 2" guard from
+     * RiderViewModel.autoConfirmRide().
+     */
+    data class ConfirmationCancelledBySelf(
         val publishedEventId: String,
         val driverPubKey: String
     ) : PaymentEvent()
@@ -360,12 +373,18 @@ class PaymentCoordinator(
      *
      * Cancels the auto-cancel deadline timer, clears the dialog state, and re-runs the
      * confirmation flow. The CAS gate was reset when the lock failed, so this call succeeds.
+     * A rapid double-tap on "Retry" is guarded by the same CAS: the second tap sees
+     * [confirmationInFlight] already true and becomes a no-op.
      *
      * No-op if there is no pending retry acceptance (guards against stale UI interactions).
      */
     fun retryEscrowLock() {
         val acceptance = pendingRetryAcceptance ?: return
         val inputs = pendingRetryInputs ?: return
+        if (!confirmationInFlight.compareAndSet(false, true)) {
+            Log.d(TAG, "Ignoring duplicate retryEscrowLock — confirmation already in flight")
+            return
+        }
         escrowRetryDeadlineJob?.cancel()
         escrowRetryDeadlineJob = null
         runConfirmation(acceptance, inputs)
@@ -664,13 +683,24 @@ class PaymentCoordinator(
                 if (eventId != null) {
                     rideEventIds.add(eventId)
 
-                    // Post-suspension stale-ride guard: if acceptance changed while we awaited
-                    // confirmRide(), do targeted cancel only — never run author-wide NIP-09
-                    // cleanup (that would delete the new ride's live events).
+                    // Post-suspension stale-ride guard. Two cases that share the same symptom
+                    // (currentAcceptanceEventId != acceptance.eventId) but need different cleanup:
+                    //  - Case 1 (cross-ride):  a NEW ride's acceptance is active → targeted cancel
+                    //                          only; never run author-wide NIP-09 cleanup because
+                    //                          it would delete the new ride's live events.
+                    //  - Case 2 (same-ride cancel): the rider cancelled and coordinator state was
+                    //                          reset (currentAcceptanceEventId == null) → safe to
+                    //                          run author-wide cleanup; no other ride is active.
                     if (currentAcceptanceEventId != acceptance.eventId) {
-                        Log.w(TAG, "[$rideCorrelationId] Stale confirmation — acceptance changed post-suspend")
-                        _events.emit(PaymentEvent.ConfirmationStale(eventId, acceptance.driverPubKey))
-                        // confirmationInFlight stays true — new ride owns the lock
+                        if (currentAcceptanceEventId == null) {
+                            Log.w(TAG, "[$rideCorrelationId] Ride cancelled during confirmRide() suspension")
+                            _events.emit(PaymentEvent.ConfirmationCancelledBySelf(eventId, acceptance.driverPubKey))
+                        } else {
+                            Log.w(TAG, "[$rideCorrelationId] Stale confirmation — acceptance changed post-suspend")
+                            _events.emit(PaymentEvent.ConfirmationStale(eventId, acceptance.driverPubKey))
+                        }
+                        // confirmationInFlight stays true — new ride owns the lock (or resetInternalState
+                        // already cleared it for the self-cancel case).
                         return@launch
                     }
 
