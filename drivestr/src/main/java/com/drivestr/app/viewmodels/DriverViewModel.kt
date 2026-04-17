@@ -196,8 +196,6 @@ class DriverViewModel @Inject constructor(
     private val takenOfferEventIds = mutableSetOf<String>()
     // Track offer IDs that the driver has declined/passed on
     private val declinedOfferEventIds = mutableSetOf<String>()
-    // Track mode before ride started (for "Stay Online" restoration)
-    private var stageBeforeRide: DriverStage? = null
     // Unified tracker: ALL events I publish during a ride (for cleanup on completion/cancellation)
     // Includes: acceptance, status updates, PIN submission, chat messages
     // Thread-safe list since events are added from multiple coroutines
@@ -998,10 +996,8 @@ class DriverViewModel @Inject constructor(
 
             // Publish locationless Kind 30173 so availability subscription works
             // (Driver is trackable by pubkey but invisible to geographic searches)
-            val presenceEventId = publishAvailability(AvailabilitySpec.RoadflarePresence)
-            if (presenceEventId != null) {
-                availabilityCoordinator.trackPublishedEvent(presenceEventId)
-            }
+            // Track so the presence event is deleted when the driver goes offline.
+            publishAvailability(AvailabilitySpec.RoadflarePresence, track = true)
         }
 
         // Stage is ROADFLARE_ONLY — if broadcaster was already running (e.g., coming back
@@ -1021,7 +1017,7 @@ class DriverViewModel @Inject constructor(
         if (currentState.stage != DriverStage.AVAILABLE && currentState.stage != DriverStage.ROADFLARE_ONLY) return
 
         // Clear saved pre-ride mode when explicitly going offline
-        stageBeforeRide = null
+        updateRideSession { copy(stageBeforeRide = null) }
 
         // Stop broadcasting and subscriptions based on current stage
         if (currentState.stage == DriverStage.AVAILABLE) {
@@ -1163,7 +1159,7 @@ class DriverViewModel @Inject constructor(
         val session = state.rideSession
 
         // Clear saved pre-ride mode to prevent stale restore
-        stageBeforeRide = null
+        updateRideSession { copy(stageBeforeRide = null) }
 
         // Guard: Already cancelling - prevent duplicate invocations
         if (session.isCancelling) {
@@ -1236,7 +1232,7 @@ class DriverViewModel @Inject constructor(
         val state = _uiState.value
         val session = state.rideSession
         val offer = session.acceptedOffer
-        val restoreRoadflareOnly = stageBeforeRide == DriverStage.ROADFLARE_ONLY
+        val restoreRoadflareOnly = session.stageBeforeRide == DriverStage.ROADFLARE_ONLY
 
         // Synchronous cleanup
         closeAllRideSubscriptionsAndJobs()
@@ -1287,7 +1283,6 @@ class DriverViewModel @Inject constructor(
         cleanupRideEventsInBackground("ride completed")
 
         availabilityCoordinator.clearBroadcastState()
-        stageBeforeRide = null
 
         // No explicit RoadFlare status update needed here — statusProvider derives
         // status from DriverStage. Downstream goOnline()/goRoadflareOnly() handles
@@ -1369,8 +1364,6 @@ class DriverViewModel @Inject constructor(
             rideContext = newContext
             rideState = RideState.CREATED
 
-            stageBeforeRide = _uiState.value.stage
-
             validateTransition(RideEvent.Accept(
                 inputterPubkey = myPubkey,
                 driverPubkey = myPubkey,
@@ -1378,7 +1371,7 @@ class DriverViewModel @Inject constructor(
                 mintUrl = walletService?.getSavedMintUrl()
             ))
 
-            updateRideSession { copy(isProcessingOffer = true) }
+            updateRideSession { copy(stageBeforeRide = _uiState.value.stage, isProcessingOffer = true) }
 
             val result = acceptanceCoordinator.acceptOffer(offer)
 
@@ -1771,7 +1764,7 @@ class DriverViewModel @Inject constructor(
         closeAllRideSubscriptionsAndJobs()
         session.acceptedOffer?.riderPubKey?.let { unsubscribeFromRiderProfile(it) }
         clearDriverStateHistory()
-        stageBeforeRide = null
+        updateRideSession { copy(stageBeforeRide = null) }
         broadcastRoadflareOfflineStatus()
         stopRoadflareBroadcasting()
         DriverOnlineService.stop(getApplication())
@@ -1937,7 +1930,6 @@ class DriverViewModel @Inject constructor(
                 closeAllRideSubscriptionsAndJobs()
                 riderPubKey?.let { unsubscribeFromRiderProfile(it) }
                 clearDriverStateHistory()
-                stageBeforeRide = null
                 broadcastRoadflareOfflineStatus()
                 stopRoadflareBroadcasting()
                 DriverOnlineService.stop(getApplication())
@@ -2012,7 +2004,6 @@ class DriverViewModel @Inject constructor(
             return
         }
         Log.d(TAG, "Rider pubkey: ${riderPubKey.take(16)}...")
-        Log.d(TAG, "Encrypted preimage present: ${preimageShare.preimageEncrypted != null}")
         Log.d(TAG, "Encrypted escrow token present: ${preimageShare.escrowTokenEncrypted != null}")
 
         viewModelScope.launch {
@@ -2053,9 +2044,10 @@ class DriverViewModel @Inject constructor(
                     Log.w(TAG, "No encrypted escrow token in preimage share")
                 }
 
-                // Update state with escrow info — don't overwrite existing escrowToken with null
+                // Update state with escrow info — don't overwrite existing escrowToken with null.
+                // preimage is non-null here (early-returned above if decryption failed).
                 val effectiveEscrowToken = escrowToken ?: session.activeEscrowToken
-                val canSettle = preimage != null && effectiveEscrowToken != null
+                val canSettle = effectiveEscrowToken != null
                 Log.d(TAG, "Updating state: canSettleEscrow=$canSettle (escrowToken from ${if (escrowToken != null) "preimageShare" else "confirmation"})")
                 updateRideSession { copy(
                     activePreimage = preimage,
@@ -2070,16 +2062,16 @@ class DriverViewModel @Inject constructor(
                 if (canSettle) {
                     Log.d(TAG, "=== ESCROW READY FOR SETTLEMENT ===")
                 } else {
-                    Log.w(TAG, "Escrow NOT ready: preimage=${preimage != null}, escrowToken=${escrowToken != null}")
+                    Log.w(TAG, "Escrow NOT ready: escrowToken=${escrowToken != null}")
 
-                    // EARLY WARNING: If payment was expected but can't be claimed, warn driver immediately
-                    // Skip for CROSS_MINT - escrow token is expected to be null (uses Lightning bridge instead)
+                    // EARLY WARNING: If payment was expected but can't be claimed, warn driver immediately.
+                    // Skip for CROSS_MINT - escrow token is expected to be null (uses Lightning bridge instead).
+                    // preimage is non-null here, so MISSING_PREIMAGE is unreachable.
                     if (session.activePaymentHash != null && session.paymentPath == PaymentPath.SAME_MINT) {
                         Log.w(TAG, "Payment issue detected - showing warning dialog immediately")
                         updateRideSession { copy(
                             showPaymentWarningDialog = true,
                             paymentWarningStatus = when {
-                                preimage == null -> PaymentStatus.MISSING_PREIMAGE
                                 escrowToken == null -> PaymentStatus.MISSING_ESCROW_TOKEN
                                 else -> PaymentStatus.UNKNOWN_ERROR
                             }
@@ -2557,8 +2549,6 @@ class DriverViewModel @Inject constructor(
      * This typically means the rider cancelled before we accepted.
      */
     private fun handleConfirmationTimeout() {
-        stageBeforeRide = null
-
         val context = getApplication<Application>()
         DriverOnlineService.updateStatus(context, DriverStatus.Cancelled)
 
@@ -2857,8 +2847,6 @@ class DriverViewModel @Inject constructor(
      * Perform cancellation cleanup (subscriptions, state, etc.)
      */
     private fun performCancellationCleanup(state: DriverUiState, offer: RideOfferData?, reason: String?) {
-        stageBeforeRide = null
-
         val context = getApplication<Application>()
 
         // Save cancelled ride to history (only if we had an accepted offer and not already saved)
@@ -2976,7 +2964,6 @@ class DriverViewModel @Inject constructor(
         // Synchronous cleanup
         closeAllRideSubscriptionsAndJobs()
         clearDriverStateHistory()
-        stageBeforeRide = null
         broadcastRoadflareOfflineStatus()
         stopRoadflareBroadcasting()
         DriverOnlineService.stop(getApplication())
@@ -3029,14 +3016,15 @@ class DriverViewModel @Inject constructor(
         _uiState.value = _uiState.value.copy(error = null)
     }
 
-    private suspend fun publishAvailability(spec: AvailabilitySpec): String? {
+    private suspend fun publishAvailability(spec: AvailabilitySpec, track: Boolean = false): String? {
         val args = spec.toPublishArgs()
         return availabilityCoordinator.publishAvailability(
             location = args.location,
             status = args.status,
             vehicle = args.vehicle,
             mintUrl = args.mintUrl,
-            paymentMethods = args.paymentMethods
+            paymentMethods = args.paymentMethods,
+            track = track
         )
     }
 
@@ -3649,8 +3637,6 @@ class DriverViewModel @Inject constructor(
             rideContext = newContext
             rideState = RideState.CREATED
 
-            stageBeforeRide = _uiState.value.stage
-
             validateTransition(RideEvent.Accept(
                 inputterPubkey = myPubkey,
                 driverPubkey = myPubkey,
@@ -3658,7 +3644,7 @@ class DriverViewModel @Inject constructor(
                 mintUrl = walletService?.getSavedMintUrl()
             ))
 
-            updateRideSession { copy(isProcessingOffer = true) }
+            updateRideSession { copy(stageBeforeRide = _uiState.value.stage, isProcessingOffer = true) }
 
             when (val outcome = acceptanceCoordinator.acceptBroadcastRequest(request, myPubkey)) {
                 is AcceptBroadcastOutcome.Success -> {
@@ -3932,7 +3918,11 @@ data class DriverRideSession(
     val pendingBroadcastRequests: List<BroadcastRideOfferData> = emptyList(),
 
     // No-common-payment-method warning dialog (Issue #46)
-    val noMatchWarningOfferEventId: String? = null
+    val noMatchWarningOfferEventId: String? = null,
+
+    // Pre-ride stage snapshot — restored on ride completion so driver returns to the
+    // same AVAILABLE / ROADFLARE_ONLY mode they were in before the ride started.
+    val stageBeforeRide: DriverStage? = null
 )
 
 /**

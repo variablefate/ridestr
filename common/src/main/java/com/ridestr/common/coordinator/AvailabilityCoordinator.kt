@@ -78,6 +78,10 @@ class AvailabilityCoordinator(
      * @param vehicle Driver's active vehicle metadata, or null.
      * @param mintUrl Cashu mint URL, or null when wallet is not configured.
      * @param paymentMethods Non-empty list of accepted payment method identifiers.
+     * @param track When true, add the returned event ID to [publishedAvailabilityEventIds]
+     *              so it is cleaned up by [deleteAllAvailabilityEvents]. Set false for
+     *              one-shot offline broadcasts that should persist (drivers going OFFLINE
+     *              want the last event visible until it expires naturally).
      * @return Event ID on success, null on failure.
      */
     suspend fun publishAvailability(
@@ -85,14 +89,21 @@ class AvailabilityCoordinator(
         status: String,
         vehicle: Vehicle?,
         mintUrl: String?,
-        paymentMethods: List<String>
-    ): String? = nostrService.broadcastAvailability(
-        location = location,
-        status = status,
-        vehicle = vehicle,
-        mintUrl = mintUrl,
-        paymentMethods = paymentMethods
-    )
+        paymentMethods: List<String>,
+        track: Boolean = false
+    ): String? {
+        val eventId = nostrService.broadcastAvailability(
+            location = location,
+            status = status,
+            vehicle = vehicle,
+            mintUrl = mintUrl,
+            paymentMethods = paymentMethods
+        )
+        if (track && eventId != null) {
+            publishedEventIds.add(eventId)
+        }
+        return eventId
+    }
 
     // -------------------------------------------------------------------------
     // Periodic broadcasting loop
@@ -165,15 +176,6 @@ class AvailabilityCoordinator(
                 delay(BROADCAST_INTERVAL_MS)
             }
         }
-    }
-
-    /**
-     * Register an event ID published outside the broadcast loop so it is included in
-     * [deleteAllAvailabilityEvents]. Use for one-shot publishes (e.g. RoadFlare presence
-     * event) that must be cleaned up when the driver goes offline.
-     */
-    fun trackPublishedEvent(eventId: String) {
-        publishedEventIds.add(eventId)
     }
 
     /** Cancel the broadcast loop without deleting published events from relays. */
