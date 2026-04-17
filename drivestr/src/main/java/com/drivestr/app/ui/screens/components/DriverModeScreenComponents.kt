@@ -901,10 +901,12 @@ fun OfferInbox(
     onAcceptOffer: (RideOfferData) -> Unit,
     onDeclineOffer: (RideOfferData) -> Unit,
     onSetNoMatchWarning: (String) -> Unit,
-    onToggleExpandedSearch: () -> Unit
+    onToggleExpandedSearch: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     val totalRequests = freshBroadcastRequests.size + pendingOffers.size
 
+    Column(modifier = modifier) {
     // Search area toggle and ride requests header
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -1027,4 +1029,5 @@ fun OfferInbox(
             }
         }
     }
+    } // end Column
 }
