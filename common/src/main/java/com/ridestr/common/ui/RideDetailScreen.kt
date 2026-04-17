@@ -13,6 +13,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.ridestr.common.fiat.formatFareDisplay
 import com.ridestr.common.nostr.events.RideHistoryEntry
 import com.ridestr.common.settings.DisplayCurrency
 import java.text.SimpleDateFormat
@@ -470,13 +471,7 @@ fun RideDetailScreen(
 
                         Spacer(modifier = Modifier.height(16.dp))
 
-                        val fareDisplay = when (displayCurrency) {
-                            DisplayCurrency.SATS -> "${ride.fareSats} sats"
-                            DisplayCurrency.USD -> {
-                                val usd = btcPriceUsd?.let { ride.fareSats.toDouble() * it / 100_000_000.0 }
-                                usd?.let { String.format("$%.2f", it) } ?: "${ride.fareSats} sats"
-                            }
-                        }
+                        val fareDisplay = ride.formatFareDisplay(displayCurrency, btcPriceUsd)
 
                         Surface(
                             color = MaterialTheme.colorScheme.primaryContainer,

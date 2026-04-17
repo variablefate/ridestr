@@ -144,6 +144,8 @@ data class RideHistoryEntry(
     val distanceMiles: Double,   // Exact distance for stats
     val durationMinutes: Int,    // Exact duration for stats
     val fareSats: Long,
+    // Authoritative fiat fare for fiat-rail rides (preserves exact quoted amount in history)
+    val fiatFare: FiatFare? = null,
     val status: String,   // "completed", "cancelled", etc.
 
     // Counterparty details (for ride detail screen)
@@ -175,6 +177,10 @@ data class RideHistoryEntry(
         put("distance_miles", distanceMiles)
         put("duration_minutes", durationMinutes)
         put("fare_sats", fareSats)
+        fiatFare?.let {
+            put("fare_fiat_amount", it.amount)
+            put("fare_fiat_currency", it.currency)
+        }
         put("status", status)
         // Counterparty details
         counterpartyFirstName?.let { put("counterparty_first_name", it) }
@@ -190,6 +196,13 @@ data class RideHistoryEntry(
     companion object {
         fun fromJson(json: JSONObject): RideHistoryEntry? {
             return try {
+                val fareFiatAmount = if (json.has("fare_fiat_amount")) json.getString("fare_fiat_amount") else null
+                val fareFiatCurrency = if (json.has("fare_fiat_currency")) json.getString("fare_fiat_currency") else null
+                val fiatFare = if (fareFiatAmount != null && fareFiatCurrency != null) {
+                    FiatFare(fareFiatAmount, fareFiatCurrency)
+                } else {
+                    null
+                }
                 RideHistoryEntry(
                     rideId = json.getString("ride_id"),
                     timestamp = json.getLong("timestamp"),
@@ -207,14 +220,15 @@ data class RideHistoryEntry(
                     distanceMiles = json.getDouble("distance_miles"),
                     durationMinutes = json.getInt("duration_minutes"),
                     fareSats = json.getLong("fare_sats"),
+                    fiatFare = fiatFare,
                     status = json.getString("status"),
                     // Counterparty details (optional, for backwards compatibility)
-                    counterpartyFirstName = json.optString("counterparty_first_name", null),
-                    vehicleMake = json.optString("vehicle_make", null),
-                    vehicleModel = json.optString("vehicle_model", null),
-                    lightningAddress = json.optString("lightning_address", null),
+                    counterpartyFirstName = if (json.has("counterparty_first_name")) json.getString("counterparty_first_name") else null,
+                    vehicleMake = if (json.has("vehicle_make")) json.getString("vehicle_make") else null,
+                    vehicleModel = if (json.has("vehicle_model")) json.getString("vehicle_model") else null,
+                    lightningAddress = if (json.has("lightning_address")) json.getString("lightning_address") else null,
                     tipSats = json.optLong("tip_sats", 0),
-                    appOrigin = json.optString("app_origin", null).takeIf { it.isNotEmpty() }
+                    appOrigin = if (json.has("app_origin")) json.getString("app_origin").takeIf { it.isNotEmpty() } else null
                 )
             } catch (e: Exception) {
                 null

@@ -16,6 +16,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.ridestr.common.fiat.formatFareDisplay
+import com.ridestr.common.fiat.sumFareUsdOrNull
 import com.ridestr.common.data.RideHistoryRepository
 import com.ridestr.common.nostr.NostrService
 import com.ridestr.common.nostr.events.Geohash
@@ -181,6 +183,7 @@ fun EarningsScreen(
                 item {
                     EarningsCard(
                         stats = stats,
+                        rides = rides,
                         displayCurrency = displayCurrency,
                         btcPriceUsd = btcPriceUsd,
                         onToggleCurrency = onToggleCurrency
@@ -241,6 +244,7 @@ fun EarningsScreen(
 @Composable
 private fun EarningsCard(
     stats: RideHistoryStats,
+    rides: List<RideHistoryEntry>,
     displayCurrency: DisplayCurrency,
     btcPriceUsd: Int?,
     onToggleCurrency: () -> Unit
@@ -275,10 +279,11 @@ private fun EarningsCard(
             Spacer(modifier = Modifier.height(16.dp))
 
             // Total Earned (prominent display)
+            val completedDriverRides = rides.filter { it.role == "driver" && it.status == "completed" }
             val totalEarnedDisplay = when (displayCurrency) {
                 DisplayCurrency.SATS -> "${stats.totalFareSatsEarned} sats"
                 DisplayCurrency.USD -> {
-                    val usd = btcPriceUsd?.let { stats.totalFareSatsEarned.toDouble() * it / 100_000_000.0 }
+                    val usd = completedDriverRides.sumFareUsdOrNull(btcPriceUsd)
                     usd?.let { String.format("$%.2f", it) } ?: "${stats.totalFareSatsEarned} sats"
                 }
             }
@@ -339,7 +344,7 @@ private fun EarningsCard(
                 val avgDisplay = when (displayCurrency) {
                     DisplayCurrency.SATS -> "$avgPerRide sats/ride"
                     DisplayCurrency.USD -> {
-                        val usd = btcPriceUsd?.let { avgPerRide.toDouble() * it / 100_000_000.0 }
+                        val usd = completedDriverRides.sumFareUsdOrNull(btcPriceUsd)?.div(stats.completedRides)
                         usd?.let { String.format("$%.2f/ride", it) } ?: "$avgPerRide sats/ride"
                     }
                 }
@@ -410,13 +415,11 @@ private fun DriverRideCard(
         dateFormat.format(Date(ride.timestamp * 1000))
     }
 
-    val fareDisplay = when (displayCurrency) {
-        DisplayCurrency.SATS -> "+${ride.fareSats} sats"
-        DisplayCurrency.USD -> {
-            val usd = btcPriceUsd?.let { ride.fareSats.toDouble() * it / 100_000_000.0 }
-            usd?.let { String.format("+$%.2f", it) } ?: "+${ride.fareSats} sats"
-        }
-    }
+    val fareDisplay = ride.formatFareDisplay(
+        displayCurrency = displayCurrency,
+        btcPriceUsd = btcPriceUsd,
+        prefix = "+"
+    )
 
     val isCompleted = ride.status == "completed"
 

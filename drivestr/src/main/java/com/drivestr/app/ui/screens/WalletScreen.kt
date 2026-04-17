@@ -13,7 +13,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.ridestr.common.fiat.sumFareUsdOrNull
 import com.ridestr.common.data.RideHistoryRepository
+import com.ridestr.common.nostr.events.RideHistoryEntry
 import com.ridestr.common.nostr.events.RideHistoryStats
 import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.payment.WalletDiagnostics
@@ -41,7 +43,27 @@ fun WalletScreen(
     onViewEarningsDetails: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val stats by rideHistoryRepository.stats.collectAsState()
+    val allRides by rideHistoryRepository.rides.collectAsState()
+    val rides = remember(allRides) {
+        allRides.filter { entry ->
+            entry.appOrigin == RideHistoryRepository.APP_ORIGIN_DRIVESTR ||
+                (entry.appOrigin == null && entry.role == "driver")
+        }
+    }
+    val stats = remember(rides) {
+        RideHistoryStats(
+            totalRidesAsRider = rides.count { it.role == "rider" },
+            totalRidesAsDriver = rides.count { it.role == "driver" },
+            totalDistanceMiles = rides.sumOf { it.distanceMiles },
+            totalDurationMinutes = rides.sumOf { it.durationMinutes },
+            totalFareSatsEarned = rides.filter { it.role == "driver" && it.status == "completed" }
+                .sumOf { it.fareSats },
+            totalFareSatsPaid = rides.filter { it.role == "rider" && it.status == "completed" }
+                .sumOf { it.fareSats },
+            completedRides = rides.count { it.status == "completed" },
+            cancelledRides = rides.count { it.status == "cancelled" }
+        )
+    }
     val btcPriceUsd by priceService.btcPriceUsd.collectAsState()
 
     // Wallet state (if service provided)
@@ -87,6 +109,7 @@ fun WalletScreen(
         item {
             EarningsCard(
                 stats = stats,
+                rides = rides,
                 displayCurrency = displayCurrency,
                 btcPriceUsd = btcPriceUsd,
                 onToggleCurrency = onToggleCurrency,
@@ -343,6 +366,7 @@ private fun WalletBalanceCard(
 @Composable
 private fun EarningsCard(
     stats: RideHistoryStats,
+    rides: List<RideHistoryEntry>,
     displayCurrency: DisplayCurrency,
     btcPriceUsd: Int?,
     onToggleCurrency: () -> Unit,
@@ -353,7 +377,14 @@ private fun EarningsCard(
     val completedRides = stats.completedRides
     val totalMiles = stats.totalDistanceMiles
 
-    val totalDisplay = formatSats(totalEarned, displayCurrency, btcPriceUsd)
+    val completedDriverRides = rides.filter { it.role == "driver" && it.status == "completed" }
+    val totalDisplay = when (displayCurrency) {
+        DisplayCurrency.SATS -> formatSats(totalEarned, displayCurrency, btcPriceUsd)
+        DisplayCurrency.USD -> {
+            val usd = completedDriverRides.sumFareUsdOrNull(btcPriceUsd)
+            usd?.let { String.format("$%.2f", it) } ?: formatSats(totalEarned, displayCurrency, btcPriceUsd)
+        }
+    }
 
     Card(
         modifier = Modifier
