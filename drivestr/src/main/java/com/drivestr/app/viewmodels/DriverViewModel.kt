@@ -1147,9 +1147,8 @@ class DriverViewModel @Inject constructor(
         // Track this broadcast for throttling
         availabilityCoordinator.updateThrottle(newLocation)
 
-        // Restart broadcasting with the new location to trigger immediate update
-        // The periodic broadcast will now use the new location from state
-        stopBroadcasting()
+        // Restart broadcasting with the new location to trigger immediate update.
+        // startBroadcasting() cancels the running job internally (see its KDoc).
         startBroadcasting(newLocation)
 
         // Also resubscribe to broadcast requests with new geohash
@@ -2583,6 +2582,10 @@ class DriverViewModel @Inject constructor(
         // Clear persisted ride state — ride was persisted on accept,
         // so timeout must clear it to prevent stale restore on app restart
         clearSavedRideState()
+
+        // Always reset broadcast gate so the next broadcast offer can be accepted,
+        // even if location is null and we skip resumeOfferSubscriptions() below.
+        acceptanceCoordinator.resetBroadcastGate()
 
         // Resume broadcasting
         val location = _uiState.value.currentLocation

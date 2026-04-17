@@ -126,12 +126,17 @@ class AcceptanceCoordinator(
 
         Log.d(TAG, "Accepting broadcast request ${request.eventId.take(8)} from ${request.riderPubKey.take(8)}")
 
-        val eventId = nostrService.acceptBroadcastRide(
-            request = request,
-            walletPubKey = walletPubKey,
-            mintUrl = driverMintUrl,
-            paymentMethod = request.paymentMethod
-        ) ?: run {
+        val eventId = try {
+            nostrService.acceptBroadcastRide(
+                request = request,
+                walletPubKey = walletPubKey,
+                mintUrl = driverMintUrl,
+                paymentMethod = request.paymentMethod
+            )
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            hasAcceptedBroadcast.set(false)
+            throw e
+        } ?: run {
             Log.e(TAG, "acceptBroadcastRide returned null — Nostr publish failed")
             hasAcceptedBroadcast.set(false) // allow retry
             return null

@@ -190,8 +190,8 @@ class AvailabilityCoordinator(
      * Request NIP-09 deletion for all Kind 30173 events published in this session.
      *
      * Suspends until the deletion event is confirmed sent (or fails). Event IDs are
-     * cleared only on success — on failure they are retained so a retry can attempt
-     * deletion again.
+     * always cleared after this call — stale events expire naturally if the relay
+     * request fails, so no retry is warranted.
      */
     suspend fun deleteAllAvailabilityEvents() {
         if (publishedEventIds.isEmpty()) {
@@ -206,10 +206,10 @@ class AvailabilityCoordinator(
         )
         if (deletionId != null) {
             Log.d(TAG, "Deletion request sent: $deletionId")
-            publishedEventIds.clear()
         } else {
-            Log.w(TAG, "Deletion request failed — retaining event IDs for retry")
+            Log.w(TAG, "Deletion request failed — events will expire naturally")
         }
+        publishedEventIds.clear()
     }
 
     // -------------------------------------------------------------------------

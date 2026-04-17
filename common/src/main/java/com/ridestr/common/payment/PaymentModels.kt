@@ -38,8 +38,6 @@ enum class EscrowType {
  *
  * This is not a lifecycle enum — it reflects the driver's *readiness to claim*, not the
  * overall payment lifecycle (see [EscrowType] / [EscrowDetails] for lifecycle state).
- *
- * // TODO(#52): inject via Hilt once migration lands
  */
 enum class PaymentStatus {
     /** Non-HTLC payment path (fiat cash, cross-mint bridge already complete, or no payment). */
