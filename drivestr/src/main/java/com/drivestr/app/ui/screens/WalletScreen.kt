@@ -13,6 +13,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.ridestr.common.fiat.formatUsd
 import com.ridestr.common.fiat.sumFareUsdOrNull
 import com.ridestr.common.data.RideHistoryRepository
 import com.ridestr.common.nostr.events.RideHistoryEntry
@@ -382,7 +383,7 @@ private fun EarningsCard(
         DisplayCurrency.SATS -> formatSats(totalEarned, displayCurrency, btcPriceUsd)
         DisplayCurrency.USD -> {
             val usd = completedDriverRides.sumFareUsdOrNull(btcPriceUsd)
-            usd?.let { String.format("$%.2f", it) } ?: formatSats(totalEarned, displayCurrency, btcPriceUsd)
+            usd?.formatUsd() ?: formatSats(totalEarned, displayCurrency, btcPriceUsd)
         }
     }
 

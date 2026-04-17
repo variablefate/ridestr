@@ -14,6 +14,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.ridestr.common.data.RideHistoryRepository
+import com.ridestr.common.fiat.formatUsd
 import com.ridestr.common.fiat.sumFareUsdOrNull
 import com.ridestr.common.nostr.events.RideHistoryStats
 import com.ridestr.common.bitcoin.BitcoinPriceService
@@ -454,7 +455,7 @@ private fun SpendingHistoryCard(
         DisplayCurrency.SATS -> formatSats(stats.totalFareSatsPaid, displayCurrency, btcPriceUsd)
         DisplayCurrency.USD -> {
             val usd = completedRiderRides.sumFareUsdOrNull(btcPriceUsd)
-            usd?.let { String.format("$%.2f", it) } ?: formatSats(stats.totalFareSatsPaid, displayCurrency, btcPriceUsd)
+            usd?.formatUsd() ?: formatSats(stats.totalFareSatsPaid, displayCurrency, btcPriceUsd)
         }
     }
     val thisMonthSpentSats = thisMonthRides.sumOf { it.fareSats }
@@ -462,7 +463,7 @@ private fun SpendingHistoryCard(
         DisplayCurrency.SATS -> formatSats(thisMonthSpentSats, displayCurrency, btcPriceUsd)
         DisplayCurrency.USD -> {
             val usd = thisMonthRides.sumFareUsdOrNull(btcPriceUsd)
-            usd?.let { String.format("$%.2f", it) } ?: formatSats(thisMonthSpentSats, displayCurrency, btcPriceUsd)
+            usd?.formatUsd() ?: formatSats(thisMonthSpentSats, displayCurrency, btcPriceUsd)
         }
     }
 

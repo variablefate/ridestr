@@ -5087,6 +5087,7 @@ class RiderViewModel @Inject constructor(
         val finalFareSats = statusData.finalFare?.toLong() ?: state.fareEstimate?.toLong() ?: 0L
         val driver = session.selectedDriver
         val driverProfile = driver?.let { state.driverProfiles[it.driverPubKey] }
+        val ridePaymentMethod = session.activePaymentMethod ?: settingsRepository.getDefaultPaymentMethod()
 
         // Conditionally mark HTLC based on driver's claim result
         val paymentHash = session.activePaymentHash
@@ -5141,9 +5142,12 @@ class RiderViewModel @Inject constructor(
                     distanceMiles = RideHistoryBuilder.toDistanceMiles(state.routeResult?.distanceKm),
                     durationMinutes = ((state.routeResult?.durationSeconds ?: 0.0) / 60).toInt(),
                     fareSats = finalFareSats,
-                    // Preserve authoritative fiat fare (per ADR-0008) so rider's own history
-                    // shows the exact quoted amount instead of re-converting via BTC price.
-                    fiatFare = state.fareEstimateUsd?.let { com.ridestr.common.nostr.events.FiatFare(it, "USD") },
+                    // Preserve authoritative fiat fare ONLY for fiat rails (per ADR-0008).
+                    // Crypto rails (cashu/lightning) treat sats as canonical — leaving fiatFare
+                    // null lets history display use live BTC conversion, matching driver behavior.
+                    fiatFare = if (isFiatPaymentMethod(ridePaymentMethod)) {
+                        state.fareEstimateUsd?.let { com.ridestr.common.nostr.events.FiatFare(it, "USD") }
+                    } else null,
                     status = "completed",
                     // Driver details for ride history
                     counterpartyFirstName = RideHistoryBuilder.extractCounterpartyFirstName(driverProfile),
