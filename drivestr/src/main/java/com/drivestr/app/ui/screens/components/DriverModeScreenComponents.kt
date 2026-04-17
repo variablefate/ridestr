@@ -25,14 +25,7 @@ import com.ridestr.common.settings.DistanceUnit
 import com.ridestr.common.ui.FareDisplay
 import java.util.Locale
 
-// ---------------------------------------------------------------------------
-// Utility functions
-// ---------------------------------------------------------------------------
-
-/**
- * Format a Unix timestamp as relative time (e.g., "5s ago", "2m ago").
- */
-fun formatRelativeTime(timestampSeconds: Long): String {
+private fun formatRelativeTime(timestampSeconds: Long): String {
     val nowSeconds = System.currentTimeMillis() / 1000
     val diffSeconds = nowSeconds - timestampSeconds
 
@@ -44,10 +37,7 @@ fun formatRelativeTime(timestampSeconds: Long): String {
     }
 }
 
-/**
- * Format distance based on user's preferred unit.
- */
-fun formatDistance(distanceKm: Double, unit: DistanceUnit): String {
+private fun formatDistance(distanceKm: Double, unit: DistanceUnit): String {
     return when (unit) {
         DistanceUnit.MILES -> {
             val miles = distanceKm * 0.621371
@@ -67,10 +57,7 @@ fun formatDistance(distanceKm: Double, unit: DistanceUnit): String {
     }
 }
 
-/**
- * Format earnings rate (sats/unit) with currency conversion.
- */
-fun formatEarnings(
+internal fun formatEarnings(
     satsPerUnit: Double,
     displayCurrency: DisplayCurrency,
     btcPriceUsd: Int?,
@@ -94,14 +81,10 @@ fun formatEarnings(
     }
 }
 
-fun effectiveRoadflareDriverMethods(driverFiatMethods: List<String>): List<String> {
+private fun effectiveRoadflareDriverMethods(driverFiatMethods: List<String>): List<String> {
     val bitcoin = com.ridestr.common.nostr.events.PaymentMethod.BITCOIN.value
     return (driverFiatMethods + bitcoin).distinctBy { it.trim().lowercase() }
 }
-
-// ---------------------------------------------------------------------------
-// Extracted composables: moved from DriverModeScreen
-// ---------------------------------------------------------------------------
 
 @Composable
 fun RideOfferCard(
@@ -711,18 +694,6 @@ fun NoCommonPaymentMethodDialog(
     )
 }
 
-// ---------------------------------------------------------------------------
-// New composables extracted from inline code in stage-routing composables
-// ---------------------------------------------------------------------------
-
-/**
- * Status card + toggle action buttons for the RoadFlare-Only mode.
- * Extracted from the top of RoadflareOnlyContent.
- *
- * @param statusMessage  Subtitle shown inside the status card (currently hard-coded text).
- * @param onGoFullyOnline  Callback for the "Go Fully Online" button.
- * @param onGoOffline  Callback for the "Go Offline" button.
- */
 @Composable
 fun AvailabilityControls(
     onGoFullyOnline: () -> Unit,
@@ -792,10 +763,6 @@ fun AvailabilityControls(
     }
 }
 
-/**
- * List of pending RoadFlare offers (or an empty-state card when none exist).
- * Extracted from the lower section of RoadflareOnlyContent.
- */
 @Composable
 fun RoadflareFollowerList(
     pendingOffers: List<RideOfferData>,
@@ -876,13 +843,6 @@ fun RoadflareFollowerList(
     }
 }
 
-/**
- * Combined offers display: broadcast requests followed by direct offer cards.
- * Extracted from the lower section of AvailableContent.
- *
- * When [totalRequests] is 0 an empty-state card is shown; otherwise a LazyColumn
- * lists broadcast requests first, then direct offers.
- */
 @Composable
 fun OfferInbox(
     expandedSearch: Boolean,

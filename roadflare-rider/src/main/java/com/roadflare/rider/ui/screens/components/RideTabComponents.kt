@@ -35,21 +35,21 @@ fun CancelledContent(
     }
 }
 
-/** Format a USD fare amount respecting the display currency preference. */
 @Composable
 fun formatFareAmount(
     fareUsd: Double,
     displayCurrency: DisplayCurrency,
     priceService: BitcoinPriceService
 ): String {
-    // Subscribe so recomposition fires when BTC price updates (usdToSats reads the same state).
     val btcPrice by priceService.btcPriceUsd.collectAsState()
     return when (displayCurrency) {
         DisplayCurrency.USD -> fareUsd.formatUsd()
         DisplayCurrency.SATS -> {
-            val sats = btcPrice?.takeIf { it > 0 }?.let { priceService.usdToSats(fareUsd) }
-            if (sats != null) String.format(Locale.US, "%,d sats", sats)
-            else fareUsd.formatUsd()
+            val price = btcPrice?.takeIf { it > 0 }
+            if (price != null) {
+                val sats = (fareUsd * 100_000_000.0 / price).toLong()
+                String.format(Locale.US, "%,d sats", sats)
+            } else fareUsd.formatUsd()
         }
     }
 }

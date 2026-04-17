@@ -949,7 +949,8 @@ private fun AvailableContent(
         onAcceptOffer = onAcceptOffer,
         onDeclineOffer = onDeclineOffer,
         onSetNoMatchWarning = onSetNoMatchWarning,
-        onToggleExpandedSearch = onToggleExpandedSearch
+        onToggleExpandedSearch = onToggleExpandedSearch,
+        modifier = Modifier.weight(1f)
     )
 
     // Auto-dismiss dialog when underlying offer disappears from pendingOffers

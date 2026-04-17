@@ -23,10 +23,6 @@ import com.ridestr.common.ui.FareDisplay
 import com.ridestr.common.ui.formatFare
 import com.ridestr.rider.viewmodels.RiderUiState
 
-// ─────────────────────────────────────────────────────────────
-// RideRequestPanel  (was: RequestRideCard)
-// ─────────────────────────────────────────────────────────────
-
 @Composable
 fun RideRequestPanel(
     driver: DriverAvailabilityData,
@@ -158,10 +154,6 @@ fun RiderPinCard(pin: String) {
         }
     }
 }
-
-// ─────────────────────────────────────────────────────────────
-// ActiveRidePanel  (was: DriverAcceptedContent)
-// ─────────────────────────────────────────────────────────────
 
 @Composable
 fun ActiveRidePanel(
@@ -382,10 +374,6 @@ fun ActiveRidePanel(
     )
 }
 
-// ─────────────────────────────────────────────────────────────
-// CompletionPanel  (was: RideCompletedContent)
-// ─────────────────────────────────────────────────────────────
-
 @Composable
 fun CompletionPanel(
     driverPubKey: String?,
@@ -497,11 +485,6 @@ fun CompletionPanel(
         }
     }
 }
-
-// ─────────────────────────────────────────────────────────────
-// CancelDialogStack  (new — extracted from RiderModeScreen body)
-// Three alert dialogs previously inlined in the screen composable.
-// ─────────────────────────────────────────────────────────────
 
 @Composable
 internal fun CancelDialogStack(
