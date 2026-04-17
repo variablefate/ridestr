@@ -28,6 +28,19 @@ data class AcceptanceResult(
 )
 
 /**
+ * Outcome of [AcceptanceCoordinator.acceptBroadcastRequest].
+ *
+ * Distinguishes CAS-gate deduplication (silent — another caller is handling it) from
+ * a real Nostr publish failure (surface to user). Without this split, a rapid duplicate
+ * invocation would look identical to a failure at the call site.
+ */
+sealed class AcceptBroadcastOutcome {
+    data class Success(val result: AcceptanceResult) : AcceptBroadcastOutcome()
+    object DuplicateBlocked : AcceptBroadcastOutcome()
+    object PublishFailed : AcceptBroadcastOutcome()
+}
+
+/**
  * Handles the offer-acceptance protocol for direct and broadcast ride offers.
  *
  * Responsibilities:
@@ -108,16 +121,17 @@ class AcceptanceCoordinator(
      *
      * @param request The broadcast request received from the rider.
      * @param myPubKey The driver's own Nostr public key (used to build the compatible offer).
-     * @return [AcceptanceResult] on success, null if already accepted by another thread or
-     *   if the Nostr publish failed.
+     * @return [AcceptBroadcastOutcome] — Success carries the acceptance data; DuplicateBlocked
+     *   indicates the CAS gate rejected the call (another invocation is handling it);
+     *   PublishFailed indicates a Nostr publish error that should be surfaced to the user.
      */
     suspend fun acceptBroadcastRequest(
         request: BroadcastRideOfferData,
         myPubKey: String
-    ): AcceptanceResult? {
+    ): AcceptBroadcastOutcome {
         if (!hasAcceptedBroadcast.compareAndSet(false, true)) {
             Log.d(TAG, "acceptBroadcastRequest: CAS gate blocked duplicate acceptance")
-            return null
+            return AcceptBroadcastOutcome.DuplicateBlocked
         }
 
         val walletService = walletServiceProvider()
@@ -139,7 +153,7 @@ class AcceptanceCoordinator(
         } ?: run {
             Log.e(TAG, "acceptBroadcastRide returned null — Nostr publish failed")
             hasAcceptedBroadcast.set(false) // allow retry
-            return null
+            return AcceptBroadcastOutcome.PublishFailed
         }
 
         // Normalize to RideOfferData for the shared downstream ride flow
@@ -160,13 +174,15 @@ class AcceptanceCoordinator(
         val paymentPath = PaymentPath.determine(request.mintUrl, driverMintUrl, request.paymentMethod)
         Log.d(TAG, "Broadcast acceptance OK: $eventId (paymentPath=$paymentPath)")
 
-        return AcceptanceResult(
-            acceptanceEventId = eventId,
-            offer = compatibleOffer,
-            broadcastRequest = request,
-            walletPubKey = walletPubKey,
-            driverMintUrl = driverMintUrl,
-            paymentPath = paymentPath
+        return AcceptBroadcastOutcome.Success(
+            AcceptanceResult(
+                acceptanceEventId = eventId,
+                offer = compatibleOffer,
+                broadcastRequest = request,
+                walletPubKey = walletPubKey,
+                driverMintUrl = driverMintUrl,
+                paymentPath = paymentPath
+            )
         )
     }
 

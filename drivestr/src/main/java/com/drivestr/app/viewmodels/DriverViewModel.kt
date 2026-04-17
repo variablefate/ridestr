@@ -57,6 +57,7 @@ import com.ridestr.common.state.toDriverStageName
 import com.ridestr.common.util.PeriodicRefreshJob
 import com.ridestr.common.util.RideHistoryBuilder
 import com.drivestr.app.BuildConfig
+import com.ridestr.common.coordinator.AcceptBroadcastOutcome
 import com.ridestr.common.coordinator.AcceptanceCoordinator
 import com.ridestr.common.coordinator.AvailabilityCoordinator
 import com.ridestr.common.coordinator.RoadflareDriverCoordinator
@@ -147,8 +148,7 @@ class DriverViewModel @Inject constructor(
 
     private val roadflareCoordinator = RoadflareDriverCoordinator(
         nostrService = nostrService,
-        driverRoadflareRepository = driverRoadflareRepository,
-        scope = viewModelScope
+        driverRoadflareRepository = driverRoadflareRepository
     )
 
     /** Signal for background refresh after RoadFlare state sync; observed by MainActivity. */
@@ -3660,24 +3660,30 @@ class DriverViewModel @Inject constructor(
 
             updateRideSession { copy(isProcessingOffer = true) }
 
-            val result = acceptanceCoordinator.acceptBroadcastRequest(request, myPubkey)
-
-            if (result != null) {
-                setupAcceptedRide(
-                    acceptanceEventId = result.acceptanceEventId,
-                    offer = result.offer,
-                    broadcastRequest = result.broadcastRequest,
-                    walletPubKey = result.walletPubKey,
-                    driverMintUrl = result.driverMintUrl,
-                    paymentPath = result.paymentPath,
-                    cleanupTag = "BROADCAST_ACCEPTANCE"
-                )
-            } else {
-                _uiState.update { current ->
-                    current.copy(
-                        error = "Failed to accept ride request",
-                        rideSession = current.rideSession.copy(isProcessingOffer = false)
+            when (val outcome = acceptanceCoordinator.acceptBroadcastRequest(request, myPubkey)) {
+                is AcceptBroadcastOutcome.Success -> {
+                    val result = outcome.result
+                    setupAcceptedRide(
+                        acceptanceEventId = result.acceptanceEventId,
+                        offer = result.offer,
+                        broadcastRequest = result.broadcastRequest,
+                        walletPubKey = result.walletPubKey,
+                        driverMintUrl = result.driverMintUrl,
+                        paymentPath = result.paymentPath,
+                        cleanupTag = "BROADCAST_ACCEPTANCE"
                     )
+                }
+                AcceptBroadcastOutcome.DuplicateBlocked -> {
+                    // Another invocation is handling this broadcast; stay silent.
+                    Log.d(TAG, "Broadcast acceptance deduplicated by CAS gate")
+                }
+                AcceptBroadcastOutcome.PublishFailed -> {
+                    _uiState.update { current ->
+                        current.copy(
+                            error = "Failed to accept ride request",
+                            rideSession = current.rideSession.copy(isProcessingOffer = false)
+                        )
+                    }
                 }
             }
         }

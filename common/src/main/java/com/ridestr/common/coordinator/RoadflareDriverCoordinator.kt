@@ -10,13 +10,11 @@ import com.ridestr.common.nostr.events.RoadflareFollower
 import com.ridestr.common.nostr.events.RoadflareLocation
 import com.ridestr.common.nostr.events.RoadflareLocationEvent
 import com.ridestr.common.roadflare.RoadflareLocationBroadcaster
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
-import kotlinx.coroutines.launch
 
 /**
  * Return type for [RoadflareDriverCoordinator.ensureStateSynced].
@@ -47,8 +45,7 @@ data class StateSyncResult(
  */
 class RoadflareDriverCoordinator(
     private val nostrService: NostrService,
-    private val driverRoadflareRepository: DriverRoadflareRepository,
-    private val scope: CoroutineScope
+    private val driverRoadflareRepository: DriverRoadflareRepository
 ) {
 
     companion object {
