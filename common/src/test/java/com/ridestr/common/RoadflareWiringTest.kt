@@ -292,6 +292,38 @@ class RoadflareWiringTest {
         assertTrue("Expected p-tag for driver", pTags.isNotEmpty())
     }
 
+    @Test
+    fun `create direct offer includes authoritative fiat fields when both values are present`() = runBlocking {
+        val tagsSlot = slot<Array<Array<String>>>()
+        val plaintextSlot = slot<String>()
+        val mockSigner = mockk<NostrSigner>(relaxed = true)
+        val mockEvent = mockk<Event>(relaxed = true)
+
+        coEvery { mockSigner.nip44Encrypt(capture(plaintextSlot), any()) } returns "encrypted_content"
+        coEvery {
+            mockSigner.sign<Event>(
+                createdAt = any(),
+                kind = any(),
+                tags = capture(tagsSlot),
+                content = any()
+            )
+        } returns mockEvent
+
+        RideOfferEvent.create(
+            signer = mockSigner,
+            driverPubKey = "abc123driver",
+            pickup = Location(36.0, -115.0),
+            destination = Location(36.1, -115.1),
+            fareEstimate = 10.0,
+            fareFiatAmount = "12.50",
+            fareFiatCurrency = "USD"
+        )
+
+        val json = JSONObject(plaintextSlot.captured)
+        assertEquals("12.50", json.getString("fare_fiat_amount"))
+        assertEquals("USD", json.getString("fare_fiat_currency"))
+    }
+
     // ==================
     // Broadcast offer path (geographic discovery)
     // ==================
@@ -357,5 +389,37 @@ class RoadflareWiringTest {
         // Should have geohash tags at precision 3, 4, and 5
         assertTrue("Expected geohash tags, got none", gTags.isNotEmpty())
         assertTrue("Expected at least 3 geohash tags (precision 3-5)", gTags.size >= 3)
+    }
+
+    @Test
+    fun `createBroadcast omits authoritative fiat fields unless both values are present`() = runBlocking {
+        val tagsSlot = slot<Array<Array<String>>>()
+        val contentSlot = slot<String>()
+        val mockSigner = mockk<NostrSigner>(relaxed = true)
+        val mockEvent = mockk<Event>(relaxed = true)
+
+        coEvery {
+            mockSigner.sign<Event>(
+                createdAt = any(),
+                kind = any(),
+                tags = capture(tagsSlot),
+                content = capture(contentSlot)
+            )
+        } returns mockEvent
+
+        RideOfferEvent.createBroadcast(
+            signer = mockSigner,
+            pickup = Location(36.0, -115.0),
+            destination = Location(36.1, -115.1),
+            fareEstimate = 10.0,
+            routeDistanceKm = 12.0,
+            routeDurationMin = 15.0,
+            fareFiatAmount = "12.50",
+            fareFiatCurrency = null
+        )
+
+        val json = JSONObject(contentSlot.captured)
+        assertFalse(json.has("fare_fiat_amount"))
+        assertFalse(json.has("fare_fiat_currency"))
     }
 }

@@ -173,9 +173,8 @@ class RiderViewModel @Inject constructor(
     )
 
     /**
-     * Result of a fare calculation. Carries both sats (always) and the original USD value
-     * used to compute it (null when BTC price was unavailable and a fallback was used).
-     * The USD value is the authoritative fiat amount per ADR-0008.
+     * Result of a fare calculation. Carries sats (actual or heuristic fallback) and the
+     * authoritative USD quote used for fiat/manual offers.
      */
     private data class FareCalc(val sats: Double, val usdAmount: String?)
 
@@ -2593,15 +2592,16 @@ class RiderViewModel @Inject constructor(
         val calculatedFare = (driverToPickupMiles + rideMiles) * ROADFLARE_RATE_PER_MILE
         val fareUsd = maxOf(calculatedFare, minimumFareUsd)
 
-        // Convert USD to sats using live BTC price
+        // Convert USD to sats using live BTC price. If price lookup fails, keep the
+        // authoritative USD quote for fiat/manual rails and fall back only for sats.
         val sats = bitcoinPriceService.usdToSats(fareUsd)
-        // If BTC price unavailable, fall back and drop USD (cannot state USD equivalent reliably)
         val MINIMUM_FALLBACK_SATS = 5000.0
-        return if (sats != null) {
-            FareCalc(sats = sats.toDouble(), usdAmount = String.format("%.2f", fareUsd))
-        } else {
-            FareCalc(sats = MINIMUM_FALLBACK_SATS, usdAmount = null)
-        }
+        val quote = authoritativeFareQuote(
+            fareUsd = fareUsd,
+            sats = sats,
+            fallbackSats = MINIMUM_FALLBACK_SATS
+        )
+        return FareCalc(sats = quote.sats, usdAmount = quote.usdAmount)
     }
 
     /**
@@ -2926,7 +2926,9 @@ class RiderViewModel @Inject constructor(
             subs.close(SubKeys.ACCEPTANCE)
             subs.closeGroup(SubKeys.BATCH_ACCEPTANCE)  // Defensive no-op (broadcast stage, not batch)
 
-            // Update fare in state - store actual sats boosted (not count)
+            // Update fare in state - store actual sats boosted (not count).
+            // Clear fareEstimateUsd: boost adds raw sats with no clean USD equivalent,
+            // so the boosted broadcast should drop authoritative fiat fields.
             // Reset broadcastTimedOut AND broadcastStartTimeMs to prevent race condition with UI
             // The explicit null reset ensures LaunchedEffect properly restarts when new time is set
             val newFareWithFees = newFare * (1 + FEE_BUFFER_PERCENT)
@@ -2934,6 +2936,7 @@ class RiderViewModel @Inject constructor(
                 current.copy(
                     fareEstimate = newFare,
                     fareEstimateWithFees = newFareWithFees,
+                    fareEstimateUsd = null,
                     rideSession = current.rideSession.copy(
                         totalBoostSats = session.totalBoostSats + boostAmount,
                         pendingOfferEventId = null,
@@ -5452,17 +5455,17 @@ class RiderViewModel @Inject constructor(
         // Enforce minimum fare to ensure driver profitability on short rides
         val fareUsd = maxOf(distanceBasedFare, minimumFare)
 
-        // Convert USD to sats using current BTC price
+        // Convert USD to sats using current BTC price. If price lookup fails, keep the
+        // authoritative USD quote for fiat/manual rails and fall back only for sats.
         val sats = bitcoinPriceService.usdToSats(fareUsd)
 
-        // If BTC price is available, the USD value matches the sats value (authoritative).
-        // If unavailable, sats falls back and we cannot reliably state the USD equivalent.
         val minimumFallbackSats = minimumFare * 1000.0  // $1 = ~1000 sats at $100k BTC
-        return if (sats != null) {
-            FareCalc(sats = sats.toDouble(), usdAmount = String.format("%.2f", fareUsd))
-        } else {
-            FareCalc(sats = maxOf(distanceMiles * FALLBACK_SATS_PER_MILE, minimumFallbackSats), usdAmount = null)
-        }
+        val quote = authoritativeFareQuote(
+            fareUsd = fareUsd,
+            sats = sats,
+            fallbackSats = maxOf(distanceMiles * FALLBACK_SATS_PER_MILE, minimumFallbackSats)
+        )
+        return FareCalc(sats = quote.sats, usdAmount = quote.usdAmount)
     }
 
     /**
