@@ -403,7 +403,6 @@ fun RiderModeScreen(
         showDriverUnavailable = uiState.rideSession.showDriverUnavailableDialog,
         showEscrowFailed = uiState.rideSession.showEscrowFailedDialog,
         escrowFailedMessage = uiState.rideSession.escrowFailedMessage,
-        escrowRetryDeadlineMs = null,
         onDismissCancelWarning = { viewModel.dismissCancelWarning() },
         onConfirmCancelWarning = { viewModel.confirmCancelAfterWarning() },
         onDismissDriverUnavailable = { viewModel.dismissDriverUnavailable() },

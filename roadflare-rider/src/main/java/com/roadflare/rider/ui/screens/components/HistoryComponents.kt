@@ -13,17 +13,22 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.ridestr.common.fiat.formatFareDisplay
+import com.ridestr.common.fiat.formatUsd
+import com.ridestr.common.fiat.sumFareUsdOrNull
 import com.ridestr.common.nostr.events.RideHistoryEntry
 import com.ridestr.common.nostr.events.RideHistoryStats
 import com.ridestr.common.settings.DisplayCurrency
 import java.text.SimpleDateFormat
-import java.util.*
+import java.util.Date
+import java.util.Locale
 
 @Composable
 fun HistoryList(
     stats: RideHistoryStats,
     rides: List<RideHistoryEntry>,
     displayCurrency: DisplayCurrency,
+    btcPriceUsd: Int?,
     onToggleCurrency: () -> Unit,
     onRideClick: (RideHistoryEntry) -> Unit,
     onDeleteRide: (RideHistoryEntry) -> Unit,
@@ -38,7 +43,9 @@ fun HistoryList(
         item {
             HistoryStatsCard(
                 stats = stats,
+                rides = rides,
                 displayCurrency = displayCurrency,
+                btcPriceUsd = btcPriceUsd,
                 onToggleCurrency = onToggleCurrency
             )
         }
@@ -58,6 +65,7 @@ fun HistoryList(
                 HistoryEntryCard(
                     ride = ride,
                     displayCurrency = displayCurrency,
+                    btcPriceUsd = btcPriceUsd,
                     onToggleCurrency = onToggleCurrency,
                     onClick = { onRideClick(ride) },
                     onDelete = { onDeleteRide(ride) }
@@ -98,6 +106,7 @@ fun HistoryFilterBar(
 fun HistoryEntryCard(
     ride: RideHistoryEntry,
     displayCurrency: DisplayCurrency,
+    btcPriceUsd: Int?,
     onToggleCurrency: () -> Unit,
     onClick: () -> Unit,
     onDelete: () -> Unit
@@ -107,8 +116,7 @@ fun HistoryEntryCard(
         dateFormat.format(Date(ride.timestamp * 1000))
     }
 
-    // Always show sats for now; fiat conversion can be added later with BitcoinPriceService
-    val fareDisplay = "${ride.fareSats} sats"
+    val fareDisplay = ride.formatFareDisplay(displayCurrency, btcPriceUsd)
     val isCompleted = ride.status == "completed"
 
     Card(
@@ -177,13 +185,13 @@ fun HistoryEntryCard(
 
             val pickupDisplay = ride.pickupAddress
                 ?: ride.pickupLat?.let { lat ->
-                    ride.pickupLon?.let { lon -> String.format("%.4f, %.4f", lat, lon) }
+                    ride.pickupLon?.let { lon -> String.format(Locale.US, "%.4f, %.4f", lat, lon) }
                 }
                 ?: "${ride.pickupGeohash.take(4)}..."
 
             val dropoffDisplay = ride.dropoffAddress
                 ?: ride.dropoffLat?.let { lat ->
-                    ride.dropoffLon?.let { lon -> String.format("%.4f, %.4f", lat, lon) }
+                    ride.dropoffLon?.let { lon -> String.format(Locale.US, "%.4f, %.4f", lat, lon) }
                 }
                 ?: "${ride.dropoffGeohash.take(4)}..."
 
@@ -237,7 +245,7 @@ fun HistoryEntryCard(
             ) {
                 Column {
                     Text(
-                        text = String.format("%.1f miles", ride.distanceMiles),
+                        text = String.format(Locale.US, "%.1f miles", ride.distanceMiles),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -272,7 +280,9 @@ fun HistoryEntryCard(
 @Composable
 internal fun HistoryStatsCard(
     stats: RideHistoryStats,
+    rides: List<RideHistoryEntry>,
     displayCurrency: DisplayCurrency,
+    btcPriceUsd: Int?,
     onToggleCurrency: () -> Unit
 ) {
     Card(
@@ -313,7 +323,7 @@ internal fun HistoryStatsCard(
                 )
                 HistoryStatItem(
                     label = "Distance",
-                    value = String.format("%.1f mi", stats.totalDistanceMiles),
+                    value = String.format(Locale.US, "%.1f mi", stats.totalDistanceMiles),
                     icon = Icons.Default.Route
                 )
                 HistoryStatItem(
@@ -325,7 +335,13 @@ internal fun HistoryStatsCard(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            val totalSpentDisplay = "${stats.totalFareSatsPaid} sats"
+            val completedRiderRides = rides.filter { it.role == "rider" && it.status == "completed" }
+            val totalSpentDisplay = when (displayCurrency) {
+                DisplayCurrency.SATS -> "${stats.totalFareSatsPaid} sats"
+                DisplayCurrency.USD -> completedRiderRides.sumFareUsdOrNull(btcPriceUsd)
+                    ?.formatUsd()
+                    ?: "${stats.totalFareSatsPaid} sats"
+            }
 
             Surface(
                 color = MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),

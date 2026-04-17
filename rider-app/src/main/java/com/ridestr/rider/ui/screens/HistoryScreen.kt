@@ -1,5 +1,6 @@
 package com.ridestr.rider.ui.screens
 
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteForever
@@ -127,7 +128,7 @@ fun HistoryScreen(
                 isRefreshing = false
             }
         },
-        modifier = modifier
+        modifier = modifier.fillMaxSize()
     ) {
         HistoryList(
             stats = stats,

@@ -1,5 +1,6 @@
 package com.roadflare.rider.ui.screens
 
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteForever
@@ -7,6 +8,7 @@ import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.data.RideHistoryRepository
 import com.ridestr.common.nostr.events.RideHistoryEntry
 import com.ridestr.common.nostr.events.RideHistoryStats
@@ -28,6 +30,7 @@ fun HistoryScreen(
     modifier: Modifier = Modifier
 ) {
     val rides by rideHistoryRepository.rides.collectAsState()
+    val btcPriceUsd by BitcoinPriceService.getInstance().btcPriceUsd.collectAsState()
 
     val stats = remember(rides) {
         RideHistoryStats(
@@ -110,12 +113,13 @@ fun HistoryScreen(
                 isRefreshing = false
             }
         },
-        modifier = modifier
+        modifier = modifier.fillMaxSize()
     ) {
         HistoryList(
             stats = stats,
             rides = rides,
             displayCurrency = displayCurrency,
+            btcPriceUsd = btcPriceUsd,
             onToggleCurrency = onToggleCurrency,
             onRideClick = onRideClick,
             onDeleteRide = { rideToDelete = it },

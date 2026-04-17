@@ -8,7 +8,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.ridestr.common.bitcoin.BitcoinPriceService
+import com.ridestr.common.fiat.formatUsd
 import com.ridestr.common.settings.DisplayCurrency
+import java.util.Locale
 
 /** Pure-presentation cancellation screen — no ride state bindings. */
 @Composable
@@ -40,14 +42,14 @@ fun formatFareAmount(
     displayCurrency: DisplayCurrency,
     priceService: BitcoinPriceService
 ): String {
-    @Suppress("UNUSED_VARIABLE")
+    // Subscribe so recomposition fires when BTC price updates (usdToSats reads the same state).
     val btcPrice by priceService.btcPriceUsd.collectAsState()
     return when (displayCurrency) {
-        DisplayCurrency.USD -> "$${String.format("%.2f", fareUsd)}"
+        DisplayCurrency.USD -> fareUsd.formatUsd()
         DisplayCurrency.SATS -> {
-            val sats = priceService.usdToSats(fareUsd)
-            if (sats != null) "${String.format("%,d", sats)} sats"
-            else "$${String.format("%.2f", fareUsd)}"
+            val sats = btcPrice?.takeIf { it > 0 }?.let { priceService.usdToSats(fareUsd) }
+            if (sats != null) String.format(Locale.US, "%,d sats", sats)
+            else fareUsd.formatUsd()
         }
     }
 }

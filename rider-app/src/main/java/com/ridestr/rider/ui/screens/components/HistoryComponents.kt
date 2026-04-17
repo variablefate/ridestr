@@ -14,12 +14,14 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.ridestr.common.fiat.formatFareDisplay
+import com.ridestr.common.fiat.formatUsd
 import com.ridestr.common.fiat.sumFareUsdOrNull
 import com.ridestr.common.nostr.events.RideHistoryEntry
 import com.ridestr.common.nostr.events.RideHistoryStats
 import com.ridestr.common.settings.DisplayCurrency
 import java.text.SimpleDateFormat
-import java.util.*
+import java.util.Date
+import java.util.Locale
 
 @Composable
 fun HistoryList(
@@ -183,13 +185,13 @@ fun HistoryEntryCard(
 
             val pickupDisplay = ride.pickupAddress
                 ?: ride.pickupLat?.let { lat ->
-                    ride.pickupLon?.let { lon -> String.format("%.4f, %.4f", lat, lon) }
+                    ride.pickupLon?.let { lon -> String.format(Locale.US, "%.4f, %.4f", lat, lon) }
                 }
                 ?: "${ride.pickupGeohash.take(4)}..."
 
             val dropoffDisplay = ride.dropoffAddress
                 ?: ride.dropoffLat?.let { lat ->
-                    ride.dropoffLon?.let { lon -> String.format("%.4f, %.4f", lat, lon) }
+                    ride.dropoffLon?.let { lon -> String.format(Locale.US, "%.4f, %.4f", lat, lon) }
                 }
                 ?: "${ride.dropoffGeohash.take(4)}..."
 
@@ -243,7 +245,7 @@ fun HistoryEntryCard(
             ) {
                 Column {
                     Text(
-                        text = String.format("%.1f miles", ride.distanceMiles),
+                        text = String.format(Locale.US, "%.1f miles", ride.distanceMiles),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -321,7 +323,7 @@ internal fun HistoryStatsCard(
                 )
                 HistoryStatItem(
                     label = "Distance",
-                    value = String.format("%.1f mi", stats.totalDistanceMiles),
+                    value = String.format(Locale.US, "%.1f mi", stats.totalDistanceMiles),
                     icon = Icons.Default.Route
                 )
                 HistoryStatItem(
@@ -337,8 +339,8 @@ internal fun HistoryStatsCard(
             val totalSpentDisplay = when (displayCurrency) {
                 DisplayCurrency.SATS -> "${stats.totalFareSatsPaid} sats"
                 DisplayCurrency.USD -> {
-                    val usd = completedRiderRides.sumFareUsdOrNull(btcPriceUsd)
-                    usd?.let { String.format("$%.2f", it) } ?: "${stats.totalFareSatsPaid} sats"
+                    completedRiderRides.sumFareUsdOrNull(btcPriceUsd)?.formatUsd()
+                        ?: "${stats.totalFareSatsPaid} sats"
                 }
             }
 

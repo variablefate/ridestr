@@ -14,6 +14,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.ridestr.common.bitcoin.BitcoinPriceService
+import com.ridestr.common.fiat.formatUsd
 import com.ridestr.common.fiat.usdAmountOrNull
 import com.ridestr.common.location.GeocodingService
 import com.ridestr.common.nostr.events.BroadcastRideOfferData
@@ -22,6 +23,7 @@ import com.ridestr.common.routing.RouteResult
 import com.ridestr.common.settings.DisplayCurrency
 import com.ridestr.common.settings.DistanceUnit
 import com.ridestr.common.ui.FareDisplay
+import java.util.Locale
 
 // ---------------------------------------------------------------------------
 // Utility functions
@@ -52,14 +54,14 @@ fun formatDistance(distanceKm: Double, unit: DistanceUnit): String {
             if (miles < 0.1) {
                 "${(miles * 5280).toInt()} ft"
             } else {
-                String.format("%.1f mi", miles)
+                String.format(Locale.US, "%.1f mi", miles)
             }
         }
         DistanceUnit.KILOMETERS -> {
             if (distanceKm < 1) {
                 "${(distanceKm * 1000).toInt()} m"
             } else {
-                String.format("%.1f km", distanceKm)
+                String.format(Locale.US, "%.1f km", distanceKm)
             }
         }
     }
@@ -81,11 +83,10 @@ fun formatEarnings(
         }
         DisplayCurrency.USD -> {
             if (fiatAmountPerUnitUsd != null) {
-                String.format("$%.2f$suffix", fiatAmountPerUnitUsd)
+                "${fiatAmountPerUnitUsd.formatUsd()}$suffix"
             } else if (btcPriceUsd != null && btcPriceUsd > 0) {
-                // Convert sats to USD: sats / 100_000_000 * btcPriceUsd
                 val usdValue = (satsPerUnit / 100_000_000.0) * btcPriceUsd
-                String.format("$%.2f$suffix", usdValue)
+                "${usdValue.formatUsd()}$suffix"
             } else {
                 "${satsPerUnit.toInt()} sats$suffix"
             }
