@@ -38,29 +38,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import java.util.Locale
 
-/** Pure-presentation cancellation screen — no ride state bindings. */
-@Composable
-fun CancelledContent(
-    onDone: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Column(
-        modifier = modifier.fillMaxSize(),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        Text(
-            text = "Ride Cancelled",
-            style = MaterialTheme.typography.headlineMedium,
-            fontWeight = FontWeight.Bold
-        )
-        Spacer(modifier = Modifier.height(32.dp))
-        Button(onClick = onDone) {
-            Text("Done")
-        }
-    }
-}
-
 @Composable
 fun formatFareAmount(
     fareUsd: Double,
@@ -661,6 +638,29 @@ fun CompletedContent(
                 style = MaterialTheme.typography.titleLarge
             )
         }
+        Spacer(modifier = Modifier.height(32.dp))
+        Button(onClick = onDone) {
+            Text("Done")
+        }
+    }
+}
+
+/** Pure-presentation cancellation screen — no ride state bindings. */
+@Composable
+fun CancelledContent(
+    onDone: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier.fillMaxSize(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text(
+            text = "Ride Cancelled",
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Bold
+        )
         Spacer(modifier = Modifier.height(32.dp))
         Button(onClick = onDone) {
             Text("Done")
