@@ -22,20 +22,14 @@ import com.ridestr.common.data.DriverRoadflareRepository
 import com.ridestr.common.data.RideHistoryRepository
 import com.ridestr.common.data.Vehicle
 import com.ridestr.common.fiat.formatDisplayAmount
-import com.ridestr.common.roadflare.RoadflareLocationBroadcaster
 import com.ridestr.common.nostr.NostrService
 import com.ridestr.common.nostr.SubscriptionManager
-import com.ridestr.common.nostr.events.MutedRider
-import com.ridestr.common.nostr.events.RoadflareFollower
-import com.ridestr.common.nostr.events.RoadflareLocation
-import com.ridestr.common.nostr.events.RoadflareLocationEvent
 import com.ridestr.common.nostr.events.RideHistoryEntry
 import com.ridestr.common.nostr.events.geohash
 import com.ridestr.common.nostr.events.BroadcastRideOfferData
 import com.ridestr.common.nostr.events.DriverAvailabilityEvent
 import com.ridestr.common.nostr.events.DriverRideAction
 import com.ridestr.common.nostr.events.DriverRideStateEvent
-import com.ridestr.common.nostr.events.DriverRoadflareState
 import com.ridestr.common.nostr.events.DriverStatusType
 import com.ridestr.common.nostr.events.FiatFare
 import com.ridestr.common.nostr.events.Location
@@ -63,13 +57,15 @@ import com.ridestr.common.state.toDriverStageName
 import com.ridestr.common.util.PeriodicRefreshJob
 import com.ridestr.common.util.RideHistoryBuilder
 import com.drivestr.app.BuildConfig
+import com.ridestr.common.coordinator.AcceptanceCoordinator
+import com.ridestr.common.coordinator.AvailabilityCoordinator
+import com.ridestr.common.coordinator.RoadflareDriverCoordinator
+import com.ridestr.common.payment.PaymentStatus
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -88,8 +84,6 @@ class DriverViewModel @Inject constructor(
 
     companion object {
         private const val TAG = "DriverViewModel"
-        // Broadcast availability every 5 minutes to stay visible to riders
-        private const val AVAILABILITY_BROADCAST_INTERVAL_MS = 5 * 60 * 1000L
         // Refresh chat subscription every 15 seconds to ensure messages are received
         private const val CHAT_REFRESH_INTERVAL_MS = 15 * 1000L
         // Timeout for PIN verification response (30 seconds)
@@ -104,29 +98,7 @@ class DriverViewModel @Inject constructor(
         private const val MAX_RIDE_STATE_AGE_MS = 2 * 60 * 60 * 1000L
         // Route cache settings
         private const val LOCATION_CACHE_PRECISION = 3 // ~100m precision for cache key
-        // Location update throttling - don't spam relays with frequent updates
-        private const val MIN_LOCATION_UPDATE_DISTANCE_M = 1000.0 // Min 1000m movement
-        private const val MIN_LOCATION_UPDATE_INTERVAL_MS = 30 * 1000L // Min 30 seconds between updates
-
-        /**
-         * Calculate distance between two locations using Haversine formula.
-         * @return Distance in meters
-         */
-        fun calculateDistanceMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
-            val earthRadiusM = 6371000.0 // Earth's radius in meters
-            val dLat = Math.toRadians(lat2 - lat1)
-            val dLon = Math.toRadians(lon2 - lon1)
-            val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-                    Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
-                    Math.sin(dLon / 2) * Math.sin(dLon / 2)
-            val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
-            return earthRadiusM * c
-        }
     }
-
-    // Track last broadcast for throttling
-    private var lastBroadcastLocation: Location? = null
-    private var lastBroadcastTimeMs: Long = 0L
 
     private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
@@ -154,11 +126,33 @@ class DriverViewModel @Inject constructor(
     // RoadFlare repository for driver's follower list and broadcast key
     private val driverRoadflareRepository = DriverRoadflareRepository.getInstance(application)
 
-    // RoadFlare location broadcaster - initialized lazily when signer is available
-    private var roadflareLocationBroadcaster: RoadflareLocationBroadcaster? = null
-
     // Bitcoin price service for fare conversion
     val bitcoinPriceService = BitcoinPriceService.getInstance()
+
+    // -------------------------------------------------------------------------
+    // Domain coordinators — own protocol logic; ViewModel owns UI state only
+    // -------------------------------------------------------------------------
+
+    // TODO(#52): replace manual construction with @Inject once Hilt migration lands
+    private val availabilityCoordinator = AvailabilityCoordinator(
+        nostrService = nostrService,
+        walletServiceProvider = { walletService },
+        paymentMethodsProvider = { settingsRepository.getPaymentMethods() }
+    )
+
+    private val acceptanceCoordinator = AcceptanceCoordinator(
+        nostrService = nostrService,
+        walletServiceProvider = { walletService }
+    )
+
+    private val roadflareCoordinator = RoadflareDriverCoordinator(
+        nostrService = nostrService,
+        driverRoadflareRepository = driverRoadflareRepository,
+        scope = viewModelScope
+    )
+
+    /** Signal for background refresh after RoadFlare state sync; observed by MainActivity. */
+    val syncTriggeredRefresh get() = roadflareCoordinator.syncTriggeredRefresh
 
     // Valhalla routing service for calculating distances
     private val routingService = ValhallaRoutingService(application)
@@ -175,13 +169,6 @@ class DriverViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(DriverUiState())
     val uiState: StateFlow<DriverUiState> = _uiState.asStateFlow()
 
-    // Signal for background refresh after sync (observed by MainActivity)
-    // Carries verified follower pubkeys to avoid re-querying, null for full refresh
-    // Channel.CONFLATED: buffers one value (no lost emissions), consumed once (no stale replays)
-    private val _syncTriggeredRefresh = Channel<Set<String>?>(capacity = Channel.CONFLATED)
-    val syncTriggeredRefresh = _syncTriggeredRefresh.receiveAsFlow()
-
-    private var availabilityJob: Job? = null
     private var chatRefreshJob: PeriodicRefreshJob? = null
     private var pinVerificationTimeoutJob: Job? = null
     private var confirmationTimeoutJob: Job? = null  // Timeout for rider confirmation after acceptance
@@ -203,7 +190,6 @@ class DriverViewModel @Inject constructor(
         val OFFER_ALL = arrayOf(OFFERS, BROADCAST_REQUESTS)
     }
 
-    private val publishedAvailabilityEventIds = mutableListOf<String>()
     // Track accepted offer IDs to filter out when resubscribing (avoids duplicate offers after ride completion)
     private val acceptedOfferEventIds = mutableSetOf<String>()
     // Track offer IDs that have been taken by another driver
@@ -454,6 +440,13 @@ class DriverViewModel @Inject constructor(
         nostrService.connect()
         // Start Bitcoin price auto-refresh (every 5 minutes)
         bitcoinPriceService.startAutoRefresh()
+
+        // Propagate availability broadcast time from coordinator into UI state
+        viewModelScope.launch {
+            availabilityCoordinator.lastBroadcastTime.collect { time ->
+                if (time != null) _uiState.update { it.copy(lastBroadcastTime = time) }
+            }
+        }
 
         // Fetch remote config (platform settings) from admin pubkey
         viewModelScope.launch {
@@ -918,7 +911,7 @@ class DriverViewModel @Inject constructor(
         // Check if broadcaster was already running BEFORE potentially restarting it.
         // If already running, startBroadcasting() will early-return, so we need
         // requestImmediateBroadcast() to publish the updated AVAILABLE status.
-        val wasAlreadyBroadcasting = roadflareLocationBroadcaster?.isBroadcasting?.value == true
+        val wasAlreadyBroadcasting = roadflareCoordinator.isBroadcasting?.value == true
 
         if (wasRoadflareOnly) {
             // Close roadflare-only subscription (full subscribeToOffers replaces it)
@@ -940,7 +933,7 @@ class DriverViewModel @Inject constructor(
         // or finishAndGoOnline → wallet warning path), fire immediate broadcast with fresh status.
         // Fresh starts broadcast immediately via the loop's first iteration.
         if (wasAlreadyBroadcasting) {
-            roadflareLocationBroadcaster?.requestImmediateBroadcast()
+            roadflareCoordinator.requestImmediateBroadcast()
         }
     }
 
@@ -994,7 +987,7 @@ class DriverViewModel @Inject constructor(
         // Check if broadcaster was already running before we try to (re)start it.
         // If already running, startBroadcasting() will early-return, so we need
         // requestImmediateBroadcast() to publish the updated ROADFLARE_ONLY status.
-        val wasAlreadyBroadcasting = roadflareLocationBroadcaster?.isBroadcasting?.value == true
+        val wasAlreadyBroadcasting = roadflareCoordinator.isBroadcasting?.value == true
 
         // Sync RoadFlare state from Nostr if local state is missing (cross-device sync)
         // then start RoadFlare broadcasting + offer subscription (RoadFlare-tagged only)
@@ -1011,7 +1004,7 @@ class DriverViewModel @Inject constructor(
         // Stage is ROADFLARE_ONLY — if broadcaster was already running (e.g., coming back
         // from AVAILABLE), fire immediate broadcast. Fresh starts broadcast via the loop.
         if (wasAlreadyBroadcasting) {
-            roadflareLocationBroadcaster?.requestImmediateBroadcast()
+            roadflareCoordinator.requestImmediateBroadcast()
         }
     }
 
@@ -1064,9 +1057,7 @@ class DriverViewModel @Inject constructor(
             // Delete all availability events - AWAIT before state reset
             deleteAllAvailabilityEvents()
 
-            // Reset throttle tracking for next time driver goes online
-            lastBroadcastLocation = null
-            lastBroadcastTimeMs = 0L
+            availabilityCoordinator.clearBroadcastState()
 
             // Stop the foreground service
             // Note: presence gate is now set by DriverOnlineService via DriverPresenceStore
@@ -1133,23 +1124,11 @@ class DriverViewModel @Inject constructor(
         }
 
         // Check throttling unless forced
-        if (!force && lastBroadcastLocation != null) {
-            val timeSinceLastBroadcast = System.currentTimeMillis() - lastBroadcastTimeMs
-            val distanceFromLastBroadcast = calculateDistanceMeters(
-                lastBroadcastLocation!!.lat, lastBroadcastLocation!!.lon,
-                newLocation.lat, newLocation.lon
-            )
-
-            val timeOk = timeSinceLastBroadcast >= MIN_LOCATION_UPDATE_INTERVAL_MS
-            val distanceOk = distanceFromLastBroadcast >= MIN_LOCATION_UPDATE_DISTANCE_M
-
-            if (!timeOk || !distanceOk) {
-                Log.d(TAG, "Location update throttled: distance=${distanceFromLastBroadcast.toInt()}m (need ${MIN_LOCATION_UPDATE_DISTANCE_M.toInt()}m), " +
-                        "time=${timeSinceLastBroadcast/1000}s (need ${MIN_LOCATION_UPDATE_INTERVAL_MS/1000}s)")
-                // Still update the local state for UI, just don't broadcast
-                _uiState.value = currentState.copy(currentLocation = newLocation)
-                return
-            }
+        if (!force && availabilityCoordinator.shouldThrottle(newLocation)) {
+            Log.d(TAG, "Location update throttled (distance or time guard)")
+            // Still update local state for UI, just don't broadcast
+            _uiState.value = currentState.copy(currentLocation = newLocation)
+            return
         }
 
         Log.d(TAG, "Updating driver location to: ${newLocation.lat}, ${newLocation.lon}" + if (force) " (forced)" else "")
@@ -1160,8 +1139,7 @@ class DriverViewModel @Inject constructor(
         )
 
         // Track this broadcast for throttling
-        lastBroadcastLocation = newLocation
-        lastBroadcastTimeMs = System.currentTimeMillis()
+        availabilityCoordinator.updateThrottle(newLocation)
 
         // Restart broadcasting with the new location to trigger immediate update
         // The periodic broadcast will now use the new location from state
@@ -1303,11 +1281,7 @@ class DriverViewModel @Inject constructor(
         offer?.riderPubKey?.let { unsubscribeFromRiderProfile(it) }
         cleanupRideEventsInBackground("ride completed")
 
-        // Reset broadcast state for fresh start
-        publishedAvailabilityEventIds.clear()
-        lastBroadcastLocation = null
-        lastBroadcastTimeMs = 0L
-
+        availabilityCoordinator.clearBroadcastState()
         stageBeforeRide = null
 
         // No explicit RoadFlare status update needed here — statusProvider derives
@@ -1364,6 +1338,7 @@ class DriverViewModel @Inject constructor(
      * Note: subscribeToBroadcastRequests() implicitly restarts staleRequestCleanupJob.
      */
     private fun resumeOfferSubscriptions(location: Location) {
+        acceptanceCoordinator.resetBroadcastGate()
         startBroadcasting(location)
         subscribeToBroadcastRequests(location)
         subscribeToOffers()
@@ -1400,23 +1375,15 @@ class DriverViewModel @Inject constructor(
 
             updateRideSession { copy(isProcessingOffer = true) }
 
-            val walletPubKey = walletService?.getWalletPubKey()
-            val driverMintUrl = walletService?.getSavedMintUrl()
+            val result = acceptanceCoordinator.acceptOffer(offer)
 
-            val eventId = nostrService.acceptRide(
-                offer = offer,
-                walletPubKey = walletPubKey,
-                mintUrl = driverMintUrl,
-                paymentMethod = offer.paymentMethod
-            )
-
-            if (eventId != null) {
+            if (result != null) {
                 setupAcceptedRide(
-                    acceptanceEventId = eventId,
-                    offer = offer,
+                    acceptanceEventId = result.acceptanceEventId,
+                    offer = result.offer,
                     broadcastRequest = null,
-                    walletPubKey = walletPubKey,
-                    driverMintUrl = driverMintUrl,
+                    walletPubKey = result.walletPubKey,
+                    driverMintUrl = result.driverMintUrl,
                     cleanupTag = "ACCEPTANCE"
                 )
             } else {
@@ -2607,7 +2574,7 @@ class DriverViewModel @Inject constructor(
 
         // Stage is now AVAILABLE — statusProvider will derive ONLINE.
         // Fire immediate broadcast to replace stale ON_RIDE event on relays.
-        roadflareLocationBroadcaster?.requestImmediateBroadcast()
+        roadflareCoordinator.requestImmediateBroadcast()
 
         // Clear persisted ride state — ride was persisted on accept,
         // so timeout must clear it to prevent stale restore on app restart
@@ -2616,9 +2583,7 @@ class DriverViewModel @Inject constructor(
         // Resume broadcasting
         val location = _uiState.value.currentLocation
         if (location != null) {
-            publishedAvailabilityEventIds.clear()
-            lastBroadcastLocation = null
-            lastBroadcastTimeMs = 0L
+            availabilityCoordinator.clearBroadcastState()
             resumeOfferSubscriptions(location)
             Log.d(TAG, "Resumed broadcasting after confirmation timeout")
         }
@@ -2922,15 +2887,12 @@ class DriverViewModel @Inject constructor(
 
         // Stage is now set — fire immediate broadcast to replace stale ON_RIDE on relays
         if (newStage == DriverStage.AVAILABLE) {
-            roadflareLocationBroadcaster?.requestImmediateBroadcast()
+            roadflareCoordinator.requestImmediateBroadcast()
         }
 
         // Resume broadcasting and subscriptions if returning to AVAILABLE
         if (newStage == DriverStage.AVAILABLE && state.currentLocation != null) {
-            publishedAvailabilityEventIds.clear()
-            lastBroadcastLocation = null
-            lastBroadcastTimeMs = 0L
-            Log.d(TAG, "Reset broadcast state before resuming after cancellation")
+            availabilityCoordinator.clearBroadcastState()
             resumeOfferSubscriptions(state.currentLocation)
             Log.d(TAG, "Resumed broadcasting after rider cancellation")
         }
@@ -3062,7 +3024,7 @@ class DriverViewModel @Inject constructor(
 
     private suspend fun publishAvailability(spec: AvailabilitySpec): String? {
         val args = spec.toPublishArgs()
-        return nostrService.broadcastAvailability(
+        return availabilityCoordinator.publishAvailability(
             location = args.location,
             status = args.status,
             vehicle = args.vehicle,
@@ -3072,89 +3034,21 @@ class DriverViewModel @Inject constructor(
     }
 
     private fun startBroadcasting(location: Location) {
-        Log.d(TAG, "=== START BROADCASTING ===")
-        Log.d(TAG, "Location: ${location.lat}, ${location.lon}")
-        Log.d(TAG, "Existing event IDs: ${publishedAvailabilityEventIds.size}")
-
-        availabilityJob?.cancel()
-
-        // Initialize throttle tracking for first broadcast
-        if (lastBroadcastLocation == null) {
-            lastBroadcastLocation = location
-            lastBroadcastTimeMs = System.currentTimeMillis()
-            Log.d(TAG, "Initialized throttle tracking (fresh start)")
-        }
-
-        availabilityJob = viewModelScope.launch {
-            var loopCount = 0
-            while (isActive) {
-                loopCount++
-                Log.d(TAG, "=== BROADCAST LOOP #$loopCount ===")
-
-                val currentLocation = _uiState.value.currentLocation ?: location
-                val activeVehicle = _uiState.value.activeVehicle
-
-                // Track this broadcast for throttling
-                lastBroadcastLocation = currentLocation
-                lastBroadcastTimeMs = System.currentTimeMillis()
-
-                val previousEventId = publishedAvailabilityEventIds.lastOrNull()
-                if (previousEventId != null) {
-                    Log.d(TAG, "Deleting previous availability: ${previousEventId.take(16)}...")
-                    nostrService.deleteEvent(previousEventId, "superseded")
-                }
-
-                Log.d(TAG, "Broadcasting availability at ${currentLocation.lat}, ${currentLocation.lon}")
-                val mintUrl = walletService?.getSavedMintUrl()
-                val paymentMethods = settingsRepository.getPaymentMethods()
-                val eventId = publishAvailability(AvailabilitySpec.Available(
-                    location = currentLocation,
-                    vehicle = activeVehicle,
-                    mintUrl = mintUrl,
-                    paymentMethods = paymentMethods
-                ))
-
-                if (eventId != null) {
-                    Log.d(TAG, "Broadcast SUCCESS: ${eventId.take(16)}... (total: ${publishedAvailabilityEventIds.size + 1})")
-                    publishedAvailabilityEventIds.add(eventId)
-                    _uiState.value = _uiState.value.copy(
-                        lastBroadcastTime = System.currentTimeMillis()
-                    )
-                } else {
-                    Log.e(TAG, "Broadcast FAILED - no event ID returned")
-                }
-
-                Log.d(TAG, "Next broadcast in ${AVAILABILITY_BROADCAST_INTERVAL_MS / 1000} seconds")
-                delay(AVAILABILITY_BROADCAST_INTERVAL_MS)
-            }
-            Log.d(TAG, "Broadcast loop ended (isActive=$isActive)")
-        }
+        Log.d(TAG, "startBroadcasting: ${location.lat}, ${location.lon}")
+        availabilityCoordinator.startBroadcasting(
+            scope = viewModelScope,
+            locationProvider = { _uiState.value.currentLocation },
+            vehicleProvider = { _uiState.value.activeVehicle },
+            locationForFirstTick = location
+        )
     }
 
     private fun stopBroadcasting() {
-        availabilityJob?.cancel()
-        availabilityJob = null
+        availabilityCoordinator.stopBroadcasting()
     }
 
     private suspend fun deleteAllAvailabilityEvents() {
-        if (publishedAvailabilityEventIds.isEmpty()) {
-            Log.d(TAG, "No availability events to delete")
-            return
-        }
-
-        Log.d(TAG, "Requesting deletion of ${publishedAvailabilityEventIds.size} availability events")
-        val deletionEventId = nostrService.deleteEvents(
-            publishedAvailabilityEventIds.toList(),
-            "driver went offline",
-            listOf(RideshareEventKinds.DRIVER_AVAILABILITY)
-        )
-
-        if (deletionEventId != null) {
-            Log.d(TAG, "Deletion request sent: $deletionEventId")
-            publishedAvailabilityEventIds.clear()
-        } else {
-            Log.w(TAG, "Failed to send deletion request")
-        }
+        availabilityCoordinator.deleteAllAvailabilityEvents()
     }
 
     private fun subscribeToOffers() {
@@ -3272,34 +3166,10 @@ class DriverViewModel @Inject constructor(
         subs.close(SubKeys.ROADFLARE_OFFERS)
     }
 
-    /**
-     * Broadcast a final OFFLINE status to RoadFlare followers so they see
-     * the driver go offline immediately rather than waiting for staleness timeout.
-     */
     private fun broadcastRoadflareOfflineStatus() {
         viewModelScope.launch {
             val location = _uiState.value.currentLocation ?: return@launch
-            val roadflareState = driverRoadflareRepository?.state?.value ?: return@launch
-            val roadflareKey = roadflareState.roadflareKey ?: return@launch
-            val signer = nostrService.getSigner() ?: return@launch
-
-            // Create location with OFFLINE status
-            val offlineLocation = RoadflareLocation(
-                lat = location.lat,
-                lon = location.lon,
-                timestamp = System.currentTimeMillis() / 1000,
-                status = RoadflareLocationEvent.Status.OFFLINE
-            )
-
-            // Publish directly to Nostr with OFFLINE status
-            nostrService.publishRoadflareLocation(
-                signer = signer,
-                roadflarePubKey = roadflareKey.publicKey,
-                location = offlineLocation,
-                keyVersion = roadflareKey.version
-            )
-
-            Log.d(TAG, "Published OFFLINE RoadFlare status")
+            roadflareCoordinator.broadcastOfflineStatus(location)
         }
     }
 
@@ -3783,38 +3653,15 @@ class DriverViewModel @Inject constructor(
 
             updateRideSession { copy(isProcessingOffer = true) }
 
-            val walletPubKey = walletService?.getWalletPubKey()
-            val driverMintUrl = walletService?.getSavedMintUrl()
+            val result = acceptanceCoordinator.acceptBroadcastRequest(request, myPubkey)
 
-            val eventId = nostrService.acceptBroadcastRide(
-                request = request,
-                walletPubKey = walletPubKey,
-                mintUrl = driverMintUrl,
-                paymentMethod = request.paymentMethod
-            )
-
-            if (eventId != null) {
-                // Convert to RideOfferData for compatibility with downstream ride flow
-                val compatibleOffer = RideOfferData(
-                    eventId = request.eventId,
-                    riderPubKey = request.riderPubKey,
-                    driverEventId = "",
-                    driverPubKey = myPubkey,
-                    approxPickup = request.pickupArea,
-                    destination = request.destinationArea,
-                    fareEstimate = request.fareEstimate,
-                    createdAt = request.createdAt,
-                    mintUrl = request.mintUrl,
-                    paymentMethod = request.paymentMethod,
-                    fiatFare = request.fiatFare
-                )
-
+            if (result != null) {
                 setupAcceptedRide(
-                    acceptanceEventId = eventId,
-                    offer = compatibleOffer,
-                    broadcastRequest = request,
-                    walletPubKey = walletPubKey,
-                    driverMintUrl = driverMintUrl,
+                    acceptanceEventId = result.acceptanceEventId,
+                    offer = result.offer,
+                    broadcastRequest = result.broadcastRequest,
+                    walletPubKey = result.walletPubKey,
+                    driverMintUrl = result.driverMintUrl,
                     cleanupTag = "BROADCAST_ACCEPTANCE"
                 )
             } else {
@@ -3943,281 +3790,26 @@ class DriverViewModel @Inject constructor(
         return ensureRoadflareStateSynced()
     }
 
-    /**
-     * Internal: Sync RoadFlare state from Nostr.
-     * Called before starting RoadFlare broadcasting to handle cross-device sync.
-     *
-     * Uses union merge strategy:
-     * 1. Takes newer key based on keyUpdatedAt/keyVersion
-     * 2. Merges follower lists (union by pubkey, prefer approved + higher keyVersionSent)
-     * 3. Merges muted lists (union, never auto-unmute)
-     * 4. Retries fetch once on null before pushing
-     * 5. Signals background refresh after merge to catch unfollowed riders
-     *
-     * @return true if state was merged/updated, false otherwise
-     */
     private suspend fun ensureRoadflareStateSynced(): Boolean {
-        val currentState = driverRoadflareRepository.state.value
-        val localKeyUpdatedAt = currentState?.keyUpdatedAt ?: 0L
-        val localKeyVersion = currentState?.roadflareKey?.version ?: 0
-        val localUpdatedAt = currentState?.updatedAt ?: 0L
-
-        Log.d(TAG, "Checking RoadFlare state: local key v$localKeyVersion, " +
-                  "keyUpdatedAt=$localKeyUpdatedAt, updatedAt=$localUpdatedAt")
-
-        // Fetch remote state with one retry on failure
-        var remoteState = nostrService.fetchDriverRoadflareState()
-        if (remoteState == null) {
-            Log.d(TAG, "First fetch returned null, retrying...")
-            delay(1000)
-            remoteState = nostrService.fetchDriverRoadflareState()
-        }
-
-        if (remoteState != null) {
-            val remoteKeyUpdatedAt = remoteState.keyUpdatedAt ?: 0L
-            val remoteKeyVersion = remoteState.roadflareKey?.version ?: 0
-            val remoteUpdatedAt = remoteState.updatedAt
-
-            Log.d(TAG, "Remote RoadFlare state: key v$remoteKeyVersion, " +
-                      "keyUpdatedAt=$remoteKeyUpdatedAt, updatedAt=$remoteUpdatedAt")
-
-            // Determine which key to use (newer keyUpdatedAt wins, then version as tiebreaker)
-            val useRemoteKey = when {
-                currentState?.roadflareKey == null && remoteState.roadflareKey != null -> true
-                remoteKeyUpdatedAt > localKeyUpdatedAt -> true
-                remoteKeyUpdatedAt == localKeyUpdatedAt && remoteKeyVersion > localKeyVersion -> true
-                else -> false
-            }
-
-            // Determine selected key version for merge validation
-            val selectedKeyVersion = if (useRemoteKey) remoteKeyVersion else localKeyVersion
-
-            // Merge follower lists (union)
-            val mergedFollowers = mergeFollowerLists(
-                currentState?.followers ?: emptyList(),
-                remoteState.followers,
-                selectedKeyVersion,
-                localUpdatedAt,
-                remoteUpdatedAt
-            )
-
-            // Verify followers against Kind 30011 to filter out unfollowed riders immediately
-            val driverPubKey = nostrService.getPubKeyHex()
-            var verifiedFollowerPubkeys: Set<String>? = null  // Capture for later emission
-            val verifiedFollowers = if (driverPubKey != null && mergedFollowers.isNotEmpty()) {
-                val queryResult = nostrService.queryCurrentFollowerPubkeys(driverPubKey)
-                if (!queryResult.success) {
-                    // Query failed/timed out - fallback to merged list (null = full refresh later)
-                    if (BuildConfig.DEBUG) {
-                        Log.w(TAG, "Kind 30011 query timed out, using merged followers as fallback")
-                    }
-                    mergedFollowers
-                } else {
-                    // Query succeeded - capture pubkeys to avoid re-querying in refresh
-                    verifiedFollowerPubkeys = queryResult.followers
-                    val filteredFollowers = mergedFollowers.filter { it.pubkey in queryResult.followers }
-                    val removedCount = mergedFollowers.size - filteredFollowers.size
-                    if (removedCount > 0 && BuildConfig.DEBUG) {
-                        Log.d(TAG, "Filtered $removedCount stale followers via Kind 30011 verification")
-                    }
-                    filteredFollowers
-                }
-            } else {
-                mergedFollowers
-            }
-
-            // Merge muted lists (union - never auto-unmute)
-            val mergedMuted = mergeMutedLists(
-                currentState?.muted ?: emptyList(),
-                remoteState.muted
-            )
-
-            // Build merged state
-            val mergedState = DriverRoadflareState(
-                eventId = if (useRemoteKey) remoteState.eventId else currentState?.eventId,
-                roadflareKey = if (useRemoteKey) remoteState.roadflareKey else currentState?.roadflareKey,
-                followers = verifiedFollowers,
-                muted = mergedMuted,
-                keyUpdatedAt = if (useRemoteKey) remoteKeyUpdatedAt else localKeyUpdatedAt,
-                lastBroadcastAt = maxOf(currentState?.lastBroadcastAt ?: 0L, remoteState.lastBroadcastAt ?: 0L),
-                updatedAt = maxOf(localUpdatedAt, remoteUpdatedAt),
-                createdAt = minOf(currentState?.createdAt ?: Long.MAX_VALUE, remoteState.createdAt)
-            )
-
-            // Check if meaningful state changed (ignore eventId/createdAt/updatedAt metadata)
-            val stateChanged = mergedState.roadflareKey != currentState?.roadflareKey ||
-                mergedState.followers != currentState?.followers ||
-                mergedState.muted != currentState?.muted ||
-                mergedState.keyUpdatedAt != currentState?.keyUpdatedAt
-
-            if (stateChanged) {
-                driverRoadflareRepository.restoreFromBackup(mergedState)
-                Log.d(TAG, "Merged RoadFlare state: key v${mergedState.roadflareKey?.version}, " +
-                          "followers=${mergedState.followers.size}, muted=${mergedState.muted.size}")
-
-                // Push merged state to Nostr
-                nostrService.getSigner()?.let { signer ->
-                    nostrService.publishDriverRoadflareState(signer, mergedState)
-                    Log.d(TAG, "Pushed merged state to Nostr")
-                }
-
-                // Signal background refresh to fetch display names and detect new followers
-                // Pass verified follower pubkeys to avoid re-querying Kind 30011
-                _syncTriggeredRefresh.trySend(verifiedFollowerPubkeys).also { result ->
-                    if (result.isFailure && BuildConfig.DEBUG) {
-                        Log.w(TAG, "Failed to send sync refresh signal: ${result.exceptionOrNull()}")
-                    }
-                }
-
-                return true
-            }
-        } else {
-            Log.d(TAG, "No RoadFlare state found on Nostr after retry")
-
-            // Push local state if we have one
-            if (currentState?.roadflareKey != null) {
-                Log.d(TAG, "Pushing local state to Nostr...")
-                nostrService.getSigner()?.let { signer ->
-                    nostrService.publishDriverRoadflareState(signer, currentState)
-                }
-            }
-        }
-
-        return false
+        return roadflareCoordinator.ensureStateSynced().changed
     }
 
-    /**
-     * Merge two follower lists (union by pubkey).
-     * For duplicates, prefer the one with approved=true or higher keyVersionSent.
-     * Clamps keyVersionSent to selected key version to prevent claiming sent keys that don't exist.
-     */
-    private fun mergeFollowerLists(
-        local: List<RoadflareFollower>,
-        remote: List<RoadflareFollower>,
-        selectedKeyVersion: Int,
-        localUpdatedAt: Long,
-        remoteUpdatedAt: Long
-    ): List<RoadflareFollower> {
-        val byPubkey = mutableMapOf<String, RoadflareFollower>()
-
-        // Add all local followers
-        for (follower in local) {
-            byPubkey[follower.pubkey] = follower
-        }
-
-        // Merge remote followers
-        for (follower in remote) {
-            val existing = byPubkey[follower.pubkey]
-            if (existing == null) {
-                byPubkey[follower.pubkey] = follower
-            } else {
-                // Merge: prefer approved, higher keyVersionSent (clamped), earlier addedAt
-                val mergedKeyVersionSent = maxOf(existing.keyVersionSent, follower.keyVersionSent)
-
-                // Clamp keyVersionSent to selected key version to prevent claiming sent keys that don't exist
-                val clampedKeyVersionSent = minOf(mergedKeyVersionSent, selectedKeyVersion)
-                if (mergedKeyVersionSent > selectedKeyVersion) {
-                    Log.w(TAG, "Clamped keyVersionSent from $mergedKeyVersionSent to $selectedKeyVersion for ${follower.pubkey.take(8)}")
-                }
-
-                byPubkey[follower.pubkey] = existing.copy(
-                    approved = existing.approved || follower.approved,
-                    keyVersionSent = clampedKeyVersionSent,
-                    addedAt = minOf(existing.addedAt, follower.addedAt)
-                )
-            }
-        }
-
-        // If remote is newer than local, prune local-only followers (they were removed on Nostr)
-        // If local is newer, keep local-only followers (they're legitimate, remote is stale)
-        if (remoteUpdatedAt > localUpdatedAt) {
-            val remotePubkeys = remote.map { it.pubkey }.toSet()
-            val localOnlyPubkeys = local.map { it.pubkey }.filter { it !in remotePubkeys }
-
-            if (localOnlyPubkeys.isNotEmpty()) {
-                if (BuildConfig.DEBUG) {
-                    Log.d(TAG, "Remote newer ($remoteUpdatedAt > $localUpdatedAt), pruning ${localOnlyPubkeys.size} stale local-only followers")
-                }
-                for (pubkey in localOnlyPubkeys) {
-                    byPubkey.remove(pubkey)
-                }
-            }
-        }
-
-        return byPubkey.values.toList()
-    }
-
-    /**
-     * Merge two muted lists (union by pubkey).
-     * Once muted, stays muted (never auto-unmute from sync).
-     */
-    private fun mergeMutedLists(
-        local: List<MutedRider>,
-        remote: List<MutedRider>
-    ): List<MutedRider> {
-        val byPubkey = mutableMapOf<String, MutedRider>()
-
-        for (muted in local) {
-            byPubkey[muted.pubkey] = muted
-        }
-
-        for (muted in remote) {
-            if (!byPubkey.containsKey(muted.pubkey)) {
-                byPubkey[muted.pubkey] = muted
-            }
-            // If already muted locally, keep local entry (earlier mutedAt)
-        }
-
-        return byPubkey.values.toList()
-    }
-
-    /**
-     * Start RoadFlare location broadcasting to followers.
-     * Creates the broadcaster if needed and starts periodic location updates.
-     */
     private fun startRoadflareBroadcasting() {
-        val signer = nostrService.getSigner()
-        if (signer == null) {
-            Log.w(TAG, "Cannot start RoadFlare broadcasting: no signer available")
-            return
-        }
-
-        // Create broadcaster if not exists
-        if (roadflareLocationBroadcaster == null) {
-            roadflareLocationBroadcaster = RoadflareLocationBroadcaster(
-                repository = driverRoadflareRepository,
-                nostrService = nostrService,
-                signer = signer
-            )
-        }
-
-        // Start broadcasting with a location provider that reads current location from UI state
-        // and a status provider that derives status from the current DriverStage
-        roadflareLocationBroadcaster?.startBroadcasting(
+        roadflareCoordinator.startBroadcasting(
             locationProvider = {
-                val location = _uiState.value.currentLocation
-                if (location != null) {
-                    // Convert our Location to Android Location for the broadcaster
+                _uiState.value.currentLocation?.let { loc ->
                     android.location.Location("").apply {
-                        latitude = location.lat
-                        longitude = location.lon
+                        latitude = loc.lat
+                        longitude = loc.lon
                     }
-                } else {
-                    null
                 }
             },
             statusProvider = { DriverPresenceMapper.roadflareStatus(_uiState.value.stage) }
         )
-
-        Log.d(TAG, "RoadFlare location broadcasting started")
     }
 
-    /**
-     * Stop RoadFlare location broadcasting.
-     */
     private fun stopRoadflareBroadcasting() {
-        roadflareLocationBroadcaster?.stopBroadcasting()
-        Log.d(TAG, "RoadFlare location broadcasting stopped")
+        roadflareCoordinator.stopBroadcasting()
     }
 
     fun performLogoutCleanup() {
@@ -4228,7 +3820,7 @@ class DriverViewModel @Inject constructor(
         pinVerificationTimeoutJob?.cancel()
         subs.closeAll()
         bitcoinPriceService.cleanup()
-        roadflareLocationBroadcaster?.destroy()
+        roadflareCoordinator.destroy()
         // Stop services safely — stopService() is a no-op if not running
         DriverOnlineService.stop(getApplication())
         RoadflareListenerService.stop(getApplication())
@@ -4265,19 +3857,6 @@ class DriverViewModel @Inject constructor(
         super.onCleared()
         performLogoutCleanup()
     }
-}
-
-/**
- * Payment status for HTLC escrow settlement.
- */
-enum class PaymentStatus {
-    NO_PAYMENT_EXPECTED,    // No HTLC (cash ride or legacy)
-    READY_TO_CLAIM,         // Both preimage and escrow token received
-    WAITING_FOR_PREIMAGE,   // Not yet shared (ride still in progress)
-    MISSING_PREIMAGE,       // Escrow token received but no preimage
-    MISSING_ESCROW_TOKEN,   // Preimage received but no escrow token
-    MISSING_PAYMENT_HASH,   // SAME_MINT ride but payment hash lost (process death)
-    UNKNOWN_ERROR
 }
 
 /**
