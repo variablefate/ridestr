@@ -5,7 +5,6 @@ import com.ridestr.common.data.FollowedDriversRepository
 import com.ridestr.common.nostr.NostrService
 import com.ridestr.common.nostr.events.RoadflareKeyShareEvent
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -219,12 +218,11 @@ class RoadflareRiderCoordinator(
     }
 
     /**
-     * Stop all subscriptions and cancel the coordinator's coroutine scope.
-     * Call from the owning ViewModel's `onCleared()`.
+     * Stop all subscriptions. Call from the owning ViewModel's `onCleared()`.
+     * Does NOT cancel [scope] — the coordinator does not own the scope lifecycle.
      */
     fun destroy() {
         stopKeyShareListener()
-        scope.cancel()
         Log.d(TAG, "Destroyed")
     }
 }
