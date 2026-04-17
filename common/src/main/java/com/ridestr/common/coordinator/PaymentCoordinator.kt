@@ -531,6 +531,11 @@ class PaymentCoordinator(
      * @param pinVerified          Whether PIN was already verified before process death.
      * @param destination          Destination location for post-PIN reveal.
      * @param postConfirmDeadlineMs Persisted post-confirm ack deadline, or 0 to skip timeout.
+     * @param lastProcessedDriverActionCount
+     *     Persisted count of driver actions processed pre-death. Kind 30180 is parametric
+     *     replaceable, so on re-delivery after restart the event will often carry a new eventId
+     *     (not blocked by the dedup set). Seeding this counter prevents replay of history actions
+     *     (EN_ROUTE_PICKUP → ARRIVED etc.) that produces UI flicker.
      */
     fun restoreRideState(
         confirmationEventId: String,
@@ -541,7 +546,8 @@ class PaymentCoordinator(
         pickupPin: String?,
         pinVerified: Boolean,
         destination: Location?,
-        postConfirmDeadlineMs: Long = 0L
+        postConfirmDeadlineMs: Long = 0L,
+        lastProcessedDriverActionCount: Int = 0
     ) {
         activeConfirmationEventId = confirmationEventId
         currentAcceptanceEventId = confirmationEventId  // best-effort (acceptance not persisted)
@@ -552,11 +558,19 @@ class PaymentCoordinator(
         activePickupPin = pickupPin
         activePinVerified = pinVerified
         activeDestination = destination
+        this.lastProcessedDriverActionCount = lastProcessedDriverActionCount
         if (postConfirmDeadlineMs > System.currentTimeMillis()) {
             startPostConfirmAckTimeout(postConfirmDeadlineMs, confirmationEventId)
         }
         Log.d(TAG, "Restored ride state for confirmation ${confirmationEventId.take(8)}")
     }
+
+    /**
+     * The count of driver actions processed so far for the active ride. The ViewModel persists
+     * this in the saved-ride JSON and passes it back via [restoreRideState] on process restart
+     * to prevent re-processing the replayed Kind 30180 history.
+     */
+    fun getLastProcessedDriverActionCount(): Int = lastProcessedDriverActionCount
 
     /**
      * Return all event IDs published by this coordinator during the current ride and clear the
@@ -567,6 +581,19 @@ class PaymentCoordinator(
         val ids = rideEventIds.toList()
         rideEventIds.clear()
         return ids
+    }
+
+    /**
+     * Resume the poll for a cross-mint bridge payment that was in flight when the app was
+     * process-killed. The ViewModel finds the pending [bridgePaymentId] via
+     * `walletService.getInProgressBridgePayments()` during restore and hands it back here so
+     * the coordinator can continue polling the mint until the melt quote resolves (PAID /
+     * UNPAID / 10 min timeout).
+     *
+     * Safe to call multiple times; each call replaces any prior poll job for the same ride.
+     */
+    fun resumeBridgePoll(bridgePaymentId: String, rideId: String, driverPubKey: String) {
+        startBridgePendingPoll(bridgePaymentId, rideId, driverPubKey)
     }
 
     /**
@@ -699,8 +726,12 @@ class PaymentCoordinator(
                             Log.w(TAG, "[$rideCorrelationId] Stale confirmation — acceptance changed post-suspend")
                             _events.emit(PaymentEvent.ConfirmationStale(eventId, acceptance.driverPubKey))
                         }
-                        // confirmationInFlight stays true — new ride owns the lock (or resetInternalState
-                        // already cleared it for the self-cancel case).
+                        // CAS lock state at this point:
+                        //  - Case 1 (cross-ride): confirmationInFlight stays true; the new ride
+                        //    acquired it via its own compareAndSet, and we must NOT clear it here.
+                        //  - Case 2 (self-cancel): resetInternalState() already set
+                        //    confirmationInFlight to false when the rider cancelled — so it is
+                        //    already clear. Don't touch it either way.
                         return@launch
                     }
 
