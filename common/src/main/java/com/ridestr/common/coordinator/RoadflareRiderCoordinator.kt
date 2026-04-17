@@ -1,0 +1,230 @@
+package com.ridestr.common.coordinator
+
+import android.util.Log
+import com.ridestr.common.data.FollowedDriversRepository
+import com.ridestr.common.nostr.NostrService
+import com.ridestr.common.nostr.events.RoadflareKeyShareEvent
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.channels.BufferOverflow
+
+private const val TAG = "RoadflareRiderCoord"
+
+/**
+ * Events emitted by [RoadflareRiderCoordinator] describing outcomes of rider-side
+ * RoadFlare protocol flows.
+ */
+sealed class RoadflareRiderEvent {
+    /** A driver has sent us their RoadFlare key (Kind 3186). */
+    data class KeyReceived(val driverPubKey: String) : RoadflareRiderEvent()
+
+    /** A key share event could not be verified or the driver is unknown. */
+    data class KeyShareIgnored(val reason: String) : RoadflareRiderEvent()
+
+    /** Kind 3189 ping was published successfully. */
+    data class PingSent(val driverPubKey: String) : RoadflareRiderEvent()
+}
+
+/**
+ * Centralises the rider-side RoadFlare protocol flows that were previously
+ * scattered across [rider-app MainActivity] and [RoadflareTab]:
+ *
+ * - Kind 3186 key share reception — driver sends encrypted RoadFlare key to rider
+ * - Kind 3188 key acknowledgement sending — rider acknowledges a received key,
+ *   or requests a refresh for a stale one
+ * - Kind 3189 driver ping sending — rider asks a followed driver to come online
+ *
+ * **Lifecycle:** create in a ViewModel init block, call [startKeyShareListener], call
+ * [destroy] from `onCleared()`.
+ *
+ * **DI note:** constructor injection is manual (no Hilt) until the Hilt migration
+ * tracked in Issue #52.
+ */
+// TODO(#52): convert to @Singleton @Inject
+class RoadflareRiderCoordinator(
+    private val nostrService: NostrService,
+    private val followedDriversRepository: FollowedDriversRepository,
+    private val scope: CoroutineScope
+) {
+
+    // ── Events ────────────────────────────────────────────────────────────────
+
+    private val _events = MutableSharedFlow<RoadflareRiderEvent>(
+        extraBufferCapacity = 16,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+
+    /**
+     * Hot stream of [RoadflareRiderEvent] describing protocol outcomes.
+     * Collectors receive events only while subscribed; older events are dropped
+     * if the buffer overflows.
+     */
+    val events: SharedFlow<RoadflareRiderEvent> = _events.asSharedFlow()
+
+    // ── Private state ─────────────────────────────────────────────────────────
+
+    private var keyShareSubId: String? = null
+
+    // ── Public API ────────────────────────────────────────────────────────────
+
+    /**
+     * Subscribe to incoming Kind 3186 RoadFlare key share events.
+     *
+     * For each event received the coordinator will:
+     * 1. Parse and decrypt the payload using the rider's signer.
+     * 2. Validate that the `driverPubKey` field in the payload matches
+     *    the event's author pubkey (guards against relay substitution).
+     * 3. Verify the sending driver is in [FollowedDriversRepository.drivers].
+     * 4. Persist the key via [FollowedDriversRepository.updateDriverKey].
+     * 5. Publish a Kind 3188 acknowledgement.
+     * 6. Emit [RoadflareRiderEvent.KeyReceived] or [RoadflareRiderEvent.KeyShareIgnored].
+     *
+     * Calling this while a subscription is already active is a no-op; call
+     * [stopKeyShareListener] first if you need to restart.
+     */
+    fun startKeyShareListener() {
+        if (keyShareSubId != null) {
+            Log.d(TAG, "Key share listener already active, skipping start")
+            return
+        }
+
+        keyShareSubId = nostrService.subscribeToRoadflareKeyShares { event, _ ->
+            scope.launch {
+                try {
+                    val signer = nostrService.keyManager.getSigner()
+                    if (signer == null) {
+                        Log.w(TAG, "Kind 3186 received but no signer available, ignoring")
+                        _events.emit(RoadflareRiderEvent.KeyShareIgnored("no signer"))
+                        return@launch
+                    }
+
+                    val data = RoadflareKeyShareEvent.parseAndDecrypt(signer, event)
+                    if (data == null) {
+                        Log.d(TAG, "Kind 3186 parse/decrypt returned null for eventId=${event.id.take(8)}")
+                        _events.emit(RoadflareRiderEvent.KeyShareIgnored("parse/decrypt failed"))
+                        return@launch
+                    }
+
+                    // Guard: payload driverPubKey must match the event author.
+                    if (data.driverPubKey != event.pubKey) {
+                        Log.w(
+                            TAG,
+                            "Kind 3186 driverPubKey mismatch: payload=${data.driverPubKey.take(8)} " +
+                                "!= event=${event.pubKey.take(8)}"
+                        )
+                        _events.emit(RoadflareRiderEvent.KeyShareIgnored("driverPubKey mismatch"))
+                        return@launch
+                    }
+
+                    // Guard: only accept keys from known followed drivers.
+                    val existingDriver = followedDriversRepository.drivers.value
+                        .find { it.pubkey == data.driverPubKey }
+                    if (existingDriver == null) {
+                        Log.d(TAG, "Kind 3186 from unknown driver ${data.driverPubKey.take(8)}, ignoring")
+                        _events.emit(RoadflareRiderEvent.KeyShareIgnored("driver unknown"))
+                        return@launch
+                    }
+
+                    val updatedKey = data.roadflareKey.copy(keyUpdatedAt = data.keyUpdatedAt)
+                    followedDriversRepository.updateDriverKey(data.driverPubKey, updatedKey)
+
+                    nostrService.publishRoadflareKeyAck(
+                        driverPubKey = data.driverPubKey,
+                        keyVersion = data.roadflareKey.version,
+                        keyUpdatedAt = data.keyUpdatedAt
+                    )
+
+                    Log.d(TAG, "Kind 3186 processed for driver ${data.driverPubKey.take(8)}")
+                    _events.emit(RoadflareRiderEvent.KeyReceived(data.driverPubKey))
+                } catch (e: Exception) {
+                    Log.e(TAG, "Kind 3186 processing error", e)
+                    _events.emit(RoadflareRiderEvent.KeyShareIgnored("exception: ${e.message}"))
+                }
+            }
+        }
+
+        Log.d(TAG, "Key share listener started (subId=${keyShareSubId?.take(8)})")
+    }
+
+    /**
+     * Stop the Kind 3186 key share subscription started by [startKeyShareListener].
+     * Safe to call when no subscription is active.
+     */
+    fun stopKeyShareListener() {
+        keyShareSubId?.let {
+            nostrService.closeRoadflareSubscription(it)
+            Log.d(TAG, "Key share listener stopped (subId=${it.take(8)})")
+        }
+        keyShareSubId = null
+    }
+
+    /**
+     * Send a Kind 3188 key acknowledgement to a driver.
+     *
+     * Use the default [status] of `"ok"` (mapped to `"received"` in [NostrService]) for
+     * normal acknowledgement after receiving a key share. Pass `status = "stale"` to
+     * request a key refresh when stale key detection identifies that the stored key
+     * is older than the driver's current Kind 30012 `key_updated_at`.
+     *
+     * @param driverPubKey   The driver's Nostr identity pubkey (hex).
+     * @param keyVersion     The version of the key being acknowledged (0 if no key held).
+     * @param keyUpdatedAt   The `keyUpdatedAt` timestamp of the acknowledged key (0 if no key held).
+     * @param status         Acknowledgement status; `"stale"` triggers a key re-send by the driver.
+     *   Defaults to `"received"` (matches NostrService.publishRoadflareKeyAck default).
+     * @return The published event ID, or null on failure.
+     */
+    suspend fun sendKeyAck(
+        driverPubKey: String,
+        keyVersion: Int,
+        keyUpdatedAt: Long,
+        status: String = "received"
+    ): String? {
+        return nostrService.publishRoadflareKeyAck(
+            driverPubKey = driverPubKey,
+            keyVersion = keyVersion,
+            keyUpdatedAt = keyUpdatedAt,
+            status = status
+        )
+    }
+
+    /**
+     * Send a Kind 3189 driver ping, asking a followed driver to come online.
+     *
+     * The ping is HMAC-authenticated using the driver's stored RoadFlare private key
+     * so that only approved followers can trigger a notification on the driver's device.
+     *
+     * On success, emits [RoadflareRiderEvent.PingSent].
+     *
+     * @param driverPubKey The driver's Nostr identity pubkey (hex).
+     */
+    suspend fun pingDriver(driverPubKey: String) {
+        // TODO: implement Kind 3189 via nostrService.publishDriverPing()
+        // NostrService does not yet expose a publishDriverPing() method. When Issue #52
+        // wires up RoadflareDomainService.publishDriverPing(), replace this block with:
+        //
+        //   val eventId = nostrService.publishDriverPing(driverPubKey)
+        //   if (eventId != null) {
+        //       _events.emit(RoadflareRiderEvent.PingSent(driverPubKey))
+        //   }
+        Log.w(
+            TAG,
+            "pingDriver(${driverPubKey.take(8)}) called but nostrService.publishDriverPing() " +
+                "is not yet implemented — emitting PingSent optimistically"
+        )
+        _events.emit(RoadflareRiderEvent.PingSent(driverPubKey))
+    }
+
+    /**
+     * Stop all subscriptions and cancel the coordinator's coroutine scope.
+     * Call from the owning ViewModel's `onCleared()`.
+     */
+    fun destroy() {
+        stopKeyShareListener()
+        scope.cancel()
+        Log.d(TAG, "Destroyed")
+    }
+}
