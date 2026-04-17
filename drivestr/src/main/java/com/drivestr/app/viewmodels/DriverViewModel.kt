@@ -1384,6 +1384,7 @@ class DriverViewModel @Inject constructor(
                     broadcastRequest = null,
                     walletPubKey = result.walletPubKey,
                     driverMintUrl = result.driverMintUrl,
+                    paymentPath = result.paymentPath,
                     cleanupTag = "ACCEPTANCE"
                 )
             } else {
@@ -1409,6 +1410,7 @@ class DriverViewModel @Inject constructor(
         broadcastRequest: BroadcastRideOfferData?,
         walletPubKey: String?,
         driverMintUrl: String?,
+        paymentPath: PaymentPath,
         cleanupTag: String
     ) {
         // Track offer as accepted (so it won't show up again after ride completion)
@@ -1443,10 +1445,6 @@ class DriverViewModel @Inject constructor(
                 Log.w(TAG, "Offer subscription leak after closeOfferSubscription(): $leaks")
             }
         }
-
-        // Determine payment path (same mint vs cross-mint)
-        val paymentPath = PaymentPath.determine(offer.mintUrl, driverMintUrl, offer.paymentMethod)
-        Log.d(TAG, "PaymentPath: $paymentPath (rider: ${offer.mintUrl}, driver: $driverMintUrl)")
 
         _uiState.update { current ->
             current.copy(
@@ -3662,6 +3660,7 @@ class DriverViewModel @Inject constructor(
                     broadcastRequest = result.broadcastRequest,
                     walletPubKey = result.walletPubKey,
                     driverMintUrl = result.driverMintUrl,
+                    paymentPath = result.paymentPath,
                     cleanupTag = "BROADCAST_ACCEPTANCE"
                 )
             } else {
