@@ -1,4 +1,4 @@
-package com.ridestr.rider.viewmodels
+package com.ridestr.common.coordinator
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -9,9 +9,9 @@ class AvailabilityMonitorPolicyTest {
     // --- onAvailabilityEvent ---
 
     @Test
-    fun `availability offline during WAITING_FOR_ACCEPTANCE defers check`() {
+    fun `availability offline while waiting for acceptance defers check`() {
         val action = AvailabilityMonitorPolicy.onAvailabilityEvent(
-            stage = RideStage.WAITING_FOR_ACCEPTANCE,
+            isWaitingForAcceptance = true,
             isAvailable = false,
             eventCreatedAt = 1000L,
             lastSeenTimestamp = 999L
@@ -20,9 +20,9 @@ class AvailabilityMonitorPolicyTest {
     }
 
     @Test
-    fun `availability offline during DRIVER_ACCEPTED is ignored`() {
+    fun `availability offline when not waiting for acceptance is ignored`() {
         val action = AvailabilityMonitorPolicy.onAvailabilityEvent(
-            stage = RideStage.DRIVER_ACCEPTED,
+            isWaitingForAcceptance = false,
             isAvailable = false,
             eventCreatedAt = 1000L,
             lastSeenTimestamp = 999L
@@ -31,9 +31,9 @@ class AvailabilityMonitorPolicyTest {
     }
 
     @Test
-    fun `stale availability event is ignored regardless of stage`() {
+    fun `stale availability event is ignored regardless of waiting flag`() {
         val action = AvailabilityMonitorPolicy.onAvailabilityEvent(
-            stage = RideStage.WAITING_FOR_ACCEPTANCE,
+            isWaitingForAcceptance = true,
             isAvailable = false,
             eventCreatedAt = 500L,
             lastSeenTimestamp = 999L
@@ -42,9 +42,9 @@ class AvailabilityMonitorPolicyTest {
     }
 
     @Test
-    fun `availability online during WAITING_FOR_ACCEPTANCE is ignored`() {
+    fun `availability online while waiting is ignored`() {
         val action = AvailabilityMonitorPolicy.onAvailabilityEvent(
-            stage = RideStage.WAITING_FOR_ACCEPTANCE,
+            isWaitingForAcceptance = true,
             isAvailable = true,
             eventCreatedAt = 1000L,
             lastSeenTimestamp = 999L
@@ -52,12 +52,25 @@ class AvailabilityMonitorPolicyTest {
         assertEquals(AvailabilityMonitorPolicy.Action.IGNORE, action)
     }
 
+    @Test
+    fun `equal timestamps pass the stale guard`() {
+        // Callers typically update `lastSeenTimestamp` to `eventCreatedAt` before invoking the
+        // policy, producing equal values — the policy must treat that as "current, not stale".
+        val action = AvailabilityMonitorPolicy.onAvailabilityEvent(
+            isWaitingForAcceptance = true,
+            isAvailable = false,
+            eventCreatedAt = 1000L,
+            lastSeenTimestamp = 1000L
+        )
+        assertEquals(AvailabilityMonitorPolicy.Action.DEFER_CHECK, action)
+    }
+
     // --- onDeletionEvent ---
 
     @Test
-    fun `deletion during WAITING_FOR_ACCEPTANCE defers check`() {
+    fun `deletion while waiting for acceptance defers check`() {
         val action = AvailabilityMonitorPolicy.onDeletionEvent(
-            stage = RideStage.WAITING_FOR_ACCEPTANCE,
+            isWaitingForAcceptance = true,
             deletionTimestamp = 1000L,
             lastSeenTimestamp = 999L
         )
@@ -65,9 +78,9 @@ class AvailabilityMonitorPolicyTest {
     }
 
     @Test
-    fun `deletion during DRIVER_ACCEPTED is ignored`() {
+    fun `deletion when not waiting for acceptance is ignored`() {
         val action = AvailabilityMonitorPolicy.onDeletionEvent(
-            stage = RideStage.DRIVER_ACCEPTED,
+            isWaitingForAcceptance = false,
             deletionTimestamp = 1000L,
             lastSeenTimestamp = 999L
         )
@@ -77,7 +90,7 @@ class AvailabilityMonitorPolicyTest {
     @Test
     fun `stale deletion is ignored`() {
         val action = AvailabilityMonitorPolicy.onDeletionEvent(
-            stage = RideStage.WAITING_FOR_ACCEPTANCE,
+            isWaitingForAcceptance = true,
             deletionTimestamp = 500L,
             lastSeenTimestamp = 999L
         )
@@ -97,41 +110,5 @@ class AvailabilityMonitorPolicyTest {
         val seed = AvailabilityMonitorPolicy.seedTimestamp(0L)
         val after = System.currentTimeMillis() / 1000
         assertTrue("seed=$seed should be between $before and $after", seed in before..after)
-    }
-
-    // --- Stage coverage ---
-
-    @Test
-    fun `all non-waiting stages are ignored for both event types`() {
-        val nonWaitingStages = listOf(
-            RideStage.IDLE,
-            RideStage.BROADCASTING_REQUEST,
-            RideStage.DRIVER_ACCEPTED,
-            RideStage.RIDE_CONFIRMED,
-            RideStage.DRIVER_ARRIVED,
-            RideStage.IN_PROGRESS,
-            RideStage.COMPLETED
-        )
-        for (stage in nonWaitingStages) {
-            assertEquals(
-                "onAvailabilityEvent should IGNORE for stage $stage",
-                AvailabilityMonitorPolicy.Action.IGNORE,
-                AvailabilityMonitorPolicy.onAvailabilityEvent(
-                    stage = stage,
-                    isAvailable = false,
-                    eventCreatedAt = 1000L,
-                    lastSeenTimestamp = 999L
-                )
-            )
-            assertEquals(
-                "onDeletionEvent should IGNORE for stage $stage",
-                AvailabilityMonitorPolicy.Action.IGNORE,
-                AvailabilityMonitorPolicy.onDeletionEvent(
-                    stage = stage,
-                    deletionTimestamp = 1000L,
-                    lastSeenTimestamp = 999L
-                )
-            )
-        }
     }
 }

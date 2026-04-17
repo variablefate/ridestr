@@ -14,6 +14,7 @@ import com.ridestr.common.nostr.NostrService
 import com.ridestr.common.nostr.events.AdminConfig
 import com.ridestr.common.nostr.events.Location
 import com.ridestr.common.nostr.events.PaymentMethod
+import com.ridestr.common.coordinator.RoadflareRiderCoordinator
 import com.ridestr.common.roadflare.RoadflareDriverPresenceCoordinator
 import com.ridestr.common.roadflare.RoadflareFarePolicy
 import com.ridestr.common.routing.NostrTileDiscoveryService
@@ -85,6 +86,12 @@ class RiderViewModel @Inject constructor(
         nostrService, followedDriversRepository, viewModelScope
     )
 
+    // RoadFlare protocol coordinator — Kind 3186 key-share reception, 3188 ack, 3189 ping
+    // TODO(#52): convert to @Singleton @Inject
+    val roadflareRiderCoordinator = RoadflareRiderCoordinator(
+        nostrService, followedDriversRepository, viewModelScope
+    )
+
     // Progressive per-driver fare refinement
     val driverQuoteCoordinator = DriverQuoteCoordinator(
         valhallaRoutingService, tileManager, followedDriversRepository, viewModelScope
@@ -97,6 +104,7 @@ class RiderViewModel @Inject constructor(
         nostrService.ensureConnected()
         viewModelScope.launch { remoteConfigManager.fetchConfig() }
         presenceCoordinator.start()
+        roadflareRiderCoordinator.startKeyShareListener()
         BitcoinPriceService.getInstance().startAutoRefresh()
     }
 
@@ -343,6 +351,7 @@ class RiderViewModel @Inject constructor(
         rideSessionManager.destroy()
         chatCoordinator.destroy()
         presenceCoordinator.stop()
+        roadflareRiderCoordinator.destroy()
         driverQuoteCoordinator.cancel()
     }
 

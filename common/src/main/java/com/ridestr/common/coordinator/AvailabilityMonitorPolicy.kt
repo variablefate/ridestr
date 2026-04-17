@@ -1,40 +1,47 @@
-package com.ridestr.rider.viewmodels
+package com.ridestr.common.coordinator
 
 /**
  * Pure decision logic for pre-confirmation driver availability monitoring.
- * Extracted for testability — RiderViewModel delegates to these functions.
+ *
+ * Extracted for testability — coordinators and ViewModels delegate to these functions.
  *
  * Design principle: availability monitoring is pre-acceptance only.
  * Post-acceptance safety relies on Kind 3179 cancellation + post-confirm ack timeout.
  */
-internal object AvailabilityMonitorPolicy {
+object AvailabilityMonitorPolicy {
 
     enum class Action {
-        IGNORE,            // Out-of-order, wrong stage, or post-acceptance
-        SHOW_UNAVAILABLE,  // Used by ViewModel after grace period expires with no acceptance
-        DEFER_CHECK        // Offline or deletion during WAITING_FOR_ACCEPTANCE — re-check after grace period
+        /** Out-of-order, driver-available, or not currently waiting for acceptance. */
+        IGNORE,
+
+        /**
+         * Availability went offline (or was deleted) while waiting for an acceptance.
+         * Caller should re-check after a grace period and only then surface "driver unavailable".
+         * A same-window Kind 3174 acceptance will cancel the deferred check.
+         */
+        DEFER_CHECK
     }
 
     /** React to a Kind 30173 availability event. */
     fun onAvailabilityEvent(
-        stage: RideStage,
+        isWaitingForAcceptance: Boolean,
         isAvailable: Boolean,
         eventCreatedAt: Long,
         lastSeenTimestamp: Long
     ): Action {
         if (eventCreatedAt < lastSeenTimestamp) return Action.IGNORE
-        if (stage != RideStage.WAITING_FOR_ACCEPTANCE) return Action.IGNORE
+        if (!isWaitingForAcceptance) return Action.IGNORE
         return if (isAvailable) Action.IGNORE else Action.DEFER_CHECK
     }
 
     /** React to a Kind 5 deletion of driver availability. */
     fun onDeletionEvent(
-        stage: RideStage,
+        isWaitingForAcceptance: Boolean,
         deletionTimestamp: Long,
         lastSeenTimestamp: Long
     ): Action {
         if (deletionTimestamp < lastSeenTimestamp) return Action.IGNORE
-        if (stage != RideStage.WAITING_FOR_ACCEPTANCE) return Action.IGNORE
+        if (!isWaitingForAcceptance) return Action.IGNORE
         return Action.DEFER_CHECK
     }
 

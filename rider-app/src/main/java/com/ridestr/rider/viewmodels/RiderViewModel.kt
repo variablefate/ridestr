@@ -20,15 +20,11 @@ import com.ridestr.common.nostr.RouteMetrics
 import com.ridestr.common.nostr.SubscriptionManager
 import com.ridestr.common.nostr.events.DriverAvailabilityData
 import com.ridestr.common.nostr.events.RideshareExpiration
-import com.ridestr.common.nostr.events.DriverRideAction
-import com.ridestr.common.nostr.events.DriverRideStateData
 import com.ridestr.common.nostr.events.DriverStatusType
 import com.ridestr.common.nostr.events.Geohash
 import com.ridestr.common.nostr.events.PaymentPath
 import com.ridestr.common.nostr.events.Location
 import com.ridestr.common.nostr.events.RideAcceptanceData
-import com.ridestr.common.nostr.events.RiderRideAction
-import com.ridestr.common.nostr.events.RiderRideStateEvent
 import com.ridestr.common.nostr.events.RideshareChatData
 import com.ridestr.common.nostr.events.UserProfile
 import com.ridestr.common.nostr.events.geohash
@@ -37,7 +33,6 @@ import com.ridestr.rider.presence.RiderPresenceMapper
 import com.ridestr.rider.presence.RiderPresenceMode
 import com.ridestr.rider.service.RiderActiveService
 import com.ridestr.rider.service.RiderStatus
-import kotlin.random.Random
 import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.routing.RouteResult
 import com.ridestr.common.routing.TileManager
@@ -48,8 +43,6 @@ import com.ridestr.common.settings.SettingsRepository
 import com.ridestr.common.settings.SettingsUiState
 import com.ridestr.common.routing.ValhallaRoutingService
 import com.ridestr.common.payment.BridgePaymentStatus
-import com.ridestr.common.payment.LockResult
-import com.ridestr.common.payment.MeltQuoteState
 import com.ridestr.common.payment.PaymentCrypto
 import com.ridestr.common.payment.WalletService
 import com.ridestr.common.state.RideContext
@@ -63,10 +56,18 @@ import com.ridestr.common.util.FareCalculator
 import com.ridestr.common.util.RideHistoryBuilder
 import com.ridestr.common.data.FollowedDriversRepository
 import com.ridestr.common.roadflare.RoadflareDriverPresenceCoordinator
+import com.ridestr.common.coordinator.AvailabilityMonitorPolicy
+import com.ridestr.common.coordinator.ConfirmationInputs
+import com.ridestr.common.coordinator.FareCalc
+import com.ridestr.common.coordinator.OfferCoordinator
+import com.ridestr.common.coordinator.OfferEvent
+import com.ridestr.common.coordinator.PaymentCoordinator
+import com.ridestr.common.coordinator.PaymentEvent
+import com.ridestr.common.coordinator.RoadflareRiderCoordinator
+import com.ridestr.common.coordinator.RoadflareRiderEvent
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -76,7 +77,6 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.withLock
 import kotlin.coroutines.coroutineContext
 import org.json.JSONObject
 import com.ridestr.rider.BuildConfig
@@ -173,12 +173,6 @@ class RiderViewModel @Inject constructor(
     )
 
     /**
-     * Result of a fare calculation. Carries sats (actual or heuristic fallback) and the
-     * authoritative USD quote used for fiat/manual offers.
-     */
-    private data class FareCalc(val sats: Double, val usdAmount: String?)
-
-    /**
      * Per ADR-0008, fiat fare fields are encoded only for fiat payment rails.
      * Crypto rails (cashu/lightning) skip the fields — sats is canonical there.
      */
@@ -212,6 +206,22 @@ class RiderViewModel @Inject constructor(
         nostrService, followedDriversRepository, viewModelScope
     )
 
+    // ── Coordinators (Issue #65: extracted from RiderViewModel) ──────────────
+
+    /** Owns all offer-sending, acceptance subscription, and availability monitoring logic. */
+    val offerCoordinator = OfferCoordinator(
+        nostrService, settingsRepository, routingService, remoteConfigManager,
+        BitcoinPriceService.getInstance()
+    )
+
+    /** Owns ride confirmation, HTLC locking, driver state processing, and bridge payment. */
+    val paymentCoordinator = PaymentCoordinator(nostrService, viewModelScope)
+
+    /** Owns RoadFlare key-share reception, key-ack sending, and driver-ping sending. */
+    val roadflareRiderCoordinator = RoadflareRiderCoordinator(
+        nostrService, followedDriversRepository, viewModelScope
+    )
+
     // Track which tile region is currently loaded
     private var currentTileRegion: String? = null
 
@@ -239,6 +249,8 @@ class RiderViewModel @Inject constructor(
 
     fun setWalletService(service: WalletService?) {
         walletService = service
+        offerCoordinator.walletService = service
+        paymentCoordinator.walletService = service
     }
 
     // === Settings mediation methods (screens call these, ViewModel delegates to repository) ===
@@ -288,19 +300,12 @@ class RiderViewModel @Inject constructor(
     private var chatRefreshJob: PeriodicRefreshJob? = null
     private var acceptanceTimeoutJob: Job? = null
     private var broadcastTimeoutJob: Job? = null
-    private var bridgePendingPollJob: Job? = null
-    private var escrowRetryDeadlineJob: Job? = null
-    private var postConfirmAckTimeoutJob: Job? = null
     private var pendingDeletionJob: Job? = null
     private var currentSubscriptionGeohash: String? = null
     // Generation counter for EOSE reconciliation — prevents stale reconciliation after resubscribe
     private val driverSubscriptionGeneration = AtomicInteger(0)
     // First-acceptance-wins flag for broadcast mode (AtomicBoolean for thread safety)
     private val hasAcceptedDriver = AtomicBoolean(false)
-    // Thread-safe guard: ensures exactly one confirmation per ride.
-    // compareAndSet(false, true) is atomic — only one caller wins across IO threads.
-    // Reset to false in resetRideUiState() and on confirmation failure.
-    private val confirmationInFlight = AtomicBoolean(false)
     // Track when we last received an event per driver (receivedAt, not createdAt)
     // Used for accurate staleness detection - network latency can make fresh events appear stale
     private val driverLastReceivedAt = mutableMapOf<String, Long>()
@@ -308,30 +313,9 @@ class RiderViewModel @Inject constructor(
     // ALL events I publish during a ride (for NIP-09 deletion on completion/cancellation)
     private val myRideEventIds = mutableListOf<String>()
 
-    // Rider ride state history for consolidated Kind 30181 events
-    // This accumulates all rider actions during a ride (location reveals, PIN verifications)
-    // THREAD SAFETY: Use synchronized list and historyMutex to prevent race conditions
-    // when multiple coroutines add actions and publish concurrently
-    private val riderStateHistory = java.util.Collections.synchronizedList(mutableListOf<RiderRideAction>())
-    private val historyMutex = kotlinx.coroutines.sync.Mutex()
-
-    // Track how many driver actions we've processed (to detect new actions)
-    private var lastProcessedDriverActionCount = 0
-
-    // Track last received driver state event ID for chain integrity (AtoB pattern)
-    private var lastReceivedDriverStateId: String? = null
-
-    // Event deduplication sets - prevents stale events from affecting new rides
-    // These track processed event IDs to avoid re-processing queued events from closed subscriptions
-    private val processedDriverStateEventIds = mutableSetOf<String>()
+    // Dedup set for Kind 3179 cancellation events. The driver-ride-state and rider-history
+    // dedup / chain-integrity / phase are now owned by PaymentCoordinator.
     private val processedCancellationEventIds = mutableSetOf<String>()
-
-    // Current phase for rider ride state - INFORMATIONAL ONLY (AtoB pattern)
-    // This is published in Kind 30181 for logging/debugging, but:
-    // - Driver ignores it (processes history array actions, not phase)
-    // - Rider UI uses rideStage (derived from driver's status), not this phase
-    // The driver is the single source of truth for post-confirmation state.
-    private var currentRiderPhase = RiderRideStateEvent.Phase.AWAITING_DRIVER
 
     // === STATE MACHINE (Phase 1: Validation Only) ===
     // The state machine validates transitions but doesn't control flow yet.
@@ -403,160 +387,15 @@ class RiderViewModel @Inject constructor(
     }
 
     /**
-     * Helper to add a location reveal action to history and publish rider ride state.
-     * @param locationType The location type ("pickup" or "destination")
-     * @param location The precise location to reveal
-     * @return The event ID if successful, null on failure
+     * Reset the ride-scoped coordinator state and ViewModel-side dedup set. Call at every ride
+     * boundary (start, completion, cancellation) to guarantee no stale events leak into the next
+     * ride. The coordinator owns rider-state history, driver-state dedup, phase, and transition
+     * chain; the ViewModel owns the Kind 3179 cancellation dedup set.
      */
-    private suspend fun revealLocation(
-        confirmationEventId: String,
-        driverPubKey: String,
-        locationType: String,
-        location: Location
-    ): String? {
-        // Encrypt the location for the driver
-        val encryptedLocation = nostrService.encryptLocationForRiderState(location, driverPubKey)
-        if (encryptedLocation == null) {
-            Log.e(TAG, "Failed to encrypt location")
-            return null
-        }
-
-        // Add location reveal action to history
-        val locationAction = RiderRideStateEvent.createLocationRevealAction(
-            locationType = locationType,
-            locationEncrypted = encryptedLocation
-        )
-
-        // CRITICAL: Use mutex to prevent race condition with PIN verification
-        return historyMutex.withLock {
-            riderStateHistory.add(locationAction)
-
-            // Publish consolidated rider ride state
-            nostrService.publishRiderRideState(
-                confirmationEventId = confirmationEventId,
-                driverPubKey = driverPubKey,
-                currentPhase = currentRiderPhase,
-                history = riderStateHistory.toList(),
-                lastTransitionId = lastReceivedDriverStateId
-            )
-        }
-    }
-
-    /**
-     * Helper to add a PIN verification action to history and publish rider ride state.
-     * @param verified Whether the PIN was verified successfully
-     * @param attempt The attempt number (1-3)
-     * @return The event ID if successful, null on failure
-     */
-    private suspend fun publishPinVerification(
-        confirmationEventId: String,
-        driverPubKey: String,
-        verified: Boolean,
-        attempt: Int
-    ): String? {
-        // Add PIN verification action to history
-        val pinAction = RiderRideStateEvent.createPinVerifyAction(
-            verified = verified,
-            attempt = attempt
-        )
-
-        // CRITICAL: Use mutex to prevent race condition with location reveals
-        return historyMutex.withLock {
-            riderStateHistory.add(pinAction)
-
-            // Update phase based on verification result
-            if (verified) {
-                currentRiderPhase = RiderRideStateEvent.Phase.VERIFIED
-            }
-
-            // Publish consolidated rider ride state
-            nostrService.publishRiderRideState(
-                confirmationEventId = confirmationEventId,
-                driverPubKey = driverPubKey,
-                currentPhase = currentRiderPhase,
-                history = riderStateHistory.toList(),
-                lastTransitionId = lastReceivedDriverStateId
-            )
-        }
-    }
-
-    /**
-     * Share the HTLC preimage and escrow token with the driver after PIN verification.
-     * The preimage allows the driver to claim the escrow payment at ride completion.
-     *
-     * @param confirmationEventId The ride confirmation event ID
-     * @param driverPubKey The driver's public key
-     * @param preimage The 64-char hex preimage that unlocks the HTLC
-     * @param escrowToken The HTLC token containing locked funds (optional)
-     */
-    private suspend fun sharePreimageWithDriver(
-        confirmationEventId: String,
-        driverPubKey: String,
-        preimage: String,
-        escrowToken: String? = null
-    ) {
-        try {
-            // Encrypt preimage for driver using NIP-44
-            val encryptedPreimage = nostrService.encryptForUser(preimage, driverPubKey)
-            if (encryptedPreimage == null) {
-                Log.e(TAG, "Failed to encrypt preimage for driver")
-                return
-            }
-
-            // Encrypt escrow token if available
-            val encryptedEscrowToken = escrowToken?.let {
-                nostrService.encryptForUser(it, driverPubKey)
-            }
-
-            // Add PreimageShare action to rider state
-            val preimageAction = RiderRideStateEvent.createPreimageShareAction(
-                preimageEncrypted = encryptedPreimage,
-                escrowTokenEncrypted = encryptedEscrowToken
-            )
-
-            // CRITICAL: Use mutex to prevent race condition with other state updates
-            val eventId = historyMutex.withLock {
-                riderStateHistory.add(preimageAction)
-
-                // Publish updated rider ride state with preimage share
-                nostrService.publishRiderRideState(
-                    confirmationEventId = confirmationEventId,
-                    driverPubKey = driverPubKey,
-                    currentPhase = currentRiderPhase,
-                    history = riderStateHistory.toList(),
-                    lastTransitionId = lastReceivedDriverStateId
-                )
-            }
-
-            if (eventId != null) {
-                if (BuildConfig.DEBUG) Log.d(TAG, "Shared encrypted preimage with driver: ${preimage.take(16)}...")
-                if (escrowToken != null) {
-                    Log.d(TAG, "Also shared HTLC escrow token")
-                }
-                myRideEventIds.add(eventId)
-                // Mark preimage as shared - driver can now claim payment
-                updateRideSession { copy(preimageShared = true) }
-            } else {
-                Log.e(TAG, "Failed to publish preimage share event")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error sharing preimage: ${e.message}", e)
-        }
-    }
-
-    /**
-     * Clear rider state history (called when ride ends or is cancelled).
-     * Also clears event deduplication sets to allow fresh events for new rides.
-     */
-    private fun clearRiderStateHistory() {
-        riderStateHistory.clear()
-        lastProcessedDriverActionCount = 0
-        lastReceivedDriverStateId = null  // Reset chain for new ride
-        currentRiderPhase = RiderRideStateEvent.Phase.AWAITING_DRIVER
-        // Clear deduplication sets so new rides can process fresh events
-        processedDriverStateEventIds.clear()
+    private fun clearRideCoordinatorState() {
         processedCancellationEventIds.clear()
-        Log.d(TAG, "Cleared rider state history and event deduplication sets")
+        paymentCoordinator.reset()
+        Log.d(TAG, "Reset ride coordinator state and cancellation dedup set")
     }
 
     /**
@@ -575,7 +414,6 @@ class RiderViewModel @Inject constructor(
         statusMessage: String,
         error: String? = null
     ) {
-        confirmationInFlight.set(false)  // Allow confirmation for next ride
         _uiState.update { current ->
             // Recalculate fare from route at current BTC price (Issue #51)
             val freshCalc = if (current.routeResult != null) {
@@ -632,14 +470,9 @@ class RiderViewModel @Inject constructor(
         acceptanceTimeoutJob = null
         broadcastTimeoutJob?.cancel()
         broadcastTimeoutJob = null
-        bridgePendingPollJob?.cancel()
-        bridgePendingPollJob = null
-        escrowRetryDeadlineJob?.cancel()
-        escrowRetryDeadlineJob = null
-        postConfirmAckTimeoutJob?.cancel()
-        postConfirmAckTimeoutJob = null
         pendingDeletionJob?.cancel()
         pendingDeletionJob = null
+        paymentCoordinator.reset()  // Cancels bridge poll, escrow retry, post-confirm timer
 
         // RoadFlare batch state — prevent stale offers to drivers from finished ride
         roadflareBatchJob?.cancel()
@@ -662,6 +495,8 @@ class RiderViewModel @Inject constructor(
 
         // Start RoadFlare location subscription + profile fetching (ViewModel-scoped)
         presenceCoordinator.start()
+        // Start RoadFlare key-share listener (Kind 3186) via coordinator
+        roadflareRiderCoordinator.startKeyShareListener()
 
         // Fetch remote config (fare rates, recommended mints) from admin pubkey
         viewModelScope.launch {
@@ -680,6 +515,11 @@ class RiderViewModel @Inject constructor(
 
         // Restore any active ride state from previous session
         restoreRideState()
+
+        // Collect coordinator event streams → update UiState
+        viewModelScope.launch { offerCoordinator.events.collect { handleOfferEvent(it) } }
+        viewModelScope.launch { paymentCoordinator.events.collect { handlePaymentEvent(it) } }
+        viewModelScope.launch { roadflareRiderCoordinator.events.collect { handleRoadflareRiderEvent(it) } }
     }
 
     /**
@@ -795,7 +635,7 @@ class RiderViewModel @Inject constructor(
                     put("pickupPin", session.pickupPin)
                     put("pinAttempts", session.pinAttempts)
                     put("pinVerified", session.pinVerified)
-                    put("lastProcessedDriverActionCount", lastProcessedDriverActionCount)
+                    put("lastProcessedDriverActionCount", paymentCoordinator.getLastProcessedDriverActionCount())
                     put("postConfirmAckDeadlineMs", session.postConfirmAckDeadlineMs ?: 0L)
 
                     // Payment path persistence (for escrow blocking after restart)
@@ -923,8 +763,8 @@ class RiderViewModel @Inject constructor(
         val pickupPin: String? = if (data.has("pickupPin")) data.getString("pickupPin") else null
         val pinAttempts = data.optInt("pinAttempts", 0)
         val pinVerified = data.optBoolean("pinVerified", false)
-        // Restore action count to prevent re-processing events on app restart
-        lastProcessedDriverActionCount = data.optInt("lastProcessedDriverActionCount", 0)
+        // Coordinator owns this counter; we just thread the persisted value through.
+        val lastProcessedDriverActionCount = data.optInt("lastProcessedDriverActionCount", 0)
         val fareEstimate = if (data.has("fareEstimate")) data.getDouble("fareEstimate") else null
 
         // Restore chat messages
@@ -1009,23 +849,37 @@ class RiderViewModel @Inject constructor(
             )
         }
 
-        // B10: Post-confirm ack timeout — restart-stable via absolute deadline
+        // Restore coordinator state: dedup sets, PIN context, payment path, and active confirmation ID.
+        // Without this, the coordinator would re-process already-handled driver state events and
+        // reset its PIN attempt counter after every process-death restore.
+        //
+        // Coordinator owns the post-confirm ack timer. Compute the effective deadline here so
+        // legacy saves (no deadline persisted) still arm a fresh timer, and an already-expired
+        // deadline triggers an immediate cancel without touching the coordinator's timer.
         if (confirmationEventId != null) {
-            if (postConfirmAckDeadlineMs > 0) {
-                val remaining = postConfirmAckDeadlineMs - System.currentTimeMillis()
-                if (remaining <= 0) {
-                    // Already expired — cancel immediately and return to prevent re-subscriptions
-                    Log.w(TAG, "Post-confirm ack timeout expired during process death — cancelling")
-                    handleDriverCancellation("No response from driver", source = "postConfirmAck")
-                    return  // CRITICAL: do not continue into re-subscriptions/service updates
-                } else {
-                    startPostConfirmAckTimeout(postConfirmAckDeadlineMs)
-                }
-            } else if (stage == RideStage.DRIVER_ACCEPTED) {
-                // Legacy save without deadline — start fresh timeout
-                val deadline = System.currentTimeMillis() + POST_CONFIRM_ACK_TIMEOUT_MS
-                startPostConfirmAckTimeout(deadline)
+            val effectiveDeadline = when {
+                postConfirmAckDeadlineMs > 0 -> postConfirmAckDeadlineMs
+                stage == RideStage.DRIVER_ACCEPTED ->
+                    System.currentTimeMillis() + POST_CONFIRM_ACK_TIMEOUT_MS
+                else -> 0L
             }
+            if (effectiveDeadline in 1..System.currentTimeMillis()) {
+                Log.w(TAG, "Post-confirm ack timeout expired during process death — cancelling")
+                handleDriverCancellation("No response from driver", source = "postConfirmAck")
+                return  // CRITICAL: do not continue into re-subscriptions/service updates
+            }
+            paymentCoordinator.restoreRideState(
+                confirmationEventId = confirmationEventId,
+                paymentPath = paymentPath,
+                paymentHash = activePaymentHash,
+                preimage = activePreimage,
+                escrowToken = escrowToken,
+                pickupPin = pickupPin,
+                pinVerified = pinVerified,
+                destination = destination,
+                postConfirmDeadlineMs = effectiveDeadline,
+                lastProcessedDriverActionCount = lastProcessedDriverActionCount
+            )
         }
 
         // Re-subscribe to relevant events
@@ -1060,8 +914,9 @@ class RiderViewModel @Inject constructor(
                         )
                     }
 
-                    // Start polling to resolve the pending state
-                    startBridgePendingPoll(pendingBridge.id, confirmationEventId, acceptance.driverPubKey)
+                    // Coordinator resumes its poll; its own state (history, phase, transition
+                    // chain) is what gets published in the BridgeComplete Kind 30181.
+                    paymentCoordinator.resumeBridgePoll(pendingBridge.id, confirmationEventId, acceptance.driverPubKey)
                 }
             }
         }
@@ -1226,13 +1081,10 @@ class RiderViewModel @Inject constructor(
     fun clearLocalRideState() {
         Log.d(TAG, "Clearing all local ride state (Account Safety cleanup)")
         clearSavedRideState()
-        // Reset action counter so we don't skip legitimate new events
-        lastProcessedDriverActionCount = 0
         // Clear tracked event IDs
         myRideEventIds.clear()
-        // Clear rider state history
-        riderStateHistory.clear()
-        currentRiderPhase = RiderRideStateEvent.Phase.AWAITING_DRIVER
+        // Reset coordinator state (dedup sets, history, phase, transition chain).
+        paymentCoordinator.reset()
     }
 
     /**
@@ -1690,7 +1542,7 @@ class RiderViewModel @Inject constructor(
 
     /**
      * Set up post-send subscriptions: acceptance monitoring, driver availability, and timeout.
-     * NOTE: clearRiderStateHistory() is NOT called here — callers are responsible for calling
+     * NOTE: clearRideCoordinatorState() is NOT called here — callers are responsible for calling
      * it at the correct time (before send for RoadFlare, after send for direct/broadcast).
      */
     private fun setupOfferSubscriptions(
@@ -1882,7 +1734,7 @@ class RiderViewModel @Inject constructor(
             val eventId = sendOfferToNostr(params, pickupRoute)
             if (eventId != null) {
                 Log.d(TAG, "Sent ride offer: $eventId with payment hash")
-                clearRiderStateHistory()  // Direct: clear AFTER send, success-only
+                clearRideCoordinatorState()  // Direct: clear AFTER send, success-only
                 setupOfferSubscriptions(eventId, driver.driverPubKey, isBroadcast = false, driverAvailabilityEventId = driver.eventId, driverAvailabilityCreatedAt = driver.createdAt)
                 applyOfferSuccessState(params, eventId)
             } else {
@@ -1941,7 +1793,7 @@ class RiderViewModel @Inject constructor(
         updateRideSession { copy(isSendingOffer = true) }
         viewModelScope.launch {
             rideState = RideState.CANCELLED
-            clearRiderStateHistory()  // RoadFlare: clear BEFORE send
+            clearRideCoordinatorState()  // RoadFlare: clear BEFORE send
 
             val preimage: String?
             val paymentHash: String?
@@ -2017,7 +1869,7 @@ class RiderViewModel @Inject constructor(
         viewModelScope.launch {
             updateRideSession { copy(isSendingOffer = true) }
             rideState = RideState.CANCELLED
-            clearRiderStateHistory()  // RoadFlare: clear BEFORE send
+            clearRideCoordinatorState()  // RoadFlare: clear BEFORE send
 
             // No HTLC for alternate payment — payment happens outside the app
             val params = OfferParams(
@@ -2426,7 +2278,7 @@ class RiderViewModel @Inject constructor(
             if (state.rideSession.pendingOfferEventId == null) {
                 subscribeToAcceptance(eventId, driverPubKey)
                 startAcceptanceTimeout()
-                clearRiderStateHistory()
+                clearRideCoordinatorState()
 
                 val fareWithFees = fareEstimate * (1 + FEE_BUFFER_PERCENT)
                 _uiState.update { current ->
@@ -2852,7 +2704,7 @@ class RiderViewModel @Inject constructor(
 
             if (eventId != null) {
                 Log.d(TAG, "Broadcast ride request: $eventId")
-                clearRiderStateHistory()  // Broadcast: clear AFTER send, success-only
+                clearRideCoordinatorState()  // Broadcast: clear AFTER send, success-only
 
                 // Broadcast uses setupOfferSubscriptions for acceptance + timeout + foreground service
                 val broadcastParams = OfferParams(
@@ -3102,18 +2954,14 @@ class RiderViewModel @Inject constructor(
      * Re-enters autoConfirmRide() which re-acquires CAS gate and recalculates payment path.
      */
     fun retryEscrowLock() {
-        val session = _uiState.value.rideSession
-        val acceptance = session.acceptance ?: return
-        val deadline = session.escrowRetryDeadlineMs
-        // If deadline has passed, auto-cancel instead of retrying
+        val deadline = _uiState.value.rideSession.escrowRetryDeadlineMs
         if (deadline != null && System.currentTimeMillis() > deadline) {
             Log.w(TAG, "Escrow retry deadline expired — cancelling instead of retrying")
             cancelRideAfterEscrowFailure()
             return
         }
-        escrowRetryDeadlineJob?.cancel()  // Cancel auto-cancel timer; will be restarted if lock fails again
         updateRideSession { copy(showEscrowFailedDialog = false, escrowFailedMessage = null) }
-        autoConfirmRide(acceptance)  // CAS succeeds because B3 reset confirmationInFlight
+        paymentCoordinator.retryEscrowLock()
     }
 
     /**
@@ -3121,8 +2969,7 @@ class RiderViewModel @Inject constructor(
      * (not author-wide cleanup which could race with a new ride's events).
      */
     fun cancelRideAfterEscrowFailure() {
-        escrowRetryDeadlineJob?.cancel()
-        escrowRetryDeadlineJob = null
+        paymentCoordinator.onRideCancelled()
         val session = _uiState.value.rideSession
         // Use acceptance's offerEventId (correct for batch flows where a different driver
         // accepted than the first offer target) with fallback to pendingOfferEventId.
@@ -3130,7 +2977,7 @@ class RiderViewModel @Inject constructor(
         updateRideSession { copy(showEscrowFailedDialog = false, escrowFailedMessage = null) }
         // Inline clearRide essentials with error preserved through reset
         closeAllRideSubscriptionsAndJobs()
-        clearRiderStateHistory()
+        clearRideCoordinatorState()
         // Targeted delete of the accepted offer event (not author-wide cleanup).
         // In batch flows, cancelNonAcceptedBatchOffers() already ran before autoConfirmRide()
         // and NIP-09-deleted the other batch offers. If those deletions failed, those stale
@@ -3177,12 +3024,12 @@ class RiderViewModel @Inject constructor(
             Log.w(TAG, "    at ${frame.className}.${frame.methodName}(${frame.fileName}:${frame.lineNumber})")
         }
 
-        // Release HTLC protection for refund (capture paymentHash before reset)
-        session.activePaymentHash?.let { walletService?.clearHtlcRideProtected(it) }
+        // Single HTLC-unlock + coordinator-reset path.
+        paymentCoordinator.onRideCancelled()
 
         // Synchronous cleanup
         closeAllRideSubscriptionsAndJobs()
-        clearRiderStateHistory()
+        clearRideCoordinatorState()
         RiderActiveService.stop(getApplication())
 
         // Capture state values before launching coroutine
@@ -3701,7 +3548,7 @@ class RiderViewModel @Inject constructor(
             prefs.edit().putLong(KEY_DRIVER_AVAIL_TIMESTAMP, availability.createdAt).apply()
 
             val action = AvailabilityMonitorPolicy.onAvailabilityEvent(
-                stage = _uiState.value.rideSession.rideStage,
+                isWaitingForAcceptance = _uiState.value.rideSession.rideStage == RideStage.WAITING_FOR_ACCEPTANCE,
                 isAvailable = availability.isAvailable,
                 eventCreatedAt = availability.createdAt,
                 lastSeenTimestamp = selectedDriverLastAvailabilityTimestamp
@@ -3729,7 +3576,6 @@ class RiderViewModel @Inject constructor(
                         }
                     }
                 }
-                AvailabilityMonitorPolicy.Action.SHOW_UNAVAILABLE -> {} // Only used after grace period
             }
         })
 
@@ -3761,7 +3607,7 @@ class RiderViewModel @Inject constructor(
             }
 
             val action = AvailabilityMonitorPolicy.onDeletionEvent(
-                stage = _uiState.value.rideSession.rideStage,
+                isWaitingForAcceptance = _uiState.value.rideSession.rideStage == RideStage.WAITING_FOR_ACCEPTANCE,
                 deletionTimestamp = deletionTimestamp,
                 lastSeenTimestamp = selectedDriverLastAvailabilityTimestamp
             )
@@ -3790,7 +3636,6 @@ class RiderViewModel @Inject constructor(
                         }
                     }
                 }
-                AvailabilityMonitorPolicy.Action.SHOW_UNAVAILABLE -> {} // Not returned by onDeletionEvent
             }
         })
     }
@@ -3808,321 +3653,32 @@ class RiderViewModel @Inject constructor(
         selectedDriverLastAvailabilityTimestamp = 0L
     }
 
-    private fun escrowFailureMessage(result: LockResult.Failure): String = when (result) {
-        is LockResult.Failure.InsufficientBalance ->
-            "Insufficient wallet balance (need ${result.required} sats, have ${result.available} sats)."
-        is LockResult.Failure.ProofsSpent ->
-            "Wallet sync issue detected. Please try again."
-        is LockResult.Failure.NotConnected ->
-            "Wallet not connected. Check your wallet settings."
-        is LockResult.Failure.MintUnreachable ->
-            "Cannot reach payment mint. Check your connection."
-        is LockResult.Failure.SwapFailed ->
-            "Payment setup rejected by mint. Please try again."
-        is LockResult.Failure.NoWalletKey ->
-            "Wallet key not available. Reconnect your wallet."
-        is LockResult.Failure.NipSyncNotInitialized ->
-            "Wallet sync not ready. Wait a moment and try again."
-        is LockResult.Failure.MintUrlNotAvailable ->
-            "Mint URL not configured. Check wallet settings."
-        is LockResult.Failure.VerificationFailed ->
-            "Could not verify wallet funds. Please try again."
-        is LockResult.Failure.Other ->
-            "Payment setup failed: ${result.message}"
-    }
-
-    private fun startEscrowRetryDeadline(deadlineMs: Long) {
-        escrowRetryDeadlineJob?.cancel()
-        escrowRetryDeadlineJob = viewModelScope.launch {
-            val delayMs = deadlineMs - System.currentTimeMillis()
-            if (delayMs > 0) delay(delayMs)
-            // If dialog is still showing, auto-cancel
-            if (_uiState.value.rideSession.showEscrowFailedDialog) {
-                Log.w(TAG, "Escrow retry deadline expired — auto-cancelling ride")
-                cancelRideAfterEscrowFailure()
-            }
-        }
-    }
-
-    private fun startPostConfirmAckTimeout(deadlineMs: Long) {
-        postConfirmAckTimeoutJob?.cancel()
-        postConfirmAckTimeoutJob = viewModelScope.launch {
-            val delayMs = deadlineMs - System.currentTimeMillis()
-            if (delayMs > 0) delay(delayMs)
-            val session = _uiState.value.rideSession
-            if (session.confirmationEventId != null && session.rideStage == RideStage.DRIVER_ACCEPTED) {
-                Log.w(TAG, "No driver response after confirmation — auto-cancelling")
-                handleDriverCancellation("No response from driver", source = "postConfirmAckTimeout")
-            }
-        }
-    }
-
     /**
      * Automatically confirm the ride when driver accepts.
      * Generates PIN locally and sends precise pickup location to the driver.
      */
     private fun autoConfirmRide(acceptance: RideAcceptanceData) {
-        // Atomic guard: only one confirmation proceeds per ride.
-        // Multi-relay delivery can call this concurrently from different IO threads.
-        if (!confirmationInFlight.compareAndSet(false, true)) {
-            Log.d(TAG, "Ignoring duplicate autoConfirmRide — confirmation already in flight")
-            return
-        }
+        val pickup = _uiState.value.pickupLocation ?: return
+        val state = _uiState.value
+        val session = state.rideSession
 
-        val pickup = _uiState.value.pickupLocation
-        if (pickup == null) {
-            confirmationInFlight.set(false)
-            return
-        }
-
-        // Set UI flag for spinner (after CAS succeeds — only winner shows spinner)
         updateRideSession { copy(isConfirmingRide = true) }
 
-        // Generate PIN locally - rider is the one with money at stake
-        val pickupPin = String.format("%04d", Random.nextInt(10000))
-        Log.d(TAG, "Generated pickup PIN: $pickupPin")
-
-        // Check if driver is already close (within 1 mile) - if so, send precise pickup immediately
-        // Look up driver's location from available drivers list
-        val driverLocation = _uiState.value.availableDrivers
-            .find { it.driverPubKey == acceptance.driverPubKey }
-            ?.approxLocation
-
-        val driverAlreadyClose = driverLocation?.let { pickup.isWithinMile(it) } == true
-
-        // RoadFlare rides always get precise pickup - it's a trusted driver network
-        val isRoadflareRide = _uiState.value.rideSession.activeIsRoadflare
-
-        viewModelScope.launch {
-            try {
-                // Send APPROXIMATE pickup for privacy - precise location revealed when driver is close
-                // UNLESS: driver is already within 1 mile, OR this is a RoadFlare ride (trusted network)
-                val pickupToSend = if (driverAlreadyClose || isRoadflareRide) {
-                    val reason = if (isRoadflareRide) "RoadFlare trusted network" else "driver within 1 mile"
-                    Log.d(TAG, "Sending precise pickup immediately ($reason)")
-                    pickup
-                } else {
-                    pickup.approximate()
-                }
-                Log.d(TAG, "Sending pickup: ${pickupToSend.lat}, ${pickupToSend.lon} (precise: ${pickup.lat}, ${pickup.lon}, roadflare: $isRoadflareRide, driver close: $driverAlreadyClose)")
-
-                // Determine payment path (same mint vs cross-mint)
-                // Prefer mint URL from offer time (survives process death) over live wallet
-                val riderMintUrl = _uiState.value.rideSession.riderMintUrl ?: walletService?.getCurrentMintUrl()
-                val driverMintUrl = acceptance.mintUrl
-                val paymentMethod = acceptance.paymentMethod ?: "cashu"
-                val paymentPath = PaymentPath.determine(riderMintUrl, driverMintUrl, paymentMethod)
-                Log.d(TAG, "PaymentPath: $paymentPath (rider: $riderMintUrl, driver: $driverMintUrl)")
-
-                // Lock HTLC escrow NOW using driver's wallet pubkey from acceptance
-                // This ensures the P2PK condition matches the key the driver will sign with
-                val paymentHash = _uiState.value.rideSession.activePaymentHash
-                val fareAmount = _uiState.value.fareEstimate?.toLong() ?: 0L
-                // Use driver's wallet pubkey for P2PK, fall back to Nostr key if not provided (legacy)
-                val rawDriverKey = acceptance.walletPubKey ?: acceptance.driverPubKey
-                // Cashu NUT-11 requires compressed pubkey (33 bytes = 66 hex chars)
-                // If driver sent x-only pubkey (32 bytes = 64 hex), add "02" prefix
-                val driverP2pkKey = if (rawDriverKey.length == 64) "02$rawDriverKey" else rawDriverKey
-
-                // HTLC Escrow Locking - only for SAME_MINT path
-                // For CROSS_MINT, payment happens via Lightning bridge at pickup
-                // Correlation ID: Use acceptanceEventId for pre-confirmation logging
-                val rideCorrelationId = acceptance.eventId.take(8)
-                var escrowFailureUserMessage: String? = null
-
-                val escrowToken = if (paymentPath == PaymentPath.SAME_MINT) {
-                    Log.d(TAG, "[RIDE $rideCorrelationId] Locking HTLC: fareAmount=$fareAmount, paymentHash=${paymentHash?.take(16)}...")
-                    Log.d(TAG, "[RIDE $rideCorrelationId] driverP2pkKey (${driverP2pkKey.length} chars)=${driverP2pkKey.take(16)}...")
-
-                    if (paymentHash != null && fareAmount > 0) {
-                        try {
-                            val lockResult = walletService?.lockForRide(
-                                amountSats = fareAmount,
-                                paymentHash = paymentHash,
-                                driverPubKey = driverP2pkKey,
-                                expirySeconds = 900L,  // 15 minutes
-                                preimage = _uiState.value.rideSession.activePreimage  // Store for future-proof refunds
-                            )
-                            when (lockResult) {
-                                is LockResult.Success -> {
-                                    Log.d(TAG, "[RIDE $rideCorrelationId] Lock SUCCESS (token: ${lockResult.escrowLock.htlcToken.length} chars)")
-                                    lockResult.escrowLock.htlcToken
-                                }
-                                is LockResult.Failure -> {
-                                    Log.e(TAG, "[RIDE $rideCorrelationId] Lock FAILED: ${lockResult.message}")
-                                    escrowFailureUserMessage = escrowFailureMessage(lockResult)
-                                    null
-                                }
-                                null -> {
-                                    Log.e(TAG, "[RIDE $rideCorrelationId] Lock FAILED: WalletService not available")
-                                    escrowFailureUserMessage = "Wallet not available."
-                                    null
-                                }
-                            }
-                        } catch (e: Exception) {
-                            Log.e(TAG, "[RIDE $rideCorrelationId] Exception during lockForRide: ${e.message}", e)
-                            escrowFailureUserMessage = "Payment setup failed unexpectedly."
-                            null
-                        }
-                    } else {
-                        Log.w(TAG, "[RIDE $rideCorrelationId] Cannot lock escrow: paymentHash=$paymentHash, fareAmount=$fareAmount")
-                        escrowFailureUserMessage = "Payment information missing."
-                        null
-                    }
-                } else {
-                    Log.d(TAG, "[RIDE $rideCorrelationId] Skipping escrow lock (${paymentPath.name}) - payment via ${if (paymentPath == PaymentPath.CROSS_MINT) "Lightning bridge" else paymentPath.name}")
-                    null  // No escrow token for cross-mint - payment happens at pickup
-                }
-
-                // Block ride for SAME_MINT escrow failure — do NOT send confirmation without payment
-                if (escrowToken == null && paymentPath == PaymentPath.SAME_MINT) {
-                    // Stale-ride guard: verify this coroutine still owns the ride
-                    if (_uiState.value.rideSession.acceptance?.eventId != acceptance.eventId) {
-                        Log.w(TAG, "[RIDE $rideCorrelationId] Stale escrow failure — ride changed, ignoring")
-                        return@launch
-                    }
-                    Log.e(TAG, "[RIDE $rideCorrelationId] ESCROW LOCK FAILED — blocking ride")
-                    confirmationInFlight.set(false)  // Allow retry
-                    val deadline = System.currentTimeMillis() + ESCROW_RETRY_DEADLINE_MS
-                    _uiState.update { current ->
-                        current.copy(rideSession = current.rideSession.copy(
-                            isConfirmingRide = false,
-                            showEscrowFailedDialog = true,
-                            escrowFailedMessage = escrowFailureUserMessage,
-                            escrowRetryDeadlineMs = deadline
-                        ))
-                    }
-                    // Auto-cancel when deadline expires (before driver's 30s confirmation timeout)
-                    startEscrowRetryDeadline(deadline)
-                    return@launch  // DO NOT send confirmation
-                }
-
-                // Pass paymentHash in confirmation (moved from offer for correct HTLC timing)
-                // Driver needs paymentHash for PIN verification and HTLC claim
-                val eventId = nostrService.confirmRide(
-                    acceptance = acceptance,
-                    precisePickup = pickupToSend,  // Send precise if driver is close, approximate otherwise
-                    paymentHash = paymentHash,
-                    escrowToken = escrowToken
-                )
-
-                if (eventId != null) {
-                    Log.d(TAG, "Auto-confirmed ride: $eventId")
-                    myRideEventIds.add(eventId)  // Track for cleanup
-
-                    // Guard: If ride was cancelled while we were suspended at confirmRide(),
-                    // check acceptance identity FIRST (cross-ride), then stage (same-ride cancel).
-                    val currentAcceptance = _uiState.value.rideSession.acceptance
-                    if (currentAcceptance?.eventId != acceptance.eventId) {
-                        // Case 1: Different ride (or no ride) is now active — targeted cancel only.
-                        // DO NOT run cleanupRideEventsInBackground() — it deletes ALL rideshare events
-                        // by author (not ride-scoped), which would nuke the new ride's live events.
-                        Log.w(TAG, "Stale confirmation from previous ride - " +
-                            "expected acceptance=${acceptance.eventId.take(8)}, " +
-                            "current=${currentAcceptance?.eventId?.take(8)}")
-                        nostrService.publishRideCancellation(
-                            confirmationEventId = eventId,
-                            otherPartyPubKey = acceptance.driverPubKey,
-                            reason = "Rider cancelled"
-                        )?.let { myRideEventIds.add(it) }
-                        // No global cleanup, no confirmationInFlight reset (new ride owns it now)
-                        return@launch
-                    } else if (_uiState.value.rideSession.rideStage != RideStage.DRIVER_ACCEPTED) {
-                        // Case 2: Same ride, but user cancelled while we were suspended.
-                        // Safe to run global cleanup — no other ride is active.
-                        Log.w(TAG, "Ride cancelled during confirmation - publishing cancellation for $eventId")
-                        nostrService.publishRideCancellation(
-                            confirmationEventId = eventId,
-                            otherPartyPubKey = acceptance.driverPubKey,
-                            reason = "Rider cancelled"
-                        )?.let { myRideEventIds.add(it) }
-                        cleanupRideEventsInBackground("ride cancelled during confirmation")
-                        confirmationInFlight.set(false)
-                        return@launch
-                    }
-
-                    // Close acceptance subscription - we don't need it anymore
-                    subs.close(SubKeys.ACCEPTANCE)
-
-                    // Close availability monitoring — post-acceptance safety relies on
-                    // Kind 3179 cancellation + post-confirm ack timeout, not availability presence.
-                    closeDriverAvailabilitySubscription()
-
-                    // Update service status - keep DriverAccepted until driver sends EN_ROUTE_PICKUP
-                    // AtoB Pattern: Don't transition notification until driver confirms state
-                    val driverName = _uiState.value.driverProfiles[acceptance.driverPubKey]?.bestName()?.split(" ")?.firstOrNull()
-                    RiderActiveService.updatePresence(getApplication(), RiderPresenceMode.DRIVER_ACCEPTED, driverName)
-
-                    // AtoB Pattern: Don't transition to RIDE_CONFIRMED yet - wait for driver's
-                    // EN_ROUTE_PICKUP status. The driver is the single source of truth.
-                    // We store confirmationEventId and PIN, but keep DRIVER_ACCEPTED stage.
-                    // Post-confirm ack deadline is set here (before saveRideState) so it's persisted
-                    val postConfirmDeadline = System.currentTimeMillis() + POST_CONFIRM_ACK_TIMEOUT_MS
-                    _uiState.update { current ->
-                        current.copy(
-                            statusMessage = "Ride confirmed! Your PIN is: $pickupPin",
-                            rideSession = current.rideSession.copy(
-                                isConfirmingRide = false,
-                                confirmationEventId = eventId,
-                                pickupPin = pickupPin,
-                                pinAttempts = 0,
-                                precisePickupShared = driverAlreadyClose,
-                                escrowToken = escrowToken,
-                                paymentPath = paymentPath,
-                                driverMintUrl = driverMintUrl,
-                                postConfirmAckDeadlineMs = postConfirmDeadline
-                            )
-                        )
-                    }
-
-                    // Protect HTLC from auto-refund now that ride is confirmed (before save — if app dies
-                    // before saveRideState(), ride may restore stale DRIVER_ACCEPTED state from earlier save,
-                    // but HTLC is protected and funds are safe)
-                    _uiState.value.rideSession.activePaymentHash?.let { walletService?.setHtlcRideProtected(it) }
-
-                    // Save ride state for persistence
-                    saveRideState()
-
-                    // Start post-confirm ack timeout (after save so deadline is persisted)
-                    startPostConfirmAckTimeout(postConfirmDeadline)
-
-                    // Subscribe to driver ride state (PIN submissions and status updates)
-                    subscribeToDriverRideState(eventId, acceptance.driverPubKey)
-
-                    // Subscribe to chat messages for this ride
-                    subscribeToChatMessages(eventId)
-                    // Start periodic refresh to ensure messages are received
-                    startChatRefreshJob(eventId)
-
-                    // Subscribe to cancellation events
-                    subscribeToCancellation(eventId)
-                } else {
-                    confirmationInFlight.set(false)  // Allow retry
-                    _uiState.update { current ->
-                        current.copy(
-                            error = "Failed to confirm ride",
-                            rideSession = current.rideSession.copy(isConfirmingRide = false)
-                        )
-                    }
-                }
-            } catch (e: CancellationException) {
-                throw e  // Preserve structured concurrency — don't swallow scope cancellation
-            } catch (e: Exception) {
-                Log.e(TAG, "autoConfirmRide failed unexpectedly: ${e.message}", e)
-                // Only reset confirmationInFlight if this coroutine still owns the ride.
-                // A stale Ride A coroutine throwing in the mismatch path must NOT
-                // clear the lock that Ride B now holds.
-                if (_uiState.value.rideSession.acceptance?.eventId == acceptance.eventId) {
-                    confirmationInFlight.set(false)
-                    _uiState.update { current ->
-                        current.copy(
-                            error = "Failed to confirm ride: ${e.message}",
-                            rideSession = current.rideSession.copy(isConfirmingRide = false)
-                        )
-                    }
-                }
-            }
-        }
+        paymentCoordinator.onAcceptanceReceived(
+            acceptance = acceptance,
+            inputs = ConfirmationInputs(
+                pickupLocation = pickup,
+                destination = state.destination,
+                fareAmountSats = state.fareEstimate?.toLong() ?: 0L,
+                paymentHash = session.activePaymentHash,
+                preimage = session.activePreimage,
+                riderMintUrl = session.riderMintUrl ?: walletService?.getCurrentMintUrl(),
+                isRoadflareRide = session.activeIsRoadflare,
+                driverApproxLocation = state.availableDrivers
+                    .find { it.driverPubKey == acceptance.driverPubKey }?.approxLocation
+            )
+        )
+        // Result is delivered asynchronously via handlePaymentEvent().
     }
 
     /**
@@ -4143,7 +3699,7 @@ class RiderViewModel @Inject constructor(
             confirmationEventId = confirmationEventId,
             driverPubKey = driverPubKey
         ) { driverState ->
-            handleDriverRideState(driverState, confirmationEventId, driverPubKey)
+            paymentCoordinator.onDriverRideStateReceived(driverState, confirmationEventId, driverPubKey)
         }
         subs.set(SubKeys.DRIVER_RIDE_STATE, newSubId)
 
@@ -4155,89 +3711,13 @@ class RiderViewModel @Inject constructor(
     }
 
     /**
-     * Handle updates to driver ride state - processes new actions in history.
-     */
-    private fun handleDriverRideState(driverState: DriverRideStateData, confirmationEventId: String, driverPubKey: String) {
-        // FIRST: Event deduplication - prevents stale queued events from affecting new rides
-        // This is the definitive fix for the phantom cancellation bug
-        if (driverState.eventId in processedDriverStateEventIds) {
-            Log.w(TAG, "=== IGNORING ALREADY-PROCESSED DRIVER STATE EVENT: ${driverState.eventId.take(8)} ===")
-            return
-        }
-
-        // Track for chain integrity (AtoB pattern) - save the event ID we received
-        lastReceivedDriverStateId = driverState.eventId
-
-        // Log chain integrity info for debugging
-        driverState.lastTransitionId?.let { transitionId ->
-            Log.d(TAG, "Chain: Driver state references our previous event: ${transitionId.take(8)}")
-        }
-
-        val currentState = _uiState.value
-
-        // DEBUG: Extensive logging to trace phantom cancellation bug
-        Log.w(TAG, "=== DRIVER STATE RECEIVED ===")
-        Log.w(TAG, "  Event ID: ${driverState.eventId.take(8)}")
-        Log.w(TAG, "  Event confirmationEventId: ${driverState.confirmationEventId}")
-        Log.w(TAG, "  Closure confirmationEventId: $confirmationEventId")
-        Log.w(TAG, "  Current state confirmationEventId: ${currentState.rideSession.confirmationEventId}")
-        Log.w(TAG, "  Current rideStage: ${currentState.rideSession.rideStage}")
-        Log.w(TAG, "  Event status: ${driverState.currentStatus}")
-        Log.w(TAG, "  Event history size: ${driverState.history.size}")
-        Log.w(TAG, "  lastProcessedDriverActionCount: $lastProcessedDriverActionCount")
-
-        // SECOND: Validate the EVENT's confirmation ID matches current ride
-        // This is the definitive check - the event itself knows which ride it belongs to
-        if (driverState.confirmationEventId != currentState.rideSession.confirmationEventId) {
-            Log.w(TAG, "  >>> REJECTED: event confId doesn't match current state <<<")
-            return
-        }
-
-        // Mark as processed AFTER validation passes
-        processedDriverStateEventIds.add(driverState.eventId)
-        Log.w(TAG, "  >>> VALIDATION PASSED - processing event (marked as processed) <<<")
-        Log.w(TAG, "===============================")
-
-        // Process only NEW actions (ones we haven't seen yet)
-        val newActions = driverState.history.drop(lastProcessedDriverActionCount)
-        lastProcessedDriverActionCount = driverState.history.size
-
-        if (newActions.isEmpty()) {
-            Log.d(TAG, "No new actions to process")
-            return
-        }
-
-        Log.d(TAG, "Processing ${newActions.size} new driver actions")
-
-        newActions.forEach { action ->
-            when (action) {
-                is DriverRideAction.Status -> {
-                    handleDriverStatusAction(action, driverState, confirmationEventId)
-                }
-                is DriverRideAction.PinSubmit -> {
-                    handlePinSubmission(action, confirmationEventId, driverPubKey)
-                }
-                is DriverRideAction.Settlement -> {
-                    // TODO: Handle settlement confirmation from driver (Stage 5)
-                    Log.d(TAG, "Received settlement confirmation: ${action.settledAmount} sats")
-                }
-                is DriverRideAction.DepositInvoiceShare -> {
-                    // Store deposit invoice for cross-mint bridge payment
-                    Log.d(TAG, "Received deposit invoice from driver: ${action.amount} sats")
-                    handleDepositInvoiceShare(action)
-                }
-            }
-        }
-    }
-
-    /**
      * Handle a status action from the driver.
      *
      * AtoB Pattern: Driver is the single source of truth for post-confirmation ride state.
      * The rider's UI stage is DERIVED from the driver's status, not set independently.
      * This eliminates state divergence between the two apps.
      */
-    private fun handleDriverStatusAction(action: DriverRideAction.Status, driverState: DriverRideStateData, confirmationEventId: String) {
+    private fun handleDriverStatusAction(status: String, confirmationEventId: String) {
         val state = _uiState.value
         val context = getApplication<Application>()
 
@@ -4248,23 +3728,18 @@ class RiderViewModel @Inject constructor(
             return
         }
 
-        // First driver status update — cancel post-confirm ack timeout
-        postConfirmAckTimeoutJob?.cancel()
-        postConfirmAckTimeoutJob = null
-
         val driverPubKey = state.rideSession.acceptance?.driverPubKey
         val driverName = driverPubKey?.let { _uiState.value.driverProfiles[it]?.bestName()?.split(" ")?.firstOrNull() }
 
         // Store the authoritative driver status (AtoB: driver is custodian)
-        Log.d(TAG, "Driver status update: ${action.status}")
+        Log.d(TAG, "Driver status update: $status")
 
         // Derive rider's UI stage from driver's status
-        val derivedStageName = riderStageFromDriverStatus(action.status)
-        val derivedStage = derivedStageName?.let {
+        val derivedStage = riderStageFromDriverStatus(status)?.let {
             try { RideStage.valueOf(it) } catch (e: Exception) { null }
         }
 
-        when (action.status) {
+        when (status) {
             DriverStatusType.EN_ROUTE_PICKUP -> {
                 Log.d(TAG, "Driver is en route to pickup (derived stage: $derivedStage)")
                 // NOW safe to close availability subscription - driver has acknowledged the ride
@@ -4275,7 +3750,7 @@ class RiderViewModel @Inject constructor(
                     current.copy(
                         statusMessage = "Driver is on the way!",
                         rideSession = current.rideSession.copy(
-                            lastDriverStatus = action.status,
+                            lastDriverStatus = status,
                             rideStage = derivedStage ?: RideStage.RIDE_CONFIRMED
                         )
                     )
@@ -4285,12 +3760,11 @@ class RiderViewModel @Inject constructor(
             DriverStatusType.ARRIVED -> {
                 Log.d(TAG, "Driver has arrived! (derived stage: $derivedStage)")
                 RiderActiveService.updatePresence(context, RiderPresenceMode.DRIVER_ARRIVED, driverName)
-                currentRiderPhase = RiderRideStateEvent.Phase.AWAITING_PIN
                 _uiState.update { current ->
                     current.copy(
                         statusMessage = "Driver has arrived! Tell them your PIN: ${current.rideSession.pickupPin}",
                         rideSession = current.rideSession.copy(
-                            lastDriverStatus = action.status,
+                            lastDriverStatus = status,
                             rideStage = derivedStage ?: RideStage.DRIVER_ARRIVED
                         )
                     )
@@ -4300,519 +3774,20 @@ class RiderViewModel @Inject constructor(
             DriverStatusType.IN_PROGRESS -> {
                 Log.d(TAG, "Ride is in progress (derived stage: $derivedStage)")
                 RiderActiveService.updatePresence(context, RiderPresenceMode.IN_RIDE, driverName)
-                currentRiderPhase = RiderRideStateEvent.Phase.IN_RIDE
                 _uiState.update { current ->
                     current.copy(
                         statusMessage = "Ride in progress",
                         rideSession = current.rideSession.copy(
-                            lastDriverStatus = action.status,
+                            lastDriverStatus = status,
                             rideStage = derivedStage ?: RideStage.IN_PROGRESS
                         )
                     )
                 }
                 saveRideState()
             }
-            DriverStatusType.COMPLETED -> {
-                Log.d(TAG, "Ride completed!")
-                // Store status first, then use dedicated completion handler
-                updateRideSession { copy(lastDriverStatus = action.status) }
-                handleRideCompletion(driverState)
-            }
-            DriverStatusType.CANCELLED -> {
-                Log.w(TAG, "=== CANCELLED STATUS DETECTED ===")
-                Log.w(TAG, "  Closure confirmationEventId: $confirmationEventId")
-                Log.w(TAG, "  Current state confirmationEventId: ${state.rideSession.confirmationEventId}")
-                Log.w(TAG, "  Current rideStage: ${state.rideSession.rideStage}")
-                updateRideSession { copy(lastDriverStatus = action.status) }
-                handleDriverCancellation(source = "driverRideState-CANCELLED")
-            }
-        }
-    }
-
-    /**
-     * Handle a PIN submission action from the driver.
-     */
-    private fun handlePinSubmission(action: DriverRideAction.PinSubmit, confirmationEventId: String, driverPubKey: String) {
-        val state = _uiState.value
-        val session = state.rideSession
-
-        // CRITICAL: Skip if already verified (prevents duplicate verification on app restart)
-        // After app restart, subscription may receive full history including already-verified PIN actions
-        if (session.pinVerified) {
-            Log.d(TAG, "PIN already verified, ignoring duplicate pin action")
-            return
-        }
-
-        val expectedPin = session.pickupPin ?: return
-
-        viewModelScope.launch {
-            // Decrypt the PIN
-            val decryptedPin = nostrService.decryptPinFromDriverState(action.pinEncrypted, driverPubKey)
-            if (decryptedPin == null) {
-                Log.e(TAG, "Failed to decrypt PIN")
-                return@launch
-            }
-
-            Log.d(TAG, "Received PIN submission from driver: $decryptedPin")
-
-            val newAttempts = session.pinAttempts + 1
-            val isCorrect = decryptedPin == expectedPin
-
-            // Send verification response via rider ride state
-            val verificationEventId = publishPinVerification(
-                confirmationEventId = confirmationEventId,
-                driverPubKey = driverPubKey,
-                verified = isCorrect,
-                attempt = newAttempts
-            )
-            verificationEventId?.let { myRideEventIds.add(it) }  // Track for cleanup
-
-            if (isCorrect) {
-                Log.d(TAG, "PIN verified successfully!")
-
-                // CRITICAL: Set pinVerified IMMEDIATELY to prevent race condition
-                // If handlePinSubmission is called twice (from duplicate events), the second call
-                // must see pinVerified=true and skip, otherwise we get double bridge payments
-                updateRideSession { copy(pinVerified = true) }
-
-                // CRITICAL: Add delay to ensure distinct timestamp for payment/preimage events
-                // NIP-33 replaceable events use timestamp (seconds) + event ID for ordering.
-                delay(1100L)
-
-                // Branch based on payment path
-                when (session.paymentPath) {
-                    PaymentPath.SAME_MINT -> {
-                        // SAME_MINT: Share preimage and escrow token with driver for HTLC settlement
-                        val preimage = session.activePreimage
-                        val escrowToken = session.escrowToken
-                        Log.d(TAG, "SAME_MINT: Preparing preimage share: preimage=${preimage != null}, escrowToken=${escrowToken != null}")
-                        if (preimage != null) {
-                            sharePreimageWithDriver(confirmationEventId, driverPubKey, preimage, escrowToken)
-                        } else {
-                            Log.w(TAG, "No preimage to share - escrow was not set up")
-                        }
-                    }
-                    PaymentPath.CROSS_MINT -> {
-                        // CROSS_MINT: Execute Lightning bridge payment to driver's mint
-                        val depositInvoice = session.driverDepositInvoice
-                        Log.d(TAG, "CROSS_MINT: Preparing bridge payment, invoice=${depositInvoice != null}")
-                        if (depositInvoice != null) {
-                            executeBridgePayment(confirmationEventId, driverPubKey, depositInvoice)
-                        } else {
-                            Log.w(TAG, "No deposit invoice from driver - cannot execute bridge payment")
-                            // TODO: Show error to user - driver didn't share deposit invoice
-                        }
-                    }
-                    PaymentPath.FIAT_CASH -> {
-                        // FIAT_CASH: No digital payment needed
-                        Log.d(TAG, "FIAT_CASH: No digital payment required")
-                    }
-                    PaymentPath.NO_PAYMENT -> {
-                        Log.w(TAG, "NO_PAYMENT: Ride proceeding without payment setup")
-                    }
-                }
-
-                // CRITICAL: Check if ride is still active after async payment operation
-                // If ride was cancelled during bridge/preimage sharing, don't overwrite state
-                val currentState = _uiState.value
-                if (currentState.rideSession.confirmationEventId != confirmationEventId) {
-                    Log.w(TAG, "Ride was cancelled during payment operation - not updating state to IN_PROGRESS")
-                    Log.w(TAG, "  Expected confirmationEventId: $confirmationEventId")
-                    Log.w(TAG, "  Current confirmationEventId: ${currentState.rideSession.confirmationEventId}")
-                    return@launch
-                }
-
-                // AtoB Pattern: Don't transition to IN_PROGRESS yet - wait for driver's
-                // IN_PROGRESS status. The driver is the single source of truth.
-                // We update pinVerified locally, but keep service status at DriverArrived
-                // until driver acknowledges with Kind 30180 IN_PROGRESS.
-
-                // Use fresh state to preserve any changes made during async operations
-                _uiState.update { current ->
-                    current.copy(
-                        statusMessage = "PIN verified! Starting ride...",
-                        rideSession = current.rideSession.copy(
-                            pinAttempts = newAttempts,
-                            pinVerified = true,
-                            pickupPin = null
-                        )
-                    )
-                }
-
-                // Save ride state for persistence
-                saveRideState()
-
-                // CRITICAL: Add delay to ensure distinct timestamp for LocationReveal event
-                delay(1100L)
-
-                // Reveal precise destination to driver now that ride is starting
-                revealPreciseDestination(confirmationEventId)
-            } else {
-                Log.w(TAG, "PIN incorrect! Attempt $newAttempts of $MAX_PIN_ATTEMPTS")
-
-                if (newAttempts >= MAX_PIN_ATTEMPTS) {
-                    // Brute force protection - cancel the ride
-                    Log.e(TAG, "Max PIN attempts reached! Cancelling ride for security.")
-
-                    // Release HTLC protection for refund (capture paymentHash before reset)
-                    _uiState.value.rideSession.activePaymentHash?.let { walletService?.clearHtlcRideProtected(it) }
-
-                    closeAllRideSubscriptionsAndJobs()
-                    clearRiderStateHistory()
-                    RiderActiveService.stop(getApplication())
-
-                    resetRideUiState(
-                        stage = RideStage.IDLE,
-                        statusMessage = "Ride cancelled - too many wrong PIN attempts",
-                        error = "Security alert: Driver entered wrong PIN $MAX_PIN_ATTEMPTS times. Ride cancelled."
-                    )
-
-                    cleanupRideEventsInBackground("pin brute force security")
-                    resubscribeToDrivers(clearExisting = false)
-                    clearSavedRideState()
-                } else {
-                    _uiState.update { current ->
-                        current.copy(
-                            statusMessage = "Wrong PIN! ${MAX_PIN_ATTEMPTS - newAttempts} attempts remaining. PIN: $expectedPin",
-                            rideSession = current.rideSession.copy(pinAttempts = newAttempts)
-                        )
-                    }
-                }
-            }
-        }
-    }
-
-    /**
-     * Handle deposit invoice share from driver (for cross-mint bridge payment).
-     * Stores the invoice so it can be used when PIN is verified.
-     */
-    private fun handleDepositInvoiceShare(action: DriverRideAction.DepositInvoiceShare) {
-        Log.d(TAG, "Storing deposit invoice for bridge payment: ${action.invoice.take(20)}... (${action.amount} sats)")
-        updateRideSession { copy(driverDepositInvoice = action.invoice) }
-    }
-
-    /**
-     * Execute cross-mint bridge payment via Lightning.
-     * Melts rider's tokens to pay driver's deposit invoice.
-     *
-     * @param confirmationEventId The ride confirmation event ID
-     * @param driverPubKey The driver's public key
-     * @param depositInvoice BOLT11 invoice from driver's mint
-     */
-    private suspend fun executeBridgePayment(
-        confirmationEventId: String,
-        driverPubKey: String,
-        depositInvoice: String
-    ) {
-        Log.d(TAG, "=== EXECUTING CROSS-MINT BRIDGE ===")
-        Log.d(TAG, "  rideId=$confirmationEventId")
-        Log.d(TAG, "  invoice=${depositInvoice.take(30)}...")
-        _uiState.update { current ->
-            current.copy(
-                infoMessage = null,
-                rideSession = current.rideSession.copy(bridgeInProgress = true)
-            )
-        }
-
-        try {
-            val result = walletService?.bridgePayment(depositInvoice, rideId = confirmationEventId)
-
-            if (result?.success == true) {
-                // Log warning if cleanup had issues (payment still succeeded)
-                if (result.error != null) {
-                    Log.w(TAG, "Bridge payment succeeded with wallet sync warning: ${result.error}")
-                }
-                Log.d(TAG, "Bridge payment successful: ${result.amountSats} sats + ${result.feesSats} fees")
-
-                // Cancel any pending poll job
-                bridgePendingPollJob?.cancel()
-                bridgePendingPollJob = null
-
-                // Clear info message and error (mutual exclusivity)
-                _uiState.value = _uiState.value.copy(infoMessage = null, error = null)
-
-                // Encrypt preimage before publishing (matches PreimageShare pattern)
-                val rawPreimage = result.preimage
-                if (rawPreimage == null) {
-                    Log.e(TAG, "[BRIDGE_PUBLISH_FAIL] Bridge payment succeeded but no preimage returned")
-                    _uiState.update { current ->
-                        current.copy(rideSession = current.rideSession.copy(
-                            bridgeInProgress = false, bridgeComplete = true, bridgeCompletePublishFailed = true
-                        ))
-                    }
-                    return
-                }
-
-                val encryptedPreimage = nostrService.encryptForUser(rawPreimage, driverPubKey)
-                if (encryptedPreimage == null) {
-                    Log.e(TAG, "[BRIDGE_PUBLISH_FAIL] Failed to encrypt bridge preimage")
-                    _uiState.update { current ->
-                        current.copy(rideSession = current.rideSession.copy(
-                            bridgeInProgress = false, bridgeComplete = true, bridgeCompletePublishFailed = true
-                        ))
-                    }
-                    return
-                }
-
-                // Publish BridgeComplete action to rider ride state
-                val bridgeAction = RiderRideStateEvent.createBridgeCompleteAction(
-                    preimageEncrypted = encryptedPreimage,
-                    amountSats = result.amountSats,
-                    feesSats = result.feesSats
-                )
-
-                val eventId = historyMutex.withLock {
-                    riderStateHistory.add(bridgeAction)
-                    nostrService.publishRiderRideState(
-                        confirmationEventId = confirmationEventId,
-                        driverPubKey = driverPubKey,
-                        currentPhase = currentRiderPhase,
-                        history = riderStateHistory.toList(),
-                        lastTransitionId = lastReceivedDriverStateId
-                    )
-                }
-
-                if (eventId != null) {
-                    Log.d(TAG, "Published BridgeComplete action: $eventId")
-                    myRideEventIds.add(eventId)
-                    _uiState.update { current ->
-                        current.copy(
-                            infoMessage = null,
-                            error = null,
-                            rideSession = current.rideSession.copy(
-                                bridgeInProgress = false,
-                                bridgeComplete = true
-                            )
-                        )
-                    }
-                } else {
-                    Log.e(TAG, "Failed to publish BridgeComplete action")
-                    _uiState.update { current ->
-                        current.copy(
-                            infoMessage = null, error = null,
-                            rideSession = current.rideSession.copy(bridgeInProgress = false)
-                        )
-                    }
-                }
-            } else if (result?.isPending == true) {
-                // Payment is PENDING - may still complete. Do NOT auto-cancel!
-                Log.w(TAG, "Bridge payment PENDING - Lightning still routing. NOT cancelling ride.")
-
-                // Keep spinner showing, but DON'T show info message yet
-                // Wait 8 seconds to see if payment resolves before alarming user
-                _uiState.update { current ->
-                    current.copy(
-                        error = null,
-                        rideSession = current.rideSession.copy(bridgeInProgress = true)
-                    )
-                }
-
-                // Delayed info message - only show if still pending after 8 seconds
-                val currentRideId = confirmationEventId  // Capture current ride context
-                viewModelScope.launch {
-                    delay(8000L)  // Wait 8 seconds
-                    // Check if still in same ride and bridge still in progress
-                    if (_uiState.value.rideSession.bridgeInProgress && _uiState.value.rideSession.confirmationEventId == currentRideId) {
-                        _uiState.value = _uiState.value.copy(
-                            infoMessage = "Payment routing... Lightning may take a few minutes."
-                        )
-                    }
-                    // If ride completed/cancelled during delay, skip showing message
-                }
-
-                // Start polling to resolve pending state
-                val bridgePaymentId = walletService?.getInProgressBridgePayments()
-                    ?.find { it.rideId == currentRideId }?.id
-
-                if (bridgePaymentId != null) {
-                    startBridgePendingPoll(bridgePaymentId, currentRideId, driverPubKey)
-                }
-
-                // DO NOT call clearRide() - payment may still complete!
-                // User can manually cancel if they want, or wait for driver to cancel
-            } else {
-                // Actual failure (not pending)
-                Log.e(TAG, "Bridge payment failed: ${result?.error} - auto-cancelling ride")
-                bridgePendingPollJob?.cancel()
-                bridgePendingPollJob = null
-                _uiState.update { current ->
-                    current.copy(
-                        infoMessage = null,
-                        error = "Payment failed: ${result?.error ?: "Unknown error"}. Ride cancelled.",
-                        rideSession = current.rideSession.copy(bridgeInProgress = false)
-                    )
-                }
-                // Auto-cancel the ride since payment failed
-                clearRide()
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Exception during bridge payment: ${e.message} - auto-cancelling ride", e)
-            bridgePendingPollJob?.cancel()
-            bridgePendingPollJob = null
-            _uiState.update { current ->
-                current.copy(
-                    infoMessage = null,
-                    error = "Payment failed: ${e.message}. Ride cancelled.",
-                    rideSession = current.rideSession.copy(bridgeInProgress = false)
-                )
-            }
-            // Auto-cancel the ride since payment failed
-            clearRide()
-        }
-    }
-
-    /**
-     * Start polling to resolve a pending bridge payment.
-     * Polls the mint every 30s for up to 10 minutes.
-     */
-    private fun startBridgePendingPoll(bridgePaymentId: String, rideId: String, driverPubKey: String) {
-        bridgePendingPollJob?.cancel()
-        bridgePendingPollJob = viewModelScope.launch {
-            val startMs = System.currentTimeMillis()
-            val timeoutMs = 10 * 60_000L  // 10 minutes
-            val pollIntervalMs = 30_000L  // 30 seconds
-
-            while (isActive && System.currentTimeMillis() - startMs < timeoutMs) {
-                delay(pollIntervalMs)
-
-                // Check if ride still active
-                if (_uiState.value.rideSession.confirmationEventId != rideId) {
-                    Log.d(TAG, "Bridge poll: Ride changed, stopping poll")
-                    return@launch
-                }
-
-                // Get full MeltQuote to access preimage
-                val quote = walletService?.checkBridgeMeltQuote(bridgePaymentId)
-                Log.d(TAG, "Bridge poll: state=${quote?.state}, preimage=${quote?.paymentPreimage?.take(8)} for payment $bridgePaymentId")
-
-                when (quote?.state) {
-                    MeltQuoteState.PAID -> {
-                        Log.d(TAG, "Bridge poll: Payment PAID! Triggering success path")
-                        handleBridgeSuccessFromPoll(bridgePaymentId, quote.paymentPreimage, driverPubKey)
-                        return@launch
-                    }
-                    MeltQuoteState.UNPAID -> {
-                        // Quote expired or failed - update storage status THEN cancel
-                        Log.e(TAG, "Bridge poll: Payment UNPAID/expired - cancelling ride")
-                        walletService?.walletStorage?.updateBridgePaymentStatus(
-                            bridgePaymentId, BridgePaymentStatus.FAILED,
-                            errorMessage = "Lightning route expired"
-                        )
-                        _uiState.update { current ->
-                            current.copy(
-                                infoMessage = null,
-                                error = "Payment failed: Lightning route expired. Ride cancelled.",
-                                rideSession = current.rideSession.copy(bridgeInProgress = false)
-                            )
-                        }
-                        clearRide()
-                        return@launch
-                    }
-                    MeltQuoteState.PENDING, null -> {
-                        // Still pending or error checking - continue polling
-                    }
-                }
-            }
-
-            // Timeout after 10 minutes - update storage status THEN cancel
-            Log.w(TAG, "Bridge poll: Timeout after 10 minutes")
-            walletService?.walletStorage?.updateBridgePaymentStatus(
-                bridgePaymentId, BridgePaymentStatus.FAILED,
-                errorMessage = "Payment timed out after 10 minutes"
-            )
-            _uiState.update { current ->
-                current.copy(
-                    infoMessage = null,
-                    error = "Payment timed out. Please check your wallet balance. Ride cancelled.",
-                    rideSession = current.rideSession.copy(bridgeInProgress = false)
-                )
-            }
-            clearRide()
-        }
-    }
-
-    /**
-     * Handle successful bridge payment detected via polling.
-     */
-    private suspend fun handleBridgeSuccessFromPoll(bridgePaymentId: String, preimage: String?, driverPubKey: String) {
-        // Get the bridge payment details for logging
-        val payment = walletService?.getBridgePayment(bridgePaymentId)
-        Log.d(TAG, "Bridge payment resolved via poll: ${payment?.amountSats} sats, preimage=${preimage?.take(8)}")
-
-        // Cancel polling job first
-        bridgePendingPollJob?.cancel()
-        bridgePendingPollJob = null
-
-        // Update bridge payment status to COMPLETE with preimage
-        walletService?.walletStorage?.updateBridgePaymentStatus(
-            bridgePaymentId, BridgePaymentStatus.COMPLETE,
-            lightningPreimage = preimage  // CRITICAL: Store preimage from MeltQuote
-        )
-
-        val confirmationId = _uiState.value.rideSession.confirmationEventId ?: return
-
-        // Encrypt preimage before publishing (matches PreimageShare pattern)
-        if (preimage == null) {
-            Log.e(TAG, "[BRIDGE_PUBLISH_FAIL] Poll bridge success but no preimage")
-            _uiState.update { current ->
-                current.copy(rideSession = current.rideSession.copy(
-                    bridgeInProgress = false, bridgeComplete = true, bridgeCompletePublishFailed = true
-                ))
-            }
-            return
-        }
-
-        val encryptedPreimage = nostrService.encryptForUser(preimage, driverPubKey)
-        if (encryptedPreimage == null) {
-            Log.e(TAG, "[BRIDGE_PUBLISH_FAIL] Failed to encrypt bridge preimage from poll")
-            _uiState.update { current ->
-                current.copy(rideSession = current.rideSession.copy(
-                    bridgeInProgress = false, bridgeComplete = true, bridgeCompletePublishFailed = true
-                ))
-            }
-            return
-        }
-
-        // Publish BridgeComplete action (same as normal success path)
-        val bridgeAction = RiderRideStateEvent.createBridgeCompleteAction(
-            preimageEncrypted = encryptedPreimage,
-            amountSats = payment?.amountSats ?: 0,
-            feesSats = payment?.feeReserveSats ?: 0
-        )
-
-        val eventId = historyMutex.withLock {
-            riderStateHistory.add(bridgeAction)
-            nostrService.publishRiderRideState(
-                confirmationEventId = confirmationId,
-                driverPubKey = driverPubKey,
-                currentPhase = currentRiderPhase,
-                history = riderStateHistory.toList(),
-                lastTransitionId = lastReceivedDriverStateId
-            )
-        }
-
-        if (eventId != null) {
-            Log.d(TAG, "Published BridgeComplete action from poll: $eventId")
-            myRideEventIds.add(eventId)
-            _uiState.update { current ->
-                current.copy(
-                    infoMessage = null,
-                    error = null,
-                    rideSession = current.rideSession.copy(
-                        bridgeInProgress = false,
-                        bridgeComplete = true
-                    )
-                )
-            }
-        } else {
-            Log.e(TAG, "Failed to publish BridgeComplete action from poll")
-            _uiState.update { current ->
-                current.copy(
-                    infoMessage = null,
-                    error = null,
-                    rideSession = current.rideSession.copy(bridgeInProgress = false)
-                )
-            }
+            // Note: COMPLETED and CANCELLED do NOT reach this handler — PaymentCoordinator
+            // routes them to PaymentEvent.DriverCompleted / DriverCancelled respectively
+            // before any DriverStatusUpdated event is emitted.
         }
     }
 
@@ -4987,142 +3962,30 @@ class RiderViewModel @Inject constructor(
     // ==================== Progressive Location Reveal ====================
 
     /**
-     * Check if driver is close enough to reveal precise pickup location.
-     * Called when driver status updates include location.
+     * Handle ride completion from driver. PaymentCoordinator has already processed HTLC
+     * (mark-claimed or unlock-for-refund) and refreshed the wallet balance before emitting
+     * [PaymentEvent.DriverCompleted]; this method owns only the ViewModel-side tear-down:
+     * close subscriptions, save ride history, push the COMPLETED UI state.
      */
-    private fun checkAndRevealPrecisePickup(confirmationEventId: String, driverLocation: Location) {
-        val state = _uiState.value
-        val pickup = state.pickupLocation ?: return
-
-        // Already shared precise pickup, nothing to do
-        if (state.rideSession.precisePickupShared) return
-
-        // Check if driver is within 1 mile (~1.6 km)
-        if (pickup.isWithinMile(driverLocation)) {
-            Log.d(TAG, "Driver is within 1 mile! Revealing precise pickup location.")
-            revealPrecisePickup(confirmationEventId)
-        } else {
-            val distanceKm = pickup.distanceToKm(driverLocation)
-            Log.d(TAG, "Driver is ${String.format("%.2f", distanceKm)} km away, waiting to reveal precise pickup.")
-        }
-    }
-
-    /**
-     * Send precise pickup location to driver via rider ride state.
-     */
-    private fun revealPrecisePickup(confirmationEventId: String) {
-        val state = _uiState.value
-        val pickup = state.pickupLocation ?: return
-        val driverPubKey = state.rideSession.acceptance?.driverPubKey ?: return
-
-        viewModelScope.launch {
-            val eventId = revealLocation(
-                confirmationEventId = confirmationEventId,
-                driverPubKey = driverPubKey,
-                locationType = RiderRideStateEvent.LocationType.PICKUP,
-                location = pickup
-            )
-
-            if (eventId != null) {
-                Log.d(TAG, "Revealed precise pickup: $eventId")
-                myRideEventIds.add(eventId)  // Track for cleanup
-                _uiState.update { current ->
-                    current.copy(
-                        statusMessage = "Precise pickup shared with driver",
-                        rideSession = current.rideSession.copy(precisePickupShared = true)
-                    )
-                }
-            } else {
-                Log.e(TAG, "Failed to reveal precise pickup")
-            }
-        }
-    }
-
-    /**
-     * Send precise destination location to driver via rider ride state.
-     * Called after PIN is verified and ride begins.
-     */
-    private fun revealPreciseDestination(confirmationEventId: String) {
-        val state = _uiState.value
-        val destination = state.destination ?: return
-        val driverPubKey = state.rideSession.acceptance?.driverPubKey ?: return
-
-        // Don't send if already shared
-        if (state.rideSession.preciseDestinationShared) return
-
-        viewModelScope.launch {
-            val eventId = revealLocation(
-                confirmationEventId = confirmationEventId,
-                driverPubKey = driverPubKey,
-                locationType = RiderRideStateEvent.LocationType.DESTINATION,
-                location = destination
-            )
-
-            if (eventId != null) {
-                Log.d(TAG, "Revealed precise destination: $eventId")
-                myRideEventIds.add(eventId)  // Track for cleanup
-                updateRideSession { copy(preciseDestinationShared = true) }
-            } else {
-                Log.e(TAG, "Failed to reveal precise destination")
-            }
-        }
-    }
-
-    /**
-     * Handle ride completion from driver.
-     */
-    private fun handleRideCompletion(statusData: DriverRideStateData) {
+    private fun handleRideCompletion(coordinatorFareSats: Long?) {
         // Close subscriptions and jobs
         closeAllRideSubscriptionsAndJobs()
-        clearRiderStateHistory()
+        clearRideCoordinatorState()
         RiderActiveService.stop(getApplication())
         clearSavedRideState()
 
         // Capture fare info before launching coroutine
-        val fareMessage = statusData.finalFare?.let { " Fare: ${it.toInt()} sats" } ?: ""
+        val fareMessage = coordinatorFareSats?.let { " Fare: ${it.toInt()} sats" } ?: ""
 
         // Capture state for ride history before launching coroutine
         val state = _uiState.value
         val session = state.rideSession
-        val finalFareSats = statusData.finalFare?.toLong() ?: state.fareEstimate?.toLong() ?: 0L
+        val finalFareSats = coordinatorFareSats ?: state.fareEstimate?.toLong() ?: 0L
         val driver = session.selectedDriver
         val driverProfile = driver?.let { state.driverProfiles[it.driverPubKey] }
         val ridePaymentMethod = session.activePaymentMethod ?: settingsRepository.getDefaultPaymentMethod()
 
-        // Conditionally mark HTLC based on driver's claim result
-        val paymentHash = session.activePaymentHash
-        if (paymentHash != null) {
-            val completedAction = statusData.history.filterIsInstance<DriverRideAction.Status>()
-                .lastOrNull { it.status == DriverStatusType.COMPLETED }
-            val claimSuccess = completedAction?.claimSuccess
-
-            if (claimSuccess == true) {
-                // Driver confirmed claim succeeded — mark HTLC as claimed
-                val marked = walletService?.markHtlcClaimedByPaymentHash(paymentHash) ?: false
-                if (marked) Log.d(TAG, "Marked HTLC escrow as claimed for ride completion")
-            } else if (claimSuccess == false) {
-                // Driver claim failed — keep HTLC LOCKED for rider refund
-                walletService?.clearHtlcRideProtected(paymentHash)
-                Log.w(TAG, "Driver claim failed for HTLC ${paymentHash.take(16)}... — keeping LOCKED for refund")
-            } else {
-                // null = old driver app without claimSuccess field
-                // Conservative: for SAME_MINT rides, keep LOCKED (money safety)
-                if (session.paymentPath == PaymentPath.SAME_MINT) {
-                    walletService?.clearHtlcRideProtected(paymentHash)
-                    Log.w(TAG, "Old driver (no claimSuccess) + SAME_MINT — keeping LOCKED for safety")
-                }
-            }
-        }
-
         viewModelScope.launch {
-            // Refresh wallet balance from NIP-60 (ensures consistency after ride)
-            try {
-                walletService?.refreshBalance()
-                Log.d(TAG, "Refreshed wallet balance after ride completion")
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to refresh wallet balance after ride: ${e.message}")
-            }
-
             // Save to ride history (rider gets exact coords + addresses for their own history)
             try {
                 val historyEntry = RideHistoryEntry(
@@ -5189,12 +4052,13 @@ class RiderViewModel @Inject constructor(
         Log.w(TAG, "  Current rideStage: ${_uiState.value.rideSession.rideStage}")
         Log.w(TAG, "  driverRideStateSubscriptionId: ${subs.get(SubKeys.DRIVER_RIDE_STATE)}")
 
-        // Release HTLC protection for refund (capture paymentHash before reset)
-        _uiState.value.rideSession.activePaymentHash?.let { walletService?.clearHtlcRideProtected(it) }
+        // onRideCancelled is the single authoritative HTLC-unlock + coordinator-reset path.
+        // (Was previously double-called: direct clearHtlcRideProtected() followed by onRideCancelled().)
+        paymentCoordinator.onRideCancelled()
 
         // Synchronous cleanup
         closeAllRideSubscriptionsAndJobs()
-        clearRiderStateHistory()
+        clearRideCoordinatorState()
         val context = getApplication<Application>()
         RiderActiveService.updateStatus(context, RiderStatus.Cancelled)
         RiderActiveService.stop(context)
@@ -5277,38 +4141,6 @@ class RiderViewModel @Inject constructor(
         }
     }
 
-    /**
-     * Handle driver arrived at pickup location.
-     */
-    private fun handleDriverArrived() {
-        // Reject stale events if we've already reached or passed DRIVER_ARRIVED stage
-        // This prevents Nostr relay cached events from reverting state after PIN verification
-        if (_uiState.value.rideSession.rideStage in listOf(
-                RideStage.DRIVER_ARRIVED,
-                RideStage.IN_PROGRESS,
-                RideStage.COMPLETED
-            )) {
-            Log.d(TAG, "Stage already at or past DRIVER_ARRIVED (${_uiState.value.rideSession.rideStage}), ignoring stale event")
-            return
-        }
-
-        val context = getApplication<Application>()
-        val driverPubKey = _uiState.value.rideSession.acceptance?.driverPubKey
-        val driverName = driverPubKey?.let { _uiState.value.driverProfiles[it]?.bestName()?.split(" ")?.firstOrNull() }
-
-        // Update service - handles notification update and sound
-        RiderActiveService.updatePresence(context, RiderPresenceMode.DRIVER_ARRIVED, driverName)
-
-        // Update UI state
-        _uiState.update { current ->
-            current.copy(
-                statusMessage = "Driver has arrived at pickup!",
-                rideSession = current.rideSession.copy(rideStage = RideStage.DRIVER_ARRIVED)
-            )
-        }
-
-        Log.d(TAG, "Driver arrived - service notified")
-    }
 
     /**
      * Send a chat message to the driver.
@@ -5492,15 +4324,321 @@ class RiderViewModel @Inject constructor(
         }
     }
 
+    // ── Coordinator event handlers (Issue #65) ─────────────────────────────────
+
+    /**
+     * Translates [PaymentEvent] emissions into UiState updates and side-effects.
+     * [paymentCoordinator] owns the protocol logic; this method owns the UI layer.
+     *
+     * Entry points that trigger coordinator events:
+     * - [autoConfirmRide] → [paymentCoordinator.onAcceptanceReceived]
+     * - [subscribeToDriverRideState] callback → [paymentCoordinator.onDriverRideStateReceived]
+     */
+    private fun handlePaymentEvent(event: PaymentEvent) {
+        when (event) {
+            is PaymentEvent.Confirmed -> {
+                subs.close(SubKeys.ACCEPTANCE)
+                closeDriverAvailabilitySubscription()
+                val driverPubKey = _uiState.value.rideSession.acceptance?.driverPubKey
+                val driverName = driverPubKey?.let {
+                    _uiState.value.driverProfiles[it]?.bestName()?.split(" ")?.firstOrNull()
+                }
+                RiderActiveService.updatePresence(
+                    getApplication(), RiderPresenceMode.DRIVER_ACCEPTED, driverName
+                )
+                _uiState.update { current ->
+                    current.copy(
+                        statusMessage = "Ride confirmed! Your PIN is: ${event.pickupPin}",
+                        rideSession = current.rideSession.copy(
+                            isConfirmingRide = false,
+                            confirmationEventId = event.confirmationEventId,
+                            pickupPin = event.pickupPin,
+                            pinAttempts = 0,
+                            precisePickupShared = event.precisePickupShared,
+                            escrowToken = event.escrowToken,
+                            paymentPath = event.paymentPath,
+                            driverMintUrl = event.driverMintUrl,
+                            postConfirmAckDeadlineMs = event.postConfirmDeadlineMs
+                        )
+                    )
+                }
+                // HTLC protection was already set by PaymentCoordinator.runConfirmation() before
+                // it emitted Confirmed — do not double-write.
+                saveRideState()
+                // Coordinator starts postConfirmAckTimeout internally — ViewModel just subscribes.
+                val acceptance = _uiState.value.rideSession.acceptance ?: return
+                subscribeToDriverRideState(event.confirmationEventId, acceptance.driverPubKey)
+                subscribeToChatMessages(event.confirmationEventId)
+                startChatRefreshJob(event.confirmationEventId)
+                subscribeToCancellation(event.confirmationEventId)
+            }
+
+            is PaymentEvent.ConfirmationFailed -> {
+                _uiState.update { current ->
+                    current.copy(
+                        error = event.message,
+                        rideSession = current.rideSession.copy(isConfirmingRide = false)
+                    )
+                }
+            }
+
+            is PaymentEvent.ConfirmationStale -> {
+                // Targeted cancel only — do NOT run author-wide NIP-09 cleanup (CLAUDE.md race guard)
+                viewModelScope.launch {
+                    nostrService.publishRideCancellation(
+                        confirmationEventId = event.publishedEventId,
+                        otherPartyPubKey = event.driverPubKey,
+                        reason = "Rider cancelled"
+                    )?.let { myRideEventIds.add(it) }
+                }
+            }
+
+            is PaymentEvent.ConfirmationCancelledBySelf -> {
+                // Same-ride cancel during confirmRide() suspension: targeted cancel + author-wide
+                // cleanup. This replicates the original "Case 2" guard from autoConfirmRide().
+                viewModelScope.launch {
+                    nostrService.publishRideCancellation(
+                        confirmationEventId = event.publishedEventId,
+                        otherPartyPubKey = event.driverPubKey,
+                        reason = "Rider cancelled"
+                    )?.let { myRideEventIds.add(it) }
+                }
+                cleanupRideEventsInBackground("ride cancelled during confirmation")
+            }
+
+            is PaymentEvent.EscrowLockFailed -> {
+                _uiState.update { current ->
+                    current.copy(
+                        rideSession = current.rideSession.copy(
+                            isConfirmingRide = false,
+                            showEscrowFailedDialog = true,
+                            escrowFailedMessage = event.userMessage,
+                            escrowRetryDeadlineMs = event.deadlineMs
+                        )
+                    )
+                }
+                // Coordinator already started the deadline timer internally.
+            }
+
+            is PaymentEvent.DriverStatusUpdated -> {
+                handleDriverStatusAction(event.status, event.confirmationEventId)
+            }
+
+            is PaymentEvent.DriverCompleted -> {
+                // Coordinator already handled HTLC claim/unlock + wallet balance refresh.
+                // ViewModel only needs to own its teardown: close subs, save history, update UI.
+                handleRideCompletion(event.finalFareSats)
+            }
+
+            is PaymentEvent.DriverCancelled -> {
+                handleDriverCancellation(event.reason, "coordinator")
+            }
+
+            is PaymentEvent.PinVerified -> {
+                _uiState.update { current ->
+                    current.copy(
+                        statusMessage = "PIN verified! Starting ride...",
+                        rideSession = current.rideSession.copy(
+                            pinVerified = true,
+                            pickupPin = null
+                        )
+                    )
+                }
+                saveRideState()
+                // Coordinator already revealed precise destination in handlePinSubmission().
+            }
+
+            is PaymentEvent.PinRejected -> {
+                val remaining = event.maxAttempts - event.attemptCount
+                val pin = _uiState.value.rideSession.pickupPin ?: ""
+                _uiState.update { current ->
+                    current.copy(
+                        statusMessage = "Wrong PIN! $remaining attempts remaining. PIN: $pin",
+                        rideSession = current.rideSession.copy(pinAttempts = event.attemptCount)
+                    )
+                }
+            }
+
+            PaymentEvent.MaxPinAttemptsReached -> {
+                paymentCoordinator.onRideCancelled()  // Single HTLC-unlock + coordinator-reset path.
+                closeAllRideSubscriptionsAndJobs()
+                clearRideCoordinatorState()
+                RiderActiveService.stop(getApplication())
+                resetRideUiState(
+                    stage = RideStage.IDLE,
+                    statusMessage = "Ride cancelled - too many wrong PIN attempts",
+                    error = "Security alert: Driver entered wrong PIN $MAX_PIN_ATTEMPTS times. Ride cancelled."
+                )
+                cleanupRideEventsInBackground("pin brute force security")
+                resubscribeToDrivers(clearExisting = false)
+                clearSavedRideState()
+            }
+
+            PaymentEvent.BridgeInProgress -> {
+                _uiState.update { current ->
+                    current.copy(
+                        statusMessage = "Processing cross-mint payment...",
+                        rideSession = current.rideSession.copy(bridgeInProgress = true, bridgeComplete = false)
+                    )
+                }
+            }
+
+            is PaymentEvent.BridgeCompleted -> {
+                _uiState.update { current ->
+                    current.copy(
+                        statusMessage = "Cross-mint payment complete (${event.amountSats} sats)",
+                        rideSession = current.rideSession.copy(bridgeInProgress = false, bridgeComplete = true)
+                    )
+                }
+            }
+
+            is PaymentEvent.BridgeFailed -> {
+                handleDriverCancellation("Cross-mint payment failed: ${event.message}", "bridge")
+            }
+
+            PaymentEvent.BridgePendingStarted -> {
+                _uiState.update { current ->
+                    current.copy(
+                        statusMessage = "Cross-mint payment processing… This may take a minute.",
+                        rideSession = current.rideSession.copy(bridgeInProgress = true)
+                    )
+                }
+            }
+
+            PaymentEvent.PostConfirmAckTimeout -> {
+                handleDriverCancellation("No response from driver after confirmation", "ack timeout")
+            }
+
+            PaymentEvent.EscrowRetryDeadlineExpired -> {
+                cancelRideAfterEscrowFailure()
+            }
+
+            is PaymentEvent.DepositInvoiceReceived -> {
+                updateRideSession { copy(driverDepositInvoice = event.invoice) }
+            }
+        }
+    }
+
+    /**
+     * Translates [OfferEvent] emissions into UiState updates.
+     * [offerCoordinator] owns offer-sending, acceptance subscriptions, and timeout logic.
+     */
+    private fun handleOfferEvent(event: OfferEvent) {
+        when (event) {
+            is OfferEvent.Sent -> {
+                val offer = event.offer
+                _uiState.update { current ->
+                    current.copy(
+                        statusMessage = if (offer.isBroadcast) "Broadcasting ride request..." else "Waiting for driver...",
+                        rideSession = current.rideSession.copy(
+                            rideStage = if (offer.isBroadcast) RideStage.BROADCASTING_REQUEST
+                                        else RideStage.WAITING_FOR_ACCEPTANCE,
+                            pendingOfferEventId = offer.eventId,
+                            isSendingOffer = false,
+                            activeIsRoadflare = offer.isRoadflare,
+                            activePaymentMethod = offer.paymentMethod,
+                            activePaymentHash = offer.paymentHash,
+                            activePreimage = offer.preimage,
+                            activeFiatPaymentMethods = offer.fiatPaymentMethods,
+                            offerTargetDriverPubKey = offer.roadflareTargetPubKey,
+                            driverAvailabilityEventId = offer.driverAvailabilityEventId,
+                            riderMintUrl = walletService?.getCurrentMintUrl(),
+                            roadflareTargetDriverPubKey = offer.roadflareTargetPubKey,
+                            roadflareTargetDriverLocation = offer.roadflareTargetLocation,
+                            broadcastStartTimeMs = if (offer.isBroadcast) System.currentTimeMillis() else null,
+                            acceptanceTimeoutStartMs = if (!offer.isBroadcast) System.currentTimeMillis() else null
+                        )
+                    )
+                }
+                saveRideState()
+            }
+
+            is OfferEvent.SendFailed -> {
+                _uiState.update { current ->
+                    current.copy(
+                        error = event.message,
+                        rideSession = current.rideSession.copy(isSendingOffer = false)
+                    )
+                }
+            }
+
+            is OfferEvent.Accepted -> {
+                val acceptance = event.acceptance
+                Log.d(TAG, "OfferEvent.Accepted from ${acceptance.driverPubKey.take(8)} (batch=${event.isBatch})")
+                _uiState.update { current ->
+                    current.copy(
+                        rideSession = current.rideSession.copy(
+                            rideStage = RideStage.DRIVER_ACCEPTED,
+                            acceptance = acceptance
+                        )
+                    )
+                }
+                autoConfirmRide(acceptance)
+                // Note: `offerCoordinator.onAcceptanceHandled()` is intentionally NOT called here —
+                // this path fires when the ViewModel's legacy offer-send code receives an acceptance,
+                // not the coordinator's (OfferCoordinator currently has no live offer-send callers).
+                // When Issue #52 migrates offer-send to the coordinator, the acceptance subscription
+                // will live inside OfferCoordinator and it will close its own subs automatically.
+            }
+
+            OfferEvent.DirectOfferTimedOut -> {
+                updateRideSession { copy(directOfferTimedOut = true) }
+            }
+
+            OfferEvent.BroadcastTimedOut -> {
+                updateRideSession { copy(broadcastTimedOut = true) }
+            }
+
+            OfferEvent.DriverUnavailable -> {
+                updateRideSession { copy(showDriverUnavailableDialog = true) }
+            }
+
+            is OfferEvent.BatchProgress -> {
+                Log.d(TAG, "Batch progress: ${event.contacted}/${event.total} drivers contacted")
+            }
+
+            is OfferEvent.InsufficientFunds -> {
+                Log.w(TAG, "Insufficient funds: shortfall=${event.shortfall} sats (roadflare=${event.isRoadflare}, batch=${event.isBatch})")
+                _uiState.update { current ->
+                    current.copy(
+                        showInsufficientFundsDialog = true,
+                        insufficientFundsAmount = event.shortfall.coerceAtLeast(0),
+                        depositAmountNeeded = event.shortfall.coerceAtLeast(0),
+                        insufficientFundsIsRoadflare = event.isRoadflare,
+                        insufficientFundsIsBatch = event.isBatch,
+                        pendingRoadflareDriverPubKey = event.pendingDriverPubKey,
+                        pendingRoadflareDriverLocation = event.pendingDriverLocation,
+                        rideSession = current.rideSession.copy(isSendingOffer = false)
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Translates [RoadflareRiderEvent] emissions into UiState updates.
+     * [roadflareRiderCoordinator] owns key-share reception, key-ack sending, and driver pings.
+     */
+    private fun handleRoadflareRiderEvent(event: RoadflareRiderEvent) {
+        when (event) {
+            is RoadflareRiderEvent.KeyReceived ->
+                Log.d(TAG, "RoadFlare key received from driver ${event.driverPubKey.take(8)}")
+            is RoadflareRiderEvent.KeyShareIgnored ->
+                Log.d(TAG, "RoadFlare key share ignored: ${event.reason}")
+        }
+    }
+
     fun performLogoutCleanup() {
         staleDriverCleanupJob?.cancel()
         chatRefreshJob?.stop()
         acceptanceTimeoutJob?.cancel()
         broadcastTimeoutJob?.cancel()
-        bridgePendingPollJob?.cancel()
         roadflareBatchJob?.cancel()
         pendingDeletionJob?.cancel()
         presenceCoordinator.stop()
+        offerCoordinator.destroy()
+        paymentCoordinator.destroy()
+        roadflareRiderCoordinator.destroy()
         subs.closeAll()
         bitcoinPriceService.cleanup()
     }
