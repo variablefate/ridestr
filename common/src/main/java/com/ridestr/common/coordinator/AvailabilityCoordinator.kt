@@ -167,6 +167,15 @@ class AvailabilityCoordinator(
         }
     }
 
+    /**
+     * Register an event ID published outside the broadcast loop so it is included in
+     * [deleteAllAvailabilityEvents]. Use for one-shot publishes (e.g. RoadFlare presence
+     * event) that must be cleaned up when the driver goes offline.
+     */
+    fun trackPublishedEvent(eventId: String) {
+        publishedEventIds.add(eventId)
+    }
+
     /** Cancel the broadcast loop without deleting published events from relays. */
     fun stopBroadcasting() {
         broadcastJob?.cancel()
@@ -180,8 +189,9 @@ class AvailabilityCoordinator(
     /**
      * Request NIP-09 deletion for all Kind 30173 events published in this session.
      *
-     * Suspends until the deletion event is confirmed sent (or fails). After this call
-     * [publishedAvailabilityEventIds] is cleared regardless of success.
+     * Suspends until the deletion event is confirmed sent (or fails). Event IDs are
+     * cleared only on success — on failure they are retained so a retry can attempt
+     * deletion again.
      */
     suspend fun deleteAllAvailabilityEvents() {
         if (publishedEventIds.isEmpty()) {
@@ -196,10 +206,10 @@ class AvailabilityCoordinator(
         )
         if (deletionId != null) {
             Log.d(TAG, "Deletion request sent: $deletionId")
+            publishedEventIds.clear()
         } else {
-            Log.w(TAG, "Deletion request failed")
+            Log.w(TAG, "Deletion request failed — retaining event IDs for retry")
         }
-        publishedEventIds.clear()
     }
 
     // -------------------------------------------------------------------------

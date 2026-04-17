@@ -132,7 +132,9 @@ class RoadflareDriverCoordinator(
             val verifiedFollowers = if (driverPubKey != null && mergedFollowers.isNotEmpty()) {
                 val queryResult = nostrService.queryCurrentFollowerPubkeys(driverPubKey)
                 if (!queryResult.success) {
-                    Log.w(TAG, "Kind 30011 query timed out — using merged followers as fallback")
+                    if (com.ridestr.common.BuildConfig.DEBUG) {
+                        Log.w(TAG, "Kind 30011 query timed out — using merged followers as fallback")
+                    }
                     mergedFollowers
                 } else {
                     verifiedFollowerPubkeys = queryResult.followers
@@ -340,7 +342,9 @@ class RoadflareDriverCoordinator(
             val remotePubkeys = remote.map { it.pubkey }.toSet()
             val localOnlyPubkeys = local.map { it.pubkey }.filter { it !in remotePubkeys }
             if (localOnlyPubkeys.isNotEmpty()) {
-                Log.d(TAG, "Remote newer; pruning ${localOnlyPubkeys.size} local-only stale followers")
+                if (com.ridestr.common.BuildConfig.DEBUG) {
+                    Log.d(TAG, "Remote newer; pruning ${localOnlyPubkeys.size} local-only stale followers")
+                }
                 localOnlyPubkeys.forEach { byPubkey.remove(it) }
             }
         }

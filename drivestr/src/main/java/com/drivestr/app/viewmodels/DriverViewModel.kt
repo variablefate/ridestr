@@ -998,7 +998,10 @@ class DriverViewModel @Inject constructor(
 
             // Publish locationless Kind 30173 so availability subscription works
             // (Driver is trackable by pubkey but invisible to geographic searches)
-            publishAvailability(AvailabilitySpec.RoadflarePresence)
+            val presenceEventId = publishAvailability(AvailabilitySpec.RoadflarePresence)
+            if (presenceEventId != null) {
+                availabilityCoordinator.trackPublishedEvent(presenceEventId)
+            }
         }
 
         // Stage is ROADFLARE_ONLY — if broadcaster was already running (e.g., coming back
@@ -1125,7 +1128,10 @@ class DriverViewModel @Inject constructor(
 
         // Check throttling unless forced
         if (!force && availabilityCoordinator.shouldThrottle(newLocation)) {
-            Log.d(TAG, "Location update throttled (distance or time guard)")
+            val last = availabilityCoordinator.lastBroadcastLocation
+            val timeSinceLast = System.currentTimeMillis() - availabilityCoordinator.lastBroadcastTimeMs
+            Log.d(TAG, "Location update throttled — timeSinceLast=${timeSinceLast}ms, " +
+                    "lastLoc=${last?.lat},${last?.lon}")
             // Still update local state for UI, just don't broadcast
             _uiState.value = currentState.copy(currentLocation = newLocation)
             return

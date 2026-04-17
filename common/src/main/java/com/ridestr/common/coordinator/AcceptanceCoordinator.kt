@@ -67,8 +67,9 @@ class AcceptanceCoordinator(
      * @return [AcceptanceResult] on success, null if the Nostr publish failed.
      */
     suspend fun acceptOffer(offer: RideOfferData): AcceptanceResult? {
-        val walletPubKey = walletServiceProvider()?.getWalletPubKey()
-        val driverMintUrl = walletServiceProvider()?.getSavedMintUrl()
+        val walletService = walletServiceProvider()
+        val walletPubKey = walletService?.getWalletPubKey()
+        val driverMintUrl = walletService?.getSavedMintUrl()
 
         Log.d(TAG, "Accepting direct offer ${offer.eventId.take(8)} from ${offer.riderPubKey.take(8)}")
 
@@ -119,8 +120,9 @@ class AcceptanceCoordinator(
             return null
         }
 
-        val walletPubKey = walletServiceProvider()?.getWalletPubKey()
-        val driverMintUrl = walletServiceProvider()?.getSavedMintUrl()
+        val walletService = walletServiceProvider()
+        val walletPubKey = walletService?.getWalletPubKey()
+        val driverMintUrl = walletService?.getSavedMintUrl()
 
         Log.d(TAG, "Accepting broadcast request ${request.eventId.take(8)} from ${request.riderPubKey.take(8)}")
 
