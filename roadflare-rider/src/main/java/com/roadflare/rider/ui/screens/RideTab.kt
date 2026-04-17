@@ -1,5 +1,25 @@
 package com.roadflare.rider.ui.screens
 
+// =============================================================================
+// TODO: Phase C-2 deferred extractions — blocked on issue #65 step A-5 landing
+//
+// The following composables bind to types whose package locations are being
+// stabilised in #65 (RideSessionManager.kt / FareCoordinator.kt). Extract them
+// once #65 merges and their packages are confirmed stable.
+//
+// Deferred:
+//   - IdleContent         → depends on RiderViewModel (direct) + RouteResult
+//   - RequestingContent   → depends on RideSession (pendingDrivers)
+//   - ChoosingDriverContent → depends on List<DriverInfo>
+//   - MatchedContent      → depends on RideSession, RideStage
+//   - InRideContent       → depends on RideSession, List<ChatMessage>
+//   - CompletedContent    → depends on RideSession
+//
+// Already extracted (Phase C-1):
+//   - CancelledContent    → components/RideTabComponents.kt (pure presentation)
+//   - formatFareAmount    → components/RideTabComponents.kt (pure helper)
+// =============================================================================
+
 import android.Manifest
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -36,6 +56,8 @@ import com.roadflare.rider.viewmodels.DriverInfo
 import com.roadflare.rider.viewmodels.RideSession
 import com.roadflare.rider.viewmodels.RiderViewModel
 import com.roadflare.rider.viewmodels.RouteResult
+import com.roadflare.rider.ui.screens.components.CancelledContent
+import com.roadflare.rider.ui.screens.components.formatFareAmount
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 
@@ -741,43 +763,4 @@ private fun CompletedContent(
     }
 }
 
-@Composable
-private fun CancelledContent(
-    onDone: () -> Unit
-) {
-    Column(
-        modifier = Modifier.fillMaxSize(),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        Text(
-            text = "Ride Cancelled",
-            style = MaterialTheme.typography.headlineMedium,
-            fontWeight = FontWeight.Bold
-        )
-        Spacer(modifier = Modifier.height(32.dp))
-        Button(onClick = onDone) {
-            Text("Done")
-        }
-    }
-}
-
-/**
- * Format a USD fare amount respecting the display currency preference.
- */
-@Composable
-private fun formatFareAmount(
-    fareUsd: Double,
-    displayCurrency: DisplayCurrency,
-    priceService: BitcoinPriceService
-): String {
-    val btcPrice by priceService.btcPriceUsd.collectAsState()
-    return when (displayCurrency) {
-        DisplayCurrency.USD -> "$${String.format("%.2f", fareUsd)}"
-        DisplayCurrency.SATS -> {
-            val sats = priceService.usdToSats(fareUsd)
-            if (sats != null) "${String.format("%,d", sats)} sats"
-            else "$${String.format("%.2f", fareUsd)}"
-        }
-    }
-}
+// CancelledContent and formatFareAmount extracted to components/RideTabComponents.kt

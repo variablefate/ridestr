@@ -1,5 +1,6 @@
 package com.drivestr.app.ui.screens
 
+import com.drivestr.app.ui.screens.components.formatEarnings
 import com.ridestr.common.settings.DisplayCurrency
 import org.junit.Assert.assertEquals
 import org.junit.Test
