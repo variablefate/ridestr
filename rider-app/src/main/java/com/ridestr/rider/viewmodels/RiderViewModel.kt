@@ -58,6 +58,7 @@ import com.ridestr.common.util.FareCalculator
 import com.ridestr.common.util.RideHistoryBuilder
 import com.ridestr.common.data.FollowedDriversRepository
 import com.ridestr.common.roadflare.RoadflareDriverPresenceCoordinator
+import com.ridestr.common.coordinator.AvailabilityMonitorPolicy
 import com.ridestr.common.coordinator.ConfirmationInputs
 import com.ridestr.common.coordinator.FareCalc
 import com.ridestr.common.coordinator.OfferCoordinator
@@ -172,12 +173,6 @@ class RiderViewModel @Inject constructor(
         val fareFiatAmount: String? = null,
         val fareFiatCurrency: String? = null,
     )
-
-    /**
-     * Result of a fare calculation. Carries sats (actual or heuristic fallback) and the
-     * authoritative USD quote used for fiat/manual offers.
-     */
-    private data class FareCalc(val sats: Double, val usdAmount: String?)
 
     /**
      * Per ADR-0008, fiat fare fields are encoded only for fiat payment rails.
@@ -394,15 +389,15 @@ class RiderViewModel @Inject constructor(
     }
 
     /**
-     * Clear rider state history (called when ride ends or is cancelled).
-     * Also clears event deduplication sets to allow fresh events for new rides.
+     * Reset the ride-scoped coordinator state and ViewModel-side dedup set. Call at every ride
+     * boundary (start, completion, cancellation) to guarantee no stale events leak into the next
+     * ride. The coordinator owns rider-state history, driver-state dedup, phase, and transition
+     * chain; the ViewModel owns the Kind 3179 cancellation dedup set.
      */
-    private fun clearRiderStateHistory() {
-        // Clear the only ViewModel-owned dedup set (cancellation events — see subscribeToCancellation).
+    private fun clearRideCoordinatorState() {
         processedCancellationEventIds.clear()
-        // Coordinator owns riderStateHistory, driver-state dedup, phase, and transition chain.
         paymentCoordinator.reset()
-        Log.d(TAG, "Cleared ride state history and event deduplication sets")
+        Log.d(TAG, "Reset ride coordinator state and cancellation dedup set")
     }
 
     /**
@@ -1549,7 +1544,7 @@ class RiderViewModel @Inject constructor(
 
     /**
      * Set up post-send subscriptions: acceptance monitoring, driver availability, and timeout.
-     * NOTE: clearRiderStateHistory() is NOT called here — callers are responsible for calling
+     * NOTE: clearRideCoordinatorState() is NOT called here — callers are responsible for calling
      * it at the correct time (before send for RoadFlare, after send for direct/broadcast).
      */
     private fun setupOfferSubscriptions(
@@ -1741,7 +1736,7 @@ class RiderViewModel @Inject constructor(
             val eventId = sendOfferToNostr(params, pickupRoute)
             if (eventId != null) {
                 Log.d(TAG, "Sent ride offer: $eventId with payment hash")
-                clearRiderStateHistory()  // Direct: clear AFTER send, success-only
+                clearRideCoordinatorState()  // Direct: clear AFTER send, success-only
                 setupOfferSubscriptions(eventId, driver.driverPubKey, isBroadcast = false, driverAvailabilityEventId = driver.eventId, driverAvailabilityCreatedAt = driver.createdAt)
                 applyOfferSuccessState(params, eventId)
             } else {
@@ -1800,7 +1795,7 @@ class RiderViewModel @Inject constructor(
         updateRideSession { copy(isSendingOffer = true) }
         viewModelScope.launch {
             rideState = RideState.CANCELLED
-            clearRiderStateHistory()  // RoadFlare: clear BEFORE send
+            clearRideCoordinatorState()  // RoadFlare: clear BEFORE send
 
             val preimage: String?
             val paymentHash: String?
@@ -1876,7 +1871,7 @@ class RiderViewModel @Inject constructor(
         viewModelScope.launch {
             updateRideSession { copy(isSendingOffer = true) }
             rideState = RideState.CANCELLED
-            clearRiderStateHistory()  // RoadFlare: clear BEFORE send
+            clearRideCoordinatorState()  // RoadFlare: clear BEFORE send
 
             // No HTLC for alternate payment — payment happens outside the app
             val params = OfferParams(
@@ -2285,7 +2280,7 @@ class RiderViewModel @Inject constructor(
             if (state.rideSession.pendingOfferEventId == null) {
                 subscribeToAcceptance(eventId, driverPubKey)
                 startAcceptanceTimeout()
-                clearRiderStateHistory()
+                clearRideCoordinatorState()
 
                 val fareWithFees = fareEstimate * (1 + FEE_BUFFER_PERCENT)
                 _uiState.update { current ->
@@ -2711,7 +2706,7 @@ class RiderViewModel @Inject constructor(
 
             if (eventId != null) {
                 Log.d(TAG, "Broadcast ride request: $eventId")
-                clearRiderStateHistory()  // Broadcast: clear AFTER send, success-only
+                clearRideCoordinatorState()  // Broadcast: clear AFTER send, success-only
 
                 // Broadcast uses setupOfferSubscriptions for acceptance + timeout + foreground service
                 val broadcastParams = OfferParams(
@@ -2984,7 +2979,7 @@ class RiderViewModel @Inject constructor(
         updateRideSession { copy(showEscrowFailedDialog = false, escrowFailedMessage = null) }
         // Inline clearRide essentials with error preserved through reset
         closeAllRideSubscriptionsAndJobs()
-        clearRiderStateHistory()
+        clearRideCoordinatorState()
         // Targeted delete of the accepted offer event (not author-wide cleanup).
         // In batch flows, cancelNonAcceptedBatchOffers() already ran before autoConfirmRide()
         // and NIP-09-deleted the other batch offers. If those deletions failed, those stale
@@ -3036,7 +3031,7 @@ class RiderViewModel @Inject constructor(
 
         // Synchronous cleanup
         closeAllRideSubscriptionsAndJobs()
-        clearRiderStateHistory()
+        clearRideCoordinatorState()
         RiderActiveService.stop(getApplication())
 
         // Capture state values before launching coroutine
@@ -3555,7 +3550,7 @@ class RiderViewModel @Inject constructor(
             prefs.edit().putLong(KEY_DRIVER_AVAIL_TIMESTAMP, availability.createdAt).apply()
 
             val action = AvailabilityMonitorPolicy.onAvailabilityEvent(
-                stage = _uiState.value.rideSession.rideStage,
+                isWaitingForAcceptance = _uiState.value.rideSession.rideStage == RideStage.WAITING_FOR_ACCEPTANCE,
                 isAvailable = availability.isAvailable,
                 eventCreatedAt = availability.createdAt,
                 lastSeenTimestamp = selectedDriverLastAvailabilityTimestamp
@@ -3583,7 +3578,6 @@ class RiderViewModel @Inject constructor(
                         }
                     }
                 }
-                AvailabilityMonitorPolicy.Action.SHOW_UNAVAILABLE -> {} // Only used after grace period
             }
         })
 
@@ -3615,7 +3609,7 @@ class RiderViewModel @Inject constructor(
             }
 
             val action = AvailabilityMonitorPolicy.onDeletionEvent(
-                stage = _uiState.value.rideSession.rideStage,
+                isWaitingForAcceptance = _uiState.value.rideSession.rideStage == RideStage.WAITING_FOR_ACCEPTANCE,
                 deletionTimestamp = deletionTimestamp,
                 lastSeenTimestamp = selectedDriverLastAvailabilityTimestamp
             )
@@ -3644,7 +3638,6 @@ class RiderViewModel @Inject constructor(
                         }
                     }
                 }
-                AvailabilityMonitorPolicy.Action.SHOW_UNAVAILABLE -> {} // Not returned by onDeletionEvent
             }
         })
     }
@@ -3991,7 +3984,7 @@ class RiderViewModel @Inject constructor(
     private fun handleRideCompletion(statusData: DriverRideStateData) {
         // Close subscriptions and jobs
         closeAllRideSubscriptionsAndJobs()
-        clearRiderStateHistory()
+        clearRideCoordinatorState()
         RiderActiveService.stop(getApplication())
         clearSavedRideState()
 
@@ -4112,7 +4105,7 @@ class RiderViewModel @Inject constructor(
 
         // Synchronous cleanup
         closeAllRideSubscriptionsAndJobs()
-        clearRiderStateHistory()
+        clearRideCoordinatorState()
         val context = getApplication<Application>()
         RiderActiveService.updateStatus(context, RiderStatus.Cancelled)
         RiderActiveService.stop(context)
@@ -4195,38 +4188,6 @@ class RiderViewModel @Inject constructor(
         }
     }
 
-    /**
-     * Handle driver arrived at pickup location.
-     */
-    private fun handleDriverArrived() {
-        // Reject stale events if we've already reached or passed DRIVER_ARRIVED stage
-        // This prevents Nostr relay cached events from reverting state after PIN verification
-        if (_uiState.value.rideSession.rideStage in listOf(
-                RideStage.DRIVER_ARRIVED,
-                RideStage.IN_PROGRESS,
-                RideStage.COMPLETED
-            )) {
-            Log.d(TAG, "Stage already at or past DRIVER_ARRIVED (${_uiState.value.rideSession.rideStage}), ignoring stale event")
-            return
-        }
-
-        val context = getApplication<Application>()
-        val driverPubKey = _uiState.value.rideSession.acceptance?.driverPubKey
-        val driverName = driverPubKey?.let { _uiState.value.driverProfiles[it]?.bestName()?.split(" ")?.firstOrNull() }
-
-        // Update service - handles notification update and sound
-        RiderActiveService.updatePresence(context, RiderPresenceMode.DRIVER_ARRIVED, driverName)
-
-        // Update UI state
-        _uiState.update { current ->
-            current.copy(
-                statusMessage = "Driver has arrived at pickup!",
-                rideSession = current.rideSession.copy(rideStage = RideStage.DRIVER_ARRIVED)
-            )
-        }
-
-        Log.d(TAG, "Driver arrived - service notified")
-    }
 
     /**
      * Send a chat message to the driver.
@@ -4574,7 +4535,7 @@ class RiderViewModel @Inject constructor(
                     walletService?.clearHtlcRideProtected(it)
                 }
                 closeAllRideSubscriptionsAndJobs()
-                clearRiderStateHistory()
+                clearRideCoordinatorState()
                 RiderActiveService.stop(getApplication())
                 resetRideUiState(
                     stage = RideStage.IDLE,
@@ -4686,7 +4647,11 @@ class RiderViewModel @Inject constructor(
                     )
                 }
                 autoConfirmRide(acceptance)
-                offerCoordinator.onAcceptanceHandled()
+                // Note: `offerCoordinator.onAcceptanceHandled()` is intentionally NOT called here —
+                // this path fires when the ViewModel's legacy offer-send code receives an acceptance,
+                // not the coordinator's (OfferCoordinator currently has no live offer-send callers).
+                // When Issue #52 migrates offer-send to the coordinator, the acceptance subscription
+                // will live inside OfferCoordinator and it will close its own subs automatically.
             }
 
             OfferEvent.DirectOfferTimedOut -> {

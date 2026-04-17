@@ -160,35 +160,10 @@ class RoadflareRiderCoordinator(
         keyShareSubId = null
     }
 
-    /**
-     * Send a Kind 3188 key acknowledgement to a driver.
-     *
-     * Use the default [status] of `"ok"` (mapped to `"received"` in [NostrService]) for
-     * normal acknowledgement after receiving a key share. Pass `status = "stale"` to
-     * request a key refresh when stale key detection identifies that the stored key
-     * is older than the driver's current Kind 30012 `key_updated_at`.
-     *
-     * @param driverPubKey   The driver's Nostr identity pubkey (hex).
-     * @param keyVersion     The version of the key being acknowledged (0 if no key held).
-     * @param keyUpdatedAt   The `keyUpdatedAt` timestamp of the acknowledged key (0 if no key held).
-     * @param status         Acknowledgement status; `"stale"` triggers a key re-send by the driver.
-     *   Defaults to `"received"` (matches NostrService.publishRoadflareKeyAck default).
-     * @return The published event ID, or null on failure.
-     */
-    suspend fun sendKeyAck(
-        driverPubKey: String,
-        keyVersion: Int,
-        keyUpdatedAt: Long,
-        status: String = "received"
-    ): String? {
-        return nostrService.publishRoadflareKeyAck(
-            driverPubKey = driverPubKey,
-            keyVersion = keyVersion,
-            keyUpdatedAt = keyUpdatedAt,
-            status = status
-        )
-    }
-
+    // TODO(#52): `sendKeyAck()` and `pingDriver()` will move here once the live callers
+    // (MainActivity, RoadflareTab) are migrated through the coordinator. Today they publish
+    // Kind 3188 / 3189 directly via `NostrService.publishRoadflareKeyAck()` so wrapping them in
+    // the coordinator would just be dead surface.
     // TODO(#52): add `pingDriver()` once NostrService exposes a `publishDriverPing()` method.
     // The coordinator class-level KDoc lists this capability. The method was deliberately
     // omitted until the underlying publisher exists, to avoid a stub that lies to callers by

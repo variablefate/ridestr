@@ -1374,7 +1374,6 @@ class OfferCoordinator(
                             }
                         }
                     }
-                    AvailabilityMonitorPolicy.Action.SHOW_UNAVAILABLE -> {} // Not returned by onAvailabilityEvent
                 }
             }
         )
@@ -1426,7 +1425,6 @@ class OfferCoordinator(
                             }
                         }
                     }
-                    AvailabilityMonitorPolicy.Action.SHOW_UNAVAILABLE -> {} // Not returned by onDeletionEvent
                 }
             }
         )

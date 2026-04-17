@@ -337,11 +337,6 @@ class PaymentCoordinator(
     private var postConfirmAckTimeoutJob: Job? = null
     private var bridgePendingPollJob: Job? = null
 
-    // ── NIP-09 event tracking ─────────────────────────────────────────────────
-
-    /** Event IDs published by this coordinator during the current ride. */
-    private val rideEventIds = mutableListOf<String>()
-
     // ── Public API ────────────────────────────────────────────────────────────
 
     /**
@@ -573,17 +568,6 @@ class PaymentCoordinator(
     fun getLastProcessedDriverActionCount(): Int = lastProcessedDriverActionCount
 
     /**
-     * Return all event IDs published by this coordinator during the current ride and clear the
-     * internal list. The ViewModel should combine these with OfferCoordinator event IDs for
-     * NIP-09 deletion on ride end.
-     */
-    fun getAndClearRideEventIds(): List<String> {
-        val ids = rideEventIds.toList()
-        rideEventIds.clear()
-        return ids
-    }
-
-    /**
      * Resume the poll for a cross-mint bridge payment that was in flight when the app was
      * process-killed. The ViewModel finds the pending [bridgePaymentId] via
      * `walletService.getInProgressBridgePayments()` during restore and hands it back here so
@@ -708,8 +692,6 @@ class PaymentCoordinator(
                 )
 
                 if (eventId != null) {
-                    rideEventIds.add(eventId)
-
                     // Post-suspension stale-ride guard. Two cases that share the same symptom
                     // (currentAcceptanceEventId != acceptance.eventId) but need different cleanup:
                     //  - Case 1 (cross-ride):  a NEW ride's acceptance is active → targeted cancel
@@ -896,7 +878,6 @@ class PaymentCoordinator(
                 verified = isCorrect,
                 attempt = newAttempts
             )
-            verificationEventId?.let { rideEventIds.add(it) }
 
             if (isCorrect) {
                 // CRITICAL: Set verified flag immediately to prevent double-processing if
@@ -951,7 +932,6 @@ class PaymentCoordinator(
                         location = dest
                     )
                     if (eventId != null) {
-                        rideEventIds.add(eventId)
                         Log.d(TAG, "Revealed precise destination: ${eventId.take(8)}")
                     } else {
                         Log.e(TAG, "Failed to reveal precise destination")
@@ -1041,7 +1021,6 @@ class PaymentCoordinator(
             if (eventId != null) {
                 Log.d(TAG, "Shared encrypted preimage with driver")
                 if (escrowToken != null) Log.d(TAG, "Also shared HTLC escrow token")
-                rideEventIds.add(eventId)
             } else {
                 Log.e(TAG, "Failed to publish preimage share event")
             }
@@ -1103,7 +1082,6 @@ class PaymentCoordinator(
                     }
 
                     if (eventId != null) {
-                        rideEventIds.add(eventId)
                         Log.d(TAG, "Published BridgeComplete action: ${eventId.take(8)}")
                         _events.emit(PaymentEvent.BridgeCompleted(result.amountSats))
                     } else {
@@ -1237,7 +1215,6 @@ class PaymentCoordinator(
         }
 
         if (eventId != null) {
-            rideEventIds.add(eventId)
             Log.d(TAG, "Published BridgeComplete from poll: ${eventId.take(8)}")
             _events.emit(PaymentEvent.BridgeCompleted(payment?.amountSats ?: 0))
         } else {
@@ -1325,7 +1302,6 @@ class PaymentCoordinator(
         driverDepositInvoice = null
         pendingRetryAcceptance = null
         pendingRetryInputs = null
-        rideEventIds.clear()
         Log.d(TAG, "Internal state reset")
     }
 }
