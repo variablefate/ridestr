@@ -82,7 +82,7 @@ sealed class PaymentEvent {
      * ViewModel derives the rider's UI stage from [status] via `riderStageFromDriverStatus()`.
      */
     data class DriverStatusUpdated(
-        val status: DriverStatusType,
+        val status: String,
         val driverState: DriverRideStateData,
         val confirmationEventId: String
     ) : PaymentEvent()

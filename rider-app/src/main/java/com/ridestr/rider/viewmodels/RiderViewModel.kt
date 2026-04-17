@@ -63,6 +63,14 @@ import com.ridestr.common.util.FareCalculator
 import com.ridestr.common.util.RideHistoryBuilder
 import com.ridestr.common.data.FollowedDriversRepository
 import com.ridestr.common.roadflare.RoadflareDriverPresenceCoordinator
+import com.ridestr.common.coordinator.ConfirmationInputs
+import com.ridestr.common.coordinator.FareCalc
+import com.ridestr.common.coordinator.OfferCoordinator
+import com.ridestr.common.coordinator.OfferEvent
+import com.ridestr.common.coordinator.PaymentCoordinator
+import com.ridestr.common.coordinator.PaymentEvent
+import com.ridestr.common.coordinator.RoadflareRiderCoordinator
+import com.ridestr.common.coordinator.RoadflareRiderEvent
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -212,6 +220,22 @@ class RiderViewModel @Inject constructor(
         nostrService, followedDriversRepository, viewModelScope
     )
 
+    // ── Coordinators (Issue #65: extracted from RiderViewModel) ──────────────
+
+    /** Owns all offer-sending, acceptance subscription, and availability monitoring logic. */
+    val offerCoordinator = OfferCoordinator(
+        nostrService, settingsRepository, routingService, remoteConfigManager,
+        BitcoinPriceService.getInstance()
+    )
+
+    /** Owns ride confirmation, HTLC locking, driver state processing, and bridge payment. */
+    val paymentCoordinator = PaymentCoordinator(nostrService, viewModelScope)
+
+    /** Owns RoadFlare key-share reception, key-ack sending, and driver-ping sending. */
+    val roadflareRiderCoordinator = RoadflareRiderCoordinator(
+        nostrService, followedDriversRepository, viewModelScope
+    )
+
     // Track which tile region is currently loaded
     private var currentTileRegion: String? = null
 
@@ -239,6 +263,8 @@ class RiderViewModel @Inject constructor(
 
     fun setWalletService(service: WalletService?) {
         walletService = service
+        offerCoordinator.walletService = service
+        paymentCoordinator.walletService = service
     }
 
     // === Settings mediation methods (screens call these, ViewModel delegates to repository) ===
@@ -556,6 +582,7 @@ class RiderViewModel @Inject constructor(
         // Clear deduplication sets so new rides can process fresh events
         processedDriverStateEventIds.clear()
         processedCancellationEventIds.clear()
+        paymentCoordinator.reset()
         Log.d(TAG, "Cleared rider state history and event deduplication sets")
     }
 
@@ -640,6 +667,7 @@ class RiderViewModel @Inject constructor(
         postConfirmAckTimeoutJob = null
         pendingDeletionJob?.cancel()
         pendingDeletionJob = null
+        paymentCoordinator.reset()
 
         // RoadFlare batch state — prevent stale offers to drivers from finished ride
         roadflareBatchJob?.cancel()
@@ -662,6 +690,8 @@ class RiderViewModel @Inject constructor(
 
         // Start RoadFlare location subscription + profile fetching (ViewModel-scoped)
         presenceCoordinator.start()
+        // Start RoadFlare key-share listener (Kind 3186) via coordinator
+        roadflareRiderCoordinator.startKeyShareListener()
 
         // Fetch remote config (fare rates, recommended mints) from admin pubkey
         viewModelScope.launch {
@@ -680,6 +710,11 @@ class RiderViewModel @Inject constructor(
 
         // Restore any active ride state from previous session
         restoreRideState()
+
+        // Collect coordinator event streams → update UiState
+        viewModelScope.launch { offerCoordinator.events.collect { handleOfferEvent(it) } }
+        viewModelScope.launch { paymentCoordinator.events.collect { handlePaymentEvent(it) } }
+        viewModelScope.launch { roadflareRiderCoordinator.events.collect { handleRoadflareRiderEvent(it) } }
     }
 
     /**
@@ -3102,18 +3137,14 @@ class RiderViewModel @Inject constructor(
      * Re-enters autoConfirmRide() which re-acquires CAS gate and recalculates payment path.
      */
     fun retryEscrowLock() {
-        val session = _uiState.value.rideSession
-        val acceptance = session.acceptance ?: return
-        val deadline = session.escrowRetryDeadlineMs
-        // If deadline has passed, auto-cancel instead of retrying
+        val deadline = _uiState.value.rideSession.escrowRetryDeadlineMs
         if (deadline != null && System.currentTimeMillis() > deadline) {
             Log.w(TAG, "Escrow retry deadline expired — cancelling instead of retrying")
             cancelRideAfterEscrowFailure()
             return
         }
-        escrowRetryDeadlineJob?.cancel()  // Cancel auto-cancel timer; will be restarted if lock fails again
         updateRideSession { copy(showEscrowFailedDialog = false, escrowFailedMessage = null) }
-        autoConfirmRide(acceptance)  // CAS succeeds because B3 reset confirmationInFlight
+        paymentCoordinator.retryEscrowLock()
     }
 
     /**
@@ -3123,6 +3154,7 @@ class RiderViewModel @Inject constructor(
     fun cancelRideAfterEscrowFailure() {
         escrowRetryDeadlineJob?.cancel()
         escrowRetryDeadlineJob = null
+        paymentCoordinator.onRideCancelled()
         val session = _uiState.value.rideSession
         // Use acceptance's offerEventId (correct for batch flows where a different driver
         // accepted than the first offer target) with fallback to pendingOfferEventId.
@@ -3862,6 +3894,32 @@ class RiderViewModel @Inject constructor(
      * Generates PIN locally and sends precise pickup location to the driver.
      */
     private fun autoConfirmRide(acceptance: RideAcceptanceData) {
+        val pickup = _uiState.value.pickupLocation ?: return
+        val state = _uiState.value
+        val session = state.rideSession
+
+        updateRideSession { copy(isConfirmingRide = true) }
+
+        paymentCoordinator.onAcceptanceReceived(
+            acceptance = acceptance,
+            inputs = ConfirmationInputs(
+                pickupLocation = pickup,
+                destination = state.destination,
+                fareAmountSats = state.fareEstimate?.toLong() ?: 0L,
+                paymentHash = session.activePaymentHash,
+                preimage = session.activePreimage,
+                riderMintUrl = session.riderMintUrl ?: walletService?.getCurrentMintUrl(),
+                isRoadflareRide = session.activeIsRoadflare,
+                driverApproxLocation = state.availableDrivers
+                    .find { it.driverPubKey == acceptance.driverPubKey }?.approxLocation
+            )
+        )
+        // Result is delivered asynchronously via handlePaymentEvent().
+    }
+
+    // Legacy confirmation implementation — kept for reference; replaced by paymentCoordinator above.
+    @Suppress("unused")
+    private fun autoConfirmRideLegacy(acceptance: RideAcceptanceData) {
         // Atomic guard: only one confirmation proceeds per ride.
         // Multi-relay delivery can call this concurrently from different IO threads.
         if (!confirmationInFlight.compareAndSet(false, true)) {
@@ -4143,7 +4201,7 @@ class RiderViewModel @Inject constructor(
             confirmationEventId = confirmationEventId,
             driverPubKey = driverPubKey
         ) { driverState ->
-            handleDriverRideState(driverState, confirmationEventId, driverPubKey)
+            paymentCoordinator.onDriverRideStateReceived(driverState, confirmationEventId, driverPubKey)
         }
         subs.set(SubKeys.DRIVER_RIDE_STATE, newSubId)
 
@@ -5191,6 +5249,7 @@ class RiderViewModel @Inject constructor(
 
         // Release HTLC protection for refund (capture paymentHash before reset)
         _uiState.value.rideSession.activePaymentHash?.let { walletService?.clearHtlcRideProtected(it) }
+        paymentCoordinator.onRideCancelled()
 
         // Synchronous cleanup
         closeAllRideSubscriptionsAndJobs()
@@ -5492,6 +5551,317 @@ class RiderViewModel @Inject constructor(
         }
     }
 
+    // ── Coordinator event handlers (Issue #65) ─────────────────────────────────
+
+    /**
+     * Translates [PaymentEvent] emissions into UiState updates and side-effects.
+     * [paymentCoordinator] owns the protocol logic; this method owns the UI layer.
+     *
+     * Entry points that trigger coordinator events:
+     * - [autoConfirmRide] → [paymentCoordinator.onAcceptanceReceived]
+     * - [subscribeToDriverRideState] callback → [paymentCoordinator.onDriverRideStateReceived]
+     */
+    private fun handlePaymentEvent(event: PaymentEvent) {
+        when (event) {
+            is PaymentEvent.Confirmed -> {
+                subs.close(SubKeys.ACCEPTANCE)
+                closeDriverAvailabilitySubscription()
+                val driverPubKey = _uiState.value.rideSession.acceptance?.driverPubKey
+                val driverName = driverPubKey?.let {
+                    _uiState.value.driverProfiles[it]?.bestName()?.split(" ")?.firstOrNull()
+                }
+                RiderActiveService.updatePresence(
+                    getApplication(), RiderPresenceMode.DRIVER_ACCEPTED, driverName
+                )
+                _uiState.update { current ->
+                    current.copy(
+                        statusMessage = "Ride confirmed! Your PIN is: ${event.pickupPin}",
+                        rideSession = current.rideSession.copy(
+                            isConfirmingRide = false,
+                            confirmationEventId = event.confirmationEventId,
+                            pickupPin = event.pickupPin,
+                            pinAttempts = 0,
+                            precisePickupShared = event.precisePickupShared,
+                            escrowToken = event.escrowToken,
+                            paymentPath = event.paymentPath,
+                            driverMintUrl = event.driverMintUrl,
+                            postConfirmAckDeadlineMs = event.postConfirmDeadlineMs
+                        )
+                    )
+                }
+                _uiState.value.rideSession.activePaymentHash?.let {
+                    walletService?.setHtlcRideProtected(it)
+                }
+                saveRideState()
+                // Coordinator starts postConfirmAckTimeout internally — ViewModel just subscribes.
+                val acceptance = _uiState.value.rideSession.acceptance ?: return
+                subscribeToDriverRideState(event.confirmationEventId, acceptance.driverPubKey)
+                subscribeToChatMessages(event.confirmationEventId)
+                startChatRefreshJob(event.confirmationEventId)
+                subscribeToCancellation(event.confirmationEventId)
+            }
+
+            is PaymentEvent.ConfirmationFailed -> {
+                _uiState.update { current ->
+                    current.copy(
+                        error = event.message,
+                        rideSession = current.rideSession.copy(isConfirmingRide = false)
+                    )
+                }
+            }
+
+            is PaymentEvent.ConfirmationStale -> {
+                // Targeted cancel only — do NOT run author-wide NIP-09 cleanup (CLAUDE.md race guard)
+                viewModelScope.launch {
+                    nostrService.publishRideCancellation(
+                        confirmationEventId = event.publishedEventId,
+                        otherPartyPubKey = event.driverPubKey,
+                        reason = "Rider cancelled"
+                    )?.let { myRideEventIds.add(it) }
+                }
+            }
+
+            is PaymentEvent.EscrowLockFailed -> {
+                _uiState.update { current ->
+                    current.copy(
+                        rideSession = current.rideSession.copy(
+                            isConfirmingRide = false,
+                            showEscrowFailedDialog = true,
+                            escrowFailedMessage = event.userMessage,
+                            escrowRetryDeadlineMs = event.deadlineMs
+                        )
+                    )
+                }
+                // Coordinator already started the deadline timer internally.
+            }
+
+            is PaymentEvent.DriverStatusUpdated -> {
+                val action = DriverRideAction.Status(
+                    status = event.status,
+                    at = System.currentTimeMillis() / 1000
+                )
+                handleDriverStatusAction(action, event.driverState, event.confirmationEventId)
+            }
+
+            is PaymentEvent.DriverCompleted -> {
+                // Coordinator already handled HTLC and balance refresh; build a synthetic
+                // DriverRideStateData so handleRideCompletion() can derive history/fareMessage.
+                val session = _uiState.value.rideSession
+                val now = System.currentTimeMillis() / 1000
+                val synthetic = DriverRideStateData(
+                    eventId = "",
+                    driverPubKey = session.acceptance?.driverPubKey ?: "",
+                    confirmationEventId = session.confirmationEventId ?: "",
+                    riderPubKey = _uiState.value.myPubKey ?: "",
+                    currentStatus = DriverStatusType.COMPLETED,
+                    history = if (event.claimSuccess != null) listOf(
+                        DriverRideAction.Status(
+                            status = DriverStatusType.COMPLETED,
+                            finalFare = event.finalFareSats,
+                            claimSuccess = event.claimSuccess,
+                            at = now
+                        )
+                    ) else emptyList(),
+                    finalFare = event.finalFareSats,
+                    invoice = null,
+                    createdAt = now
+                )
+                handleRideCompletion(synthetic)
+            }
+
+            is PaymentEvent.DriverCancelled -> {
+                handleDriverCancellation(event.reason, "coordinator")
+            }
+
+            is PaymentEvent.PinVerified -> {
+                _uiState.update { current ->
+                    current.copy(
+                        statusMessage = "PIN verified! Starting ride...",
+                        rideSession = current.rideSession.copy(
+                            pinVerified = true,
+                            pickupPin = null
+                        )
+                    )
+                }
+                saveRideState()
+                viewModelScope.launch {
+                    delay(1100L)
+                    revealPreciseDestination(event.confirmationEventId)
+                }
+            }
+
+            is PaymentEvent.PinRejected -> {
+                val remaining = event.maxAttempts - event.attemptCount
+                val pin = _uiState.value.rideSession.pickupPin ?: ""
+                _uiState.update { current ->
+                    current.copy(
+                        statusMessage = "Wrong PIN! $remaining attempts remaining. PIN: $pin",
+                        rideSession = current.rideSession.copy(pinAttempts = event.attemptCount)
+                    )
+                }
+            }
+
+            PaymentEvent.MaxPinAttemptsReached -> {
+                _uiState.value.rideSession.activePaymentHash?.let {
+                    walletService?.clearHtlcRideProtected(it)
+                }
+                closeAllRideSubscriptionsAndJobs()
+                clearRiderStateHistory()
+                RiderActiveService.stop(getApplication())
+                resetRideUiState(
+                    stage = RideStage.IDLE,
+                    statusMessage = "Ride cancelled - too many wrong PIN attempts",
+                    error = "Security alert: Driver entered wrong PIN $MAX_PIN_ATTEMPTS times. Ride cancelled."
+                )
+                cleanupRideEventsInBackground("pin brute force security")
+                resubscribeToDrivers(clearExisting = false)
+                clearSavedRideState()
+            }
+
+            PaymentEvent.BridgeInProgress -> {
+                _uiState.update { current ->
+                    current.copy(
+                        statusMessage = "Processing cross-mint payment...",
+                        rideSession = current.rideSession.copy(bridgeInProgress = true, bridgeComplete = false)
+                    )
+                }
+            }
+
+            is PaymentEvent.BridgeCompleted -> {
+                _uiState.update { current ->
+                    current.copy(
+                        statusMessage = "Cross-mint payment complete (${event.amountSats} sats)",
+                        rideSession = current.rideSession.copy(bridgeInProgress = false, bridgeComplete = true)
+                    )
+                }
+            }
+
+            is PaymentEvent.BridgeFailed -> {
+                handleDriverCancellation("Cross-mint payment failed: ${event.message}", "bridge")
+            }
+
+            PaymentEvent.BridgePendingStarted -> {
+                _uiState.update { current ->
+                    current.copy(
+                        statusMessage = "Cross-mint payment processing… This may take a minute.",
+                        rideSession = current.rideSession.copy(bridgeInProgress = true)
+                    )
+                }
+            }
+
+            PaymentEvent.PostConfirmAckTimeout -> {
+                handleDriverCancellation("No response from driver after confirmation", "ack timeout")
+            }
+
+            PaymentEvent.EscrowRetryDeadlineExpired -> {
+                cancelRideAfterEscrowFailure()
+            }
+
+            is PaymentEvent.DepositInvoiceReceived -> {
+                updateRideSession { copy(driverDepositInvoice = event.invoice) }
+            }
+        }
+    }
+
+    /**
+     * Translates [OfferEvent] emissions into UiState updates.
+     * [offerCoordinator] owns offer-sending, acceptance subscriptions, and timeout logic.
+     */
+    private fun handleOfferEvent(event: OfferEvent) {
+        when (event) {
+            is OfferEvent.Sent -> {
+                val offer = event.offer
+                _uiState.update { current ->
+                    current.copy(
+                        statusMessage = if (offer.isBroadcast) "Broadcasting ride request..." else "Waiting for driver...",
+                        rideSession = current.rideSession.copy(
+                            rideStage = if (offer.isBroadcast) RideStage.BROADCASTING_REQUEST
+                                        else RideStage.WAITING_FOR_ACCEPTANCE,
+                            pendingOfferEventId = offer.eventId,
+                            isSendingOffer = false,
+                            activeIsRoadflare = offer.isRoadflare,
+                            activePaymentMethod = offer.paymentMethod,
+                            activePaymentHash = offer.paymentHash,
+                            activePreimage = offer.preimage,
+                            activeFiatPaymentMethods = offer.fiatPaymentMethods,
+                            offerTargetDriverPubKey = offer.roadflareTargetPubKey,
+                            driverAvailabilityEventId = offer.driverAvailabilityEventId,
+                            riderMintUrl = walletService?.getCurrentMintUrl(),
+                            roadflareTargetDriverPubKey = offer.roadflareTargetPubKey,
+                            roadflareTargetDriverLocation = offer.roadflareTargetLocation,
+                            broadcastStartTimeMs = if (offer.isBroadcast) System.currentTimeMillis() else null,
+                            acceptanceTimeoutStartMs = if (!offer.isBroadcast) System.currentTimeMillis() else null
+                        )
+                    )
+                }
+                saveRideState()
+            }
+
+            is OfferEvent.SendFailed -> {
+                _uiState.update { current ->
+                    current.copy(
+                        error = event.message,
+                        rideSession = current.rideSession.copy(isSendingOffer = false)
+                    )
+                }
+            }
+
+            is OfferEvent.Accepted -> {
+                val acceptance = event.acceptance
+                Log.d(TAG, "OfferEvent.Accepted from ${acceptance.driverPubKey.take(8)} (batch=${event.isBatch})")
+                _uiState.update { current ->
+                    current.copy(
+                        rideSession = current.rideSession.copy(
+                            rideStage = RideStage.DRIVER_ACCEPTED,
+                            acceptance = acceptance
+                        )
+                    )
+                }
+                autoConfirmRide(acceptance)
+            }
+
+            OfferEvent.DirectOfferTimedOut -> {
+                updateRideSession { copy(directOfferTimedOut = true) }
+            }
+
+            OfferEvent.BroadcastTimedOut -> {
+                updateRideSession { copy(broadcastTimedOut = true) }
+            }
+
+            OfferEvent.DriverUnavailable -> {
+                updateRideSession { copy(showDriverUnavailableDialog = true) }
+            }
+
+            is OfferEvent.BatchProgress -> {
+                Log.d(TAG, "Batch progress: ${event.contacted}/${event.total} drivers contacted")
+            }
+
+            is OfferEvent.InsufficientFunds -> {
+                Log.w(TAG, "Insufficient funds: shortfall=${event.shortfall} sats")
+                _uiState.update { current ->
+                    current.copy(
+                        rideSession = current.rideSession.copy(isSendingOffer = false)
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Translates [RoadflareRiderEvent] emissions into UiState updates.
+     * [roadflareRiderCoordinator] owns key-share reception, key-ack sending, and driver pings.
+     */
+    private fun handleRoadflareRiderEvent(event: RoadflareRiderEvent) {
+        when (event) {
+            is RoadflareRiderEvent.KeyReceived ->
+                Log.d(TAG, "RoadFlare key received from driver ${event.driverPubKey.take(8)}")
+            is RoadflareRiderEvent.KeyShareIgnored ->
+                Log.d(TAG, "RoadFlare key share ignored: ${event.reason}")
+            is RoadflareRiderEvent.PingSent ->
+                Log.d(TAG, "Driver ping sent to ${event.driverPubKey.take(8)}")
+        }
+    }
+
     fun performLogoutCleanup() {
         staleDriverCleanupJob?.cancel()
         chatRefreshJob?.stop()
@@ -5501,6 +5871,9 @@ class RiderViewModel @Inject constructor(
         roadflareBatchJob?.cancel()
         pendingDeletionJob?.cancel()
         presenceCoordinator.stop()
+        offerCoordinator.destroy()
+        paymentCoordinator.destroy()
+        roadflareRiderCoordinator.destroy()
         subs.closeAll()
         bitcoinPriceService.cleanup()
     }
