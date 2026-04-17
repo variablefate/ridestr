@@ -23,7 +23,10 @@ sealed class RideOfferSpec {
         val rideRoute: RouteMetrics?,
         val mintUrl: String?,
         val paymentMethod: String,
-        val fiatPaymentMethods: List<String> = emptyList()
+        val fiatPaymentMethods: List<String> = emptyList(),
+        // Authoritative fiat fare per ADR-0008 (both-or-neither)
+        val fareFiatAmount: String? = null,
+        val fareFiatCurrency: String? = null
     ) : RideOfferSpec()
 
     /** RoadFlare offer to a followed driver. No availability event reference. */
@@ -37,7 +40,10 @@ sealed class RideOfferSpec {
         val rideRoute: RouteMetrics?,
         val mintUrl: String?,
         val paymentMethod: String,
-        val fiatPaymentMethods: List<String> = emptyList()
+        val fiatPaymentMethods: List<String> = emptyList(),
+        // Authoritative fiat fare per ADR-0008 (both-or-neither)
+        val fareFiatAmount: String? = null,
+        val fareFiatCurrency: String? = null
     ) : RideOfferSpec()
 
     /** Public broadcast visible to all drivers in pickup area. Precise locations —
@@ -48,7 +54,10 @@ sealed class RideOfferSpec {
         val fareEstimate: Double,
         val routeDistance: RouteMetrics,  // Required for broadcasts
         val mintUrl: String?,
-        val paymentMethod: String
+        val paymentMethod: String,
+        // Authoritative fiat fare per ADR-0008 (both-or-neither)
+        val fareFiatAmount: String? = null,
+        val fareFiatCurrency: String? = null
     ) : RideOfferSpec()
 }
 
