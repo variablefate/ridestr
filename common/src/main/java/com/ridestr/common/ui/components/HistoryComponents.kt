@@ -113,7 +113,9 @@ private fun HistoryEntryCard(
         dateFormat.format(Date(ride.timestamp * 1000))
     }
 
-    val fareDisplay = ride.formatFareDisplay(displayCurrency, btcPriceUsd)
+    val fareDisplay = remember(ride, displayCurrency, btcPriceUsd) {
+        ride.formatFareDisplay(displayCurrency, btcPriceUsd)
+    }
     val isCompleted = ride.status == "completed"
 
     Card(
@@ -180,17 +182,21 @@ private fun HistoryEntryCard(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            val pickupDisplay = ride.pickupAddress
-                ?: ride.pickupLat?.let { lat ->
-                    ride.pickupLon?.let { lon -> String.format(Locale.US, "%.4f, %.4f", lat, lon) }
-                }
-                ?: "${ride.pickupGeohash.take(4)}..."
+            val pickupDisplay = remember(ride) {
+                ride.pickupAddress
+                    ?: ride.pickupLat?.let { lat ->
+                        ride.pickupLon?.let { lon -> String.format(Locale.US, "%.4f, %.4f", lat, lon) }
+                    }
+                    ?: "${ride.pickupGeohash.take(4)}..."
+            }
 
-            val dropoffDisplay = ride.dropoffAddress
-                ?: ride.dropoffLat?.let { lat ->
-                    ride.dropoffLon?.let { lon -> String.format(Locale.US, "%.4f, %.4f", lat, lon) }
-                }
-                ?: "${ride.dropoffGeohash.take(4)}..."
+            val dropoffDisplay = remember(ride) {
+                ride.dropoffAddress
+                    ?: ride.dropoffLat?.let { lat ->
+                        ride.dropoffLon?.let { lon -> String.format(Locale.US, "%.4f, %.4f", lat, lon) }
+                    }
+                    ?: "${ride.dropoffGeohash.take(4)}..."
+            }
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -332,12 +338,15 @@ private fun HistoryStatsCard(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            val completedRiderRides = rides.filter { it.role == "rider" && it.status == "completed" }
-            val totalSpentDisplay = when (displayCurrency) {
-                DisplayCurrency.SATS -> "${stats.totalFareSatsPaid} sats"
-                DisplayCurrency.USD -> completedRiderRides.sumFareUsdOrNull(btcPriceUsd)
-                    ?.formatUsd()
-                    ?: "${stats.totalFareSatsPaid} sats"
+            val totalSpentDisplay = remember(rides, stats.totalFareSatsPaid, displayCurrency, btcPriceUsd) {
+                when (displayCurrency) {
+                    DisplayCurrency.SATS -> "${stats.totalFareSatsPaid} sats"
+                    DisplayCurrency.USD -> rides
+                        .filter { it.role == "rider" && it.status == "completed" }
+                        .sumFareUsdOrNull(btcPriceUsd)
+                        ?.formatUsd()
+                        ?: "${stats.totalFareSatsPaid} sats"
+                }
             }
 
             Surface(

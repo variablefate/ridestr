@@ -179,12 +179,14 @@ private fun DriverCard(
     val dateFormat = remember { SimpleDateFormat("MMM d, yyyy", Locale.getDefault()) }
     val displayName = driverName ?: driver.pubkey.take(8) + "..."
 
-    val distanceMiles = if (riderLocation != null && locationState != null &&
-        locationState.status == RoadflareLocationEvent.Status.ONLINE) {
-        val driverLoc = Location(locationState.lat, locationState.lon)
-        val distanceKm = riderLocation.distanceToKm(driverLoc)
-        distanceKm * 0.621371
-    } else null
+    val distanceMiles = remember(riderLocation, locationState) {
+        if (riderLocation != null && locationState != null &&
+            locationState.status == RoadflareLocationEvent.Status.ONLINE) {
+            val driverLoc = Location(locationState.lat, locationState.lon)
+            val distanceKm = riderLocation.distanceToKm(driverLoc)
+            distanceKm * 0.621371
+        } else null
+    }
 
     Card(
         onClick = onClick,

@@ -1,5 +1,6 @@
 package com.ridestr.common.nostr.events
 
+import androidx.compose.runtime.Immutable
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
 import org.json.JSONArray
@@ -176,6 +177,7 @@ data class FollowedDriversData(
  * @param note Optional note about the driver (e.g., "Great driver, Toyota Camry")
  * @param roadflareKey The driver's RoadFlare key (needed to decrypt their location broadcasts)
  */
+@Immutable
 data class FollowedDriver(
     val pubkey: String,
     val addedAt: Long,
