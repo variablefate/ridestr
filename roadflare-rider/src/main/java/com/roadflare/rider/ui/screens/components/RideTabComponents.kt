@@ -24,6 +24,7 @@ import androidx.core.content.ContextCompat
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.ridestr.common.bitcoin.BitcoinPriceService
+import com.ridestr.common.fiat.formatSatsOrPlaceholder
 import com.ridestr.common.fiat.formatUsd
 import com.ridestr.common.settings.DisplayCurrency
 import com.ridestr.common.ui.FavoritesSection
@@ -36,7 +37,6 @@ import com.roadflare.rider.viewmodels.RideSession
 import com.roadflare.rider.viewmodels.RiderViewModel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
-import java.util.Locale
 
 @Composable
 fun formatFareAmount(
@@ -48,11 +48,9 @@ fun formatFareAmount(
     val btcPrice by priceService.btcPriceUsd.collectAsState()
     return when (displayCurrency) {
         DisplayCurrency.USD -> fareUsd.formatUsd()
-        DisplayCurrency.SATS -> {
-            val sats = btcPrice?.takeIf { it > 0 }?.let { priceService.usdToSats(fareUsd) }
-            if (sats != null) String.format(Locale.US, "%,d sats", sats)
-            else fareUsd.formatUsd()
-        }
+        DisplayCurrency.SATS -> formatSatsOrPlaceholder(
+            btcPrice?.takeIf { it > 0 }?.let { priceService.usdToSats(fareUsd) }
+        )
     }
 }
 

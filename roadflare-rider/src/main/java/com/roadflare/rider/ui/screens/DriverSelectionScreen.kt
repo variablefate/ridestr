@@ -19,6 +19,7 @@ import androidx.compose.ui.unit.dp
 import androidx.annotation.VisibleForTesting
 import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.data.CachedDriverLocation
+import com.ridestr.common.fiat.formatSatsOrPlaceholder
 import com.ridestr.common.nostr.events.AdminConfig
 import com.ridestr.common.nostr.events.FollowedDriver
 import com.ridestr.common.nostr.events.Location
@@ -300,11 +301,7 @@ private fun formatFareUsd(
 ): String {
     return when (displayCurrency) {
         DisplayCurrency.USD -> "$${String.format("%.2f", fareUsd)}"
-        DisplayCurrency.SATS -> {
-            val sats = priceService.usdToSats(fareUsd)
-            if (sats != null) "${String.format("%,d", sats)} sats"
-            else "$${String.format("%.2f", fareUsd)}"
-        }
+        DisplayCurrency.SATS -> formatSatsOrPlaceholder(priceService.usdToSats(fareUsd))
     }
 }
 
