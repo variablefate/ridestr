@@ -401,6 +401,7 @@ fun RiderModeScreen(
         showDriverUnavailable = uiState.rideSession.showDriverUnavailableDialog,
         showEscrowFailed = uiState.rideSession.showEscrowFailedDialog,
         escrowFailedMessage = uiState.rideSession.escrowFailedMessage,
+        paymentPath = uiState.rideSession.paymentPath,
         onDismissCancelWarning = { viewModel.dismissCancelWarning() },
         onConfirmCancelWarning = { viewModel.confirmCancelAfterWarning() },
         onDismissDriverUnavailable = { viewModel.dismissDriverUnavailable() },

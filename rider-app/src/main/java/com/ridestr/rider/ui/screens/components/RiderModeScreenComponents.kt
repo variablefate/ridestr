@@ -16,6 +16,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.nostr.events.DriverAvailabilityData
+import com.ridestr.common.nostr.events.PaymentPath
 import com.ridestr.common.nostr.events.UserProfile
 import com.ridestr.common.settings.DisplayCurrency
 import com.ridestr.common.ui.ActiveRideCard
@@ -492,6 +493,7 @@ internal fun CancelDialogStack(
     showDriverUnavailable: Boolean,
     showEscrowFailed: Boolean,
     escrowFailedMessage: String?,
+    paymentPath: PaymentPath,
     onDismissCancelWarning: () -> Unit,
     onConfirmCancelWarning: () -> Unit,
     onDismissDriverUnavailable: () -> Unit,
@@ -500,6 +502,24 @@ internal fun CancelDialogStack(
 ) {
     // Cancel warning dialog (shown when cancelling after PIN verification)
     if (showCancelWarning) {
+        // Only Cashu HTLC rides have an escrow the driver can claim post-cancel.
+        // Fiat/RoadFlare (and NO_PAYMENT) rides don't — phrase the warning in
+        // terms of "driver has been notified" instead of payment claiming. See #59.
+        val hasEscrow = paymentPath == PaymentPath.SAME_MINT || paymentPath == PaymentPath.CROSS_MINT
+        val (title, body, footer) = if (hasEscrow) {
+            Triple(
+                "Payment Already Sent",
+                "Your payment has already been authorized to the driver. If you cancel now, the driver can still claim the fare.",
+                "Cancelling does not guarantee a refund."
+            )
+        } else {
+            Triple(
+                "Cancel This Ride?",
+                "Your driver has been notified and may already be on the way. Cancelling now may inconvenience them.",
+                null
+            )
+        }
+
         AlertDialog(
             onDismissRequest = onDismissCancelWarning,
             icon = {
@@ -509,19 +529,19 @@ internal fun CancelDialogStack(
                     tint = MaterialTheme.colorScheme.error
                 )
             },
-            title = { Text("Payment Already Sent") },
+            title = { Text(title) },
             text = {
                 Column {
-                    Text(
-                        "Your payment has already been authorized to the driver. If you cancel now, the driver can still claim the fare."
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        "Cancelling does not guarantee a refund.",
-                        style = MaterialTheme.typography.bodySmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.error
-                    )
+                    Text(body)
+                    footer?.let {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
                 }
             },
             confirmButton = {
