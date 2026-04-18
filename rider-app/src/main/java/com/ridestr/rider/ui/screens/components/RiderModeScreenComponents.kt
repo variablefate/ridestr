@@ -506,18 +506,17 @@ internal fun CancelDialogStack(
         // Fiat/RoadFlare (and NO_PAYMENT) rides don't — phrase the warning in
         // terms of "driver has been notified" instead of payment claiming. See #59.
         val hasEscrow = paymentPath == PaymentPath.SAME_MINT || paymentPath == PaymentPath.CROSS_MINT
-        val (title, body, footer) = if (hasEscrow) {
-            Triple(
-                "Payment Already Sent",
-                "Your payment has already been authorized to the driver. If you cancel now, the driver can still claim the fare.",
-                "Cancelling does not guarantee a refund."
-            )
+        val title: String
+        val body: String
+        val footer: String?
+        if (hasEscrow) {
+            title = "Payment Already Sent"
+            body = "Your payment has already been authorized to the driver. If you cancel now, the driver can still claim the fare."
+            footer = "Cancelling does not guarantee a refund."
         } else {
-            Triple(
-                "Cancel This Ride?",
-                "Your driver has been notified and may already be on the way. Cancelling now may inconvenience them.",
-                null
-            )
+            title = "Cancel This Ride?"
+            body = "Your driver has been notified and may already be on the way. Cancelling now may inconvenience them."
+            footer = null
         }
 
         AlertDialog(

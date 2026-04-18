@@ -517,6 +517,17 @@ fun DriverModeScreen(
             )
         }
 
+        // Per-offer callbacks stabilized so children that `remember`-wrap them
+        // (OfferInbox / RoadflareFollowerList / item children) see the same
+        // lambda identity across recompositions — otherwise the child-side
+        // `remember(offer, onAccept)` would invalidate every frame (see #71).
+        val onAcceptOfferStable = remember(viewModel) { { offer: RideOfferData -> viewModel.acceptOffer(offer) } }
+        val onDeclineOfferStable = remember(viewModel) { { offer: RideOfferData -> viewModel.declineOffer(offer) } }
+        val onAcceptBroadcastStable = remember(viewModel) { { req: BroadcastRideOfferData -> viewModel.acceptBroadcastRequest(req) } }
+        val onDeclineBroadcastStable = remember(viewModel) { { req: BroadcastRideOfferData -> viewModel.declineBroadcastRequest(req) } }
+        val onSetNoMatchWarningStable = remember(viewModel) { { id: String -> viewModel.setNoMatchWarningOffer(id) } }
+        val onDismissNoMatchWarningStable = remember(viewModel) { { viewModel.dismissNoMatchWarning() } }
+
         // Main content based on driver stage
         Crossfade(
             targetState = uiState.stage,
@@ -572,10 +583,10 @@ fun DriverModeScreen(
                         }
                     },
                     onGoOffline = { viewModel.goOffline() },
-                    onAcceptOffer = { viewModel.acceptOffer(it) },
-                    onDeclineOffer = { viewModel.declineOffer(it) },
-                    onSetNoMatchWarning = { viewModel.setNoMatchWarningOffer(it) },
-                    onDismissNoMatchWarning = { viewModel.dismissNoMatchWarning() },
+                    onAcceptOffer = onAcceptOfferStable,
+                    onDeclineOffer = onDeclineOfferStable,
+                    onSetNoMatchWarning = onSetNoMatchWarningStable,
+                    onDismissNoMatchWarning = onDismissNoMatchWarningStable,
                     displayCurrency = settings.displayCurrency,
                     distanceUnit = settings.distanceUnit,
                     roadflarePaymentMethods = settings.roadflarePaymentMethods,
@@ -589,12 +600,12 @@ fun DriverModeScreen(
                     uiState = uiState,
                     onGoOffline = { viewModel.goOffline() },
                     onToggleExpandedSearch = { viewModel.toggleExpandedSearch() },
-                    onAcceptBroadcastRequest = { viewModel.acceptBroadcastRequest(it) },
-                    onDeclineBroadcastRequest = { viewModel.declineBroadcastRequest(it) },
-                    onAcceptOffer = { viewModel.acceptOffer(it) },
-                    onDeclineOffer = { viewModel.declineOffer(it) },
-                    onSetNoMatchWarning = { viewModel.setNoMatchWarningOffer(it) },
-                    onDismissNoMatchWarning = { viewModel.dismissNoMatchWarning() },
+                    onAcceptBroadcastRequest = onAcceptBroadcastStable,
+                    onDeclineBroadcastRequest = onDeclineBroadcastStable,
+                    onAcceptOffer = onAcceptOfferStable,
+                    onDeclineOffer = onDeclineOfferStable,
+                    onSetNoMatchWarning = onSetNoMatchWarningStable,
+                    onDismissNoMatchWarning = onDismissNoMatchWarningStable,
                     displayCurrency = settings.displayCurrency,
                     distanceUnit = settings.distanceUnit,
                     roadflarePaymentMethods = settings.roadflarePaymentMethods,
