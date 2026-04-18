@@ -35,6 +35,9 @@ See [docs/README.md](../docs/README.md) for full documentation.
 | Batch Offer Cancellation | ✅ COMPLETE (NIP-09 deletion, payment method selection, balance precheck, FrozenRideInputs) |
 | Payment Method Priority (Issue #46) | ✅ COMPLETE (drag-to-reorder UI, fiat_payment_methods wiring, case-insensitive matching, driver-side compatibility indicator) |
 | Escrow Bypass Block | ✅ COMPLETE (rider blocks confirmation, driver hides "Complete Anyway" for SAME_MINT, process-death-stable paymentPath) |
+| Rider Coordinator Extraction (Issue #65) | ✅ COMPLETE (OfferCoordinator, PaymentCoordinator, RoadflareRiderCoordinator + AvailabilityMonitorPolicy in `:common/coordinator/`) |
+| Driver Coordinator Extraction (Issue #66) | ✅ COMPLETE (AvailabilityCoordinator, AcceptanceCoordinator, RoadflareDriverCoordinator in `:common/coordinator/`; PaymentStatus consolidated to `:common/payment/PaymentModels`) |
+| Compose Screen Decomposition (Issue #67) | ✅ COMPLETE (per-module `components/` packages: DriverModeScreenComponents, RideTabComponents, DriverNetworkComponents, HistoryComponents, SettingsComponents, ReorderablePaymentMethodList) |
 
 ## Project Structure
 - `rider-app/` - Rider Android app (RiderViewModel.kt is main state)
@@ -331,10 +334,38 @@ Multi-relay delivery of acceptance events causes concurrent `autoConfirmRide()` 
 
 ## Key Files Reference
 
+### Coordinators (`:common/coordinator/`)
+
+SDK-grade protocol extraction — no Hilt, no Context/ViewModel references, full KDoc on every public symbol. Each coordinator emits a SharedFlow of events consumed by its ViewModel.
+
+**Rider side (Issue #65):**
+- `OfferCoordinator.kt` - Offer sending (direct/broadcast/RoadFlare), batch offers, pre-confirmation driver availability monitoring (Issue #22)
+- `PaymentCoordinator.kt` - HTLC lock, Kind 3175 confirmation, escrow-bypass dialog, PIN verify, SAME_MINT preimage share, CROSS_MINT bridge + pending poll, post-confirm ack timeout, CAS race guards
+- `RoadflareRiderCoordinator.kt` - Kind 3186 key-share listener, Kind 3188 key-ack handling, Kind 3189 driver-ping
+- `AvailabilityMonitorPolicy.kt` - Pure policy object for pre-confirm driver availability monitoring
+
+**Driver side (Issue #66):**
+- `AvailabilityCoordinator.kt` - Kind 30173 broadcast loop, NIP-09 deletion, throttling
+- `AcceptanceCoordinator.kt` - Offer/broadcast accept, first-acceptance-wins CAS gate, PaymentPath determination
+- `RoadflareDriverCoordinator.kt` - State sync union-merge, Kind 30014 broadcasting, offline publish
+
+**Touching coordinators:** They're synthetic hotspots — the first bug fixes in them warrant extra care. Preserve the SDK-grade posture: visibility, KDoc, package boundaries.
+
+### Screen Components (Issue #67)
+
+Per-module `components/` packages decompose high-churn Compose screens into focused composables — pure UI code motion, no behavior change.
+
+- `drivestr/ui/screens/components/DriverModeScreenComponents.kt` - AvailabilityControls, OfferInbox, RoadflareFollowerList, RideOfferCard, BroadcastRideRequestCard, NoCommonPaymentMethodDialog, format helpers
+- `rider-app/ui/screens/components/` - HistoryList/FilterBar/EntryCard/StatsCard, RideRequestPanel, ActiveRidePanel, CompletionPanel, CancelDialogStack
+- `roadflare-rider/ui/screens/components/RideTabComponents.kt` - All ride-stage composables (IdleContent, RequestingContent, ChoosingDriverContent, MatchedContent, InRideContent, CompletedContent, CancelledContent) + `formatFareAmount`
+- `roadflare-rider/ui/screens/components/DriverNetworkComponents.kt` - FollowedDriverList, DriverCard, DriverStatusBadge, EmptyDriversState, RoadflarePaymentMethodsDialog
+- `common/ui/components/HistoryComponents.kt` - Shared history UI (HistoryList, HistoryFilterBar, HistoryEntryCard, HistoryStatsCard)
+- `common/ui/components/SettingsComponents.kt`, `ReorderablePaymentMethodList.kt` - Settings + drag-to-reorder payment methods
+
 ### Ride State Management
 - `SubscriptionManager.kt` - Centralized subscription ID lifecycle (`set()`, `close()`, `closeAll()`, `setInGroup()`, `closeGroup()`)
-- `DriverViewModel.kt` - `resetRideUiState()`, `closeAllRideSubscriptionsAndJobs()`, `clearDriverStateHistory()`, `acceptOffer()`, `acceptBroadcastRequest()`
-- `RiderViewModel.kt` - `resetRideUiState()`, `closeAllRideSubscriptionsAndJobs()`, `clearRiderStateHistory()`
+- `DriverViewModel.kt` - `resetRideUiState()`, `closeAllRideSubscriptionsAndJobs()`, `clearDriverStateHistory()`, `acceptOffer()`/`acceptBroadcastRequest()` (delegate to AcceptanceCoordinator)
+- `RiderViewModel.kt` - `resetRideUiState()`, `closeAllRideSubscriptionsAndJobs()`, `clearRiderStateHistory()` (ride protocol logic now owned by OfferCoordinator / PaymentCoordinator / RoadflareRiderCoordinator)
 - `NostrService.kt` - Facade that delegates to domain services (backward compatible)
 - `RideshareDomainService.kt` - Ride protocol events (Kind 3173-3179, 30173, 30180-30181)
 - `NostrCryptoHelper.kt` - NIP-44 encryption utilities
