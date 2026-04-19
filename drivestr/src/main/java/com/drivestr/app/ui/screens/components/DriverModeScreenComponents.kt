@@ -9,6 +9,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -16,12 +18,46 @@ import com.ridestr.common.bitcoin.BitcoinPriceService
 import com.ridestr.common.fiat.formatUsd
 import com.ridestr.common.fiat.usdAmountOrNull
 import com.ridestr.common.nostr.events.BroadcastRideOfferData
+import com.ridestr.common.nostr.events.PaymentMethod
 import com.ridestr.common.nostr.events.RideOfferData
 import com.ridestr.common.routing.RouteResult
 import com.ridestr.common.settings.DisplayCurrency
 import com.ridestr.common.settings.DistanceUnit
 import com.ridestr.common.ui.FareDisplay
 import java.util.Locale
+
+/**
+ * Leaf composable that isolates the 1Hz relative-time ticker from the enclosing card.
+ *
+ * Before Issue #71 the ticker lived inside [RideOfferCard] / [BroadcastRideRequestCard]
+ * and each 1s tick recomposed the whole card — re-running route maths, earnings
+ * calculations, and payment-method lookups for every visible offer. Pulling the
+ * ticker into this leaf means only the `Text` itself recomposes each second; the
+ * surrounding card stays stable.
+ */
+@Composable
+private fun RelativeTimeText(
+    timestampSeconds: Long,
+    style: TextStyle,
+    color: Color,
+    modifier: Modifier = Modifier
+) {
+    var relativeTime by remember(timestampSeconds) {
+        mutableStateOf(formatRelativeTime(timestampSeconds))
+    }
+    LaunchedEffect(timestampSeconds) {
+        while (true) {
+            relativeTime = formatRelativeTime(timestampSeconds)
+            kotlinx.coroutines.delay(1000)
+        }
+    }
+    Text(
+        text = relativeTime,
+        style = style,
+        color = color,
+        modifier = modifier
+    )
+}
 
 private fun formatRelativeTime(timestampSeconds: Long): String {
     val nowSeconds = System.currentTimeMillis() / 1000
@@ -80,8 +116,137 @@ internal fun formatEarnings(
 }
 
 private fun effectiveRoadflareDriverMethods(driverFiatMethods: List<String>): List<String> {
-    val bitcoin = com.ridestr.common.nostr.events.PaymentMethod.BITCOIN.value
+    val bitcoin = PaymentMethod.BITCOIN.value
     return (driverFiatMethods + bitcoin).distinctBy { it.trim().lowercase() }
+}
+
+/**
+ * Intercept accept taps on fiat RoadFlare offers with no common payment method
+ * (Issue #46). Routes to a warning dialog instead of accepting when the driver
+ * can't actually settle in any method the rider prefers.
+ */
+private fun handleOfferAccept(
+    offer: RideOfferData,
+    driverFiatMethods: List<String>,
+    onAcceptOffer: (RideOfferData) -> Unit,
+    onSetNoMatchWarning: (String) -> Unit
+) {
+    val needsWarning = offer.isRoadflare &&
+        offer.paymentMethod != "cashu" &&
+        offer.fiatPaymentMethods.isNotEmpty() &&
+        PaymentMethod.findBestCommonFiatMethod(
+            offer.fiatPaymentMethods,
+            effectiveRoadflareDriverMethods(driverFiatMethods)
+        ) == null
+
+    if (needsWarning) onSetNoMatchWarning(offer.eventId) else onAcceptOffer(offer)
+}
+
+/**
+ * Earnings strings rendered beneath an offer card. Packaged in a single value so
+ * both fields are computed in one [remember] block — the math shares all inputs and
+ * always runs together. See Issue #71: previously these recomputed on every 1Hz
+ * ticker recomposition.
+ */
+private data class EarningsDisplay(val perHour: String?, val perDistance: String?) {
+    companion object {
+        val None = EarningsDisplay(perHour = null, perDistance = null)
+    }
+}
+
+/**
+ * Compute per-hour and per-distance earnings strings from raw offer inputs.
+ *
+ * [pickupDistanceKm] and [pickupDurationMin] are nullable to express "pickup
+ * route not yet calculated". Both must be present to produce a meaningful
+ * total-distance figure (driver only gets paid for ride miles but has to drive
+ * pickup miles too — per-mile earnings must reflect the total).
+ */
+private fun computeEarningsDisplay(
+    fareSats: Double,
+    authoritativeUsdFare: Double?,
+    pickupDistanceKm: Double?,
+    pickupDurationMin: Double?,
+    rideDistanceKm: Double?,
+    rideDurationMin: Double?,
+    displayCurrency: DisplayCurrency,
+    distanceUnit: DistanceUnit,
+    btcPriceUsd: Int?
+): EarningsDisplay {
+    if (pickupDurationMin == null || rideDurationMin == null) return EarningsDisplay.None
+
+    val totalTimeHours = (pickupDurationMin + rideDurationMin) / 60.0
+    val totalDistanceKm = (pickupDistanceKm ?: 0.0) + (rideDistanceKm ?: 0.0)
+    val totalDistanceForEarnings = if (distanceUnit == DistanceUnit.MILES) {
+        totalDistanceKm * 0.621371
+    } else {
+        totalDistanceKm
+    }
+
+    val perHour = if (totalTimeHours > 0) {
+        formatEarnings(
+            satsPerUnit = fareSats / totalTimeHours,
+            displayCurrency = displayCurrency,
+            btcPriceUsd = btcPriceUsd,
+            suffix = "/hr",
+            fiatAmountPerUnitUsd = authoritativeUsdFare?.div(totalTimeHours)
+        )
+    } else null
+
+    val perDistance = if (totalDistanceForEarnings > 0) {
+        val perDistanceUnit = if (distanceUnit == DistanceUnit.MILES) "/mi" else "/km"
+        formatEarnings(
+            satsPerUnit = fareSats / totalDistanceForEarnings,
+            displayCurrency = displayCurrency,
+            btcPriceUsd = btcPriceUsd,
+            suffix = perDistanceUnit,
+            fiatAmountPerUnitUsd = authoritativeUsdFare?.div(totalDistanceForEarnings)
+        )
+    } else null
+
+    return EarningsDisplay(perHour = perHour, perDistance = perDistance)
+}
+
+/**
+ * Pre-computed payment-method match display for a RoadFlare fiat offer. Lets the
+ * card branch on the display variant without re-running `findBestCommonFiatMethod`
+ * (which allocates a fresh list via [effectiveRoadflareDriverMethods] and scans
+ * both sides for a common method) on every recomposition.
+ */
+private sealed class PaymentMatchDisplay {
+    /** Cashu offer, or non-RoadFlare — no match row rendered. */
+    object Hidden : PaymentMatchDisplay()
+
+    /** Driver and rider share at least one fiat method. */
+    data class BestMatch(val methodDisplay: String) : PaymentMatchDisplay()
+
+    /** Rider advertised methods; driver has none in common — block acceptance. */
+    object NoCommon : PaymentMatchDisplay()
+
+    /** Legacy offer without `fiat_payment_methods` — show the single declared method. */
+    data class LegacyMethod(val methodDisplay: String) : PaymentMatchDisplay()
+}
+
+private fun computePaymentMatch(
+    offer: RideOfferData,
+    driverFiatMethods: List<String>
+): PaymentMatchDisplay {
+    val bestMatch = if (offer.fiatPaymentMethods.isNotEmpty()) {
+        PaymentMethod.findBestCommonFiatMethod(
+            offer.fiatPaymentMethods,
+            effectiveRoadflareDriverMethods(driverFiatMethods)
+        )
+    } else null
+
+    return when {
+        bestMatch != null -> PaymentMatchDisplay.BestMatch(
+            methodDisplay = PaymentMethod.fromString(bestMatch)?.displayName ?: bestMatch
+        )
+        offer.fiatPaymentMethods.isNotEmpty() -> PaymentMatchDisplay.NoCommon
+        else -> PaymentMatchDisplay.LegacyMethod(
+            methodDisplay = PaymentMethod.fromString(offer.paymentMethod)?.displayName ?: offer.paymentMethod
+        )
+    }
 }
 
 @Composable
@@ -100,58 +265,55 @@ private fun RideOfferCard(
 ) {
     val btcPrice by priceService.btcPriceUsd.collectAsState()
 
-    // Update relative time every second
-    var relativeTime by remember { mutableStateOf(formatRelativeTime(offer.createdAt)) }
-    LaunchedEffect(offer.createdAt) {
-        while (true) {
-            relativeTime = formatRelativeTime(offer.createdAt)
-            kotlinx.coroutines.delay(1000)
-        }
+    // Route info — cached so we don't re-unbox nullable fields on every recomposition
+    // (the full card still recomposes on btcPrice changes, but not on the 1Hz ticker).
+    val pickupDistanceKm = remember(pickupRoute) { pickupRoute?.distanceKm }
+    val pickupDurationMin = remember(pickupRoute) { pickupRoute?.let { it.durationSeconds / 60.0 } }
+    val rideDistanceKm = remember(rideRoute) { rideRoute?.distanceKm }
+    val rideDurationMin = remember(rideRoute) { rideRoute?.let { it.durationSeconds / 60.0 } }
+    val authoritativeUsdFare = remember(offer.fiatFare) { offer.fiatFare?.usdAmountOrNull() }
+
+    // Earnings math — only recomputes when routes, currency, distance unit, or BTC price change.
+    val earnings = remember(
+        offer.fareEstimate,
+        authoritativeUsdFare,
+        pickupDistanceKm,
+        pickupDurationMin,
+        rideDistanceKm,
+        rideDurationMin,
+        displayCurrency,
+        distanceUnit,
+        btcPrice
+    ) {
+        computeEarningsDisplay(
+            fareSats = offer.fareEstimate,
+            authoritativeUsdFare = authoritativeUsdFare,
+            pickupDistanceKm = pickupDistanceKm,
+            pickupDurationMin = pickupDurationMin,
+            rideDistanceKm = rideDistanceKm,
+            rideDurationMin = rideDurationMin,
+            displayCurrency = displayCurrency,
+            distanceUnit = distanceUnit,
+            btcPriceUsd = btcPrice
+        )
     }
+    val earningsPerHour = earnings.perHour
+    val earningsPerDistance = earnings.perDistance
 
-    // Route info calculations
-    val pickupDistanceKm = pickupRoute?.distanceKm
-    val pickupDurationMin = pickupRoute?.let { it.durationSeconds / 60.0 }
-    val rideDistanceKm = rideRoute?.distanceKm
-    val rideDurationMin = rideRoute?.let { it.durationSeconds / 60.0 }
-
-    // Calculate earnings metrics (only if we have both routes)
-    val earningsPerHour: String?
-    val earningsPerDistance: String?
-    val authoritativeUsdFare = offer.fiatFare?.usdAmountOrNull()
-
-    if (pickupRoute != null && rideRoute != null && pickupDurationMin != null && rideDurationMin != null) {
-        val totalTimeHours = (pickupDurationMin + rideDurationMin) / 60.0
-        val totalDistanceKm = (pickupDistanceKm ?: 0.0) + (rideDistanceKm ?: 0.0)
-        val totalDistanceForEarnings = if (distanceUnit == DistanceUnit.MILES) {
-            totalDistanceKm * 0.621371
+    // Fiat payment-method best match (RoadFlare offers only). Wrapped in remember so the
+    // allocation-heavy list merge + `findBestCommonFiatMethod` scan doesn't re-run each
+    // recomposition — the inputs only change when the offer or driver methods change.
+    val paymentMatch = remember(
+        offer.isRoadflare,
+        offer.paymentMethod,
+        offer.fiatPaymentMethods,
+        driverFiatMethods
+    ) {
+        if (!offer.isRoadflare || offer.paymentMethod == "cashu") {
+            PaymentMatchDisplay.Hidden
         } else {
-            totalDistanceKm
+            computePaymentMatch(offer, driverFiatMethods)
         }
-
-        earningsPerHour = if (totalTimeHours > 0) {
-            formatEarnings(
-                satsPerUnit = offer.fareEstimate / totalTimeHours,
-                displayCurrency = displayCurrency,
-                btcPriceUsd = btcPrice,
-                suffix = "/hr",
-                fiatAmountPerUnitUsd = authoritativeUsdFare?.div(totalTimeHours)
-            )
-        } else null
-
-        earningsPerDistance = if (totalDistanceForEarnings > 0) {
-            val perDistanceUnit = if (distanceUnit == DistanceUnit.MILES) "/mi" else "/km"
-            formatEarnings(
-                satsPerUnit = offer.fareEstimate / totalDistanceForEarnings,
-                displayCurrency = displayCurrency,
-                btcPriceUsd = btcPrice,
-                suffix = perDistanceUnit,
-                fiatAmountPerUnitUsd = authoritativeUsdFare?.div(totalDistanceForEarnings)
-            )
-        } else null
-    } else {
-        earningsPerHour = null
-        earningsPerDistance = null
     }
 
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -186,40 +348,27 @@ private fun RideOfferCard(
                         color = if (offer.isRoadflare) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary
                     )
                     // Show fiat payment match status for RoadFlare offers (Issue #46)
-                    if (offer.isRoadflare && offer.paymentMethod != "cashu") {
-                        val bestMatch = if (offer.fiatPaymentMethods.isNotEmpty()) {
-                            com.ridestr.common.nostr.events.PaymentMethod.findBestCommonFiatMethod(
-                                offer.fiatPaymentMethods,
-                                effectiveRoadflareDriverMethods(driverFiatMethods)
-                            )
-                        } else null
-                        val methodDisplay = com.ridestr.common.nostr.events.PaymentMethod.fromString(offer.paymentMethod)?.displayName ?: offer.paymentMethod
-
-                        if (bestMatch != null) {
-                            val matchDisplay = com.ridestr.common.nostr.events.PaymentMethod.fromString(bestMatch)?.displayName ?: bestMatch
-                            Text(
-                                text = "Pay via: $matchDisplay",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = androidx.compose.ui.graphics.Color(0xFF2E7D32) // Green
-                            )
-                        } else if (offer.fiatPaymentMethods.isNotEmpty()) {
-                            Text(
-                                text = "No Common Payment Method",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.error
-                            )
-                        } else {
-                            // Legacy offer without fiat_payment_methods field
-                            Text(
-                                text = "Payment: $methodDisplay",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.tertiary
-                            )
-                        }
+                    when (paymentMatch) {
+                        PaymentMatchDisplay.Hidden -> Unit
+                        is PaymentMatchDisplay.BestMatch -> Text(
+                            text = "Pay via: ${paymentMatch.methodDisplay}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF2E7D32) // Green
+                        )
+                        PaymentMatchDisplay.NoCommon -> Text(
+                            text = "No Common Payment Method",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                        is PaymentMatchDisplay.LegacyMethod -> Text(
+                            text = "Payment: ${paymentMatch.methodDisplay}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.tertiary
+                        )
                     }
                 }
-                Text(
-                    text = relativeTime,
+                RelativeTimeText(
+                    timestampSeconds = offer.createdAt,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -367,71 +516,50 @@ private fun BroadcastRideRequestCard(
 ) {
     val btcPrice by priceService.btcPriceUsd.collectAsState()
 
-    // Update relative time every second
-    var relativeTime by remember { mutableStateOf(formatRelativeTime(request.createdAt)) }
-    LaunchedEffect(request.createdAt) {
-        while (true) {
-            relativeTime = formatRelativeTime(request.createdAt)
-            kotlinx.coroutines.delay(1000)
-        }
-    }
-
-    // Distance conversion (km to miles if needed)
     val rideDistanceKm = request.routeDistanceKm
     val rideDurationMin = request.routeDurationMin
-
-    // Format ride distance based on user preference
-    val rideDistanceStr = formatDistance(rideDistanceKm, distanceUnit)
-
-    // Pickup route info (only available if calculated)
-    val pickupDistanceKm = pickupRoute?.distanceKm
-    val pickupDurationMin = pickupRoute?.let { it.durationSeconds / 60.0 }
-    val pickupDistanceStr = pickupDistanceKm?.let { formatDistance(it, distanceUnit) }
-
-    // Calculate earnings metrics ONLY if we have pickup route data
-    // Without pickup time, $/hr would be misleadingly high
-    val earningsPerHour: String?
-    val earningsPerDistance: String?
-    val authoritativeUsdFare = request.fiatFare?.usdAmountOrNull()
-
-    if (pickupRoute != null && pickupDurationMin != null && pickupDistanceKm != null) {
-        // Total time = pickup time + ride time (in hours)
-        val totalTimeHours = (pickupDurationMin + rideDurationMin) / 60.0
-
-        // Total distance = pickup + ride (driver has to drive both, only gets paid for ride)
-        // This gives accurate $/mile for total miles driven
-        val totalDistanceKm = pickupDistanceKm + rideDistanceKm
-        val totalDistanceForEarnings = if (distanceUnit == DistanceUnit.MILES) {
-            totalDistanceKm * 0.621371
-        } else {
-            totalDistanceKm
-        }
-
-        earningsPerHour = if (totalTimeHours > 0) {
-            formatEarnings(
-                satsPerUnit = request.fareEstimate / totalTimeHours,
-                displayCurrency = displayCurrency,
-                btcPriceUsd = btcPrice,
-                suffix = "/hr",
-                fiatAmountPerUnitUsd = authoritativeUsdFare?.div(totalTimeHours)
-            )
-        } else null
-
-        earningsPerDistance = if (totalDistanceForEarnings > 0) {
-            val perDistanceUnit = if (distanceUnit == DistanceUnit.MILES) "/mi" else "/km"
-            formatEarnings(
-                satsPerUnit = request.fareEstimate / totalDistanceForEarnings,
-                displayCurrency = displayCurrency,
-                btcPriceUsd = btcPrice,
-                suffix = perDistanceUnit,
-                fiatAmountPerUnitUsd = authoritativeUsdFare?.div(totalDistanceForEarnings)
-            )
-        } else null
-    } else {
-        // Don't show earnings without pickup route - they'd be misleading
-        earningsPerHour = null
-        earningsPerDistance = null
+    val rideDistanceStr = remember(rideDistanceKm, distanceUnit) {
+        formatDistance(rideDistanceKm, distanceUnit)
     }
+
+    val pickupDistanceKm = remember(pickupRoute) { pickupRoute?.distanceKm }
+    val pickupDurationMin = remember(pickupRoute) { pickupRoute?.let { it.durationSeconds / 60.0 } }
+    val pickupDistanceStr = remember(pickupDistanceKm, distanceUnit) {
+        pickupDistanceKm?.let { formatDistance(it, distanceUnit) }
+    }
+    val authoritativeUsdFare = remember(request.fiatFare) { request.fiatFare?.usdAmountOrNull() }
+
+    // Earnings: only meaningful when we have the pickup route (without pickup time,
+    // $/hr would be misleadingly high). Remember so the math doesn't run per-tick.
+    val earnings = remember(
+        request.fareEstimate,
+        authoritativeUsdFare,
+        pickupDistanceKm,
+        pickupDurationMin,
+        rideDistanceKm,
+        rideDurationMin,
+        displayCurrency,
+        distanceUnit,
+        btcPrice
+    ) {
+        if (pickupDistanceKm == null || pickupDurationMin == null) {
+            EarningsDisplay.None
+        } else {
+            computeEarningsDisplay(
+                fareSats = request.fareEstimate,
+                authoritativeUsdFare = authoritativeUsdFare,
+                pickupDistanceKm = pickupDistanceKm,
+                pickupDurationMin = pickupDurationMin,
+                rideDistanceKm = rideDistanceKm,
+                rideDurationMin = rideDurationMin,
+                displayCurrency = displayCurrency,
+                distanceUnit = distanceUnit,
+                btcPriceUsd = btcPrice
+            )
+        }
+    }
+    val earningsPerHour = earnings.perHour
+    val earningsPerDistance = earnings.perDistance
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -472,8 +600,8 @@ private fun BroadcastRideRequestCard(
                         )
                     }
                 }
-                Text(
-                    text = relativeTime,
+                RelativeTimeText(
+                    timestampSeconds = request.createdAt,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -771,33 +899,35 @@ fun RoadflareFollowerList(
             style = MaterialTheme.typography.titleMedium,
             modifier = Modifier.padding(top = 8.dp)
         )
+        // N is small (personal follower network) so a non-lazy Column is fine — the
+        // per-card ticker has been hoisted to [RelativeTimeText] so the cost no longer
+        // compounds with list length.
         pendingOffers.forEach { offer ->
-            RideOfferCard(
-                offer = offer,
-                pickupRoute = directOfferPickupRoutes[offer.eventId],
-                rideRoute = directOfferRideRoutes[offer.eventId],
-                isProcessing = isProcessingOffer,
-                onAccept = {
-                    // Intercept fiat offers with no common method (Issue #46)
-                    if (offer.isRoadflare && offer.paymentMethod != "cashu" &&
-                        offer.fiatPaymentMethods.isNotEmpty() &&
-                        com.ridestr.common.nostr.events.PaymentMethod.findBestCommonFiatMethod(
-                            offer.fiatPaymentMethods,
-                            effectiveRoadflareDriverMethods(driverFiatMethods)
-                        ) == null
-                    ) {
-                        onSetNoMatchWarning(offer.eventId)
-                    } else {
-                        onAcceptOffer(offer)
-                    }
-                },
-                onDecline = { onDeclineOffer(offer) },
-                displayCurrency = displayCurrency,
-                distanceUnit = distanceUnit,
-                onToggleCurrency = onToggleCurrency,
-                priceService = priceService,
-                driverFiatMethods = driverFiatMethods
-            )
+            key(offer.eventId) {
+                val pickupRoute = directOfferPickupRoutes[offer.eventId]
+                val rideRoute = directOfferRideRoutes[offer.eventId]
+                val onAccept = remember(
+                    offer, driverFiatMethods, onAcceptOffer, onSetNoMatchWarning
+                ) {
+                    { handleOfferAccept(offer, driverFiatMethods, onAcceptOffer, onSetNoMatchWarning) }
+                }
+                val onDecline = remember(offer, onDeclineOffer) {
+                    { onDeclineOffer(offer) }
+                }
+                RideOfferCard(
+                    offer = offer,
+                    pickupRoute = pickupRoute,
+                    rideRoute = rideRoute,
+                    isProcessing = isProcessingOffer,
+                    onAccept = onAccept,
+                    onDecline = onDecline,
+                    displayCurrency = displayCurrency,
+                    distanceUnit = distanceUnit,
+                    onToggleCurrency = onToggleCurrency,
+                    priceService = priceService,
+                    driverFiatMethods = driverFiatMethods
+                )
+            }
         }
     } else {
         Card(
@@ -921,14 +1051,24 @@ fun OfferInbox(
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             // Show broadcast requests first (sorted by fare, highest first)
-            // Using freshBroadcastRequests which filters out stale requests
-            items(freshBroadcastRequests) { request ->
+            // Using freshBroadcastRequests which filters out stale requests.
+            items(
+                items = freshBroadcastRequests,
+                key = { it.eventId }
+            ) { request ->
+                val pickupRoute = pickupRoutes[request.eventId]
+                val onAccept = remember(request, onAcceptBroadcastRequest) {
+                    { onAcceptBroadcastRequest(request) }
+                }
+                val onDecline = remember(request, onDeclineBroadcastRequest) {
+                    { onDeclineBroadcastRequest(request) }
+                }
                 BroadcastRideRequestCard(
                     request = request,
-                    pickupRoute = pickupRoutes[request.eventId],
+                    pickupRoute = pickupRoute,
                     isProcessing = isProcessingOffer,
-                    onAccept = { onAcceptBroadcastRequest(request) },
-                    onDecline = { onDeclineBroadcastRequest(request) },
+                    onAccept = onAccept,
+                    onDecline = onDecline,
                     displayCurrency = displayCurrency,
                     distanceUnit = distanceUnit,
                     onToggleCurrency = onToggleCurrency,
@@ -946,27 +1086,27 @@ fun OfferInbox(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                items(pendingOffers) { offer ->
+                items(
+                    items = pendingOffers,
+                    key = { it.eventId }
+                ) { offer ->
+                    val pickupRoute = directOfferPickupRoutes[offer.eventId]
+                    val rideRoute = directOfferRideRoutes[offer.eventId]
+                    val onAccept = remember(
+                        offer, driverFiatMethods, onAcceptOffer, onSetNoMatchWarning
+                    ) {
+                        { handleOfferAccept(offer, driverFiatMethods, onAcceptOffer, onSetNoMatchWarning) }
+                    }
+                    val onDecline = remember(offer, onDeclineOffer) {
+                        { onDeclineOffer(offer) }
+                    }
                     RideOfferCard(
                         offer = offer,
-                        pickupRoute = directOfferPickupRoutes[offer.eventId],
-                        rideRoute = directOfferRideRoutes[offer.eventId],
+                        pickupRoute = pickupRoute,
+                        rideRoute = rideRoute,
                         isProcessing = isProcessingOffer,
-                        onAccept = {
-                            // Intercept fiat offers with no common method (Issue #46)
-                            if (offer.isRoadflare && offer.paymentMethod != "cashu" &&
-                                offer.fiatPaymentMethods.isNotEmpty() &&
-                                com.ridestr.common.nostr.events.PaymentMethod.findBestCommonFiatMethod(
-                                    offer.fiatPaymentMethods,
-                                    effectiveRoadflareDriverMethods(driverFiatMethods)
-                                ) == null
-                            ) {
-                                onSetNoMatchWarning(offer.eventId)
-                            } else {
-                                onAcceptOffer(offer)
-                            }
-                        },
-                        onDecline = { onDeclineOffer(offer) },
+                        onAccept = onAccept,
+                        onDecline = onDecline,
                         displayCurrency = displayCurrency,
                         distanceUnit = distanceUnit,
                         onToggleCurrency = onToggleCurrency,

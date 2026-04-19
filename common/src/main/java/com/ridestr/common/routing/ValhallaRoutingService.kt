@@ -3,6 +3,7 @@ package com.ridestr.common.routing
 import ValhallaConfigBuilder
 import android.content.Context
 import android.util.Log
+import androidx.compose.runtime.Immutable
 import com.valhalla.api.models.CostingModel
 import com.valhalla.api.models.DirectionsOptions
 import com.valhalla.api.models.RouteRequest
@@ -233,7 +234,14 @@ class ValhallaRoutingService(private val context: Context) {
 
 /**
  * Result of a route calculation.
+ *
+ * `@Immutable` because `RouteResult` is a pure value — once the route is calculated
+ * it never mutates — and it flows through Compose UI (offer cards, maps). Without
+ * this annotation the `List<Maneuver>` field causes the Compose compiler to infer
+ * the whole class as unstable, which defeats child skipping in offer lists
+ * (Issue #71).
  */
+@Immutable
 data class RouteResult(
     val distanceKm: Double,
     val durationSeconds: Double,

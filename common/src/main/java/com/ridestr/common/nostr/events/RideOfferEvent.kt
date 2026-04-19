@@ -1,6 +1,7 @@
 package com.ridestr.common.nostr.events
 
 import android.util.Log
+import androidx.compose.runtime.Immutable
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
 import org.json.JSONArray
@@ -468,7 +469,14 @@ data class RideOfferDataEncrypted(
 
 /**
  * Decrypted data from a DIRECT ride offer event (targeted to specific driver).
+ *
+ * `@Immutable` because ride offers are value-typed (parsed once from a Nostr event,
+ * never mutated) and passed through Compose UI (offer cards, inbox lists). The
+ * Compose compiler can't infer stability from the `List<String>` field
+ * (`fiatPaymentMethods`), so this annotation is necessary for `items { }` child
+ * skipping in the driver's offer inbox (see Issue #71).
  */
+@Immutable
 data class RideOfferData(
     val eventId: String,
     val riderPubKey: String,
@@ -499,7 +507,11 @@ data class RideOfferData(
 
 /**
  * Parsed data from a BROADCAST ride offer event (visible to all drivers in area).
+ *
+ * See [RideOfferData] for the `@Immutable` rationale — same reasoning applies to
+ * the `List<String>` geohashes field.
  */
+@Immutable
 data class BroadcastRideOfferData(
     val eventId: String,
     val riderPubKey: String,
@@ -527,4 +539,5 @@ data class BroadcastRideOfferData(
  * @param amount Decimal string (e.g., "12.50") — preserves rider's exact intended amount
  * @param currency ISO 4217 code (e.g., "USD")
  */
+@Immutable
 data class FiatFare(val amount: String, val currency: String)
