@@ -442,4 +442,222 @@ class RoadflareKeyManager(
      * Check if we have an active RoadFlare key.
      */
     fun hasKey(): Boolean = repository.getRoadflareKey() != null
+
+    // ── Lightweight per-follower mute (issue #80) ─────────────────────────────
+    //
+    // Distinct from [handleMuteFollower] / [handleRemoveFollower] which trigger key rotation.
+    // The lightweight mute just suppresses Kind 3186 delivery for one follower, so muting and
+    // unmuting back-to-back has zero side-effect on other followers. Synced cross-device via
+    // Kind 30177's `muted_pubkeys` (last-write-wins on `created_at`); the caller is responsible
+    // for triggering a profile-backup republish after a successful mute/unmute.
+
+    /**
+     * Lightweight-mute a single follower (issue #80).
+     *
+     * Sets `mutedAt` on the follower row. The Kind 3186 send-loop and active-follower
+     * queries skip muted entries. Does NOT rotate the RoadFlare key. Other followers are
+     * untouched.
+     *
+     * Local state takes effect immediately, even when offline. Cross-device sync happens
+     * via the next Kind 30177 publish — the caller (UI handler) should invoke
+     * `profileSyncManager.backupProfileData()` (or equivalent) after this returns true.
+     *
+     * @param followerPubkey Hex pubkey of the follower to mute.
+     * @param now Override the timestamp (epoch seconds). Tests inject a deterministic clock; in
+     *   production the default `System.currentTimeMillis() / 1000` matches the rest of the
+     *   repository's timestamp convention.
+     * @return true if the follower row was updated; false if no matching follower exists.
+     */
+    fun muteFollower(
+        followerPubkey: String,
+        now: Long = System.currentTimeMillis() / 1000
+    ): Boolean {
+        val updated = repository.setFollowerMuted(followerPubkey, now)
+        if (updated) {
+            Log.d(TAG, "Lightweight-muted follower ${followerPubkey.take(8)}... at $now")
+        } else {
+            Log.w(TAG, "muteFollower: no follower row for ${followerPubkey.take(8)}...")
+        }
+        return updated
+    }
+
+    /**
+     * Lightweight-unmute a single follower (issue #80).
+     *
+     * Clears `mutedAt` on the follower row and best-effort re-delivers the current RoadFlare
+     * key via Kind 3186 so the rider can resume decrypting location broadcasts. Does NOT
+     * rotate the key. The caller should trigger a profile-backup republish afterward.
+     *
+     * @param signer The driver's identity signer for publishing the Kind 3186 key share.
+     * @param followerPubkey Hex pubkey of the follower to unmute.
+     * @return true if the follower row was updated. The Kind 3186 send is best-effort and
+     *   does not affect this return value (a transient relay failure is recoverable on next
+     *   `ensureFollowersHaveCurrentKey`).
+     */
+    suspend fun unmuteFollower(
+        signer: NostrSigner,
+        followerPubkey: String
+    ): Boolean {
+        val updated = repository.setFollowerUnmuted(followerPubkey)
+        if (!updated) {
+            Log.w(TAG, "unmuteFollower: no follower row for ${followerPubkey.take(8)}...")
+            return false
+        }
+
+        Log.d(TAG, "Lightweight-unmuted follower ${followerPubkey.take(8)}...")
+
+        // Best-effort key re-delivery so the unmuted rider can decrypt new broadcasts.
+        // No key rotation; uses the current key + keyUpdatedAt verbatim.
+        val key = repository.getRoadflareKey()
+        val keyUpdatedAt = repository.getKeyUpdatedAt() ?: key?.createdAt
+        if (key != null && keyUpdatedAt != null) {
+            val sent = sendKeyToFollower(signer, followerPubkey, key, keyUpdatedAt)
+            if (sent) {
+                repository.markFollowerKeySent(followerPubkey, key.version)
+            } else {
+                Log.w(TAG, "unmuteFollower: Kind 3186 re-delivery failed for ${followerPubkey.take(8)}... (recoverable)")
+            }
+        } else {
+            Log.w(TAG, "unmuteFollower: no current key to re-deliver to ${followerPubkey.take(8)}...")
+        }
+
+        return true
+    }
+
+    /**
+     * Fetch the driver's own Kind 30177 profile backup and apply mute reconciliation.
+     *
+     * Convenience wrapper around [reconcileMuteStateFromBackup] for the app-start path: the
+     * driver app calls this after Kind 30012 sync (which populates the follower list).
+     * Returns null when no backup exists or the fetch fails — the caller can treat that as
+     * "no remote state, nothing to reconcile" and continue with current local state.
+     *
+     * Does NOT trigger a profile-backup republish on its own. The caller decides whether to
+     * publish based on [MuteReconciliationResult.changed]; the existing `backupProfileData()`
+     * pipeline picks up the merged state via the [com.ridestr.common.sync.ProfileSyncAdapter]
+     * → driver-roadflare-repository wiring.
+     *
+     * @return Reconciliation result, or null if no Kind 30177 backup was found / fetch failed.
+     */
+    suspend fun fetchAndReconcileMuteFromBackup(signer: NostrSigner): MuteReconciliationResult? {
+        val backup = try {
+            nostrService.fetchProfileBackup()
+        } catch (e: Exception) {
+            Log.w(TAG, "fetchAndReconcileMute: profile backup fetch threw — skipping", e)
+            return null
+        }
+        if (backup == null) {
+            Log.d(TAG, "fetchAndReconcileMute: no Kind 30177 backup found — nothing to reconcile")
+            return null
+        }
+        return reconcileMuteStateFromBackup(
+            signer = signer,
+            remoteMutedPubkeys = backup.mutedFollowerPubkeys,
+            remoteCreatedAt = backup.createdAt
+        )
+    }
+
+    /**
+     * Reconcile the local lightweight-mute state against a remote Kind 30177 backup
+     * using last-write-wins on `created_at` (issue #80).
+     *
+     * Per-pubkey rules:
+     * - Pubkey in remote `muted_pubkeys`, not muted locally → mute locally with `mutedAt =
+     *   remoteCreatedAt`. Backup is treated as the authoritative timestamp for that mute.
+     * - Pubkey muted locally, also in remote → no-op (already muted; preserve original local
+     *   `mutedAt`).
+     * - Pubkey muted locally, NOT in remote, `local.mutedAt > remoteCreatedAt` → keep local
+     *   mute (newer than remote backup; next publish will sync).
+     * - Pubkey muted locally, NOT in remote, `local.mutedAt <= remoteCreatedAt` → unmute
+     *   locally and best-effort re-deliver Kind 3186 (remote backup wrote the unmute after our
+     *   mute).
+     *
+     * Pubkeys present only as remote-muted but unknown to the local follower list are skipped:
+     * we cannot mute a row that does not exist. They will resolve naturally if/when the
+     * follower is re-added via Kind 3187.
+     *
+     * Idempotent: running it again with the same inputs makes no further mutations.
+     *
+     * @param signer Driver's identity signer for publishing the unmute Kind 3186 events.
+     * @param remoteMutedPubkeys The `muted_pubkeys` array from the remote Kind 30177 payload.
+     * @param remoteCreatedAt The `created_at` timestamp of the remote Kind 30177 event (epoch seconds).
+     * @return Counts of state changes applied. Caller can use these to decide whether to
+     *   republish a Kind 30177 reflecting the merged local state.
+     */
+    suspend fun reconcileMuteStateFromBackup(
+        signer: NostrSigner,
+        remoteMutedPubkeys: List<String>,
+        remoteCreatedAt: Long
+    ): MuteReconciliationResult {
+        val followers = repository.getFollowers()
+        val remoteSet = remoteMutedPubkeys.toSet()
+
+        var muted = 0
+        var unmuted = 0
+        var keyResent = 0
+
+        // Case A: pubkey in remote backup → ensure local is muted.
+        for (pubkey in remoteSet) {
+            val local = followers.find { it.pubkey == pubkey }
+            if (local == null) {
+                Log.d(TAG, "reconcileMute: skipping unknown pubkey ${pubkey.take(8)}... (not in followers)")
+                continue
+            }
+            if (local.mutedAt == null) {
+                if (repository.setFollowerMuted(pubkey, remoteCreatedAt)) {
+                    muted++
+                    Log.d(TAG, "reconcileMute: muted ${pubkey.take(8)}... locally (backup wins, mutedAt=$remoteCreatedAt)")
+                }
+            }
+        }
+
+        // Case B: pubkey muted locally, NOT in remote backup → last-write-wins on local.mutedAt vs remoteCreatedAt.
+        for (follower in followers) {
+            val localMutedAt = follower.mutedAt ?: continue
+            if (follower.pubkey in remoteSet) continue
+
+            if (localMutedAt > remoteCreatedAt) {
+                // Local mute is newer than the backup; keep local. Next publish syncs out.
+                Log.d(TAG, "reconcileMute: kept local mute on ${follower.pubkey.take(8)}... (local=$localMutedAt > remote=$remoteCreatedAt)")
+            } else {
+                // Backup is newer and doesn't include this pubkey → remote unmuted it.
+                if (repository.setFollowerUnmuted(follower.pubkey)) {
+                    unmuted++
+                    Log.d(TAG, "reconcileMute: unmuted ${follower.pubkey.take(8)}... (remote=$remoteCreatedAt >= local=$localMutedAt)")
+
+                    // Best-effort key re-delivery so the rider can resume decrypting.
+                    val key = repository.getRoadflareKey()
+                    val keyUpdatedAt = repository.getKeyUpdatedAt() ?: key?.createdAt
+                    if (key != null && keyUpdatedAt != null) {
+                        if (sendKeyToFollower(signer, follower.pubkey, key, keyUpdatedAt)) {
+                            repository.markFollowerKeySent(follower.pubkey, key.version)
+                            keyResent++
+                        }
+                    }
+                }
+            }
+        }
+
+        if (muted > 0 || unmuted > 0) {
+            Log.d(TAG, "reconcileMute: muted=$muted, unmuted=$unmuted, keyResent=$keyResent")
+        }
+
+        return MuteReconciliationResult(muted = muted, unmuted = unmuted, keyResent = keyResent)
+    }
+}
+
+/**
+ * Aggregate result of [RoadflareKeyManager.reconcileMuteStateFromBackup].
+ *
+ * @param muted Number of followers newly muted by this reconciliation pass (remote → local).
+ * @param unmuted Number of followers newly unmuted by this pass (remote → local).
+ * @param keyResent Number of Kind 3186 re-deliveries triggered by an unmute.
+ */
+data class MuteReconciliationResult(
+    val muted: Int,
+    val unmuted: Int,
+    val keyResent: Int
+) {
+    /** True when the reconciliation produced at least one local state change. */
+    val changed: Boolean get() = muted > 0 || unmuted > 0
 }
