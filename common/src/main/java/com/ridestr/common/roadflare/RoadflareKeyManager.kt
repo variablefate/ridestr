@@ -240,19 +240,94 @@ class RoadflareKeyManager(
     }
 
     /**
-     * Handle a new follow notification from a rider.
-     * Adds follower as pending (requires separate approval by driver).
+     * Handle a Kind 3187 follow notification from a rider.
      *
-     * @param followerPubkey The rider's pubkey
-     * @param riderName The rider's display name (from notification)
-     * @return true if follower was added as pending
+     * Kind 3187 is used by riders for both first follows AND as a delivery-retry
+     * signal when their stored copy of the driver's RoadFlare key is unavailable
+     * (fresh install, transient relay failure during backup restore, etc.).
+     *
+     * Receiving Kind 3187 NEVER rotates the key or advances
+     * [DriverRoadflareRepository.getKeyUpdatedAt] — other followers' stored keys
+     * are not invalidated by one rider re-adding the driver. See
+     * [FollowNotificationResult] for the per-state outcomes.
+     *
+     * @param signer The driver's identity signer (for publishing Kind 3186/30012).
+     * @param followerPubkey The rider's pubkey from the Kind 3187 event.
+     * @param riderName The rider's display name from the notification body.
+     * @return The action taken; the call site uses this to decide whether to
+     *   surface an OS notification (only for [FollowNotificationResult.AddedAsPending])
+     *   and whether to refresh profile backups.
      */
-    fun handleNewFollower(
+    suspend fun handleFollowNotification(
+        signer: NostrSigner,
         followerPubkey: String,
         riderName: String
+    ): FollowNotificationResult {
+        val existing = repository.state.value?.followers?.find { it.pubkey == followerPubkey }
+
+        if (existing == null) {
+            // New rider — add as pending; driver must approve via UI before key is sent.
+            // Preserves driver consent for genuinely new follows.
+            val added = addPendingFollower(followerPubkey, riderName)
+            return if (added) {
+                FollowNotificationResult.AddedAsPending
+            } else {
+                // Race: another path added them between our state read and add. Treat as pending.
+                FollowNotificationResult.AlreadyPending
+            }
+        }
+
+        if (repository.isMuted(followerPubkey)) {
+            // Muted re-add — unmute and re-deliver the current key.
+            // Does NOT rotate; mute removal is published via Kind 30012 with
+            // keyUpdatedAt unchanged so other followers' stored keys stay valid.
+            repository.unmuteRider(followerPubkey)
+            val keySent = resendCurrentKey(signer, followerPubkey)
+            // Publish state regardless of key send outcome — the unmute itself is observable.
+            val newState = repository.state.value
+            if (newState != null) {
+                nostrService.publishDriverRoadflareState(signer, newState)
+            }
+            return if (keySent) {
+                Log.d(TAG, "Unmuted and re-sent key to ${followerPubkey.take(8)}...")
+                FollowNotificationResult.UnmutedAndKeyResent
+            } else {
+                FollowNotificationResult.Failed("unmuted but key resend failed")
+            }
+        }
+
+        if (existing.approved) {
+            // Approved re-add — re-deliver the current key. State unchanged, no Kind 30012 republish.
+            val keySent = resendCurrentKey(signer, followerPubkey)
+            return if (keySent) {
+                Log.d(TAG, "Re-sent key to approved follower ${followerPubkey.take(8)}...")
+                FollowNotificationResult.KeyResent
+            } else {
+                FollowNotificationResult.Failed("no current key to resend")
+            }
+        }
+
+        // Pending (not yet approved) re-add — driver still owes an approval via UI.
+        return FollowNotificationResult.AlreadyPending
+    }
+
+    /**
+     * Re-send the current Kind 3186 key share to a specific follower.
+     * Uses the existing keyUpdatedAt — does NOT advance it.
+     *
+     * @return true if the key was sent; false if no key is configured yet or send failed.
+     */
+    private suspend fun resendCurrentKey(
+        signer: NostrSigner,
+        followerPubkey: String
     ): Boolean {
-        // Just add as pending - driver must approve separately
-        return addPendingFollower(followerPubkey, riderName)
+        val key = repository.getRoadflareKey() ?: return false
+        val keyUpdatedAt = repository.getKeyUpdatedAt() ?: key.createdAt
+        val sent = sendKeyToFollower(signer, followerPubkey, key, keyUpdatedAt)
+        if (sent) {
+            repository.markFollowerKeySent(followerPubkey, key.version)
+        }
+        return sent
     }
 
     /**
