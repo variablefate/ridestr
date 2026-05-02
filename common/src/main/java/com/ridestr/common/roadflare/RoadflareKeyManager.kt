@@ -253,20 +253,35 @@ class RoadflareKeyManager(
      *
      * Muted riders are left alone: the driver's "Remove" decision is preserved
      * (matches the cross-device sync invariant in
-     * `RoadflareDriverCoordinator.mergeMutedLists`).
+     * `RoadflareDriverCoordinator.mergeMutedLists`). The mute check runs before
+     * the existence check so that a muted entry without a corresponding
+     * `followers` record (possible after cross-device sync filters out a
+     * follower whose Kind 30011 stopped listing the driver) is not bypassed.
      *
      * @param signer The driver's identity signer (for publishing Kind 3186).
      * @param followerPubkey The rider's pubkey from the Kind 3187 event.
      * @param riderName The rider's display name from the notification body.
-     * @return The action taken; the call site uses this to decide whether to
-     *   surface an OS notification (only for [FollowNotificationResult.AddedAsPending])
+     * @return The action taken. The call site uses this to decide whether to
+     *   surface an OS notification (only [FollowNotificationResult.AddedAsPending])
      *   and whether to refresh profile backups.
+     *   [FollowNotificationResult.AlreadyPending] covers two situations: the
+     *   rider was already pending before this call, OR a concurrent path won
+     *   the add race between the existence check and [addPendingFollower].
      */
     suspend fun handleFollowNotification(
         signer: NostrSigner,
         followerPubkey: String,
         riderName: String
     ): FollowNotificationResult {
+        if (repository.isMuted(followerPubkey)) {
+            // Muted re-add — preserve the driver's "Remove" decision.
+            // Auto-unmute would conflict with mergeMutedLists' "once muted, always
+            // muted" cross-device invariant and silently bypass driver consent.
+            // Checked first so a stale muted entry without a `followers` record
+            // (e.g., after cross-device sync) cannot be bypassed.
+            return FollowNotificationResult.AlreadyMuted
+        }
+
         val existing = repository.state.value?.followers?.find { it.pubkey == followerPubkey }
 
         if (existing == null) {
@@ -279,13 +294,6 @@ class RoadflareKeyManager(
                 // Race: another path added them between our state read and add. Treat as pending.
                 FollowNotificationResult.AlreadyPending
             }
-        }
-
-        if (repository.isMuted(followerPubkey)) {
-            // Muted re-add — preserve the driver's "Remove" decision.
-            // Auto-unmute would conflict with mergeMutedLists' "once muted, always
-            // muted" cross-device invariant and silently bypass driver consent.
-            return FollowNotificationResult.AlreadyMuted
         }
 
         if (existing.approved) {
@@ -305,7 +313,15 @@ class RoadflareKeyManager(
 
     /**
      * Re-send the current Kind 3186 key share to a specific follower.
-     * Uses the existing keyUpdatedAt — does NOT advance it.
+     * Uses the existing [DriverRoadflareRepository.getKeyUpdatedAt]; never
+     * advances it.
+     *
+     * If [DriverRoadflareRepository.getKeyUpdatedAt] is `null` but a key
+     * exists, the fallback to [DriverRoadflareKey.createdAt] is also persisted
+     * via [DriverRoadflareRepository.updateKeyUpdatedAt] — this mirrors
+     * [ensureFollowersHaveCurrentKey] so a future Kind 30012 publish does not
+     * fall through to [DriverRoadflareStateEvent.create]'s wall-clock fallback
+     * and silently advance the public `key_updated_at` tag.
      *
      * @return true if the key was sent; false if no key is configured yet or send failed.
      */
@@ -314,7 +330,10 @@ class RoadflareKeyManager(
         followerPubkey: String
     ): Boolean {
         val key = repository.getRoadflareKey() ?: return false
-        val keyUpdatedAt = repository.getKeyUpdatedAt() ?: key.createdAt
+        val keyUpdatedAt = repository.getKeyUpdatedAt() ?: run {
+            repository.updateKeyUpdatedAt(key.createdAt)
+            key.createdAt
+        }
         val sent = sendKeyToFollower(signer, followerPubkey, key, keyUpdatedAt)
         if (sent) {
             repository.markFollowerKeySent(followerPubkey, key.version)

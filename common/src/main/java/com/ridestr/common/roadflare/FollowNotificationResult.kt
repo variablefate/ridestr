@@ -8,7 +8,7 @@ package com.ridestr.common.roadflare
  * install, or a delivery-retry when the rider's local backup of the driver's
  * key share is unavailable. The driver-side handler interprets the rider's
  * current state in the followers list to decide whether to add as pending,
- * unmute, or simply re-deliver the existing key.
+ * re-deliver the existing key to an approved follower, or no-op.
  *
  * Variants are returned to the caller so the UI layer can decide whether
  * to surface an OS notification (genuinely new follows only) or remain

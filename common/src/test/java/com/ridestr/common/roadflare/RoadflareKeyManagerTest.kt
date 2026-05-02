@@ -159,6 +159,9 @@ class RoadflareKeyManagerTest {
         coVerify(exactly = 1) { nostrService.publishRoadflareKeyShare(any(), any(), any(), any()) }
         // State is unchanged for an approved-rider re-delivery; no Kind 30012 republish.
         coVerify(exactly = 0) { nostrService.publishDriverRoadflareState(any(), any()) }
+        // markFollowerKeySent must be called so the follower record stays in sync with what was sent.
+        val alice = repository.getFollowers().single { it.pubkey == alicePubkey }
+        assertEquals(1, alice.keyVersionSent)
     }
 
     @Test
@@ -171,6 +174,47 @@ class RoadflareKeyManagerTest {
         assertTrue("expected Failed result, got $result", result is FollowNotificationResult.Failed)
         coVerify(exactly = 0) { nostrService.publishRoadflareKeyShare(any(), any(), any(), any()) }
         coVerify(exactly = 0) { nostrService.publishDriverRoadflareState(any(), any()) }
+    }
+
+    @Test
+    fun `re-add of approved follower returns Failed when key share publish fails`() = runBlocking {
+        seedKey(version = 1, keyUpdatedAt = 1_000L)
+        seedFollower(alicePubkey, approved = true, keyVersionSent = 1)
+        coEvery {
+            nostrService.publishRoadflareKeyShare(any(), any(), any(), any())
+        } returns null
+
+        val result = keyManager.handleFollowNotification(signer, alicePubkey, "Alice")
+
+        assertTrue("expected Failed, got $result", result is FollowNotificationResult.Failed)
+        // markFollowerKeySent must NOT be called when the publish fails.
+        val alice = repository.getFollowers().single { it.pubkey == alicePubkey }
+        assertEquals(1, alice.keyVersionSent)
+        assertEquals(1_000L, repository.getKeyUpdatedAt())
+    }
+
+    @Test
+    fun `re-add of approved follower with null keyUpdatedAt persists fallback to repository`() = runBlocking {
+        // Edge case: driver has a key but keyUpdatedAt was never set (post-restore).
+        // resendCurrentKey must mirror ensureFollowersHaveCurrentKey and write the
+        // fallback back so a later Kind 30012 publish does not fall through to
+        // DriverRoadflareStateEvent.create's wall-clock fallback (which would
+        // silently advance the public key_updated_at tag).
+        val key = DriverRoadflareKey(
+            privateKey = "p".repeat(64),
+            publicKey = "k".repeat(64),
+            version = 1,
+            createdAt = 4_242L
+        )
+        repository.setRoadflareKey(key)
+        // Deliberately do NOT call updateKeyUpdatedAt — leave it null.
+        seedFollower(alicePubkey, approved = true, keyVersionSent = 1)
+        assertNull("setup precondition", repository.getKeyUpdatedAt())
+
+        val result = keyManager.handleFollowNotification(signer, alicePubkey, "Alice")
+
+        assertEquals(FollowNotificationResult.KeyResent, result)
+        assertEquals(4_242L, repository.getKeyUpdatedAt())
     }
 
     // ---------------------------------------------------------------------
@@ -191,6 +235,29 @@ class RoadflareKeyManagerTest {
         assertEquals(FollowNotificationResult.AlreadyMuted, result)
         assertEquals(2_000L, repository.getKeyUpdatedAt())
         assertTrue("Alice must remain muted", repository.isMuted(alicePubkey))
+        coVerify(exactly = 0) { nostrService.publishRoadflareKeyShare(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { nostrService.publishDriverRoadflareState(any(), any()) }
+    }
+
+    @Test
+    fun `muted pubkey with no followers record is still treated as muted`() = runBlocking {
+        // After cross-device sync, a mute entry can outlive its followers record
+        // (e.g., the rider unfollowed and Kind 30011 verification filtered them
+        // out of the followers list, but the mute entry survives via union-merge).
+        // The handler must NOT fall through to AddedAsPending and silently let
+        // the muted rider back in as pending.
+        seedKey(version = 1, keyUpdatedAt = 1_000L)
+        repository.muteRider(alicePubkey, reason = "removed by driver")
+        // No seedFollower(alice, ...) — alice is muted but not in followers list.
+
+        val result = keyManager.handleFollowNotification(signer, alicePubkey, "Alice")
+
+        assertEquals(FollowNotificationResult.AlreadyMuted, result)
+        assertTrue("alice must remain muted", repository.isMuted(alicePubkey))
+        assertTrue(
+            "alice must NOT be re-added as pending",
+            repository.getFollowers().none { it.pubkey == alicePubkey }
+        )
         coVerify(exactly = 0) { nostrService.publishRoadflareKeyShare(any(), any(), any(), any()) }
         coVerify(exactly = 0) { nostrService.publishDriverRoadflareState(any(), any()) }
     }
