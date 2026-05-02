@@ -246,12 +246,16 @@ class RoadflareKeyManager(
      * signal when their stored copy of the driver's RoadFlare key is unavailable
      * (fresh install, transient relay failure during backup restore, etc.).
      *
-     * Receiving Kind 3187 NEVER rotates the key or advances
-     * [DriverRoadflareRepository.getKeyUpdatedAt] — other followers' stored keys
-     * are not invalidated by one rider re-adding the driver. See
-     * [FollowNotificationResult] for the per-state outcomes.
+     * Receiving Kind 3187 NEVER rotates the key, advances
+     * [DriverRoadflareRepository.getKeyUpdatedAt], or republishes Kind 30012 —
+     * other followers' stored keys are not invalidated by one rider re-adding
+     * the driver. See [FollowNotificationResult] for the per-state outcomes.
      *
-     * @param signer The driver's identity signer (for publishing Kind 3186/30012).
+     * Muted riders are left alone: the driver's "Remove" decision is preserved
+     * (matches the cross-device sync invariant in
+     * `RoadflareDriverCoordinator.mergeMutedLists`).
+     *
+     * @param signer The driver's identity signer (for publishing Kind 3186).
      * @param followerPubkey The rider's pubkey from the Kind 3187 event.
      * @param riderName The rider's display name from the notification body.
      * @return The action taken; the call site uses this to decide whether to
@@ -278,22 +282,10 @@ class RoadflareKeyManager(
         }
 
         if (repository.isMuted(followerPubkey)) {
-            // Muted re-add — unmute and re-deliver the current key.
-            // Does NOT rotate; mute removal is published via Kind 30012 with
-            // keyUpdatedAt unchanged so other followers' stored keys stay valid.
-            repository.unmuteRider(followerPubkey)
-            val keySent = resendCurrentKey(signer, followerPubkey)
-            // Publish state regardless of key send outcome — the unmute itself is observable.
-            val newState = repository.state.value
-            if (newState != null) {
-                nostrService.publishDriverRoadflareState(signer, newState)
-            }
-            return if (keySent) {
-                Log.d(TAG, "Unmuted and re-sent key to ${followerPubkey.take(8)}...")
-                FollowNotificationResult.UnmutedAndKeyResent
-            } else {
-                FollowNotificationResult.Failed("unmuted but key resend failed")
-            }
+            // Muted re-add — preserve the driver's "Remove" decision.
+            // Auto-unmute would conflict with mergeMutedLists' "once muted, always
+            // muted" cross-device invariant and silently bypass driver consent.
+            return FollowNotificationResult.AlreadyMuted
         }
 
         if (existing.approved) {

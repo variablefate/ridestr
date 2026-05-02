@@ -86,6 +86,7 @@ import com.ridestr.common.sync.RideHistorySyncAdapter
 import com.ridestr.common.sync.ProfileSyncAdapter
 import com.ridestr.common.data.DriverRoadflareRepository
 import com.ridestr.common.sync.DriverRoadflareSyncAdapter
+import com.ridestr.common.roadflare.FollowNotificationResult
 import com.ridestr.common.roadflare.RoadflareKeyManager
 import com.ridestr.common.nostr.events.RoadflareFollowNotifyEvent
 import com.drivestr.app.service.RoadflareListenerService
@@ -370,7 +371,7 @@ fun DrivestrApp(settingsRepository: SettingsRepository) {
                                 )
 
                                 when (result) {
-                                    is com.ridestr.common.roadflare.FollowNotificationResult.AddedAsPending -> {
+                                    is FollowNotificationResult.AddedAsPending -> {
                                         android.util.Log.d("MainActivity", "New RoadFlare follow request from: ${notification.riderName} (${notification.riderPubKey.take(16)})")
 
                                         // Show OS notification so driver knows about the new follower
@@ -399,17 +400,16 @@ fun DrivestrApp(settingsRepository: SettingsRepository) {
 
                                         profileSyncManager.backupProfileData()
                                     }
-                                    is com.ridestr.common.roadflare.FollowNotificationResult.UnmutedAndKeyResent -> {
-                                        android.util.Log.d("MainActivity", "Re-delivered key to previously-muted ${notification.riderPubKey.take(16)}")
-                                        profileSyncManager.backupProfileData()
-                                    }
-                                    is com.ridestr.common.roadflare.FollowNotificationResult.KeyResent -> {
+                                    is FollowNotificationResult.KeyResent -> {
                                         android.util.Log.d("MainActivity", "Re-delivered key to approved ${notification.riderPubKey.take(16)}")
                                     }
-                                    is com.ridestr.common.roadflare.FollowNotificationResult.AlreadyPending -> {
+                                    is FollowNotificationResult.AlreadyMuted -> {
+                                        android.util.Log.d("MainActivity", "Follow notification from muted ${notification.riderPubKey.take(16)} — preserving driver's Remove decision")
+                                    }
+                                    is FollowNotificationResult.AlreadyPending -> {
                                         android.util.Log.d("MainActivity", "Follow notification from pending ${notification.riderPubKey.take(16)} — awaiting driver approval")
                                     }
-                                    is com.ridestr.common.roadflare.FollowNotificationResult.Failed -> {
+                                    is FollowNotificationResult.Failed -> {
                                         android.util.Log.w("MainActivity", "Follow notification handling failed for ${notification.riderPubKey.take(16)}: ${result.reason}")
                                     }
                                 }

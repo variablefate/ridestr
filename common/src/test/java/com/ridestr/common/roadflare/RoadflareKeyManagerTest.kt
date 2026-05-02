@@ -178,49 +178,37 @@ class RoadflareKeyManagerTest {
     // ---------------------------------------------------------------------
 
     @Test
-    fun `re-add of muted follower unmutes and resends key without bumping keyUpdatedAt`() = runBlocking {
+    fun `re-add of muted follower is no-op and preserves driver's Remove decision`() = runBlocking {
+        // Auto-unmuting on Kind 3187 would silently bypass driver consent and
+        // conflict with mergeMutedLists' "once muted, always muted" cross-device
+        // invariant. The handler must leave muted re-adds alone.
         seedKey(version = 2, keyUpdatedAt = 2_000L)
         seedFollower(alicePubkey, approved = true, keyVersionSent = 1)
         repository.muteRider(alicePubkey, reason = "removed by driver")
 
-        val publishedStateSlot = slot<DriverRoadflareState>()
-        coEvery {
-            nostrService.publishDriverRoadflareState(any(), capture(publishedStateSlot))
-        } returns "evt-state"
-
         val result = keyManager.handleFollowNotification(signer, alicePubkey, "Alice")
 
-        assertEquals(FollowNotificationResult.UnmutedAndKeyResent, result)
+        assertEquals(FollowNotificationResult.AlreadyMuted, result)
         assertEquals(2_000L, repository.getKeyUpdatedAt())
-        assertFalse("Alice must no longer be muted", repository.isMuted(alicePubkey))
-
-        // Key share was sent.
-        coVerify(exactly = 1) { nostrService.publishRoadflareKeyShare(any(), eq(alicePubkey), any(), any()) }
-
-        // Kind 30012 was republished, with keyUpdatedAt PRESERVED.
-        coVerify(exactly = 1) { nostrService.publishDriverRoadflareState(any(), any()) }
-        assertEquals(2_000L, publishedStateSlot.captured.keyUpdatedAt)
-        assertTrue(
-            "muted list must shrink in published state",
-            publishedStateSlot.captured.muted.none { it.pubkey == alicePubkey }
-        )
+        assertTrue("Alice must remain muted", repository.isMuted(alicePubkey))
+        coVerify(exactly = 0) { nostrService.publishRoadflareKeyShare(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { nostrService.publishDriverRoadflareState(any(), any()) }
     }
 
     @Test
-    fun `re-add of muted follower without current key reports Failed but still unmutes and publishes`() = runBlocking {
-        // Driver has a follower record + a stale mute, but no local key (post-restore edge case).
+    fun `re-add of muted follower without current key is also no-op`() = runBlocking {
+        // Edge case: driver has a follower record + a stale mute but no local key
+        // (post-restore). The no-op contract holds regardless of key presence.
         seedFollower(alicePubkey, approved = true, keyVersionSent = 1)
         repository.muteRider(alicePubkey)
 
         val result = keyManager.handleFollowNotification(signer, alicePubkey, "Alice")
 
-        assertTrue("expected Failed, got $result", result is FollowNotificationResult.Failed)
-        // Unmute is observable even when key send fails — driver state must reflect the rider's intent.
-        assertFalse(repository.isMuted(alicePubkey))
-        coVerify(exactly = 1) { nostrService.publishDriverRoadflareState(any(), any()) }
-        coVerify(exactly = 0) { nostrService.publishRoadflareKeyShare(any(), any(), any(), any()) }
-        // keyUpdatedAt was null and stays null.
+        assertEquals(FollowNotificationResult.AlreadyMuted, result)
+        assertTrue(repository.isMuted(alicePubkey))
         assertNull(repository.getKeyUpdatedAt())
+        coVerify(exactly = 0) { nostrService.publishRoadflareKeyShare(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { nostrService.publishDriverRoadflareState(any(), any()) }
     }
 
     // ---------------------------------------------------------------------
@@ -282,5 +270,9 @@ class RoadflareKeyManagerTest {
         // Bob received a re-delivered key, but Alice did not.
         coVerify(exactly = 1) { nostrService.publishRoadflareKeyShare(any(), eq(bobPubkey), any(), any()) }
         coVerify(exactly = 0) { nostrService.publishRoadflareKeyShare(any(), eq(alicePubkey), any(), any()) }
+        // Pin the no-Kind-30012-republish invariant: any unexpected publishDriverRoadflareState
+        // would be a regression of the keyUpdatedAt-can-silently-advance hazard.
+        coVerify(exactly = 0) { nostrService.publishDriverRoadflareState(any(), any()) }
+        confirmVerified(nostrService)
     }
 }

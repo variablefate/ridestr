@@ -30,11 +30,16 @@ sealed class FollowNotificationResult {
     object AlreadyPending : FollowNotificationResult()
 
     /**
-     * Rider was on the muted list. Mute was removed and the current Kind 3186
-     * key share was re-delivered. The shared keyUpdatedAt is unchanged, so
-     * other followers' stored keys remain valid.
+     * Rider is on the muted list. No-op — the driver's explicit "Remove"
+     * decision is preserved.
+     *
+     * Auto-unmuting on Kind 3187 would silently bypass driver consent and
+     * conflict with the cross-device sync invariant in
+     * `RoadflareDriverCoordinator.mergeMutedLists` ("once muted, always muted —
+     * auto-unmute via sync is intentionally blocked"). To restore a removed
+     * rider the driver re-approves them through the RoadFlare tab.
      */
-    object UnmutedAndKeyResent : FollowNotificationResult()
+    object AlreadyMuted : FollowNotificationResult()
 
     /**
      * Rider was already approved. The current Kind 3186 key share was
