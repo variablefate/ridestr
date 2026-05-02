@@ -1,6 +1,7 @@
 package com.ridestr.common.sync
 
 import android.util.Log
+import com.ridestr.common.data.DriverRoadflareRepository
 import com.ridestr.common.data.SavedLocation
 import com.ridestr.common.data.SavedLocationRepository
 import com.ridestr.common.data.Vehicle
@@ -27,12 +28,21 @@ import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
  *
  * Migration: On fetch, if no 30177 event found, falls back to separate
  * 30175 (vehicles) and 30176 (locations) events for backward compatibility.
+ *
+ * @param driverRoadflareRepository Optional driver-only repository whose lightweight-mute state
+ *   (issue #80, [DriverRoadflareRepository.getMutedFollowerPubkeys]) is published in the
+ *   `muted_pubkeys` field of Kind 30177. Null for rider apps; the field is then omitted from
+ *   the wire payload entirely. Restoration of mute state is NOT done here — it requires the
+ *   follower list (synced via Kind 30012) to already be present, so the driver app calls
+ *   [com.ridestr.common.roadflare.RoadflareKeyManager.reconcileMuteStateFromBackup] explicitly
+ *   after both sync passes complete.
  */
 class ProfileSyncAdapter(
     private val vehicleRepository: VehicleRepository?,
     private val savedLocationRepository: SavedLocationRepository?,
     private val settingsRepository: SettingsRepository,
-    private val nostrService: NostrService
+    private val nostrService: NostrService,
+    private val driverRoadflareRepository: DriverRoadflareRepository? = null
 ) : SyncableProfileData {
 
     companion object {
@@ -190,9 +200,16 @@ class ProfileSyncAdapter(
                 ?: emptyList()
             val settings = settingsRepository.toBackupData()
 
-            val eventId = nostrService.publishProfileBackup(vehicles, savedLocations, settings)
+            // muted_pubkeys (issue #80): driver-only. When the driver repository is absent
+            // (rider apps), preserve whatever was in the existing remote backup so we don't
+            // accidentally drop a sibling driver app's mute state from the same identity.
+            val mutedFollowerPubkeys = driverRoadflareRepository?.getMutedFollowerPubkeys()
+                ?: existingProfile?.mutedFollowerPubkeys
+                ?: emptyList()
+
+            val eventId = nostrService.publishProfileBackup(vehicles, savedLocations, settings, mutedFollowerPubkeys)
             if (eventId != null) {
-                Log.d(TAG, "Profile backed up as event $eventId (${vehicles.size} vehicles, ${savedLocations.size} locations)")
+                Log.d(TAG, "Profile backed up as event $eventId (${vehicles.size} vehicles, ${savedLocations.size} locations, ${mutedFollowerPubkeys.size} muted)")
             } else {
                 Log.w(TAG, "Failed to backup profile")
             }
