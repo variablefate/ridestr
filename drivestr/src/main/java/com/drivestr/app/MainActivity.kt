@@ -242,7 +242,8 @@ fun DrivestrApp(settingsRepository: SettingsRepository) {
                 vehicleRepository = vehicleRepository,
                 savedLocationRepository = null,  // Driver app doesn't use saved locations
                 settingsRepository = settingsRepository,
-                nostrService = nostrService
+                nostrService = nostrService,
+                driverRoadflareRepository = driverRoadflareRepo  // Issue #80: include muted_pubkeys in Kind 30177
             ))
             psm.registerSyncable(RideHistorySyncAdapter(rideHistoryRepository, nostrService))
             psm.registerSyncable(DriverRoadflareSyncAdapter(driverRoadflareRepo, nostrService))
@@ -345,6 +346,24 @@ fun DrivestrApp(settingsRepository: SettingsRepository) {
         nostrService.relayManager.awaitConnected(tag = "roadflareDriverSubs")
 
         val asyncScope = this
+
+        // Issue #80: app-start mute reconciliation. Fetch own Kind 30177 once and apply
+        // last-write-wins reconciliation against local follower mute state. Best-effort —
+        // a fetch failure leaves local state untouched. If anything changed, republish so
+        // other devices converge. Fire-and-forget on a child coroutine so the subscription
+        // setup below isn't blocked by the network round-trip.
+        asyncScope.launch {
+            try {
+                val signer = nostrService.keyManager.getSigner() ?: return@launch
+                val result = roadflareKeyManager.fetchAndReconcileMuteFromBackup(signer)
+                if (result?.changed == true) {
+                    android.util.Log.d("MainActivity", "Mute reconciliation: muted=${result.muted}, unmuted=${result.unmuted}, keyResent=${result.keyResent} — republishing profile backup")
+                    profileSyncManager.backupProfileData()
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("MainActivity", "Mute reconciliation failed at startup", e)
+            }
+        }
 
         val subId = nostrService.subscribeToRoadflareFollowNotifications { event, relayUrl ->
             // Check if we should ignore notifications (dev setting for testing p-tag queries)
@@ -452,10 +471,14 @@ fun DrivestrApp(settingsRepository: SettingsRepository) {
                         if (!pubkeyMatches) {
                             android.util.Log.w("MainActivity", "Key ack pubkey mismatch - ignoring (claimed=${ackData.riderPubKey.take(8)}, signer=${event.pubKey.take(8)})")
                         } else {
-                            // Verify authorized follower (approved + not muted)
+                            // Verify authorized follower (approved + not muted via either path).
+                            // - Heavyweight mute (`MutedRider` / "Remove" UX) excludes the rider entirely.
+                            // - Lightweight mute (issue #80, `RoadflareFollower.mutedAt`) suppresses
+                            //   key delivery — re-sends in response to acks would defeat the mute.
                             val follower = driverRoadflareRepo.getFollowers().find { it.pubkey == ackData.riderPubKey }
                             val isMuted = driverRoadflareRepo.getMutedPubkeys().contains(ackData.riderPubKey)
-                            val isAuthorized = follower != null && follower.approved && !isMuted
+                            val isLightMuted = follower?.mutedAt != null
+                            val isAuthorized = follower != null && follower.approved && !isMuted && !isLightMuted
 
                             if (!isAuthorized) {
                                 android.util.Log.w("MainActivity", "Key ack from unauthorized follower - ignoring")
@@ -1383,6 +1406,22 @@ fun MainScreen(
                                     followerPubkey = pubkey,
                                     reason = "removed by driver"
                                 )
+                                profileSyncManager.backupProfileData()
+                            }
+                        }
+                    },
+                    onMuteFollower = { pubkey ->
+                        // Lightweight mute (issue #80) — no key rotation. Local-authoritative;
+                        // synced cross-device via Kind 30177's `muted_pubkeys` (last-write-wins).
+                        if (roadflareKeyManager.muteFollower(pubkey)) {
+                            scope.launch { profileSyncManager.backupProfileData() }
+                        }
+                    },
+                    onUnmuteFollower = { pubkey ->
+                        // Lightweight unmute (issue #80) — re-delivers current key via Kind 3186.
+                        scope.launch {
+                            val signer = nostrService.keyManager.getSigner() ?: return@launch
+                            if (roadflareKeyManager.unmuteFollower(signer, pubkey)) {
                                 profileSyncManager.backupProfileData()
                             }
                         }
