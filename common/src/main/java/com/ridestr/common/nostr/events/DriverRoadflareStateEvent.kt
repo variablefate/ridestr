@@ -253,13 +253,19 @@ data class DriverRoadflareKey(
  * @param addedAt Timestamp when follower was added
  * @param approved Whether driver has approved this follower (pending if false)
  * @param keyVersionSent Which key version was sent to this follower (0 if not yet sent)
+ * @param mutedAt Lightweight per-follower mute timestamp (issue #80). When non-null, the
+ *   follower is muted: the Kind 3186 send-loop skips delivery and active-follower queries
+ *   exclude them. Distinct from the heavyweight [MutedRider] / "Remove" path which rotates
+ *   the RoadFlare key. Synced cross-device via Kind 30177's `muted_pubkeys` field, NOT via
+ *   Kind 30012 (mute is owned by the profile backup with last-write-wins).
  */
 data class RoadflareFollower(
     val pubkey: String,
     val name: String = "",
     val addedAt: Long,
     val approved: Boolean = false,
-    val keyVersionSent: Int = 0
+    val keyVersionSent: Int = 0,
+    val mutedAt: Long? = null
 ) {
     /**
      * Serialize to JSON.
@@ -271,6 +277,7 @@ data class RoadflareFollower(
             put("addedAt", addedAt)
             put("approved", approved)
             put("keyVersionSent", keyVersionSent)
+            mutedAt?.let { put("mutedAt", it) }
         }
     }
 
@@ -284,7 +291,8 @@ data class RoadflareFollower(
                 name = json.optString("name", ""),
                 addedAt = json.getLong("addedAt"),
                 approved = json.optBoolean("approved", true), // Default true for backwards compat
-                keyVersionSent = json.optInt("keyVersionSent", 0)
+                keyVersionSent = json.optInt("keyVersionSent", 0),
+                mutedAt = if (json.has("mutedAt")) json.getLong("mutedAt") else null
             )
         }
     }

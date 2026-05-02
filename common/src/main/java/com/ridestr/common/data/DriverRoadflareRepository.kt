@@ -212,6 +212,10 @@ class DriverRoadflareRepository(context: Context) {
     /**
      * Get follower pubkeys that have the current key version and are approved.
      * Used for location broadcast subscriptions.
+     *
+     * Excludes followers muted via either path:
+     * - Heavyweight mute via [MutedRider] / `state.muted` (key rotation, "Remove" UX).
+     * - Lightweight mute via [RoadflareFollower.mutedAt] (issue #80, "Mute" UX).
      */
     fun getActiveFollowerPubkeys(): List<String> {
         val state = _state.value ?: return emptyList()
@@ -224,20 +228,27 @@ class DriverRoadflareRepository(context: Context) {
                 val isApproved = f.approved
                 val hasCurrentKey = f.keyVersionSent == currentVersion
                 val isMuted = f.pubkey in mutedPubkeys
-                val isActive = isApproved && hasCurrentKey && !isMuted
+                val isLightMuted = f.mutedAt != null
+                val isActive = isApproved && hasCurrentKey && !isMuted && !isLightMuted
                 if (!isActive) {
-                    android.util.Log.d("RoadflareRepo", "Follower ${f.pubkey.take(8)} NOT active: approved=$isApproved, keyVersionSent=${f.keyVersionSent} vs current=$currentVersion, muted=$isMuted")
+                    android.util.Log.d("RoadflareRepo", "Follower ${f.pubkey.take(8)} NOT active: approved=$isApproved, keyVersionSent=${f.keyVersionSent} vs current=$currentVersion, muted=$isMuted, lightMuted=$isLightMuted")
                 }
             }
         }
 
         return state.followers
-            .filter { it.approved && it.keyVersionSent == currentVersion && it.pubkey !in mutedPubkeys }
+            .filter {
+                it.approved &&
+                    it.keyVersionSent == currentVersion &&
+                    it.pubkey !in mutedPubkeys &&
+                    it.mutedAt == null
+            }
             .map { it.pubkey }
     }
 
     /**
      * Get approved followers who need the current key (haven't received it yet).
+     * Excludes both heavyweight-muted ([MutedRider]) and lightweight-muted ([RoadflareFollower.mutedAt]) entries.
      */
     fun getFollowersNeedingKey(): List<RoadflareFollower> {
         val state = _state.value ?: return emptyList()
@@ -245,7 +256,12 @@ class DriverRoadflareRepository(context: Context) {
         val mutedPubkeys = state.muted.map { it.pubkey }.toSet()
 
         return state.followers
-            .filter { it.approved && it.keyVersionSent < currentVersion && it.pubkey !in mutedPubkeys }
+            .filter {
+                it.approved &&
+                    it.keyVersionSent < currentVersion &&
+                    it.pubkey !in mutedPubkeys &&
+                    it.mutedAt == null
+            }
     }
 
     /**
@@ -352,6 +368,76 @@ class DriverRoadflareRepository(context: Context) {
      */
     fun isMuted(pubkey: String): Boolean {
         return _state.value?.muted?.any { it.pubkey == pubkey } ?: false
+    }
+
+    // ── Lightweight per-follower mute (issue #80) ─────────────────────────────
+    //
+    // Distinct from the heavyweight [MutedRider] / "Remove" path above:
+    // - No key rotation; just suppresses Kind 3186 delivery for one follower.
+    // - Synced cross-device via Kind 30177's `muted_pubkeys` (last-write-wins),
+    //   not via Kind 30012.
+
+    /**
+     * Set the lightweight-mute timestamp on a single follower.
+     * No-op if the follower is not present in the current state.
+     *
+     * @param pubkey Follower pubkey to mute.
+     * @param mutedAt Timestamp (epoch seconds) recording when the mute took effect.
+     *   Used as the comparison value for last-write-wins reconciliation against
+     *   remote Kind 30177 backups.
+     * @return true if a follower row was updated; false if no matching follower exists.
+     */
+    fun setFollowerMuted(pubkey: String, mutedAt: Long): Boolean {
+        val current = _state.value ?: return false
+        if (current.followers.none { it.pubkey == pubkey }) return false
+
+        _state.value = current.copy(
+            followers = current.followers.map {
+                if (it.pubkey == pubkey) it.copy(mutedAt = mutedAt) else it
+            },
+            updatedAt = System.currentTimeMillis() / 1000
+        )
+        saveState()
+        return true
+    }
+
+    /**
+     * Clear the lightweight-mute timestamp on a single follower.
+     * No-op if the follower is not present.
+     *
+     * @return true if a follower row was updated; false if no matching follower exists.
+     */
+    fun setFollowerUnmuted(pubkey: String): Boolean {
+        val current = _state.value ?: return false
+        if (current.followers.none { it.pubkey == pubkey }) return false
+
+        _state.value = current.copy(
+            followers = current.followers.map {
+                if (it.pubkey == pubkey) it.copy(mutedAt = null) else it
+            },
+            updatedAt = System.currentTimeMillis() / 1000
+        )
+        saveState()
+        return true
+    }
+
+    /**
+     * Pubkeys of followers currently lightweight-muted (per-follower mutedAt non-null).
+     * Order is not significant (matches Kind 30177's `muted_pubkeys` array semantics).
+     */
+    fun getMutedFollowerPubkeys(): List<String> {
+        return _state.value?.followers
+            ?.filter { it.mutedAt != null }
+            ?.map { it.pubkey }
+            ?: emptyList()
+    }
+
+    /**
+     * Check if a follower is lightweight-muted.
+     * Independent of [isMuted] (which checks the heavyweight [MutedRider] list).
+     */
+    fun isFollowerMuted(pubkey: String): Boolean {
+        return _state.value?.followers?.any { it.pubkey == pubkey && it.mutedAt != null } ?: false
     }
 
     /**

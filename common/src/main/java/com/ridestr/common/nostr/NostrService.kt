@@ -1127,13 +1127,16 @@ class NostrService internal constructor(
      * @param vehicles List of vehicles to backup (driver)
      * @param savedLocations List of saved locations to backup (rider)
      * @param settings Settings backup data
+     * @param mutedFollowerPubkeys Hex pubkeys of lightweight-muted RoadFlare followers (issue #80).
+     *   Empty for non-driver apps; field is omitted from the wire payload when empty.
      * @return Event ID if successful, null on failure
      */
     suspend fun publishProfileBackup(
         vehicles: List<Vehicle>,
         savedLocations: List<SavedLocation>,
-        settings: SettingsBackup
-    ): String? = profileBackupService.publishProfileBackup(vehicles, savedLocations, settings)
+        settings: SettingsBackup,
+        mutedFollowerPubkeys: List<String> = emptyList()
+    ): String? = profileBackupService.publishProfileBackup(vehicles, savedLocations, settings, mutedFollowerPubkeys)
 
     /**
      * Fetch the user's profile backup from Nostr relays.

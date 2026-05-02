@@ -38,12 +38,18 @@ object ProfileBackupEvent {
      * @param vehicles List of vehicles to backup (driver)
      * @param savedLocations List of saved locations to backup (rider)
      * @param settings Settings to backup
+     * @param mutedFollowerPubkeys Hex pubkeys of RoadFlare followers the driver has lightweight-muted
+     *   (issue #80). Empty for non-driver apps. Cross-device reconciled via last-write-wins on
+     *   the event's `created_at`. Not nested under settings — RoadFlare state, not a
+     *   user-configurable setting. Field is omitted from the JSON when empty so an empty driver or
+     *   any rider produces a wire-identical payload to pre-issue-#80 events.
      */
     suspend fun create(
         signer: NostrSigner,
         vehicles: List<Vehicle>,
         savedLocations: List<SavedLocation>,
-        settings: SettingsBackup
+        settings: SettingsBackup,
+        mutedFollowerPubkeys: List<String> = emptyList()
     ): Event? {
         val pubKeyHex = signer.pubKey
 
@@ -67,6 +73,13 @@ object ProfileBackupEvent {
             put("vehicles", vehiclesArray)
             put("savedLocations", locationsArray)
             put("settings", settingsJson)
+            // muted_pubkeys (issue #80): only emit when non-empty so existing parsers and
+            // rider-only apps produce wire-identical payloads to pre-issue-#80 events.
+            if (mutedFollowerPubkeys.isNotEmpty()) {
+                val mutedPubkeysArray = JSONArray()
+                mutedFollowerPubkeys.forEach { mutedPubkeysArray.put(it) }
+                put("muted_pubkeys", mutedPubkeysArray)
+            }
             put("updated_at", System.currentTimeMillis() / 1000)
         }
 
@@ -135,6 +148,17 @@ object ProfileBackupEvent {
                 SettingsBackup() // Default settings if not present
             }
 
+            // Parse muted_pubkeys (issue #80, optional). Missing/empty → no muted pubkeys.
+            // Tolerates non-string entries by skipping them rather than failing the whole parse.
+            val mutedFollowerPubkeys = mutableListOf<String>()
+            val mutedPubkeysArray = json.optJSONArray("muted_pubkeys")
+            if (mutedPubkeysArray != null) {
+                for (i in 0 until mutedPubkeysArray.length()) {
+                    val s = mutedPubkeysArray.optString(i, "")
+                    if (s.isNotEmpty()) mutedFollowerPubkeys.add(s)
+                }
+            }
+
             val updatedAt = json.getLong("updated_at")
 
             ProfileBackupData(
@@ -142,6 +166,7 @@ object ProfileBackupEvent {
                 vehicles = vehicles,
                 savedLocations = savedLocations,
                 settings = settings,
+                mutedFollowerPubkeys = mutedFollowerPubkeys,
                 updatedAt = updatedAt,
                 createdAt = event.createdAt
             )
@@ -153,12 +178,17 @@ object ProfileBackupEvent {
 
 /**
  * Parsed and decrypted profile backup data.
+ *
+ * @param mutedFollowerPubkeys Hex pubkeys of RoadFlare followers the driver lightweight-muted
+ *   (issue #80). Empty for non-driver backups or pre-issue-#80 events. Drives the last-write-wins
+ *   reconciliation in `RoadflareKeyManager.reconcileMuteStateFromBackup`.
  */
 data class ProfileBackupData(
     val eventId: String,
     val vehicles: List<Vehicle>,
     val savedLocations: List<SavedLocation>,
     val settings: SettingsBackup,
+    val mutedFollowerPubkeys: List<String> = emptyList(),
     val updatedAt: Long,
     val createdAt: Long
 )
