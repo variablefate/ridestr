@@ -5,7 +5,6 @@ import androidx.test.core.app.ApplicationProvider
 import com.ridestr.common.data.DriverRoadflareRepository
 import com.ridestr.common.nostr.NostrService
 import com.ridestr.common.nostr.events.DriverRoadflareKey
-import com.ridestr.common.nostr.events.DriverRoadflareState
 import com.ridestr.common.nostr.events.RoadflareFollower
 import com.ridestr.common.nostr.events.RoadflareKey
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
@@ -187,6 +186,11 @@ class RoadflareKeyManagerTest {
         val result = keyManager.handleFollowNotification(signer, alicePubkey, "Alice")
 
         assertTrue("expected Failed, got $result", result is FollowNotificationResult.Failed)
+        // The reason must distinguish "publish failed" from "no key configured" so a
+        // future maintainer can tell why the result was Failed without re-reading the SUT.
+        assertEquals("Kind 3186 publish failed", (result as FollowNotificationResult.Failed).reason)
+        // The publish was attempted exactly once.
+        coVerify(exactly = 1) { nostrService.publishRoadflareKeyShare(any(), eq(alicePubkey), any(), any()) }
         // markFollowerKeySent must NOT be called when the publish fails.
         val alice = repository.getFollowers().single { it.pubkey == alicePubkey }
         assertEquals(1, alice.keyVersionSent)

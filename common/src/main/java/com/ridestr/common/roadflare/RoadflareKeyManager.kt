@@ -298,12 +298,15 @@ class RoadflareKeyManager(
 
         if (existing.approved) {
             // Approved re-add — re-deliver the current key. State unchanged, no Kind 30012 republish.
+            val hasKey = repository.getRoadflareKey() != null
             val keySent = resendCurrentKey(signer, followerPubkey)
             return if (keySent) {
                 Log.d(TAG, "Re-sent key to approved follower ${followerPubkey.take(8)}...")
                 FollowNotificationResult.KeyResent
-            } else {
+            } else if (!hasKey) {
                 FollowNotificationResult.Failed("no current key to resend")
+            } else {
+                FollowNotificationResult.Failed("Kind 3186 publish failed")
             }
         }
 
