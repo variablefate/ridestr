@@ -200,12 +200,26 @@ class ProfileSyncAdapter(
                 ?: emptyList()
             val settings = settingsRepository.toBackupData()
 
-            // muted_pubkeys (issue #80): driver-only. When the driver repository is absent
-            // (rider apps), preserve whatever was in the existing remote backup so we don't
-            // accidentally drop a sibling driver app's mute state from the same identity.
-            val mutedFollowerPubkeys = driverRoadflareRepository?.getMutedFollowerPubkeys()
-                ?: existingProfile?.mutedFollowerPubkeys
-                ?: emptyList()
+            // muted_pubkeys (issue #80): driver-only.
+            //
+            // Three-way decision:
+            // - Rider app (no driverRoadflareRepository) → preserve remote so we don't drop
+            //   a sibling driver app's mute state from the same identity.
+            // - Driver app, reconciliation has NOT yet run this session → preserve remote.
+            //   Local mute list may be empty only because Kind 30012 sync + Kind 30177
+            //   reconciliation haven't completed yet (fresh device first key-import).
+            //   Trusting an empty local list here would silently wipe cross-device mutes
+            //   before reconciliation observes them.
+            // - Driver app, reconciliation HAS run → trust local. An empty local list now
+            //   reflects "user unmuted everyone" — a deliberate empty publish.
+            val mutedFollowerPubkeys = when {
+                driverRoadflareRepository == null ->
+                    existingProfile?.mutedFollowerPubkeys ?: emptyList()
+                driverRoadflareRepository.isMuteReconciled() ->
+                    driverRoadflareRepository.getMutedFollowerPubkeys()
+                else ->
+                    existingProfile?.mutedFollowerPubkeys ?: emptyList()
+            }
 
             val eventId = nostrService.publishProfileBackup(vehicles, savedLocations, settings, mutedFollowerPubkeys)
             if (eventId != null) {

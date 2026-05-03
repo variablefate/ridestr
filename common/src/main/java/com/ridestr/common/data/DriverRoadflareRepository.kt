@@ -440,6 +440,30 @@ class DriverRoadflareRepository(context: Context) {
         return _state.value?.followers?.any { it.pubkey == pubkey && it.mutedAt != null } ?: false
     }
 
+    // In-memory flag (resets across process restarts) tracking whether the lightweight-mute
+    // reconciliation against Kind 30177 has run at least once this session.
+    //
+    // Why: on a fresh device first key-import the local follower list and mute set are empty
+    // until both Kind 30012 sync AND Kind 30177 mute reconciliation complete. Auto-backup
+    // hooks (settings hash, vehicles) can fire BEFORE that, and a publish with an empty local
+    // mute list would silently overwrite the remote `muted_pubkeys` set on Kind 30177 — wiping
+    // cross-device mutes before reconciliation ever sees them.
+    //
+    // Consumed by [ProfileSyncAdapter.publishToNostr]: when this flag is false the publish
+    // path preserves the remote `muted_pubkeys` instead of trusting the (possibly empty) local
+    // list. Once reconciliation has run, local is authoritative and an empty local list is
+    // treated as "user unmuted everyone" — i.e., a deliberate empty publish.
+    @Volatile
+    private var muteReconciledThisSession: Boolean = false
+
+    /** True once [markMuteReconciled] has been called in this process lifetime. */
+    fun isMuteReconciled(): Boolean = muteReconciledThisSession
+
+    /** Mark the lightweight-mute reconciliation as having run at least once this session. */
+    fun markMuteReconciled() {
+        muteReconciledThisSession = true
+    }
+
     /**
      * Update last broadcast timestamp.
      */

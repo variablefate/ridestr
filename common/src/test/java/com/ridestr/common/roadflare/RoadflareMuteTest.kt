@@ -427,6 +427,39 @@ class RoadflareMuteTest {
     }
 
     @Test
+    fun `isMuteReconciled flips false to true after reconcileMuteStateFromBackup runs`() = runTest {
+        // Pass 3 fix: ProfileSyncAdapter.publishToNostr uses this gate to decide whether to
+        // trust an empty local mute list (after reconciliation) or preserve remote (before).
+        // Without the gate, an auto-backup that fires before reconciliation would silently wipe
+        // remote `muted_pubkeys` on a freshly imported device.
+        assertFalse("flag should start false on a fresh repository", repository.isMuteReconciled())
+
+        keyManager.reconcileMuteStateFromBackup(
+            signer = signer,
+            remoteMutedPubkeys = emptyList(),
+            remoteCreatedAt = 1_000L
+        )
+
+        assertTrue("flag should flip true even when reconcile makes no changes", repository.isMuteReconciled())
+    }
+
+    @Test
+    fun `isMuteReconciled flips true even when reconcile applies no changes`() = runTest {
+        // The flag is independent of changed — what matters is that we observed the remote
+        // and confirmed local matches.
+        seedFollower("rider-A", mutedAt = null)
+
+        val result = keyManager.reconcileMuteStateFromBackup(
+            signer = signer,
+            remoteMutedPubkeys = emptyList(),
+            remoteCreatedAt = 1_000L
+        )
+
+        assertFalse(result.changed)
+        assertTrue(repository.isMuteReconciled())
+    }
+
+    @Test
     fun `reconcile unmute does NOT re-deliver key when rider is heavyweight-muted`() = runTest {
         // Cross-device hazard: device 1 lightweight-mutes a rider; device 2 then "Removes" them
         // (handleMuteFollower → muteRider + rotateKey). If device 2's Kind 30177 is older than

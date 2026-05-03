@@ -351,7 +351,8 @@ fun DrivestrApp(settingsRepository: SettingsRepository) {
         // last-write-wins reconciliation against local follower mute state. Best-effort —
         // a fetch failure leaves local state untouched. If anything changed, republish so
         // other devices converge. Fire-and-forget on a child coroutine so the subscription
-        // setup below isn't blocked by the network round-trip.
+        // setup below isn't blocked by the network round-trip. CancellationException is
+        // explicitly re-thrown so logout / nav-away cancellation propagates correctly.
         asyncScope.launch {
             try {
                 val signer = nostrService.keyManager.getSigner() ?: return@launch
@@ -360,6 +361,8 @@ fun DrivestrApp(settingsRepository: SettingsRepository) {
                     android.util.Log.d("MainActivity", "Mute reconciliation: muted=${result.muted}, unmuted=${result.unmuted}, keyResent=${result.keyResent} — republishing profile backup")
                     profileSyncManager.backupProfileData()
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 android.util.Log.w("MainActivity", "Mute reconciliation failed at startup", e)
             }
@@ -1266,17 +1269,25 @@ fun MainScreen(
             // sync on a fresh device first key-import) are applied. Reconciliation is
             // idempotent — re-running it with the same backup is a no-op for already-applied
             // mutes.
-            try {
-                val signer = nostrService.keyManager.getSigner()
-                if (signer != null) {
-                    val result = roadflareKeyManager.fetchAndReconcileMuteFromBackup(signer)
-                    if (result?.changed == true) {
-                        android.util.Log.d("MainActivity", "Post-sync mute reconciliation: muted=${result.muted}, unmuted=${result.unmuted}, keyResent=${result.keyResent} — republishing profile backup")
-                        profileSyncManager.backupProfileData()
+            //
+            // Wrapped in a child launch + explicit CancellationException re-throw so that a
+            // logout / nav-away cancellation does NOT silently allow `backupProfileData()` to
+            // execute on a cancelled scope. Mirrors the at-login pattern above.
+            launch {
+                try {
+                    val signer = nostrService.keyManager.getSigner()
+                    if (signer != null) {
+                        val result = roadflareKeyManager.fetchAndReconcileMuteFromBackup(signer)
+                        if (result?.changed == true) {
+                            android.util.Log.d("MainActivity", "Post-sync mute reconciliation: muted=${result.muted}, unmuted=${result.unmuted}, keyResent=${result.keyResent} — republishing profile backup")
+                            profileSyncManager.backupProfileData()
+                        }
                     }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    android.util.Log.w("MainActivity", "Post-sync mute reconciliation failed", e)
                 }
-            } catch (e: Exception) {
-                android.util.Log.w("MainActivity", "Post-sync mute reconciliation failed", e)
             }
         }
     }

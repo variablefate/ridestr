@@ -666,6 +666,13 @@ class RoadflareKeyManager(
             Log.d(TAG, "reconcileMute: muted=$muted, unmuted=$unmuted, keyResent=$keyResent")
         }
 
+        // Mark reconciliation as run so subsequent profile-backup publishes can trust the
+        // local mute list as authoritative (see DriverRoadflareRepository.isMuteReconciled).
+        // Set unconditionally — even if no changes were applied, we have observed remote and
+        // confirmed local matches. Without this, an auto-backup that fires after reconciliation
+        // would still preserve remote unnecessarily.
+        repository.markMuteReconciled()
+
         return MuteReconciliationResult(muted = muted, unmuted = unmuted, keyResent = keyResent)
     }
 }
