@@ -72,9 +72,14 @@ object DriverRoadflareStateEvent {
             return null
         }
 
-        // Include key_version and key_updated_at in public tags for quick staleness check
+        // Include key_version and key_updated_at in public tags for quick staleness check.
+        // When keyUpdatedAt is null (e.g., a driver who generated a key via OnboardingViewModel
+        // but hasn't approved a follower yet) emit "0", matching key_version's null treatment.
+        // A wall-clock fallback here would silently advance the public tag — riders would see
+        // currentKeyUpdatedAt > storedKeyUpdatedAt and flap into stale-key flagging until the
+        // next real publish. "0 > anything" is always false, so no false-stale.
         val keyVersion = state.roadflareKey?.version?.toString() ?: "0"
-        val keyUpdatedAt = state.keyUpdatedAt?.toString() ?: (System.currentTimeMillis() / 1000).toString()
+        val keyUpdatedAt = state.keyUpdatedAt?.toString() ?: "0"
 
         val tags = arrayOf(
             arrayOf("d", D_TAG),
