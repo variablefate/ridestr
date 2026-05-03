@@ -173,10 +173,15 @@ class ProfileBackupEventMutedPubkeysTest {
         val parsed = ProfileBackupEvent.parseAndDecrypt(signer, event)
         assertNotNull(parsed)
         val muted = parsed!!.mutedFollowerPubkeys
-        // Valid entries survive (lower- and upper-case hex both accepted).
+        // Valid entries survive (lower-case stored as-is).
         assertTrue("expected valid lower-hex c…", muted.contains("c".repeat(64)))
         assertTrue("expected valid lower-hex d…", muted.contains("d".repeat(64)))
-        assertTrue("expected upper-case hex accepted", muted.contains("AABBCCDDEEFFAABBCCDDEEFFAABBCCDDEEFFAABBCCDDEEFFAABBCCDDEEFFAABB"))
+        // Upper-case hex is accepted by validation but NORMALISED to lowercase on storage so
+        // equality checks against `RoadflareFollower.pubkey` (always lowercase via toHexKey())
+        // line up across backup cycles. Without normalisation, an upper-case entry from a
+        // malformed remote event would silently drop on the next publish cycle.
+        assertFalse("upper-case hex must NOT round-trip in upper-case", muted.contains("AABBCCDDEEFFAABBCCDDEEFFAABBCCDDEEFFAABBCCDDEEFFAABBCCDDEEFFAABB"))
+        assertTrue("upper-case hex must be normalised to lowercase on storage", muted.contains("aabbccddeeffaabbccddeeffaabbccddeeffaabbccddeeffaabbccddeeffaabb"))
         // Junk entries are rejected.
         assertFalse("numeric '42' must NOT pass the hex filter", muted.contains("42"))
         assertFalse("63-char entry must NOT pass length check", muted.contains("a".repeat(63)))

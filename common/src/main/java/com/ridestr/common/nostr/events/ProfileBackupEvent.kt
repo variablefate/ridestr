@@ -149,15 +149,18 @@ object ProfileBackupEvent {
             }
 
             // Parse muted_pubkeys (issue #80, optional). Missing/empty → no muted pubkeys.
-            // Reject entries that don't look like a 32-byte hex pubkey (64 lowercase hex chars).
+            // Reject entries that don't look like a 32-byte hex pubkey (64 hex chars).
             // `optString` on a numeric JSON entry coerces to e.g. `"42"`, which would otherwise pass
             // a naive `isNotEmpty` filter and accumulate as junk on every backup republish cycle.
+            // Normalise to lowercase so equality checks against locally-stored pubkeys (which are
+            // always lowercase via `toHexKey()`) work without case-sensitivity drift across
+            // backup cycles.
             val mutedFollowerPubkeys = mutableListOf<String>()
             val mutedPubkeysArray = json.optJSONArray("muted_pubkeys")
             if (mutedPubkeysArray != null) {
                 for (i in 0 until mutedPubkeysArray.length()) {
                     val s = mutedPubkeysArray.optString(i, "")
-                    if (isHexPubkey(s)) mutedFollowerPubkeys.add(s)
+                    if (isHexPubkey(s)) mutedFollowerPubkeys.add(s.lowercase())
                 }
             }
 
@@ -178,10 +181,14 @@ object ProfileBackupEvent {
     }
 
     /**
-     * True when [s] looks like a 32-byte hex pubkey (64 lowercase hex chars).
-     * Tolerates upper-case input by normalising via [Char.isHexChar]. Used to filter junk
-     * entries from `muted_pubkeys` so a malformed remote event cannot grow the local list
-     * unboundedly across backup cycles.
+     * True when [s] looks like a 32-byte hex pubkey (64 hex chars). The validation is
+     * case-insensitive (accepts both `a–f` and `A–F`); callers that intend to *store* the
+     * value are expected to normalise to lowercase via `s.lowercase()` so equality checks
+     * against locally-emitted pubkeys (which are always lowercase via `toHexKey()`) line up
+     * across backup cycles.
+     *
+     * Used to filter junk entries from `muted_pubkeys` so a malformed remote event cannot
+     * grow the local list unboundedly across backup cycles.
      */
     private fun isHexPubkey(s: String): Boolean {
         if (s.length != 64) return false

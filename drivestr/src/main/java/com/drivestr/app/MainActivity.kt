@@ -1259,6 +1259,25 @@ fun MainScreen(
         if (isConnected && !hasInitialSynced) {
             hasInitialSynced = true
             refreshRoadflareStateAndFollowers()
+
+            // Issue #80 — chained mute reconciliation: now that Kind 30012 has populated the
+            // followers list, run the lightweight-mute reconciliation a second time so any
+            // remote-muted pubkeys missed by the at-login pass (which races against this very
+            // sync on a fresh device first key-import) are applied. Reconciliation is
+            // idempotent — re-running it with the same backup is a no-op for already-applied
+            // mutes.
+            try {
+                val signer = nostrService.keyManager.getSigner()
+                if (signer != null) {
+                    val result = roadflareKeyManager.fetchAndReconcileMuteFromBackup(signer)
+                    if (result?.changed == true) {
+                        android.util.Log.d("MainActivity", "Post-sync mute reconciliation: muted=${result.muted}, unmuted=${result.unmuted}, keyResent=${result.keyResent} — republishing profile backup")
+                        profileSyncManager.backupProfileData()
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("MainActivity", "Post-sync mute reconciliation failed", e)
+            }
         }
     }
 
