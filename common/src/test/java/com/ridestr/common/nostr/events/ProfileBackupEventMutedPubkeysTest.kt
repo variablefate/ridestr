@@ -8,6 +8,7 @@ import io.mockk.mockk
 import io.mockk.slot
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -137,17 +138,24 @@ class ProfileBackupEventMutedPubkeysTest {
     }
 
     @Test
-    fun `parseAndDecrypt tolerates non-string entries in muted_pubkeys array`() = runTest {
+    fun `parseAndDecrypt rejects non-hex and wrong-length entries in muted_pubkeys array`() = runTest {
+        // The parser must filter junk entries (numbers, short strings, non-hex chars) so a
+        // malformed remote event cannot grow the local mute list unboundedly across backup
+        // cycles. Only canonical 32-byte hex pubkeys (64 lowercase hex chars) are accepted.
         val signer = identitySigner()
         val payload = JSONObject().apply {
             put("vehicles", org.json.JSONArray())
             put("savedLocations", org.json.JSONArray())
             put("settings", SettingsBackup().toJson())
-            // Mix in a numeric junk entry — should be skipped, not crash.
             put("muted_pubkeys", org.json.JSONArray().apply {
-                put("c".repeat(64))
-                put(42)
-                put("d".repeat(64))
+                put("c".repeat(64))                  // valid hex
+                put(42)                              // numeric — coerced to "42" by optString
+                put("d".repeat(64))                  // valid hex
+                put("not-hex-but-64-chars-long-______________________________________") // 64 chars, non-hex
+                put("a".repeat(63))                  // wrong length (off-by-one short)
+                put("a".repeat(65))                  // wrong length (off-by-one long)
+                put("")                              // empty
+                put("AABBCCDDEEFFAABBCCDDEEFFAABBCCDDEEFFAABBCCDDEEFFAABBCCDDEEFFAABB") // upper-case hex (accepted)
             })
             put("updated_at", 1L)
         }.toString()
@@ -164,11 +172,16 @@ class ProfileBackupEventMutedPubkeysTest {
 
         val parsed = ProfileBackupEvent.parseAndDecrypt(signer, event)
         assertNotNull(parsed)
-        // Numeric entry "42" is coerced by optString; we only really care that no crash and
-        // valid hex strings survive. The implementation skips entries that optString returns
-        // as empty (none here), so the numeric coerces to "42" and gets included. Either way
-        // the test pins the no-crash behavior.
-        assertTrue(parsed!!.mutedFollowerPubkeys.contains("c".repeat(64)))
-        assertTrue(parsed.mutedFollowerPubkeys.contains("d".repeat(64)))
+        val muted = parsed!!.mutedFollowerPubkeys
+        // Valid entries survive (lower- and upper-case hex both accepted).
+        assertTrue("expected valid lower-hex c…", muted.contains("c".repeat(64)))
+        assertTrue("expected valid lower-hex d…", muted.contains("d".repeat(64)))
+        assertTrue("expected upper-case hex accepted", muted.contains("AABBCCDDEEFFAABBCCDDEEFFAABBCCDDEEFFAABBCCDDEEFFAABBCCDDEEFFAABB"))
+        // Junk entries are rejected.
+        assertFalse("numeric '42' must NOT pass the hex filter", muted.contains("42"))
+        assertFalse("63-char entry must NOT pass length check", muted.contains("a".repeat(63)))
+        assertFalse("65-char entry must NOT pass length check", muted.contains("a".repeat(65)))
+        assertFalse("empty string must NOT pass length check", muted.contains(""))
+        assertEquals("only the 3 valid entries survive", 3, muted.size)
     }
 }

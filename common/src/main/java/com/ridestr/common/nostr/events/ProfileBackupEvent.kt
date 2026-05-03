@@ -149,13 +149,15 @@ object ProfileBackupEvent {
             }
 
             // Parse muted_pubkeys (issue #80, optional). Missing/empty → no muted pubkeys.
-            // Tolerates non-string entries by skipping them rather than failing the whole parse.
+            // Reject entries that don't look like a 32-byte hex pubkey (64 lowercase hex chars).
+            // `optString` on a numeric JSON entry coerces to e.g. `"42"`, which would otherwise pass
+            // a naive `isNotEmpty` filter and accumulate as junk on every backup republish cycle.
             val mutedFollowerPubkeys = mutableListOf<String>()
             val mutedPubkeysArray = json.optJSONArray("muted_pubkeys")
             if (mutedPubkeysArray != null) {
                 for (i in 0 until mutedPubkeysArray.length()) {
                     val s = mutedPubkeysArray.optString(i, "")
-                    if (s.isNotEmpty()) mutedFollowerPubkeys.add(s)
+                    if (isHexPubkey(s)) mutedFollowerPubkeys.add(s)
                 }
             }
 
@@ -174,6 +176,23 @@ object ProfileBackupEvent {
             null
         }
     }
+
+    /**
+     * True when [s] looks like a 32-byte hex pubkey (64 lowercase hex chars).
+     * Tolerates upper-case input by normalising via [Char.isHexChar]. Used to filter junk
+     * entries from `muted_pubkeys` so a malformed remote event cannot grow the local list
+     * unboundedly across backup cycles.
+     */
+    private fun isHexPubkey(s: String): Boolean {
+        if (s.length != 64) return false
+        for (c in s) {
+            if (!c.isHexChar()) return false
+        }
+        return true
+    }
+
+    private fun Char.isHexChar(): Boolean =
+        (this in '0'..'9') || (this in 'a'..'f') || (this in 'A'..'F')
 }
 
 /**

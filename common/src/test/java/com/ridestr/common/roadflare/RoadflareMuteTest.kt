@@ -383,4 +383,74 @@ class RoadflareMuteTest {
         seedFollower("rider-A", mutedAt = null)
         assertTrue(repository.setFollowerUnmuted("rider-A"))
     }
+
+    // ── Code-review pass 1 fixes ──────────────────────────────────────────────
+
+    @Test
+    fun `unmuteFollower persists keyUpdatedAt fallback when repo value is null`() = runTest {
+        // PR #79 fixed exactly this hazard for `resendCurrentKey`: when getKeyUpdatedAt() is null,
+        // the local fallback to key.createdAt MUST be persisted via updateKeyUpdatedAt — otherwise
+        // the next publishDriverRoadflareState falls through to DriverRoadflareStateEvent.create's
+        // wall-clock fallback (line 77) and silently advances the public key_updated_at tag,
+        // invalidating riders' stored keys.
+        //
+        // Reset the keyUpdatedAt that setUp seeded so we can exercise the null-fallback branch.
+        val current = repository.state.value!!
+        repository.restoreFromBackup(current.copy(keyUpdatedAt = null))
+        seedFollower("rider-A", mutedAt = 100L)
+
+        val updated = keyManager.unmuteFollower(signer, "rider-A")
+
+        assertTrue(updated)
+        assertEquals(
+            "expected unmuteFollower to persist key.createdAt as keyUpdatedAt",
+            driverKey.createdAt,
+            repository.getKeyUpdatedAt()
+        )
+    }
+
+    @Test
+    fun `reconcile unmute persists keyUpdatedAt fallback when repo value is null`() = runTest {
+        // Same hazard, second affected path: the Case B unmute branch of
+        // reconcileMuteStateFromBackup also sends Kind 3186 with the fallback keyUpdatedAt.
+        val current = repository.state.value!!
+        repository.restoreFromBackup(current.copy(keyUpdatedAt = null))
+        seedFollower("rider-A", mutedAt = 1_000L)
+
+        keyManager.reconcileMuteStateFromBackup(
+            signer = signer,
+            remoteMutedPubkeys = emptyList(),
+            remoteCreatedAt = 2_000L
+        )
+
+        assertEquals(driverKey.createdAt, repository.getKeyUpdatedAt())
+    }
+
+    @Test
+    fun `reconcile unmute does NOT re-deliver key when rider is heavyweight-muted`() = runTest {
+        // Cross-device hazard: device 1 lightweight-mutes a rider; device 2 then "Removes" them
+        // (handleMuteFollower → muteRider + rotateKey). If device 2's Kind 30177 is older than
+        // device 1's lightweight mute, device 1's reconciliation would otherwise unmute the
+        // rider AND re-deliver the post-rotation key — defeating device 2's heavyweight mute.
+        // The reconciliation must clear the lightweight mute (so state stays consistent) but
+        // skip Kind 3186 delivery.
+        seedFollower("rider-A", mutedAt = 1_000L)
+        // Heavyweight-mute the same rider via the legacy path (simulates a "Remove" from another device).
+        repository.muteRider("rider-A", reason = "removed on device 2")
+
+        val result = keyManager.reconcileMuteStateFromBackup(
+            signer = signer,
+            remoteMutedPubkeys = emptyList(),
+            remoteCreatedAt = 2_000L
+        )
+
+        assertEquals(0, result.muted)
+        assertEquals("local lightweight mute is cleared so it converges with remote", 1, result.unmuted)
+        assertEquals("Kind 3186 must NOT be re-delivered to a heavyweight-muted rider", 0, result.keyResent)
+        coVerify(exactly = 0) {
+            nostrService.publishRoadflareKeyShare(any(), eq("rider-A"), any(), any())
+        }
+        // Heavyweight mute is unaffected.
+        assertTrue("heavyweight mute must still be in effect", repository.isMuted("rider-A"))
+    }
 }

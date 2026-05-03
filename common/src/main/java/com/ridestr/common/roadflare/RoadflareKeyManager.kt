@@ -508,9 +508,18 @@ class RoadflareKeyManager(
 
         // Best-effort key re-delivery so the unmuted rider can decrypt new broadcasts.
         // No key rotation; uses the current key + keyUpdatedAt verbatim.
+        //
+        // If `getKeyUpdatedAt()` is null, persist the `key.createdAt` fallback via
+        // `updateKeyUpdatedAt` — same write-back pattern PR #79 added to `resendCurrentKey`.
+        // Without this, the next `publishDriverRoadflareState` would fall through to
+        // `DriverRoadflareStateEvent.create`'s wall-clock fallback and silently advance the
+        // public `key_updated_at` tag, invalidating riders' stored keys.
         val key = repository.getRoadflareKey()
-        val keyUpdatedAt = repository.getKeyUpdatedAt() ?: key?.createdAt
-        if (key != null && keyUpdatedAt != null) {
+        if (key != null) {
+            val keyUpdatedAt = repository.getKeyUpdatedAt() ?: run {
+                repository.updateKeyUpdatedAt(key.createdAt)
+                key.createdAt
+            }
             val sent = sendKeyToFollower(signer, followerPubkey, key, keyUpdatedAt)
             if (sent) {
                 repository.markFollowerKeySent(followerPubkey, key.version)
@@ -621,17 +630,32 @@ class RoadflareKeyManager(
                 Log.d(TAG, "reconcileMute: kept local mute on ${follower.pubkey.take(8)}... (local=$localMutedAt > remote=$remoteCreatedAt)")
             } else {
                 // Backup is newer and doesn't include this pubkey → remote unmuted it.
+                // BUT: if the rider was meanwhile heavyweight-muted ("Removed") on another device,
+                // the key has been rotated and they MUST stay excluded. Clear our local lightweight
+                // mute (so the state stays consistent with the remote backup) but skip the Kind 3186
+                // re-delivery — sending the post-rotation key would defeat the heavyweight mute.
+                val isHeavyweightMuted = repository.isMuted(follower.pubkey)
                 if (repository.setFollowerUnmuted(follower.pubkey)) {
                     unmuted++
                     Log.d(TAG, "reconcileMute: unmuted ${follower.pubkey.take(8)}... (remote=$remoteCreatedAt >= local=$localMutedAt)")
 
-                    // Best-effort key re-delivery so the rider can resume decrypting.
-                    val key = repository.getRoadflareKey()
-                    val keyUpdatedAt = repository.getKeyUpdatedAt() ?: key?.createdAt
-                    if (key != null && keyUpdatedAt != null) {
-                        if (sendKeyToFollower(signer, follower.pubkey, key, keyUpdatedAt)) {
-                            repository.markFollowerKeySent(follower.pubkey, key.version)
-                            keyResent++
+                    if (isHeavyweightMuted) {
+                        Log.d(TAG, "reconcileMute: skipping Kind 3186 re-delivery to ${follower.pubkey.take(8)}... — heavyweight-muted (Removed) on another device")
+                    } else {
+                        // Best-effort key re-delivery so the rider can resume decrypting.
+                        // Mirror PR #79's `resendCurrentKey` write-back so the null-fallback for
+                        // `keyUpdatedAt` is persisted and a future Kind 30012 publish doesn't
+                        // wall-clock-advance the public `key_updated_at` tag.
+                        val key = repository.getRoadflareKey()
+                        if (key != null) {
+                            val keyUpdatedAt = repository.getKeyUpdatedAt() ?: run {
+                                repository.updateKeyUpdatedAt(key.createdAt)
+                                key.createdAt
+                            }
+                            if (sendKeyToFollower(signer, follower.pubkey, key, keyUpdatedAt)) {
+                                repository.markFollowerKeySent(follower.pubkey, key.version)
+                                keyResent++
+                            }
                         }
                     }
                 }
