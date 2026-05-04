@@ -297,6 +297,16 @@ class RoadflareKeyManager(
         }
 
         if (existing.approved) {
+            // Issue #80 — lightweight mute guard. Without this, an approved-but-
+            // lightweight-muted follower who fires a Kind 3187 (re-add after fresh install,
+            // delivery-retry workaround, etc.) would receive a key share, defeating the
+            // lightweight mute. The Kind 3188 ack handler in MainActivity already has the
+            // analogous guard; this is the matching guard for the Kind 3187 path.
+            if (existing.mutedAt != null) {
+                Log.d(TAG, "Skipping resend to lightweight-muted follower ${followerPubkey.take(8)}... (mutedAt=${existing.mutedAt})")
+                return FollowNotificationResult.AlreadyLightMuted
+            }
+
             // Approved re-add — re-deliver the current key. State unchanged, no Kind 30012 republish.
             val hasKey = repository.getRoadflareKey() != null
             val keySent = resendCurrentKey(signer, followerPubkey)
@@ -668,10 +678,20 @@ class RoadflareKeyManager(
 
         // Mark reconciliation as run so subsequent profile-backup publishes can trust the
         // local mute list as authoritative (see DriverRoadflareRepository.isMuteReconciled).
-        // Set unconditionally — even if no changes were applied, we have observed remote and
-        // confirmed local matches. Without this, an auto-backup that fires after reconciliation
-        // would still preserve remote unnecessarily.
-        repository.markMuteReconciled()
+        //
+        // Important: do NOT mark when (followers empty AND remote non-empty). That combination
+        // means we observed remote mutes we couldn't apply (no matching follower row yet — the
+        // Kind 30012 follower-list sync hasn't completed). Marking here would let the next
+        // auto-backup trust the empty local list and silently overwrite the remote `muted_pubkeys`
+        // we just failed to read. The post-sync chained reconciliation in MainActivity will
+        // re-run this method after Kind 30012 sync populates the follower rows; that pass will
+        // observe non-empty followers and mark correctly.
+        val reconciliationWasComplete = followers.isNotEmpty() || remoteSet.isEmpty()
+        if (reconciliationWasComplete) {
+            repository.markMuteReconciled()
+        } else {
+            Log.d(TAG, "reconcileMute: deferring markMuteReconciled — followers list empty but remote has ${remoteSet.size} muted pubkeys (waiting for Kind 30012 sync)")
+        }
 
         return MuteReconciliationResult(muted = muted, unmuted = unmuted, keyResent = keyResent)
     }

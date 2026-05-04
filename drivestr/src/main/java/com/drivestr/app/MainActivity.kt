@@ -428,6 +428,9 @@ fun DrivestrApp(settingsRepository: SettingsRepository) {
                                     is FollowNotificationResult.AlreadyMuted -> {
                                         android.util.Log.d("MainActivity", "Follow notification from muted ${notification.riderPubKey.take(16)} — preserving driver's Remove decision")
                                     }
+                                    is FollowNotificationResult.AlreadyLightMuted -> {
+                                        android.util.Log.d("MainActivity", "Follow notification from lightweight-muted ${notification.riderPubKey.take(16)} — preserving driver's Mute decision")
+                                    }
                                     is FollowNotificationResult.AlreadyPending -> {
                                         android.util.Log.d("MainActivity", "Follow notification from pending ${notification.riderPubKey.take(16)} — awaiting driver approval")
                                     }

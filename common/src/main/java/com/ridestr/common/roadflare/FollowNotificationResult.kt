@@ -30,8 +30,8 @@ sealed class FollowNotificationResult {
     object AlreadyPending : FollowNotificationResult()
 
     /**
-     * Rider is on the muted list. No-op — the driver's explicit "Remove"
-     * decision is preserved.
+     * Rider is on the heavyweight muted list ([com.ridestr.common.nostr.events.MutedRider]).
+     * No-op — the driver's explicit "Remove" decision is preserved.
      *
      * Auto-unmuting on Kind 3187 would silently bypass driver consent and
      * conflict with the cross-device sync invariant in
@@ -40,6 +40,18 @@ sealed class FollowNotificationResult {
      * rider the driver re-approves them through the RoadFlare tab.
      */
     object AlreadyMuted : FollowNotificationResult()
+
+    /**
+     * Rider is approved but lightweight-muted (issue #80,
+     * [com.ridestr.common.nostr.events.RoadflareFollower.mutedAt] non-null). No-op —
+     * re-delivering the current Kind 3186 key would defeat the lightweight mute.
+     *
+     * Distinct from [AlreadyMuted] (heavyweight `MutedRider` + key rotation) so the
+     * call site can render different UI / log messages. Recovery: the driver clears
+     * the lightweight mute via the RoadFlare tab's "Unmute" action, which re-sends
+     * the current key.
+     */
+    object AlreadyLightMuted : FollowNotificationResult()
 
     /**
      * Rider was already approved. The current Kind 3186 key share was

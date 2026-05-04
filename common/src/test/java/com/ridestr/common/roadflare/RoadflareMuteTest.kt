@@ -7,6 +7,7 @@ import com.ridestr.common.nostr.events.DriverRoadflareKey
 import com.ridestr.common.nostr.events.MutedRider
 import com.ridestr.common.nostr.events.RoadflareFollower
 import com.ridestr.common.nostr.events.RoadflareKey
+import com.ridestr.common.roadflare.FollowNotificationResult
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -382,6 +383,90 @@ class RoadflareMuteTest {
         // Callers can still trigger republish; reconciliation doesn't rely on the boolean.
         seedFollower("rider-A", mutedAt = null)
         assertTrue(repository.setFollowerUnmuted("rider-A"))
+    }
+
+    // ── Post-rebase pass: cross-PR seam fixes (PR #79 + PR #81) ───────────────
+
+    @Test
+    fun `handleFollowNotification returns AlreadyLightMuted for approved lightweight-muted follower`() = runTest {
+        // PR #79's handleFollowNotification only checked the heavyweight MutedRider list.
+        // After rebasing PR #81 onto post-#79 main, an approved lightweight-muted follower
+        // (mutedAt != null) firing a Kind 3187 would otherwise pass the heavyweight check
+        // and call resendCurrentKey — defeating the lightweight mute. The new
+        // AlreadyLightMuted variant + guard prevents the resend.
+        seedFollower("rider-A", approved = true, mutedAt = 100L)
+
+        val result = keyManager.handleFollowNotification(
+            signer = signer,
+            followerPubkey = "rider-A",
+            riderName = "rider-A-name"
+        )
+
+        assertEquals(FollowNotificationResult.AlreadyLightMuted, result)
+        coVerify(exactly = 0) {
+            nostrService.publishRoadflareKeyShare(any(), eq("rider-A"), any(), any())
+        }
+    }
+
+    @Test
+    fun `handleFollowNotification still resends key to approved follower without lightweight mute`() = runTest {
+        // Sanity: the new guard does not regress the existing approved-resend path.
+        seedFollower("rider-A", approved = true, mutedAt = null)
+
+        val result = keyManager.handleFollowNotification(
+            signer = signer,
+            followerPubkey = "rider-A",
+            riderName = "rider-A-name"
+        )
+
+        assertEquals(FollowNotificationResult.KeyResent, result)
+        coVerify(exactly = 1) {
+            nostrService.publishRoadflareKeyShare(any(), eq("rider-A"), any(), any())
+        }
+    }
+
+    @Test
+    fun `reconcileMuteStateFromBackup defers markMuteReconciled when followers empty but remote non-empty`() = runTest {
+        // Cross-PR seam fix: at-login reconciliation can fire BEFORE the Kind 30012 follower
+        // list sync completes. If we marked reconciled here, an auto-backup that fires next
+        // would trust the empty local mute list and publish-empty, overwriting remote
+        // `muted_pubkeys`. Defer the mark until we have followers to reconcile against.
+        assertFalse("baseline: flag is false", repository.isMuteReconciled())
+
+        keyManager.reconcileMuteStateFromBackup(
+            signer = signer,
+            remoteMutedPubkeys = listOf("rider-Z"),  // remote has a mute, but rider-Z isn't in our followers
+            remoteCreatedAt = 1_000L
+        )
+
+        assertFalse("flag must NOT flip when followers empty + remote non-empty", repository.isMuteReconciled())
+    }
+
+    @Test
+    fun `reconcileMuteStateFromBackup marks reconciled when followers empty AND remote empty`() = runTest {
+        // Both sides empty = nothing to do. We've observed remote and confirmed local matches.
+        // Safe to mark.
+        keyManager.reconcileMuteStateFromBackup(
+            signer = signer,
+            remoteMutedPubkeys = emptyList(),
+            remoteCreatedAt = 1_000L
+        )
+
+        assertTrue(repository.isMuteReconciled())
+    }
+
+    @Test
+    fun `reconcileMuteStateFromBackup marks reconciled when followers non-empty regardless of remote`() = runTest {
+        // Followers are populated → we can apply the algorithm correctly. Safe to mark.
+        seedFollower("rider-A")
+
+        keyManager.reconcileMuteStateFromBackup(
+            signer = signer,
+            remoteMutedPubkeys = listOf("rider-Z"),  // unknown to us, will be skipped
+            remoteCreatedAt = 1_000L
+        )
+
+        assertTrue(repository.isMuteReconciled())
     }
 
     // ── Code-review pass 1 fixes ──────────────────────────────────────────────
