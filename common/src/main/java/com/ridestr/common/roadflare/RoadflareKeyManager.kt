@@ -322,9 +322,8 @@ class RoadflareKeyManager(
      * If [DriverRoadflareRepository.getKeyUpdatedAt] is `null` but a key
      * exists, the fallback to [DriverRoadflareKey.createdAt] is also persisted
      * via [DriverRoadflareRepository.updateKeyUpdatedAt] — this mirrors
-     * [ensureFollowersHaveCurrentKey] so a future Kind 30012 publish does not
-     * fall through to [DriverRoadflareStateEvent.create]'s wall-clock fallback
-     * and silently advance the public `key_updated_at` tag.
+     * [ensureFollowersHaveCurrentKey] so the rider's stored key share carries
+     * the same `keyUpdatedAt` value any future Kind 30012 publish will emit.
      *
      * @return true if the key was sent; false if no key is configured yet or send failed.
      */
