@@ -300,6 +300,11 @@ class RoadflareDriverCoordinator(
      * - `approved` = logical-OR (once approved, stays approved)
      * - `keyVersionSent` = max, clamped to [selectedKeyVersion] (prevents phantom sent-key claims)
      * - `addedAt` = min (preserve the earliest known follow time)
+     * - `mutedAt` = earliest non-null wins (issue #80 lightweight mute). Bias toward "muted":
+     *   if either side has the lightweight mute set, keep it. The min-of-non-nulls preserves
+     *   the original mute timestamp (Kind 30177 reconciliation uses last-write-wins on its own
+     *   timestamp, not on this field, so this merge strategy is safe — it can't lose state
+     *   that Kind 30177 reconciliation will then re-apply).
      *
      * If `remoteUpdatedAt > localUpdatedAt`, local-only followers are pruned on the assumption
      * that the remote state is authoritative for removals. If local is newer, local additions
@@ -326,10 +331,18 @@ class RoadflareDriverCoordinator(
                 if (mergedVersion > selectedKeyVersion) {
                     Log.w(TAG, "Clamped keyVersionSent $mergedVersion→$selectedKeyVersion for ${follower.pubkey.take(8)}")
                 }
+                // Lightweight-mute (issue #80) merge: preserve mute from whichever side has it.
+                // If both sides have a value, take the earlier one (first-mute timestamp).
+                val mergedMutedAt = when {
+                    existing.mutedAt != null && follower.mutedAt != null ->
+                        minOf(existing.mutedAt, follower.mutedAt)
+                    else -> existing.mutedAt ?: follower.mutedAt
+                }
                 byPubkey[follower.pubkey] = existing.copy(
                     approved = existing.approved || follower.approved,
                     keyVersionSent = clampedVersion,
-                    addedAt = minOf(existing.addedAt, follower.addedAt)
+                    addedAt = minOf(existing.addedAt, follower.addedAt),
+                    mutedAt = mergedMutedAt
                 )
             }
         }

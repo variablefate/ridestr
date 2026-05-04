@@ -39,13 +39,15 @@ class RoadflareDriverCoordinatorMergeTest {
         pubkey: String,
         approved: Boolean = false,
         keyVersionSent: Int = 0,
-        addedAt: Long = 1_000L
+        addedAt: Long = 1_000L,
+        mutedAt: Long? = null
     ) = RoadflareFollower(
         pubkey = pubkey,
         name = "",
         addedAt = addedAt,
         approved = approved,
-        keyVersionSent = keyVersionSent
+        keyVersionSent = keyVersionSent,
+        mutedAt = mutedAt
     )
 
     // ── mergeFollowerLists ────────────────────────────────────────────────────
@@ -190,5 +192,60 @@ class RoadflareDriverCoordinatorMergeTest {
 
         assertEquals(1, merged.size)
         assertEquals("A", merged[0].pubkey)
+    }
+
+    // ── Lightweight mute (issue #80) — mutedAt union-merge ───────────────────
+
+    @Test
+    fun `mergeFollowerLists takes remote mutedAt when local lacks it`() {
+        // Cross-device scenario: device 1 lightweight-mutes follower A and republishes Kind 30012.
+        // Device 2 (no local mute) syncs. The pre-fix code did `existing.copy(approved=...,
+        // keyVersionSent=..., addedAt=...)` and silently dropped remote.mutedAt because the
+        // copy preserved local's null. The union-merge fix means the remote mute survives.
+        val local = listOf(follower("A", mutedAt = null))
+        val remote = listOf(follower("A", mutedAt = 1_500L))
+
+        val merged = coordinator.mergeFollowerLists(local, remote, 1, 100L, 100L)
+
+        assertEquals(1, merged.size)
+        assertEquals("remote mutedAt must propagate when local lacks it", 1_500L, merged[0].mutedAt)
+    }
+
+    @Test
+    fun `mergeFollowerLists keeps local mutedAt when remote lacks it`() {
+        // Inverse: local has the mute, remote doesn't (e.g., remote backup is stale).
+        // Local mute must survive the merge.
+        val local = listOf(follower("A", mutedAt = 1_500L))
+        val remote = listOf(follower("A", mutedAt = null))
+
+        val merged = coordinator.mergeFollowerLists(local, remote, 1, 100L, 100L)
+
+        assertEquals(1, merged.size)
+        assertEquals(1_500L, merged[0].mutedAt)
+    }
+
+    @Test
+    fun `mergeFollowerLists picks earliest mutedAt when both sides have it`() {
+        // Two devices independently muted the same follower at different times.
+        // The earlier timestamp wins (preserves the original mute moment).
+        val local = listOf(follower("A", mutedAt = 2_000L))
+        val remote = listOf(follower("A", mutedAt = 1_500L))
+
+        val merged = coordinator.mergeFollowerLists(local, remote, 1, 100L, 100L)
+
+        assertEquals(1, merged.size)
+        assertEquals("earlier of the two mutedAt timestamps wins", 1_500L, merged[0].mutedAt)
+    }
+
+    @Test
+    fun `mergeFollowerLists preserves null mutedAt when neither side has it`() {
+        // No regression: a normal merge of two unmuted entries keeps mutedAt null.
+        val local = listOf(follower("A", approved = true, mutedAt = null))
+        val remote = listOf(follower("A", approved = true, mutedAt = null))
+
+        val merged = coordinator.mergeFollowerLists(local, remote, 1, 100L, 100L)
+
+        assertEquals(1, merged.size)
+        assertNull(merged[0].mutedAt)
     }
 }

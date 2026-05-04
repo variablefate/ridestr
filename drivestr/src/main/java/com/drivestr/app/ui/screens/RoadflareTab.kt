@@ -53,6 +53,8 @@ fun RoadflareTab(
     onApproveFollower: (String) -> Unit = {},
     onDeclineFollower: (String) -> Unit = {},
     onRemoveFollower: (String) -> Unit = {},
+    onMuteFollower: (String) -> Unit = {},
+    onUnmuteFollower: (String) -> Unit = {},
     onRefreshFollowers: (suspend () -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
@@ -337,7 +339,9 @@ fun RoadflareTab(
                 items(approvedFollowers, key = { it.pubkey }) { follower ->
                     FollowerCard(
                         follower = follower,
-                        onRemove = { showRemoveDialog = follower }
+                        onRemove = { showRemoveDialog = follower },
+                        onMute = { onMuteFollower(follower.pubkey) },
+                        onUnmute = { onUnmuteFollower(follower.pubkey) }
                     )
                 }
             }
@@ -674,19 +678,38 @@ private fun PendingFollowerCard(
 
 /**
  * Card for an approved follower.
+ *
+ * Supports two distinct destructive/restrictive actions:
+ * - **Mute** ([onMute] / [onUnmute]): lightweight per-follower suppression (issue #80). No
+ *   key rotation; reversible by Unmute. Visual: greyed-out card + "Muted" badge while muted.
+ * - **Remove** ([onRemove]): heavyweight removal that rotates the RoadFlare key. Recoverable
+ *   only via Settings > Removed Followers.
+ *
+ * The menu item that's shown for the lightweight mute swaps between "Mute" and "Unmute"
+ * based on [RoadflareFollower.mutedAt].
  */
 @Composable
 private fun FollowerCard(
     follower: RoadflareFollower,
     onRemove: () -> Unit,
+    onMute: () -> Unit,
+    onUnmute: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var showMenu by remember { mutableStateOf(false) }
     val dateFormat = remember { SimpleDateFormat("MMM d, yyyy", Locale.getDefault()) }
     val displayName = follower.name.ifEmpty { "${follower.pubkey.take(8)}...${follower.pubkey.takeLast(4)}" }
+    val isMuted = follower.mutedAt != null
 
     Card(
-        modifier = modifier.fillMaxWidth()
+        modifier = modifier.fillMaxWidth(),
+        colors = if (isMuted) {
+            CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+            )
+        } else {
+            CardDefaults.cardColors()
+        }
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -694,17 +717,25 @@ private fun FollowerCard(
                 .fillMaxWidth()
                 .padding(16.dp)
         ) {
-            // Avatar placeholder
+            // Avatar placeholder (greyed when muted)
             Surface(
                 shape = MaterialTheme.shapes.medium,
-                color = MaterialTheme.colorScheme.secondaryContainer,
+                color = if (isMuted) {
+                    MaterialTheme.colorScheme.surfaceVariant
+                } else {
+                    MaterialTheme.colorScheme.secondaryContainer
+                },
                 modifier = Modifier.size(40.dp)
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
-                        imageVector = Icons.Default.Person,
+                        imageVector = if (isMuted) Icons.Default.NotificationsOff else Icons.Default.Person,
                         contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSecondaryContainer
+                        tint = if (isMuted) {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        } else {
+                            MaterialTheme.colorScheme.onSecondaryContainer
+                        }
                     )
                 }
             }
@@ -712,12 +743,34 @@ private fun FollowerCard(
             Spacer(modifier = Modifier.width(12.dp))
 
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = displayName,
-                    style = MaterialTheme.typography.bodyMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = displayName,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (isMuted) {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        } else {
+                            MaterialTheme.colorScheme.onSurface
+                        },
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    if (isMuted) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Surface(
+                            shape = MaterialTheme.shapes.small,
+                            color = MaterialTheme.colorScheme.surfaceVariant
+                        ) {
+                            Text(
+                                text = "Muted",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                }
 
                 Text(
                     text = "Added ${dateFormat.format(Date(follower.addedAt * 1000))}",
@@ -739,6 +792,35 @@ private fun FollowerCard(
                     expanded = showMenu,
                     onDismissRequest = { showMenu = false }
                 ) {
+                    if (isMuted) {
+                        DropdownMenuItem(
+                            text = { Text("Unmute") },
+                            onClick = {
+                                showMenu = false
+                                onUnmute()
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Default.Notifications,
+                                    contentDescription = null
+                                )
+                            }
+                        )
+                    } else {
+                        DropdownMenuItem(
+                            text = { Text("Mute") },
+                            onClick = {
+                                showMenu = false
+                                onMute()
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Default.NotificationsOff,
+                                    contentDescription = null
+                                )
+                            }
+                        )
+                    }
                     DropdownMenuItem(
                         text = { Text("Remove", color = MaterialTheme.colorScheme.error) },
                         onClick = {

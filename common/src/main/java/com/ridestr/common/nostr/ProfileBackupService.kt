@@ -264,12 +264,15 @@ class ProfileBackupService(
      * @param vehicles List of vehicles to backup (driver)
      * @param savedLocations List of saved locations to backup (rider)
      * @param settings Settings backup data
+     * @param mutedFollowerPubkeys Hex pubkeys of lightweight-muted RoadFlare followers (issue #80).
+     *   Empty for non-driver apps; field is omitted from the wire payload when empty.
      * @return Event ID if successful, null on failure
      */
     suspend fun publishProfileBackup(
         vehicles: List<Vehicle>,
         savedLocations: List<SavedLocation>,
-        settings: SettingsBackup
+        settings: SettingsBackup,
+        mutedFollowerPubkeys: List<String> = emptyList()
     ): String? {
         val signer = keyManager.getSigner()
         if (signer == null) {
@@ -284,10 +287,10 @@ class ProfileBackupService(
         }
 
         return try {
-            val event = ProfileBackupEvent.create(signer, vehicles, savedLocations, settings)
+            val event = ProfileBackupEvent.create(signer, vehicles, savedLocations, settings, mutedFollowerPubkeys)
             if (event != null) {
                 relayManager.publish(event)
-                Log.d(TAG, "Published profile backup: ${event.id} (${vehicles.size} vehicles, ${savedLocations.size} locations) to ${relayManager.connectedCount()} relays")
+                Log.d(TAG, "Published profile backup: ${event.id} (${vehicles.size} vehicles, ${savedLocations.size} locations, ${mutedFollowerPubkeys.size} muted) to ${relayManager.connectedCount()} relays")
                 event.id
             } else {
                 Log.e(TAG, "Failed to create profile backup event")

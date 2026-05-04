@@ -1,6 +1,7 @@
 package com.ridestr.common.sync
 
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import com.ridestr.common.data.DriverRoadflareRepository
 import com.ridestr.common.data.SavedLocation
 import com.ridestr.common.data.SavedLocationRepository
 import com.ridestr.common.data.Vehicle
@@ -381,5 +382,135 @@ class ProfileSyncAdapterTest {
 
         assertTrue("Should publish on FetchFailed when both repos present", result != null)
         coVerify(exactly = 1) { nostrService.publishProfileBackup(any(), any(), any()) }
+    }
+
+    // ── Issue #80 mute reconciliation gate (pass-3 fix) ──────────────────────
+
+    @Test
+    fun `publishToNostr preserves remote muted_pubkeys when reconciliation has NOT run`() = testScope.runTest {
+        // Pass-3 hazard: on a fresh device first key-import, the local follower list and
+        // therefore the lightweight-mute set are empty until BOTH Kind 30012 sync AND Kind
+        // 30177 reconciliation finish. An auto-backup (settings hash, vehicle change) that
+        // fires before those complete must NOT publish an empty muted_pubkeys list — that
+        // would silently overwrite the remote authoritative mute state. The
+        // `isMuteReconciled()` gate distinguishes "haven't observed remote yet" from
+        // "deliberately empty".
+        settingsRepository.awaitInitialLoad()
+
+        val driverRoadflareRepository = mockk<DriverRoadflareRepository>(relaxed = true)
+        every { driverRoadflareRepository.isMuteReconciled() } returns false
+        every { driverRoadflareRepository.getMutedFollowerPubkeys() } returns emptyList()
+
+        val remoteMuted = listOf("a".repeat(64), "b".repeat(64))
+        val existingProfile = ProfileBackupData(
+            eventId = "existing-with-mutes",
+            vehicles = emptyList(),
+            savedLocations = emptyList(),
+            settings = SettingsBackup(),
+            mutedFollowerPubkeys = remoteMuted,
+            updatedAt = System.currentTimeMillis(),
+            createdAt = System.currentTimeMillis()
+        )
+
+        val mutedSlot = slot<List<String>>()
+        coEvery { nostrService.fetchProfileBackupResult() } returns ProfileFetchResult.Found(existingProfile)
+        every { vehicleRepository.vehicles } returns MutableStateFlow(emptyList())
+        coEvery {
+            nostrService.publishProfileBackup(any(), any(), any(), capture(mutedSlot))
+        } returns "event-pass3-preserve"
+
+        val adapter = ProfileSyncAdapter(
+            vehicleRepository = vehicleRepository,
+            savedLocationRepository = null,
+            settingsRepository = settingsRepository,
+            nostrService = nostrService,
+            driverRoadflareRepository = driverRoadflareRepository
+        )
+
+        adapter.publishToNostr(mockSigner, mockRelayManager)
+
+        assertEquals("remote muted_pubkeys must be preserved before reconciliation runs", remoteMuted, mutedSlot.captured)
+    }
+
+    @Test
+    fun `publishToNostr trusts local muted_pubkeys after reconciliation has run`() = testScope.runTest {
+        // Inverse of the previous test: once reconciliation has confirmed local matches
+        // remote, an empty local list means the user deliberately unmuted everyone. The
+        // publish must respect that and emit an empty muted_pubkeys list (which the create
+        // path then omits from the wire payload entirely).
+        settingsRepository.awaitInitialLoad()
+
+        val driverRoadflareRepository = mockk<DriverRoadflareRepository>(relaxed = true)
+        every { driverRoadflareRepository.isMuteReconciled() } returns true
+        every { driverRoadflareRepository.getMutedFollowerPubkeys() } returns emptyList()
+
+        val existingProfile = ProfileBackupData(
+            eventId = "existing-with-mutes",
+            vehicles = emptyList(),
+            savedLocations = emptyList(),
+            settings = SettingsBackup(),
+            mutedFollowerPubkeys = listOf("a".repeat(64)),
+            updatedAt = System.currentTimeMillis(),
+            createdAt = System.currentTimeMillis()
+        )
+
+        val mutedSlot = slot<List<String>>()
+        coEvery { nostrService.fetchProfileBackupResult() } returns ProfileFetchResult.Found(existingProfile)
+        every { vehicleRepository.vehicles } returns MutableStateFlow(emptyList())
+        coEvery {
+            nostrService.publishProfileBackup(any(), any(), any(), capture(mutedSlot))
+        } returns "event-pass3-trust-local"
+
+        val adapter = ProfileSyncAdapter(
+            vehicleRepository = vehicleRepository,
+            savedLocationRepository = null,
+            settingsRepository = settingsRepository,
+            nostrService = nostrService,
+            driverRoadflareRepository = driverRoadflareRepository
+        )
+
+        adapter.publishToNostr(mockSigner, mockRelayManager)
+
+        assertTrue("local empty muted_pubkeys must be respected after reconciliation", mutedSlot.captured.isEmpty())
+    }
+
+    @Test
+    fun `publishToNostr emits local muted_pubkeys when reconciled and non-empty`() = testScope.runTest {
+        settingsRepository.awaitInitialLoad()
+
+        val driverRoadflareRepository = mockk<DriverRoadflareRepository>(relaxed = true)
+        every { driverRoadflareRepository.isMuteReconciled() } returns true
+        val localMuted = listOf("c".repeat(64), "d".repeat(64))
+        every { driverRoadflareRepository.getMutedFollowerPubkeys() } returns localMuted
+
+        // Even if remote has different content, local wins after reconciliation.
+        val existingProfile = ProfileBackupData(
+            eventId = "existing-with-different-mutes",
+            vehicles = emptyList(),
+            savedLocations = emptyList(),
+            settings = SettingsBackup(),
+            mutedFollowerPubkeys = listOf("e".repeat(64)),
+            updatedAt = System.currentTimeMillis(),
+            createdAt = System.currentTimeMillis()
+        )
+
+        val mutedSlot = slot<List<String>>()
+        coEvery { nostrService.fetchProfileBackupResult() } returns ProfileFetchResult.Found(existingProfile)
+        every { vehicleRepository.vehicles } returns MutableStateFlow(emptyList())
+        coEvery {
+            nostrService.publishProfileBackup(any(), any(), any(), capture(mutedSlot))
+        } returns "event-pass3-local-wins"
+
+        val adapter = ProfileSyncAdapter(
+            vehicleRepository = vehicleRepository,
+            savedLocationRepository = null,
+            settingsRepository = settingsRepository,
+            nostrService = nostrService,
+            driverRoadflareRepository = driverRoadflareRepository
+        )
+
+        adapter.publishToNostr(mockSigner, mockRelayManager)
+
+        assertEquals(localMuted, mutedSlot.captured)
     }
 }

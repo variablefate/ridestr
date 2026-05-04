@@ -38,12 +38,18 @@ object ProfileBackupEvent {
      * @param vehicles List of vehicles to backup (driver)
      * @param savedLocations List of saved locations to backup (rider)
      * @param settings Settings to backup
+     * @param mutedFollowerPubkeys Hex pubkeys of RoadFlare followers the driver has lightweight-muted
+     *   (issue #80). Empty for non-driver apps. Cross-device reconciled via last-write-wins on
+     *   the event's `created_at`. Not nested under settings — RoadFlare state, not a
+     *   user-configurable setting. Field is omitted from the JSON when empty so an empty driver or
+     *   any rider produces a wire-identical payload to pre-issue-#80 events.
      */
     suspend fun create(
         signer: NostrSigner,
         vehicles: List<Vehicle>,
         savedLocations: List<SavedLocation>,
-        settings: SettingsBackup
+        settings: SettingsBackup,
+        mutedFollowerPubkeys: List<String> = emptyList()
     ): Event? {
         val pubKeyHex = signer.pubKey
 
@@ -67,6 +73,13 @@ object ProfileBackupEvent {
             put("vehicles", vehiclesArray)
             put("savedLocations", locationsArray)
             put("settings", settingsJson)
+            // muted_pubkeys (issue #80): only emit when non-empty so existing parsers and
+            // rider-only apps produce wire-identical payloads to pre-issue-#80 events.
+            if (mutedFollowerPubkeys.isNotEmpty()) {
+                val mutedPubkeysArray = JSONArray()
+                mutedFollowerPubkeys.forEach { mutedPubkeysArray.put(it) }
+                put("muted_pubkeys", mutedPubkeysArray)
+            }
             put("updated_at", System.currentTimeMillis() / 1000)
         }
 
@@ -135,6 +148,22 @@ object ProfileBackupEvent {
                 SettingsBackup() // Default settings if not present
             }
 
+            // Parse muted_pubkeys (issue #80, optional). Missing/empty → no muted pubkeys.
+            // Reject entries that don't look like a 32-byte hex pubkey (64 hex chars).
+            // `optString` on a numeric JSON entry coerces to e.g. `"42"`, which would otherwise pass
+            // a naive `isNotEmpty` filter and accumulate as junk on every backup republish cycle.
+            // Normalise to lowercase so equality checks against locally-stored pubkeys (which are
+            // always lowercase via `toHexKey()`) work without case-sensitivity drift across
+            // backup cycles.
+            val mutedFollowerPubkeys = mutableListOf<String>()
+            val mutedPubkeysArray = json.optJSONArray("muted_pubkeys")
+            if (mutedPubkeysArray != null) {
+                for (i in 0 until mutedPubkeysArray.length()) {
+                    val s = mutedPubkeysArray.optString(i, "")
+                    if (isHexPubkey(s)) mutedFollowerPubkeys.add(s.lowercase())
+                }
+            }
+
             val updatedAt = json.getLong("updated_at")
 
             ProfileBackupData(
@@ -142,6 +171,7 @@ object ProfileBackupEvent {
                 vehicles = vehicles,
                 savedLocations = savedLocations,
                 settings = settings,
+                mutedFollowerPubkeys = mutedFollowerPubkeys,
                 updatedAt = updatedAt,
                 createdAt = event.createdAt
             )
@@ -149,16 +179,42 @@ object ProfileBackupEvent {
             null
         }
     }
+
+    /**
+     * True when [s] looks like a 32-byte hex pubkey (64 hex chars). The validation is
+     * case-insensitive (accepts both `a–f` and `A–F`); callers that intend to *store* the
+     * value are expected to normalise to lowercase via `s.lowercase()` so equality checks
+     * against locally-emitted pubkeys (which are always lowercase via `toHexKey()`) line up
+     * across backup cycles.
+     *
+     * Used to filter junk entries from `muted_pubkeys` so a malformed remote event cannot
+     * grow the local list unboundedly across backup cycles.
+     */
+    private fun isHexPubkey(s: String): Boolean {
+        if (s.length != 64) return false
+        for (c in s) {
+            if (!c.isHexChar()) return false
+        }
+        return true
+    }
+
+    private fun Char.isHexChar(): Boolean =
+        (this in '0'..'9') || (this in 'a'..'f') || (this in 'A'..'F')
 }
 
 /**
  * Parsed and decrypted profile backup data.
+ *
+ * @param mutedFollowerPubkeys Hex pubkeys of RoadFlare followers the driver lightweight-muted
+ *   (issue #80). Empty for non-driver backups or pre-issue-#80 events. Drives the last-write-wins
+ *   reconciliation in `RoadflareKeyManager.reconcileMuteStateFromBackup`.
  */
 data class ProfileBackupData(
     val eventId: String,
     val vehicles: List<Vehicle>,
     val savedLocations: List<SavedLocation>,
     val settings: SettingsBackup,
+    val mutedFollowerPubkeys: List<String> = emptyList(),
     val updatedAt: Long,
     val createdAt: Long
 )

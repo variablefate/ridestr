@@ -1,6 +1,7 @@
 package com.ridestr.common.sync
 
 import android.util.Log
+import com.ridestr.common.data.DriverRoadflareRepository
 import com.ridestr.common.data.SavedLocation
 import com.ridestr.common.data.SavedLocationRepository
 import com.ridestr.common.data.Vehicle
@@ -27,12 +28,21 @@ import com.vitorpamplona.quartz.nip01Core.signers.NostrSigner
  *
  * Migration: On fetch, if no 30177 event found, falls back to separate
  * 30175 (vehicles) and 30176 (locations) events for backward compatibility.
+ *
+ * @param driverRoadflareRepository Optional driver-only repository whose lightweight-mute state
+ *   (issue #80, [DriverRoadflareRepository.getMutedFollowerPubkeys]) is published in the
+ *   `muted_pubkeys` field of Kind 30177. Null for rider apps; the field is then omitted from
+ *   the wire payload entirely. Restoration of mute state is NOT done here — it requires the
+ *   follower list (synced via Kind 30012) to already be present, so the driver app calls
+ *   [com.ridestr.common.roadflare.RoadflareKeyManager.reconcileMuteStateFromBackup] explicitly
+ *   after both sync passes complete.
  */
 class ProfileSyncAdapter(
     private val vehicleRepository: VehicleRepository?,
     private val savedLocationRepository: SavedLocationRepository?,
     private val settingsRepository: SettingsRepository,
-    private val nostrService: NostrService
+    private val nostrService: NostrService,
+    private val driverRoadflareRepository: DriverRoadflareRepository? = null
 ) : SyncableProfileData {
 
     companion object {
@@ -190,9 +200,30 @@ class ProfileSyncAdapter(
                 ?: emptyList()
             val settings = settingsRepository.toBackupData()
 
-            val eventId = nostrService.publishProfileBackup(vehicles, savedLocations, settings)
+            // muted_pubkeys (issue #80): driver-only.
+            //
+            // Three-way decision:
+            // - Rider app (no driverRoadflareRepository) → preserve remote so we don't drop
+            //   a sibling driver app's mute state from the same identity.
+            // - Driver app, reconciliation has NOT yet run this session → preserve remote.
+            //   Local mute list may be empty only because Kind 30012 sync + Kind 30177
+            //   reconciliation haven't completed yet (fresh device first key-import).
+            //   Trusting an empty local list here would silently wipe cross-device mutes
+            //   before reconciliation observes them.
+            // - Driver app, reconciliation HAS run → trust local. An empty local list now
+            //   reflects "user unmuted everyone" — a deliberate empty publish.
+            val mutedFollowerPubkeys = when {
+                driverRoadflareRepository == null ->
+                    existingProfile?.mutedFollowerPubkeys ?: emptyList()
+                driverRoadflareRepository.isMuteReconciled() ->
+                    driverRoadflareRepository.getMutedFollowerPubkeys()
+                else ->
+                    existingProfile?.mutedFollowerPubkeys ?: emptyList()
+            }
+
+            val eventId = nostrService.publishProfileBackup(vehicles, savedLocations, settings, mutedFollowerPubkeys)
             if (eventId != null) {
-                Log.d(TAG, "Profile backed up as event $eventId (${vehicles.size} vehicles, ${savedLocations.size} locations)")
+                Log.d(TAG, "Profile backed up as event $eventId (${vehicles.size} vehicles, ${savedLocations.size} locations, ${mutedFollowerPubkeys.size} muted)")
             } else {
                 Log.w(TAG, "Failed to backup profile")
             }
