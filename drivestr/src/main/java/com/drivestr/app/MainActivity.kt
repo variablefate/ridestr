@@ -86,6 +86,7 @@ import com.ridestr.common.sync.RideHistorySyncAdapter
 import com.ridestr.common.sync.ProfileSyncAdapter
 import com.ridestr.common.data.DriverRoadflareRepository
 import com.ridestr.common.sync.DriverRoadflareSyncAdapter
+import com.ridestr.common.roadflare.FollowNotificationResult
 import com.ridestr.common.roadflare.RoadflareKeyManager
 import com.ridestr.common.nostr.events.RoadflareFollowNotifyEvent
 import com.drivestr.app.service.RoadflareListenerService
@@ -363,40 +364,54 @@ fun DrivestrApp(settingsRepository: SettingsRepository) {
                     if (notification != null) {
                         when (notification.action) {
                             "follow" -> {
-                                // Check if already a follower
-                                val existingFollowers = driverRoadflareRepo.state.value?.followers ?: emptyList()
-                                if (existingFollowers.none { it.pubkey == notification.riderPubKey }) {
-                                    android.util.Log.d("MainActivity", "New RoadFlare follow request from: ${notification.riderName} (${notification.riderPubKey.take(16)})")
+                                val result = roadflareKeyManager.handleFollowNotification(
+                                    signer = signer,
+                                    followerPubkey = notification.riderPubKey,
+                                    riderName = notification.riderName
+                                )
 
-                                    // Add as pending follower - driver must approve in RoadflareTab
-                                    roadflareKeyManager.handleNewFollower(notification.riderPubKey, notification.riderName)
+                                when (result) {
+                                    is FollowNotificationResult.AddedAsPending -> {
+                                        android.util.Log.d("MainActivity", "New RoadFlare follow request from: ${notification.riderName} (${notification.riderPubKey.take(16)})")
 
-                                    // Show OS notification so driver knows about the new follower
-                                    val displayName = notification.riderName.ifEmpty { notification.riderPubKey.take(8) + "..." }
-                                    val tapIntent = android.content.Intent(context, MainActivity::class.java).apply {
-                                        flags = android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP or android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
-                                        putExtra("open_tab", "ROADFLARE")
+                                        // Show OS notification so driver knows about the new follower
+                                        val displayName = notification.riderName.ifEmpty { notification.riderPubKey.take(8) + "..." }
+                                        val tapIntent = android.content.Intent(context, MainActivity::class.java).apply {
+                                            flags = android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP or android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
+                                            putExtra("open_tab", "ROADFLARE")
+                                        }
+                                        val pendingIntent = android.app.PendingIntent.getActivity(
+                                            context, notification.riderPubKey.hashCode(),
+                                            tapIntent, android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT
+                                        )
+                                        val notif = androidx.core.app.NotificationCompat.Builder(context, com.ridestr.common.notification.NotificationHelper.CHANNEL_FOLLOW_REQUEST)
+                                            .setSmallIcon(android.R.drawable.ic_menu_add)
+                                            .setContentTitle("New Follow Request")
+                                            .setContentText("$displayName wants to add you to their driver network")
+                                            .setPriority(androidx.core.app.NotificationCompat.PRIORITY_DEFAULT)
+                                            .setContentIntent(pendingIntent)
+                                            .setAutoCancel(true)
+                                            .build()
+                                        com.ridestr.common.notification.NotificationHelper.showNotification(
+                                            context,
+                                            com.ridestr.common.notification.NotificationHelper.NOTIFICATION_ID_FOLLOW_REQUEST + kotlin.math.abs(notification.riderPubKey.hashCode() % 10000),
+                                            notif
+                                        )
+
+                                        profileSyncManager.backupProfileData()
                                     }
-                                    val pendingIntent = android.app.PendingIntent.getActivity(
-                                        context, notification.riderPubKey.hashCode(),
-                                        tapIntent, android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT
-                                    )
-                                    val notif = androidx.core.app.NotificationCompat.Builder(context, com.ridestr.common.notification.NotificationHelper.CHANNEL_FOLLOW_REQUEST)
-                                        .setSmallIcon(android.R.drawable.ic_menu_add)
-                                        .setContentTitle("New Follow Request")
-                                        .setContentText("$displayName wants to add you to their driver network")
-                                        .setPriority(androidx.core.app.NotificationCompat.PRIORITY_DEFAULT)
-                                        .setContentIntent(pendingIntent)
-                                        .setAutoCancel(true)
-                                        .build()
-                                    com.ridestr.common.notification.NotificationHelper.showNotification(
-                                        context,
-                                        com.ridestr.common.notification.NotificationHelper.NOTIFICATION_ID_FOLLOW_REQUEST + kotlin.math.abs(notification.riderPubKey.hashCode() % 10000),
-                                        notif
-                                    )
-
-                                    // Backup updated state to Nostr
-                                    profileSyncManager.backupProfileData()
+                                    is FollowNotificationResult.KeyResent -> {
+                                        android.util.Log.d("MainActivity", "Re-delivered key to approved ${notification.riderPubKey.take(16)}")
+                                    }
+                                    is FollowNotificationResult.AlreadyMuted -> {
+                                        android.util.Log.d("MainActivity", "Follow notification from muted ${notification.riderPubKey.take(16)} — preserving driver's Remove decision")
+                                    }
+                                    is FollowNotificationResult.AlreadyPending -> {
+                                        android.util.Log.d("MainActivity", "Follow notification from pending ${notification.riderPubKey.take(16)} — awaiting driver approval")
+                                    }
+                                    is FollowNotificationResult.Failed -> {
+                                        android.util.Log.w("MainActivity", "Follow notification handling failed for ${notification.riderPubKey.take(16)}: ${result.reason}")
+                                    }
                                 }
                             }
                             "unfollow" -> {

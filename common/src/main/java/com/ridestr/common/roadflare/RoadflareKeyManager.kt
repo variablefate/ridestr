@@ -240,19 +240,107 @@ class RoadflareKeyManager(
     }
 
     /**
-     * Handle a new follow notification from a rider.
-     * Adds follower as pending (requires separate approval by driver).
+     * Handle a Kind 3187 follow notification from a rider.
      *
-     * @param followerPubkey The rider's pubkey
-     * @param riderName The rider's display name (from notification)
-     * @return true if follower was added as pending
+     * Kind 3187 is used by riders for both first follows AND as a delivery-retry
+     * signal when their stored copy of the driver's RoadFlare key is unavailable
+     * (fresh install, transient relay failure during backup restore, etc.).
+     *
+     * Receiving Kind 3187 NEVER rotates the key, advances
+     * [DriverRoadflareRepository.getKeyUpdatedAt], or republishes Kind 30012 —
+     * other followers' stored keys are not invalidated by one rider re-adding
+     * the driver. See [FollowNotificationResult] for the per-state outcomes.
+     *
+     * Muted riders are left alone: the driver's "Remove" decision is preserved
+     * (matches the cross-device sync invariant in
+     * `RoadflareDriverCoordinator.mergeMutedLists`). The mute check runs before
+     * the existence check so that a muted entry without a corresponding
+     * `followers` record (possible after cross-device sync filters out a
+     * follower whose Kind 30011 stopped listing the driver) is not bypassed.
+     *
+     * @param signer The driver's identity signer (for publishing Kind 3186).
+     * @param followerPubkey The rider's pubkey from the Kind 3187 event.
+     * @param riderName The rider's display name from the notification body.
+     * @return The action taken. The call site uses this to decide whether to
+     *   surface an OS notification (only [FollowNotificationResult.AddedAsPending])
+     *   and whether to refresh profile backups.
+     *   [FollowNotificationResult.AlreadyPending] covers two situations: the
+     *   rider was already pending before this call, OR a concurrent path won
+     *   the add race between the existence check and [addPendingFollower].
      */
-    fun handleNewFollower(
+    suspend fun handleFollowNotification(
+        signer: NostrSigner,
         followerPubkey: String,
         riderName: String
+    ): FollowNotificationResult {
+        if (repository.isMuted(followerPubkey)) {
+            // Muted re-add — preserve the driver's "Remove" decision.
+            // Auto-unmute would conflict with mergeMutedLists' "once muted, always
+            // muted" cross-device invariant and silently bypass driver consent.
+            // Checked first so a stale muted entry without a `followers` record
+            // (e.g., after cross-device sync) cannot be bypassed.
+            return FollowNotificationResult.AlreadyMuted
+        }
+
+        val existing = repository.state.value?.followers?.find { it.pubkey == followerPubkey }
+
+        if (existing == null) {
+            // New rider — add as pending; driver must approve via UI before key is sent.
+            // Preserves driver consent for genuinely new follows.
+            val added = addPendingFollower(followerPubkey, riderName)
+            return if (added) {
+                FollowNotificationResult.AddedAsPending
+            } else {
+                // Race: another path added them between our state read and add. Treat as pending.
+                FollowNotificationResult.AlreadyPending
+            }
+        }
+
+        if (existing.approved) {
+            // Approved re-add — re-deliver the current key. State unchanged, no Kind 30012 republish.
+            val hasKey = repository.getRoadflareKey() != null
+            val keySent = resendCurrentKey(signer, followerPubkey)
+            return if (keySent) {
+                Log.d(TAG, "Re-sent key to approved follower ${followerPubkey.take(8)}...")
+                FollowNotificationResult.KeyResent
+            } else if (!hasKey) {
+                FollowNotificationResult.Failed("no current key to resend")
+            } else {
+                FollowNotificationResult.Failed("Kind 3186 publish failed")
+            }
+        }
+
+        // Pending (not yet approved) re-add — driver still owes an approval via UI.
+        return FollowNotificationResult.AlreadyPending
+    }
+
+    /**
+     * Re-send the current Kind 3186 key share to a specific follower.
+     * Uses the existing [DriverRoadflareRepository.getKeyUpdatedAt]; never
+     * advances it.
+     *
+     * If [DriverRoadflareRepository.getKeyUpdatedAt] is `null` but a key
+     * exists, the fallback to [DriverRoadflareKey.createdAt] is also persisted
+     * via [DriverRoadflareRepository.updateKeyUpdatedAt] — this mirrors
+     * [ensureFollowersHaveCurrentKey] so the rider's stored key share carries
+     * the same `keyUpdatedAt` value any future Kind 30012 publish will emit.
+     *
+     * @return true if the key was sent; false if no key is configured yet or send failed.
+     */
+    private suspend fun resendCurrentKey(
+        signer: NostrSigner,
+        followerPubkey: String
     ): Boolean {
-        // Just add as pending - driver must approve separately
-        return addPendingFollower(followerPubkey, riderName)
+        val key = repository.getRoadflareKey() ?: return false
+        val keyUpdatedAt = repository.getKeyUpdatedAt() ?: run {
+            repository.updateKeyUpdatedAt(key.createdAt)
+            key.createdAt
+        }
+        val sent = sendKeyToFollower(signer, followerPubkey, key, keyUpdatedAt)
+        if (sent) {
+            repository.markFollowerKeySent(followerPubkey, key.version)
+        }
+        return sent
     }
 
     /**
