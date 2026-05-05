@@ -26,6 +26,27 @@ data class CachedDriverLocation(
 )
 
 /**
+ * Cached driver presence — read from the **public** `status` tag on Kind 30014 events
+ * (no decryption required). Issue #82: drives the rider's "this driver is available
+ * even though I can't see their location" UX so a stale or missing RoadFlare key never
+ * blocks ride-on-demand.
+ *
+ * Distinct from [CachedDriverLocation] which carries the decrypted lat/lon/timestamp
+ * from the event content. Presence is a strict subset that any follower can read
+ * regardless of key state — the protocol exposes `status` publicly via the event tags
+ * (see `RoadflareLocationEvent.create()` line 86 + `getStatus()` helper line 163).
+ *
+ * @param status `"online"` / `"on_ride"` / `"offline"` from the public tag
+ * @param timestamp `event.createdAt` of the latest 30014 event for this driver
+ * @param keyVersion Driver's current RoadFlare key version, also from a public tag
+ */
+data class CachedDriverPresence(
+    val status: String,
+    val timestamp: Long,
+    val keyVersion: Int = 0
+)
+
+/**
  * Repository for managing rider's followed drivers list for RoadFlare.
  * Stores drivers and their RoadFlare decryption keys in SharedPreferences.
  *
@@ -74,6 +95,33 @@ class FollowedDriversRepository(context: Context) {
      */
     fun clearDriverLocations() {
         _driverLocations.value = emptyMap()
+    }
+
+    /**
+     * Cached driver presence — populated from the public `status` tag on Kind 30014
+     * regardless of whether the encrypted content can be decrypted. Issue #82.
+     */
+    private val _driverPresence = MutableStateFlow<Map<String, CachedDriverPresence>>(emptyMap())
+    val driverPresence: StateFlow<Map<String, CachedDriverPresence>> = _driverPresence.asStateFlow()
+
+    /**
+     * Update a driver's cached presence from a Kind 30014 event's PUBLIC tags.
+     * Skips the update if an existing entry has a newer timestamp (out-of-order delivery).
+     */
+    fun updateDriverPresence(pubkey: String, status: String, timestamp: Long, keyVersion: Int = 0) {
+        val existing = _driverPresence.value[pubkey]
+        if (existing != null && existing.timestamp >= timestamp) return
+        _driverPresence.value = _driverPresence.value + (pubkey to CachedDriverPresence(status, timestamp, keyVersion))
+    }
+
+    /** Remove a driver's cached presence. */
+    fun removeDriverPresence(pubkey: String) {
+        _driverPresence.value = _driverPresence.value - pubkey
+    }
+
+    /** Clear all cached driver presence. */
+    fun clearDriverPresence() {
+        _driverPresence.value = emptyMap()
     }
 
     /**
