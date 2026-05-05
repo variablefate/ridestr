@@ -38,6 +38,7 @@ See [docs/README.md](../docs/README.md) for full documentation.
 | Rider Coordinator Extraction (Issue #65) | ✅ COMPLETE (OfferCoordinator, PaymentCoordinator, RoadflareRiderCoordinator + AvailabilityMonitorPolicy in `:common/coordinator/`) |
 | Driver Coordinator Extraction (Issue #66) | ✅ COMPLETE (AvailabilityCoordinator, AcceptanceCoordinator, RoadflareDriverCoordinator in `:common/coordinator/`; PaymentStatus consolidated to `:common/payment/PaymentModels`) |
 | Compose Screen Decomposition (Issue #67) | ✅ COMPLETE (per-module `components/` packages: DriverModeScreenComponents, RideTabComponents, DriverNetworkComponents, HistoryComponents, SettingsComponents, ReorderablePaymentMethodList) |
+| Per-Follower Lightweight Mute (Issue #80) | ✅ COMPLETE (`RoadflareFollower.mutedAt` + Kind 30177 `muted_pubkeys` + last-write-wins reconciliation; `AlreadyLightMuted` guards Kind 3187 / Kind 3188; `mergeFollowerLists` union-merges; `isMuteReconciled` gate prevents fresh-import overwrite) |
 
 ## Project Structure
 - `rider-app/` - Rider Android app (RiderViewModel.kt is main state)
