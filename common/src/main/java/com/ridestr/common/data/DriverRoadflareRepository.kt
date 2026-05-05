@@ -440,6 +440,15 @@ class DriverRoadflareRepository(context: Context) {
         return _state.value?.followers?.any { it.pubkey == pubkey && it.mutedAt != null } ?: false
     }
 
+    /**
+     * True if the rider is muted via either path (issue #82). Single helper so receive-side
+     * filters across the codebase use the same check. Callers:
+     * - `DriverViewModel.processIncomingOffer` — Kind 3173 ride offers (silent-drop muted)
+     * - `RoadflareListenerService` Kind 3189 handler — driver pings (silent-drop muted)
+     * - `MainActivity` Kind 3187 follow + Kind 3188 ack handlers — already used for both paths
+     */
+    fun isAnyMuted(pubkey: String): Boolean = isMuted(pubkey) || isFollowerMuted(pubkey)
+
     // In-memory flag (resets across process restarts) tracking whether the lightweight-mute
     // reconciliation against Kind 30177 has run at least once this session.
     //

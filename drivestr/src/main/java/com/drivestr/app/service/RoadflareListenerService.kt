@@ -264,8 +264,12 @@ class RoadflareListenerService : Service() {
         // requiring a service restart (unlike the Kind 3173 snapshot approach).
         // O(n) in muted-count per event; acceptable up to ~200 muted pubkeys.
         // Revisit with a cached snapshot if drivers report >1000 followers or high muted counts.
-        val mutedPubkeys = driverRoadflareRepo?.getMutedPubkeys() ?: emptySet()
-        if (event.pubKey in mutedPubkeys) {
+        //
+        // Issue #82: now checks BOTH mute paths (heavyweight MutedRider + lightweight
+        // RoadflareFollower.mutedAt) via the unified `isAnyMuted` helper. Pre-#82 only
+        // the heavyweight list was checked, so a lightweight-muted rider could still wake
+        // the driver up with a Kind 3189 ping.
+        if (driverRoadflareRepo?.isAnyMuted(event.pubKey) == true) {
             Log.d(TAG, "Discarding authenticated ping from muted rider ${event.pubKey.take(8)}")
             return
         }

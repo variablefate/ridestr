@@ -3085,6 +3085,15 @@ class DriverViewModel @Inject constructor(
         val offerType = if (offer.isRoadflare) "RoadFlare" else "Direct"
         Log.d(TAG, "Received $offerType offer from ${offer.riderPubKey.take(8)}...")
 
+        // Issue #82 Scope A — silent mute filter. Drop offers from heavyweight-muted
+        // ("Removed") AND lightweight-muted riders. The rider sees no response (matches
+        // standard "soft block" UX from Twitter/Instagram) and can fall back to another
+        // app — explicit product decision: muted means muted, downgraded UX is acceptable.
+        if (driverRoadflareRepository.isAnyMuted(offer.riderPubKey)) {
+            Log.d(TAG, "Filtering offer from muted rider ${offer.riderPubKey.take(8)}...")
+            return
+        }
+
         // Filter out offers we've already accepted (prevents duplicates after ride completion)
         if (offer.eventId in acceptedOfferEventIds) {
             Log.d(TAG, "Ignoring already-accepted offer: ${offer.eventId.take(8)}")
