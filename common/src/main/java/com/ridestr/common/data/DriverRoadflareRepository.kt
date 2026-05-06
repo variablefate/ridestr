@@ -442,18 +442,18 @@ class DriverRoadflareRepository(context: Context) {
 
     /**
      * True if the rider is muted via either path (issue #82). Single helper so receive-side
-     * filters across the codebase use the same check. Callers:
+     * filters across the codebase use the same check and can't drift. Callers:
      * - `DriverViewModel.processIncomingOffer` — Kind 3173 direct/RoadFlare ride offers
      * - `DriverViewModel.subscribeToBroadcastRequests` — Kind 3173 broadcast offers
      * - `RoadflareListenerService.subscribeToRoadflareRequests` — Kind 3173 RoadFlare offers
      *   reaching the foreground service
      * - `RoadflareListenerService.processPingEvent` — Kind 3189 driver pings
+     * - `MainActivity` Kind 3188 ack handler — refuses key re-delivery to muted riders
      *
-     * Kind 3187 (`RoadflareKeyManager.handleFollowNotification`) and Kind 3188
-     * (`MainActivity` ack handler) implement the equivalent two-path check inline via
-     * [isMuted] + [isFollowerMuted] separately, predating this helper. Functionally
-     * equivalent — kept inline because each call site has additional surrounding logic
-     * that wraps the mute decision.
+     * Kind 3187 (`RoadflareKeyManager.handleFollowNotification`) deliberately calls
+     * [isMuted] and [isFollowerMuted] separately because the two outcomes map to
+     * distinct return values (`AlreadyMuted` vs `AlreadyLightMuted`) — collapsing
+     * to `isAnyMuted` there would lose the semantic distinction the caller depends on.
      */
     fun isAnyMuted(pubkey: String): Boolean = isMuted(pubkey) || isFollowerMuted(pubkey)
 

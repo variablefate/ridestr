@@ -478,13 +478,15 @@ fun DrivestrApp(settingsRepository: SettingsRepository) {
                             android.util.Log.w("MainActivity", "Key ack pubkey mismatch - ignoring (claimed=${ackData.riderPubKey.take(8)}, signer=${event.pubKey.take(8)})")
                         } else {
                             // Verify authorized follower (approved + not muted via either path).
-                            // - Heavyweight mute (`MutedRider` / "Remove" UX) excludes the rider entirely.
-                            // - Lightweight mute (issue #80, `RoadflareFollower.mutedAt`) suppresses
-                            //   key delivery — re-sends in response to acks would defeat the mute.
+                            // `isAnyMuted` covers BOTH heavyweight (`MutedRider` / "Remove" UX,
+                            // which excludes the rider entirely) AND lightweight (issue #80,
+                            // `RoadflareFollower.mutedAt`, which suppresses key delivery — re-sends
+                            // in response to acks would defeat the mute). Single helper so the
+                            // four receive-side handlers (Kind 3173 broadcast/direct, 3188, 3189)
+                            // can't drift on which paths they cover.
                             val follower = driverRoadflareRepo.getFollowers().find { it.pubkey == ackData.riderPubKey }
-                            val isMuted = driverRoadflareRepo.getMutedPubkeys().contains(ackData.riderPubKey)
-                            val isLightMuted = follower?.mutedAt != null
-                            val isAuthorized = follower != null && follower.approved && !isMuted && !isLightMuted
+                            val isAuthorized = follower != null && follower.approved &&
+                                !driverRoadflareRepo.isAnyMuted(ackData.riderPubKey)
 
                             if (!isAuthorized) {
                                 android.util.Log.w("MainActivity", "Key ack from unauthorized follower - ignoring")

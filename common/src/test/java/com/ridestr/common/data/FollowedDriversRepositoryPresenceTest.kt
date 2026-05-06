@@ -106,4 +106,20 @@ class FollowedDriversRepositoryPresenceTest {
         assertTrue("rider-B appears in locations", repo.driverLocations.value.containsKey("rider-B"))
         assertFalse("rider-B NOT in presence (writes are independent)", repo.driverPresence.value.containsKey("rider-B"))
     }
+
+    @Test
+    fun `clearAll wipes the presence channel along with locations`() {
+        // Issue #82 pass-1 fix: presence has the same in-memory-only semantic as locations
+        // and MUST be cleared on logout so the next user's session doesn't inherit stale
+        // data from the previous identity. The test pins this so a future refactor that
+        // adds another in-memory state can't silently regress the cleanup.
+        repo.updateDriverPresence("driver-A", "online", 1_000L, 5)
+        repo.updateDriverPresence("driver-B", "on_ride", 1_500L, 6)
+        repo.updateDriverLocation("driver-C", lat = 36.0, lon = -115.0, status = "online", timestamp = 1_000L)
+
+        repo.clearAll()
+
+        assertTrue("presence map must be empty after clearAll", repo.driverPresence.value.isEmpty())
+        assertTrue("locations map must be empty after clearAll", repo.driverLocations.value.isEmpty())
+    }
 }
