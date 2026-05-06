@@ -185,9 +185,6 @@ class RoadflareListenerService : Service() {
     }
 
     private fun subscribeToRoadflareRequests(driverPubKey: String) {
-        // Get muted pubkeys to filter
-        val mutedPubkeys = driverRoadflareRepo?.getMutedPubkeys()?.toSet() ?: emptySet()
-
         subscriptionId = nostrService?.relayManager?.subscribe(
             kinds = listOf(RideshareEventKinds.RIDE_OFFER),
             tags = mapOf(
@@ -198,8 +195,13 @@ class RoadflareListenerService : Service() {
             // Skip if already seen (atomic check-and-add)
             if (!seenRequests.add(event.id)) return@subscribe
 
-            // Skip if from muted rider
-            if (event.pubKey in mutedPubkeys) {
+            // Issue #82: live mute check via the unified `isAnyMuted` helper.
+            // Pre-fix this captured a `getMutedPubkeys()` snapshot at subscribe-open
+            // time (heavyweight only) — which had two compounding gaps: mutes applied
+            // after subscribe were invisible until service restart, AND lightweight-muted
+            // riders (`RoadflareFollower.mutedAt`) bypassed the check entirely. The
+            // live `isAnyMuted` call covers both paths and refreshes per event.
+            if (driverRoadflareRepo?.isAnyMuted(event.pubKey) == true) {
                 Log.d(TAG, "Ignoring RoadFlare from muted rider ${event.pubKey.take(8)}")
                 return@subscribe
             }

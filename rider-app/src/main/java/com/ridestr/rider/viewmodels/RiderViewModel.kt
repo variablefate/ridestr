@@ -1826,18 +1826,20 @@ class RiderViewModel @Inject constructor(
             val eventId = sendOfferToNostr(params, pickupRoute)
             if (eventId != null) {
                 Log.d(TAG, "Sent RoadFlare offer to ${driverPubKey.take(16)}: $eventId")
-                // Issue #82: stale-key piggyback. If we just sent an offer to a driver
-                // we can't see the location of (no key OR stale key), fire a Kind 3188
+                // Acceptance subscription MUST be armed before any further round-trip
+                // so a fast-responding driver's Kind 3174 isn't missed.
+                setupOfferSubscriptions(eventId, driverPubKey, isBroadcast = false)
+                applyOfferSuccessState(params, eventId)
+                // Issue #82: stale-key piggyback. If we sent an offer to a driver we
+                // can't see the location of (no key OR stale key), fire a Kind 3188
                 // status="stale" alongside so the driver re-delivers the current key in
                 // the same beat. By the time they accept, we have the new key and can
-                // decrypt the in-ride Kind 30014 updates. Fire-and-forget — failure
-                // doesn't affect the offer, and `RoadflareTab.checkStaleKeys` covers the
-                // periodic backfill.
+                // decrypt the in-ride Kind 30014 updates. Fire-and-forget — runs AFTER
+                // the acceptance subscription is live so its publish round-trip can't
+                // race the driver's response.
                 if (driverLocation == null) {
                     requestKeyRefreshAlongsideOffer(driverPubKey)
                 }
-                setupOfferSubscriptions(eventId, driverPubKey, isBroadcast = false)
-                applyOfferSuccessState(params, eventId)
             } else {
                 applyOfferFailureState("Failed to send RoadFlare offer")
             }
@@ -1934,12 +1936,13 @@ class RiderViewModel @Inject constructor(
             val eventId = sendOfferToNostr(params, pickupRoute)
             if (eventId != null) {
                 Log.d(TAG, "Sent RoadFlare offer with $paymentMethod to ${driverPubKey.take(16)}: $eventId")
-                // Issue #82: stale-key piggyback. See sendRoadflareOffer() for the rationale.
+                // Acceptance subscription armed BEFORE the piggyback round-trip — see
+                // sendRoadflareOffer() for the ordering rationale.
+                setupOfferSubscriptions(eventId, driverPubKey, isBroadcast = false)
+                applyOfferSuccessState(params, eventId)
                 if (driverLocation == null) {
                     requestKeyRefreshAlongsideOffer(driverPubKey)
                 }
-                setupOfferSubscriptions(eventId, driverPubKey, isBroadcast = false)
-                applyOfferSuccessState(params, eventId)
             } else {
                 applyOfferFailureState("Failed to send RoadFlare offer")
             }

@@ -316,7 +316,7 @@ class FollowedDriversRepository(context: Context) {
     }
 
     /**
-     * Clear all followed drivers and cached names/locations (for logout).
+     * Clear all followed drivers and cached names/locations/presence (for logout).
      */
     fun clearAll() {
         prefs.edit()
@@ -326,6 +326,10 @@ class FollowedDriversRepository(context: Context) {
         _drivers.value = emptyList()
         _driverNames.value = emptyMap()
         _driverLocations.value = emptyMap()
+        // Issue #82: presence has the same in-memory-only semantic as locations and
+        // belongs in the logout reset path so the next user's session doesn't inherit
+        // stale presence data from the previous identity.
+        _driverPresence.value = emptyMap()
     }
 
     companion object {

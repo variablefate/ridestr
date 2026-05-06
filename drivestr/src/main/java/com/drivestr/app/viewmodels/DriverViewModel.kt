@@ -3425,6 +3425,14 @@ class DriverViewModel @Inject constructor(
 
             Log.d(TAG, "Received broadcast ride request from ${request.riderPubKey.take(8)}, fare=${request.fareEstimate}")
 
+            // Issue #82 Scope A — silent mute filter for the broadcast Kind 3173 path.
+            // Mirrors the check in `processIncomingOffer` for the direct/RoadFlare path.
+            // Without this, a muted rider's broadcast request still lands in the inbox.
+            if (driverRoadflareRepository.isAnyMuted(request.riderPubKey)) {
+                Log.d(TAG, "Filtering broadcast request from muted rider ${request.riderPubKey.take(8)}...")
+                return@subscribeToBroadcastRideRequests
+            }
+
             // Filter out requests we've already accepted
             if (request.eventId in acceptedOfferEventIds) {
                 Log.d(TAG, "Ignoring already-accepted request: ${request.eventId.take(8)}")
