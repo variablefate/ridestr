@@ -3,6 +3,7 @@ package com.ridestr.common.data
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -121,5 +122,57 @@ class FollowedDriversRepositoryPresenceTest {
 
         assertTrue("presence map must be empty after clearAll", repo.driverPresence.value.isEmpty())
         assertTrue("locations map must be empty after clearAll", repo.driverLocations.value.isEmpty())
+    }
+
+    @Test
+    fun `removeDriver clears the presence entry for that pubkey`() {
+        // Issue #82 pass-3 fix: removeDriver was clearing names + locations but not presence.
+        // The leak meant a re-add of the same driver in a single session could see the
+        // `(timestamp >= timestamp)` guard hit on the same Kind 30014 event (still within
+        // its 5-min relay TTL), rendering the re-added driver as offline until the next
+        // broadcast tick. Pin the cleanup symmetric with locations.
+        // (Note: this repo doesn't expose addDriver as a unit-test seam — `_drivers` is only
+        // mutated via the wider Kind 30011 sync path. The presence clear is unconditional on
+        // pubkey match, so test it directly without going through the drivers list.)
+        repo.updateDriverPresence("driver-A", "online", 1_000L, 5)
+        repo.updateDriverPresence("driver-B", "online", 1_000L, 5)
+        repo.updateDriverLocation("driver-A", lat = 36.0, lon = -115.0, status = "online", timestamp = 1_000L)
+
+        repo.removeDriver("driver-A")
+
+        assertNull("driver-A presence must be cleared", repo.driverPresence.value["driver-A"])
+        assertNull("driver-A location must be cleared", repo.driverLocations.value["driver-A"])
+        assertNotNull("driver-B presence must NOT be touched", repo.driverPresence.value["driver-B"])
+    }
+
+    @Test
+    fun `updateDriverPresence converges to highest timestamp under concurrent updates`() {
+        // Issue #82 pass-3 fix: updateDriverPresence used direct `_driverPresence.value =`
+        // assignment with a non-atomic read-then-check-then-write guard. Two relay threads
+        // calling updateDriverPresence for the same pubkey with different timestamps could
+        // both pass the `existing.timestamp >= timestamp` guard (both reading the same
+        // `existing` before either writes), and the lower-timestamp write could win the
+        // StateFlow assignment. The fix uses StateFlow.update {} for CAS-retried
+        // read-modify-write.
+        //
+        // Sanity check: launch many concurrent updates with strictly-ascending timestamps
+        // (in shuffled order to avoid happens-before ordering by accident) and confirm the
+        // highest timestamp wins. Uses plain JVM threads to avoid coroutine-scope plumbing
+        // in a Robolectric test.
+        val concurrency = 64
+        val timestamps = (1..concurrency).toList().shuffled()
+        val threads = timestamps.map { ts ->
+            Thread { repo.updateDriverPresence("driver-X", "online", ts.toLong(), 0) }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+
+        val finalEntry = repo.driverPresence.value["driver-X"]
+        assertNotNull("driver-X presence must be set", finalEntry)
+        assertEquals(
+            "highest timestamp must win after concurrent updates",
+            concurrency.toLong(),
+            finalEntry?.timestamp
+        )
     }
 }

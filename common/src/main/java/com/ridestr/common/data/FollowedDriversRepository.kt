@@ -7,6 +7,7 @@ import com.ridestr.common.nostr.events.RoadflareKey
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -106,12 +107,27 @@ class FollowedDriversRepository(context: Context) {
 
     /**
      * Update a driver's cached presence from a Kind 30014 event's PUBLIC tags.
-     * Skips the update if an existing entry has a newer timestamp (out-of-order delivery).
+     * Skips the update if an existing entry has a newer-or-equal timestamp (out-of-order
+     * delivery + same-event multi-relay dedup).
+     *
+     * Issue #82: uses [kotlinx.coroutines.flow.MutableStateFlow.update] so the read /
+     * timestamp-compare / write executes atomically under CAS. Direct
+     * `_driverPresence.value =` would race when multiple relay callbacks (`Dispatchers.IO`)
+     * update the same pubkey concurrently — both reading the same `existing` before either
+     * writes — and the lower-timestamp write could win, defeating the guard. The other
+     * in-memory caches in this file use the simpler unprotected pattern; this one is held
+     * to a stricter standard because the PR's KDoc explicitly advertises the out-of-order
+     * guard as a correctness property.
      */
     fun updateDriverPresence(pubkey: String, status: String, timestamp: Long, keyVersion: Int = 0) {
-        val existing = _driverPresence.value[pubkey]
-        if (existing != null && existing.timestamp >= timestamp) return
-        _driverPresence.value = _driverPresence.value + (pubkey to CachedDriverPresence(status, timestamp, keyVersion))
+        _driverPresence.update { current ->
+            val existing = current[pubkey]
+            if (existing != null && existing.timestamp >= timestamp) {
+                current
+            } else {
+                current + (pubkey to CachedDriverPresence(status, timestamp, keyVersion))
+            }
+        }
     }
 
     /** Remove a driver's cached presence. */
@@ -239,6 +255,11 @@ class FollowedDriversRepository(context: Context) {
         }
         // Remove from location cache (in-memory only, no persist needed)
         _driverLocations.value = _driverLocations.value - pubkey
+        // Issue #82: also remove the presence entry so a re-add of the same driver
+        // in the same session doesn't see a stale `(timestamp >= timestamp)` guard
+        // hit and silently render the re-added driver as offline until their next
+        // broadcast tick.
+        _driverPresence.value = _driverPresence.value - pubkey
     }
 
     /**

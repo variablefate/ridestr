@@ -48,6 +48,15 @@ class RoadflareDriverPresenceCoordinator(
         locationSubId?.let { nostrService.closeRoadflareSubscription(it) }
         locationSubId = null
 
+        // Issue #82: prune lastLocationCreatedAt for drivers no longer in the list. Without
+        // this, removing + re-adding the same driver in a single session leaves the prior
+        // session's `lastLocationCreatedAt[pubkey]` intact, which then gates the same Kind
+        // 30014 event (createdAt unchanged within the 5-min TTL window) at the
+        // `eventCreatedAt < lastSeen` boundary — driver shows as offline until the next
+        // broadcast tick, defeating the stale-key UX in a real scenario.
+        val currentPubkeys = drivers.map { it.pubkey }.toSet()
+        lastLocationCreatedAt.keys.retainAll(currentPubkeys)
+
         // Issue #82: subscribe to ALL followed drivers, not just those with a current key.
         // The PUBLIC `status` tag on Kind 30014 lets us track availability for stale-key /
         // missing-key drivers without ever decrypting the encrypted lat/lon content. The
