@@ -276,6 +276,32 @@ class RoadflareMuteTest {
     }
 
     @Test
+    fun `isAnyMuted returns true for either heavyweight or lightweight mute`() {
+        // Issue #82 helper — single check used by all four receive-side handlers
+        // (Kind 3173 / 3187 / 3188 / 3189). Must catch both mute paths.
+        seedFollower("rider-A", mutedAt = null)              // unmuted baseline
+        seedFollower("rider-B", mutedAt = 100L)              // lightweight only
+        seedFollower("rider-C", mutedAt = null)              // will become heavyweight
+        seedFollower("rider-D", mutedAt = 100L)              // both paths
+
+        val current = repository.state.value!!
+        repository.restoreFromBackup(
+            current.copy(
+                muted = listOf(
+                    MutedRider(pubkey = "rider-C", mutedAt = 50L),
+                    MutedRider(pubkey = "rider-D", mutedAt = 50L)
+                )
+            )
+        )
+
+        assertFalse("unmuted rider must NOT be flagged", repository.isAnyMuted("rider-A"))
+        assertTrue("lightweight-muted rider must be flagged", repository.isAnyMuted("rider-B"))
+        assertTrue("heavyweight-muted rider must be flagged", repository.isAnyMuted("rider-C"))
+        assertTrue("rider muted via both paths must be flagged", repository.isAnyMuted("rider-D"))
+        assertFalse("unknown pubkey must NOT be flagged", repository.isAnyMuted("ghost-rider"))
+    }
+
+    @Test
     fun `lightweight mute is independent of heavyweight MutedRider`() {
         seedFollower("rider-A", mutedAt = 1L)
         // Heavyweight mute would also flag "rider-A" via the legacy MutedRider list — the

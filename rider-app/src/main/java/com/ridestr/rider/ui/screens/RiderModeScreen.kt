@@ -2939,6 +2939,10 @@ private fun RoadflareDriverSelectionSheet(
 
     // Use repository cache for names and locations (survives sheet close/reopen)
     val cachedLocations by followedDriversRepository.driverLocations.collectAsState()
+    // Issue #82: presence channel — drives availability for drivers whose Kind 30014
+    // location can't be decrypted (stale key, missing key). Read from the public
+    // `status` tag, no decryption required.
+    val cachedPresence by followedDriversRepository.driverPresence.collectAsState()
     val driverNames by followedDriversRepository.driverNames.collectAsState()
 
     // Location subscriptions and profile fetching are now managed by
@@ -3047,14 +3051,27 @@ private fun RoadflareDriverSelectionSheet(
 
             val driverEntries = drivers.map { driver ->
                 val cachedState = cachedLocations[driver.pubkey]
+                val cachedPres = cachedPresence[driver.pubkey]
                 val driverLocation = cachedState?.let { Location(lat = it.lat, lon = it.lon) }
                 val driverName = driverNames[driver.pubkey] ?: driver.pubkey.take(8) + "..."
                 val hasKey = driver.roadflareKey != null
 
-                val isOnline = cachedState != null &&
+                // Issue #82: a driver is "online" if EITHER the decrypted location says so
+                // (cachedState path — drivers with a fresh key) OR the public `status` tag
+                // on Kind 30014 says so (cachedPres path — drivers with stale or missing
+                // key). The presence-only path drives the stale-key offer flow: rider can
+                // still request the ride even though they can't see the driver's lat/lon.
+                val locationOnline = cachedState != null &&
                     cachedState.status == com.ridestr.common.nostr.events.RoadflareLocationEvent.Status.ONLINE &&
                     (nowSec - cachedState.timestamp) < staleThresholdSec
+                val presenceOnline = cachedPres != null &&
+                    cachedPres.status == com.ridestr.common.nostr.events.RoadflareLocationEvent.Status.ONLINE &&
+                    (nowSec - cachedPres.timestamp) < staleThresholdSec
+                val isOnline = locationOnline || presenceOnline
 
+                // Per-driver fare quote needs the actual location. When location is
+                // unavailable (stale key) we omit the quote — the offer-send path falls
+                // back to the rider-route fare via `state.fareEstimate` automatically.
                 val quote = if (driverLocation != null && pickupLocation != null) {
                     RoadflareFarePolicy.quoteDriver(
                         pickupLat = pickupLocation.lat,
@@ -3097,7 +3114,14 @@ private fun RoadflareDriverSelectionSheet(
                         pickupMiles = quote?.pickupMiles,
                         fareState = quote?.fareState ?: FareState.ESTIMATED,
                         isTooFar = isTooFar,
-                        isBroadcastEligible = hasKey && isOnline && !isTooFar,
+                        // Broadcast requires a known location for the geographic too-far cap
+                        // — `sendRoadflareToAll` filters out null-location drivers anyway.
+                        // Use the strict `locationOnline` here so the count + button match
+                        // what the batch will actually attempt.
+                        isBroadcastEligible = hasKey && locationOnline && !isTooFar,
+                        // Direct selection works on the looser `isOnline` (location OR
+                        // presence). Sending an offer with `driverLocation = null` falls
+                        // back to the rider-route fare via `state.fareEstimate`.
                         isDirectSelectable = hasKey && !isSending
                     )
                 )

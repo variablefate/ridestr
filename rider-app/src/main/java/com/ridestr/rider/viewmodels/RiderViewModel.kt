@@ -1826,11 +1826,55 @@ class RiderViewModel @Inject constructor(
             val eventId = sendOfferToNostr(params, pickupRoute)
             if (eventId != null) {
                 Log.d(TAG, "Sent RoadFlare offer to ${driverPubKey.take(16)}: $eventId")
+                // Acceptance subscription MUST be armed before any further round-trip
+                // so a fast-responding driver's Kind 3174 isn't missed.
                 setupOfferSubscriptions(eventId, driverPubKey, isBroadcast = false)
                 applyOfferSuccessState(params, eventId)
+                // Issue #82: stale-key piggyback. If we sent an offer to a driver we
+                // can't see the location of (no key OR stale key), fire a Kind 3188
+                // status="stale" alongside so the driver re-delivers the current key in
+                // the same beat. By the time they accept, we have the new key and can
+                // decrypt the in-ride Kind 30014 updates. Fire-and-forget — runs AFTER
+                // the acceptance subscription is live so its publish round-trip can't
+                // race the driver's response.
+                if (driverLocation == null) {
+                    requestKeyRefreshAlongsideOffer(driverPubKey)
+                }
             } else {
                 applyOfferFailureState("Failed to send RoadFlare offer")
             }
+        }
+    }
+
+    /**
+     * Fire a Kind 3188 with `status="stale"` to a driver alongside the just-sent ride
+     * offer. Issue #82: the driver receives both events together; the existing Kind 3188
+     * ack handler re-delivers the current Kind 3186 key share in response. Best-effort —
+     * any failure is logged and otherwise ignored.
+     */
+    private suspend fun requestKeyRefreshAlongsideOffer(driverPubKey: String) {
+        try {
+            val storedKey = followedDriversRepository.drivers.value
+                .find { it.pubkey == driverPubKey }
+                ?.roadflareKey
+            val storedKeyUpdatedAt = storedKey?.keyUpdatedAt ?: 0L
+            val storedVersion = storedKey?.version ?: 0
+
+            val ackEventId = nostrService.publishRoadflareKeyAck(
+                driverPubKey = driverPubKey,
+                keyVersion = storedVersion,
+                keyUpdatedAt = storedKeyUpdatedAt,
+                status = "stale"
+            )
+            if (ackEventId != null) {
+                Log.d(TAG, "Stale-signal piggyback: requested key refresh from ${driverPubKey.take(8)}... (offer sent without location)")
+            } else {
+                Log.w(TAG, "Stale-signal piggyback failed for ${driverPubKey.take(8)}... (offer still went through)")
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Stale-signal piggyback threw for ${driverPubKey.take(8)}...", e)
         }
     }
 
@@ -1892,8 +1936,13 @@ class RiderViewModel @Inject constructor(
             val eventId = sendOfferToNostr(params, pickupRoute)
             if (eventId != null) {
                 Log.d(TAG, "Sent RoadFlare offer with $paymentMethod to ${driverPubKey.take(16)}: $eventId")
+                // Acceptance subscription armed BEFORE the piggyback round-trip — see
+                // sendRoadflareOffer() for the ordering rationale.
                 setupOfferSubscriptions(eventId, driverPubKey, isBroadcast = false)
                 applyOfferSuccessState(params, eventId)
+                if (driverLocation == null) {
+                    requestKeyRefreshAlongsideOffer(driverPubKey)
+                }
             } else {
                 applyOfferFailureState("Failed to send RoadFlare offer")
             }

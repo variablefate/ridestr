@@ -7,6 +7,7 @@ import com.ridestr.common.nostr.events.RoadflareKey
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -20,6 +21,27 @@ private const val TAG = "FollowedDriversRepo"
 data class CachedDriverLocation(
     val lat: Double,
     val lon: Double,
+    val status: String,
+    val timestamp: Long,
+    val keyVersion: Int = 0
+)
+
+/**
+ * Cached driver presence — read from the **public** `status` tag on Kind 30014 events
+ * (no decryption required). Issue #82: drives the rider's "this driver is available
+ * even though I can't see their location" UX so a stale or missing RoadFlare key never
+ * blocks ride-on-demand.
+ *
+ * Distinct from [CachedDriverLocation] which carries the decrypted lat/lon/timestamp
+ * from the event content. Presence is a strict subset that any follower can read
+ * regardless of key state — the protocol exposes `status` publicly via the event tags
+ * (see `RoadflareLocationEvent.create()` line 86 + `getStatus()` helper line 163).
+ *
+ * @param status `"online"` / `"on_ride"` / `"offline"` from the public tag
+ * @param timestamp `event.createdAt` of the latest 30014 event for this driver
+ * @param keyVersion Driver's current RoadFlare key version, also from a public tag
+ */
+data class CachedDriverPresence(
     val status: String,
     val timestamp: Long,
     val keyVersion: Int = 0
@@ -74,6 +96,48 @@ class FollowedDriversRepository(context: Context) {
      */
     fun clearDriverLocations() {
         _driverLocations.value = emptyMap()
+    }
+
+    /**
+     * Cached driver presence — populated from the public `status` tag on Kind 30014
+     * regardless of whether the encrypted content can be decrypted. Issue #82.
+     */
+    private val _driverPresence = MutableStateFlow<Map<String, CachedDriverPresence>>(emptyMap())
+    val driverPresence: StateFlow<Map<String, CachedDriverPresence>> = _driverPresence.asStateFlow()
+
+    /**
+     * Update a driver's cached presence from a Kind 30014 event's PUBLIC tags.
+     * Skips the update if an existing entry has a newer-or-equal timestamp (out-of-order
+     * delivery + same-event multi-relay dedup).
+     *
+     * Issue #82: uses [kotlinx.coroutines.flow.MutableStateFlow.update] so the read /
+     * timestamp-compare / write executes atomically under CAS. Direct
+     * `_driverPresence.value =` would race when multiple relay callbacks (`Dispatchers.IO`)
+     * update the same pubkey concurrently — both reading the same `existing` before either
+     * writes — and the lower-timestamp write could win, defeating the guard. The other
+     * in-memory caches in this file use the simpler unprotected pattern; this one is held
+     * to a stricter standard because the PR's KDoc explicitly advertises the out-of-order
+     * guard as a correctness property.
+     */
+    fun updateDriverPresence(pubkey: String, status: String, timestamp: Long, keyVersion: Int = 0) {
+        _driverPresence.update { current ->
+            val existing = current[pubkey]
+            if (existing != null && existing.timestamp >= timestamp) {
+                current
+            } else {
+                current + (pubkey to CachedDriverPresence(status, timestamp, keyVersion))
+            }
+        }
+    }
+
+    /** Remove a driver's cached presence. */
+    fun removeDriverPresence(pubkey: String) {
+        _driverPresence.value = _driverPresence.value - pubkey
+    }
+
+    /** Clear all cached driver presence. */
+    fun clearDriverPresence() {
+        _driverPresence.value = emptyMap()
     }
 
     /**
@@ -191,6 +255,11 @@ class FollowedDriversRepository(context: Context) {
         }
         // Remove from location cache (in-memory only, no persist needed)
         _driverLocations.value = _driverLocations.value - pubkey
+        // Issue #82: also remove the presence entry so a re-add of the same driver
+        // in the same session doesn't see a stale `(timestamp >= timestamp)` guard
+        // hit and silently render the re-added driver as offline until their next
+        // broadcast tick.
+        _driverPresence.value = _driverPresence.value - pubkey
     }
 
     /**
@@ -268,7 +337,7 @@ class FollowedDriversRepository(context: Context) {
     }
 
     /**
-     * Clear all followed drivers and cached names/locations (for logout).
+     * Clear all followed drivers and cached names/locations/presence (for logout).
      */
     fun clearAll() {
         prefs.edit()
@@ -278,6 +347,10 @@ class FollowedDriversRepository(context: Context) {
         _drivers.value = emptyList()
         _driverNames.value = emptyMap()
         _driverLocations.value = emptyMap()
+        // Issue #82: presence has the same in-memory-only semantic as locations and
+        // belongs in the logout reset path so the next user's session doesn't inherit
+        // stale presence data from the previous identity.
+        _driverPresence.value = emptyMap()
     }
 
     companion object {

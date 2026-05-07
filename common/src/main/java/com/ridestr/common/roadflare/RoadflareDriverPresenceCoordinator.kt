@@ -48,22 +48,62 @@ class RoadflareDriverPresenceCoordinator(
         locationSubId?.let { nostrService.closeRoadflareSubscription(it) }
         locationSubId = null
 
-        val withKeys = drivers.filter { it.roadflareKey != null }
-        if (withKeys.isEmpty()) {
-            Log.d(TAG, "No drivers with keys to subscribe to (total: ${drivers.size})")
+        // Issue #82: prune lastLocationCreatedAt for drivers no longer in the list. Without
+        // this, removing + re-adding the same driver in a single session leaves the prior
+        // session's `lastLocationCreatedAt[pubkey]` intact, which then gates the same Kind
+        // 30014 event (createdAt unchanged within the 5-min TTL window) at the
+        // `eventCreatedAt < lastSeen` boundary — driver shows as offline until the next
+        // broadcast tick, defeating the stale-key UX in a real scenario.
+        val currentPubkeys = drivers.map { it.pubkey }.toSet()
+        lastLocationCreatedAt.keys.retainAll(currentPubkeys)
+
+        // Issue #82: subscribe to ALL followed drivers, not just those with a current key.
+        // The PUBLIC `status` tag on Kind 30014 lets us track availability for stale-key /
+        // missing-key drivers without ever decrypting the encrypted lat/lon content. The
+        // decryption attempt below is best-effort — if it fails we still surface the driver
+        // as available via `updateDriverPresence`, so the rider can fall back to the
+        // rider-route fare and request the ride anyway.
+        if (drivers.isEmpty()) {
+            Log.d(TAG, "No followed drivers to subscribe to")
             return
         }
 
-        val driverPubkeys = withKeys.map { it.pubkey }
-        Log.d(TAG, "Subscribing to ${driverPubkeys.size} driver locations")
+        val driverPubkeys = drivers.map { it.pubkey }
+        val withKeysCount = drivers.count { it.roadflareKey != null }
+        Log.d(TAG, "Subscribing to ${driverPubkeys.size} driver locations ($withKeysCount with keys)")
 
         locationSubId = nostrService.subscribeToRoadflareLocations(driverPubkeys) { event, relayUrl ->
             val driverPubKey = event.pubKey
-            val driver = withKeys.find { it.pubkey == driverPubKey }
-            val roadflareKey = driver?.roadflareKey
+            val eventCreatedAt = event.createdAt
+            val isExpired = RoadflareLocationEvent.isExpired(event)
+            val lastSeen = lastLocationCreatedAt[driverPubKey] ?: 0L
+            val isOutOfOrder = eventCreatedAt < lastSeen
 
+            if (isExpired || isOutOfOrder) {
+                Log.d(TAG, "Rejected stale/out-of-order 30014 from ${driverPubKey.take(8)}: expired=$isExpired, outOfOrder=$isOutOfOrder")
+                return@subscribeToRoadflareLocations
+            }
+
+            // Mark this event as the latest seen for the driver, regardless of decryption
+            // outcome — the out-of-order guard at the top now applies to presence-only
+            // events too, so a stale Kind 30014 can't overwrite a fresher presence update.
+            lastLocationCreatedAt[driverPubKey] = eventCreatedAt
+
+            // Always update presence from the PUBLIC tags — works regardless of key state.
+            val publicStatus = RoadflareLocationEvent.getStatus(event)
+            val publicKeyVersion = RoadflareLocationEvent.getKeyVersion(event)
+            followedDriversRepository.updateDriverPresence(
+                pubkey = driverPubKey,
+                status = publicStatus,
+                timestamp = eventCreatedAt,
+                keyVersion = publicKeyVersion
+            )
+
+            // Best-effort location decryption — only succeeds if we have the current key.
+            val driver = drivers.find { it.pubkey == driverPubKey }
+            val roadflareKey = driver?.roadflareKey
             if (roadflareKey == null) {
-                Log.w(TAG, "No RoadFlare key for driver ${driverPubKey.take(8)}")
+                Log.d(TAG, "No RoadFlare key for ${driverPubKey.take(8)} — presence-only update")
                 return@subscribeToRoadflareLocations
             }
 
@@ -74,27 +114,19 @@ class RoadflareDriverPresenceCoordinator(
             )
 
             if (locationData != null) {
-                val eventCreatedAt = event.createdAt
-
-                val isExpired = RoadflareLocationEvent.isExpired(event)
-                val lastSeen = lastLocationCreatedAt[driverPubKey] ?: 0L
-                val isOutOfOrder = eventCreatedAt < lastSeen
-
-                if (!isExpired && !isOutOfOrder) {
-                    lastLocationCreatedAt[driverPubKey] = eventCreatedAt
-                    followedDriversRepository.updateDriverLocation(
-                        pubkey = driverPubKey,
-                        lat = locationData.location.lat,
-                        lon = locationData.location.lon,
-                        status = locationData.tagStatus,
-                        timestamp = eventCreatedAt,
-                        keyVersion = locationData.keyVersion
-                    )
-                } else {
-                    Log.d(TAG, "Rejected stale/out-of-order 30014 from ${driverPubKey.take(8)}: expired=$isExpired, outOfOrder=$isOutOfOrder")
-                }
+                followedDriversRepository.updateDriverLocation(
+                    pubkey = driverPubKey,
+                    lat = locationData.location.lat,
+                    lon = locationData.location.lon,
+                    status = locationData.tagStatus,
+                    timestamp = eventCreatedAt,
+                    keyVersion = locationData.keyVersion
+                )
             } else {
-                Log.w(TAG, "Failed to decrypt location from ${driverPubKey.take(8)}")
+                // Decryption failed despite having a key — likely stale (key was rotated).
+                // Presence already updated above; rider will see the driver as available
+                // and fall through to the rider-route fare path on offer-send.
+                Log.w(TAG, "Failed to decrypt location from ${driverPubKey.take(8)} (presence-only, likely stale key)")
             }
         }
     }
@@ -121,6 +153,9 @@ class RoadflareDriverPresenceCoordinator(
         locationSubId?.let { nostrService.closeRoadflareSubscription(it) }
         locationSubId = null
         lastLocationCreatedAt.clear()
+        // Don't clear presence/locations from the repository here — other ViewModel
+        // observers may briefly read them across configuration changes. The repository
+        // owns its own clear lifecycle (e.g., on logout).
     }
 
     companion object {
