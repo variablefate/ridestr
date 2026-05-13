@@ -10,13 +10,7 @@ description: |
     - Get paid in Bitcoin
     - Earn 100% of the funds from every ride.
 summary: Rideshare, without the middleman.
-tags:
-    - bitcoin
-    - nostr
-    - rideshare
-    - cashu
-    - ecash
-    - transportation
+tags: bitcoin nostr rideshare cashu ecash transportation
 license: MIT No-Shitcoin
 website: https://github.com/variablefate/ridestr
 icon: ./icon.png
