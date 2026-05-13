@@ -99,3 +99,4 @@ commonMain/
 # node_modules/ is covered in the global gitignore)
 package.json
 package-lock.json
+.gitnexus
