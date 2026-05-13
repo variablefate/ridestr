@@ -1,5 +1,6 @@
 repository: https://github.com/variablefate/ridestr
-match: drivestr-release\.apk$
+assets:
+    - drivestr-release\.apk$
 name: Drivestr
 description: |
     Drive people and build a personal network of riders.
