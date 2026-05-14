@@ -1,6 +1,7 @@
 package com.ridestr.common.nostr.relay
 
 import android.util.Log
+import androidx.annotation.VisibleForTesting
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.crypto.verify
 import kotlinx.coroutines.CoroutineScope
@@ -69,6 +70,24 @@ class RelayConnection(
     private val _state = MutableStateFlow(RelayConnectionState.DISCONNECTED)
     val state: StateFlow<RelayConnectionState> = _state.asStateFlow()
 
+    /** Test-only accessor for the auto-reconnect backoff counter. */
+    @VisibleForTesting
+    internal fun reconnectAttemptsForTest(): Int = reconnectAttempts.get()
+
+    /** Test-only mutator to simulate prior auto-retry failures. */
+    @VisibleForTesting
+    internal fun setReconnectAttemptsForTest(value: Int) {
+        reconnectAttempts.set(value)
+    }
+
+    /** Test-only accessor for the generation counter. */
+    @VisibleForTesting
+    internal fun connectionGenerationForTest(): Long = synchronized(this) { connectionGeneration }
+
+    /** Test-only accessor for the set of subscription IDs this connection has stored. */
+    @VisibleForTesting
+    internal fun activeSubscriptionIdsForTest(): Set<String> = activeSubscriptions.keys.toSet()
+
     private val activeSubscriptions = ConcurrentHashMap<String, String>() // subId -> filterJson
     private val pendingEvents = ConcurrentHashMap<String, Event>() // eventId -> event
 
@@ -113,6 +132,50 @@ class RelayConnection(
         // Close outside lock to avoid holding lock during network I/O
         socketToClose?.close(1000, "Client disconnect")
         Log.d(TAG, "Disconnected from $url")
+    }
+
+    /**
+     * Tear down the current socket and reopen immediately, resetting the reconnect backoff.
+     *
+     * Used by the manual "Reconnect to Relays" UI. Differs from `disconnect()+connect()`:
+     *   1. `cancel()` (not graceful `close()`) — frees the OkHttp dispatcher slot immediately
+     *      even if the prior socket was mid-handshake. Graceful close can linger up to
+     *      `readTimeout` (30s) while the close handshake races with new connection attempts.
+     *   2. Resets `reconnectAttempts` so the auto-retry backoff (capped at 60s) restarts at 0,
+     *      preventing manual reconnects from being shadowed by long-pending scheduled retries.
+     *   3. Single-locked transition keeps `socket`, `state`, and `connectionGeneration`
+     *      coherent so the stale-callback guards in `RelayWebSocketListener` work correctly.
+     */
+    fun forceReconnect() {
+        val socketToCancel: WebSocket?
+
+        synchronized(this) {
+            socketToCancel = socket
+            socket = null
+
+            // Bump generation so any in-flight messages/callbacks from the prior socket
+            // are recognized as stale.
+            connectionGeneration++
+
+            // Reset backoff — any scheduled-reconnect coroutine still sleeping will see
+            // shouldReconnect=true and either complete its connect() (no-op because we're
+            // now CONNECTING) or be preempted by ours.
+            reconnectAttempts.set(0)
+            shouldReconnect.set(true)
+            _state.value = RelayConnectionState.CONNECTING
+
+            val request = Request.Builder()
+                .url(url)
+                .build()
+            socket = client.newWebSocket(request, RelayWebSocketListener())
+        }
+
+        // Cancel outside the lock to avoid holding it during network I/O.
+        // `cancel()` is non-graceful and releases resources immediately, unlike `close()`
+        // which initiates a close handshake that can hang for up to readTimeout.
+        socketToCancel?.cancel()
+
+        Log.d(TAG, "Force-reconnecting to $url (generation $connectionGeneration)")
     }
 
     /**

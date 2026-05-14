@@ -393,6 +393,11 @@ class RiderViewModel @Inject constructor(
     fun onAddRelay(url: String) = viewModelScope.launch { settingsRepository.addRelay(url) }
     fun onRemoveRelay(url: String) = viewModelScope.launch { settingsRepository.removeRelay(url) }
     fun onResetRelays() = viewModelScope.launch { settingsRepository.resetRelaysToDefault() }
+    fun onForceReconnect() {
+        // Reads the effective relay list synchronously and passes it to forceReconnect so
+        // user edits to custom relays take effect without an app restart.
+        nostrService.forceReconnect(settingsRepository.getEffectiveRelays())
+    }
     fun onToggleUseGeocodingSearch() = viewModelScope.launch { settingsRepository.toggleUseGeocodingSearch() }
     fun onSetUseManualDriverLocation(enabled: Boolean) = viewModelScope.launch { settingsRepository.setUseManualDriverLocation(enabled) }
     fun onSetManualDriverLocation(lat: Double, lon: Double) = viewModelScope.launch { settingsRepository.setManualDriverLocation(lat, lon) }

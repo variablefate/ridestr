@@ -33,4 +33,10 @@ object RelayConfig {
      * Time to wait before attempting reconnection after failure.
      */
     const val RECONNECT_DELAY_MS = 5_000L
+
+    /**
+     * WebSocket ping interval. Without pings, NAT/wifi transitions can leave
+     * the client believing a connection is alive when it isn't.
+     */
+    const val PING_INTERVAL_MS = 30_000L
 }

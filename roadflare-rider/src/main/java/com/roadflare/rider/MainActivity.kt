@@ -376,7 +376,7 @@ private fun MainTabScreen() {
                 totalRelays = connectionStates.size,
                 connectionStates = connectionStates,
                 onBack = { secondaryScreen = SecondaryScreen.None },
-                onReconnect = { viewModel.nostrService.relayManager.ensureConnected() }
+                onReconnect = { viewModel.onForceReconnect() }
             )
             return
         }

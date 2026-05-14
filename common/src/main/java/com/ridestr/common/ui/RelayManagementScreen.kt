@@ -18,9 +18,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.CircleShape
 import com.ridestr.common.nostr.relay.RelayConnectionState
-import kotlinx.coroutines.MainScope
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Standalone relay management screen accessible from:
@@ -46,7 +45,44 @@ fun RelayManagementScreen(
 ) {
     BackHandler(onBack = onBack)
 
-    var isReconnecting by remember { mutableStateOf(false) }
+    // Tracks "we just kicked off a reconnect" so the button doesn't no-op visually.
+    // Auto-clears either when at least one relay comes back CONNECTED after the
+    // forced disconnect propagates, or after a hard cap so a totally unreachable
+    // relay set doesn't lock the button forever.
+    var reconnectInitiatedAt by remember { mutableStateOf<Long?>(null) }
+    val isReconnecting = reconnectInitiatedAt != null
+
+    // `connectedCount` is a regular composable parameter, recomputed per
+    // recomposition. Wrap it in `rememberUpdatedState` so `snapshotFlow` inside
+    // the LaunchedEffect can observe its changes without re-keying the effect
+    // (which would cancel/restart and lose the "transition seen" state).
+    val currentConnectedCount by rememberUpdatedState(connectedCount)
+
+    LaunchedEffect(reconnectInitiatedAt) {
+        val started = reconnectInitiatedAt ?: return@LaunchedEffect
+        val deadline = started + 15_000L
+        val timeBudget = { (deadline - System.currentTimeMillis()).coerceAtLeast(0) }
+        try {
+            // Phase 1: wait for the forced disconnect to be visible
+            // (connectedCount drops to 0). Without this, pre-existing CONNECTED
+            // state would let Phase 2 resolve instantly and the spinner would
+            // never appear. Cross-dispatcher (Dispatchers.IO -> Main) state
+            // propagation means `connectedCount` can briefly look stale right
+            // after the press; this wait absorbs that window.
+            withTimeoutOrNull(timeBudget()) {
+                snapshotFlow { currentConnectedCount }.first { it == 0 }
+            }
+            // Phase 2: wait for at least one relay to come back online, or hit
+            // the cap. If Phase 1 timed out (e.g., reconnect was a no-op),
+            // `currentConnectedCount` is already non-zero and this resolves
+            // immediately.
+            withTimeoutOrNull(timeBudget()) {
+                snapshotFlow { currentConnectedCount }.first { it > 0 }
+            }
+        } finally {
+            reconnectInitiatedAt = null
+        }
+    }
     var newRelayInput by remember { mutableStateOf("") }
 
     Scaffold(
@@ -122,13 +158,8 @@ fun RelayManagementScreen(
                 if (onReconnect != null) {
                     Button(
                         onClick = {
-                            isReconnecting = true
+                            reconnectInitiatedAt = System.currentTimeMillis()
                             onReconnect()
-                            // Reset after a brief delay (reconnection is async)
-                            MainScope().launch {
-                                delay(2000)
-                                isReconnecting = false
-                            }
                         },
                         enabled = !isReconnecting,
                         modifier = Modifier
