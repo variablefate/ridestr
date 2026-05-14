@@ -124,6 +124,20 @@ class NostrService internal constructor(
     }
 
     /**
+     * Force every relay to tear down and reopen, resetting reconnect backoff.
+     * Use from the manual "Reconnect to Relays" UI — does NOT have the
+     * dispatcher-starvation / backoff-poisoning problems of disconnectAll+connectAll.
+     *
+     * @param newRelayUrls Optional updated relay list (e.g., from
+     *     `settingsRepository.getEffectiveRelays()`) so user edits to custom relays
+     *     take effect without an app restart.
+     */
+    fun forceReconnect(newRelayUrls: List<String>? = null) {
+        Log.d(TAG, "Force-reconnecting all relays (newRelayUrls=${newRelayUrls?.size ?: "unchanged"})")
+        relayManager.forceReconnectAll(newRelayUrls)
+    }
+
+    /**
      * Clear all subscriptions. Use for debugging or to reset state.
      */
     fun clearAllSubscriptions() {

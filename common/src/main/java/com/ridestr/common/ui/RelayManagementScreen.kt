@@ -18,9 +18,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.CircleShape
 import com.ridestr.common.nostr.relay.RelayConnectionState
-import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 /**
  * Standalone relay management screen accessible from:
@@ -46,7 +44,30 @@ fun RelayManagementScreen(
 ) {
     BackHandler(onBack = onBack)
 
-    var isReconnecting by remember { mutableStateOf(false) }
+    // Tracks "we just kicked off a reconnect" so the button doesn't no-op visually.
+    // Auto-clears either when at least one relay reports CONNECTED, or after a hard cap
+    // so a totally unreachable relay set doesn't lock the button forever.
+    var reconnectInitiatedAt by remember { mutableStateOf<Long?>(null) }
+    val isReconnecting = reconnectInitiatedAt != null
+    LaunchedEffect(reconnectInitiatedAt, connectedCount) {
+        val started = reconnectInitiatedAt ?: return@LaunchedEffect
+        // Clear immediately on success.
+        if (connectedCount > 0) {
+            reconnectInitiatedAt = null
+            return@LaunchedEffect
+        }
+        // Hard cap so the button doesn't stay disabled if all relays are unreachable.
+        // 15s ≈ ample for fresh OkHttp WebSocket handshake (10s connectTimeout + slack).
+        val elapsed = System.currentTimeMillis() - started
+        val remaining = 15_000L - elapsed
+        if (remaining > 0) {
+            delay(remaining)
+        }
+        // Re-check on resume — connectedCount may have updated during the delay.
+        if (connectedCount == 0) {
+            reconnectInitiatedAt = null
+        }
+    }
     var newRelayInput by remember { mutableStateOf("") }
 
     Scaffold(
@@ -122,13 +143,8 @@ fun RelayManagementScreen(
                 if (onReconnect != null) {
                     Button(
                         onClick = {
-                            isReconnecting = true
+                            reconnectInitiatedAt = System.currentTimeMillis()
                             onReconnect()
-                            // Reset after a brief delay (reconnection is async)
-                            MainScope().launch {
-                                delay(2000)
-                                isReconnecting = false
-                            }
                         },
                         enabled = !isReconnecting,
                         modifier = Modifier

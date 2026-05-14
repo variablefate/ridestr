@@ -52,6 +52,10 @@ class RelayManager(
         .connectTimeout(RelayConfig.CONNECT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         .readTimeout(RelayConfig.READ_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         .writeTimeout(RelayConfig.WRITE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        // Send WebSocket pings so NAT/firewall transitions don't leave zombie sockets
+        // that the client thinks are CONNECTED but won't deliver messages.
+        // Matches CashuWebSocket's 30s interval.
+        .pingInterval(RelayConfig.PING_INTERVAL_MS, TimeUnit.MILLISECONDS)
         .build()
 
     private val connections = ConcurrentHashMap<String, RelayConnection>()
@@ -124,6 +128,46 @@ class RelayManager(
     fun disconnectAll() {
         Log.d(TAG, "Disconnecting from all relays")
         connections.values.forEach { it.disconnect() }
+    }
+
+    /**
+     * Force-reconnect every relay, resetting backoff and replacing any stale socket.
+     *
+     * Use this from the manual "Reconnect to Relays" UI rather than
+     * `disconnectAll()+connectAll()`. The compound call is not equivalent:
+     *
+     *   - `disconnectAll()` uses graceful `WebSocket.close()`, which can keep an OkHttp
+     *     dispatcher slot occupied for up to `readTimeout` (30s) while the close handshake
+     *     completes. A rapid `connectAll()` afterwards starts new sockets that compete with
+     *     the dying ones, and the backoff state (`reconnectAttempts`) isn't reset.
+     *   - `forceReconnectAll()` per-relay: `cancel()`s the old socket (immediate teardown),
+     *     resets `reconnectAttempts` to 0, and opens a new socket in a single synchronized
+     *     transition so stale-callback guards in the listener fire reliably.
+     *
+     * @param newRelayUrls Optional updated relay list. If provided, relays not in the list
+     *     are removed and new relays are added BEFORE force-reconnecting. Use this when the
+     *     user has edited custom relays in settings so the changes take effect without an
+     *     app restart.
+     */
+    fun forceReconnectAll(newRelayUrls: List<String>? = null) {
+        if (newRelayUrls != null) {
+            syncRelayList(newRelayUrls)
+        }
+        Log.d(TAG, "Force-reconnecting all ${connections.size} relay(s)")
+        connections.values.forEach { it.forceReconnect() }
+    }
+
+    /**
+     * Reconcile the connection set with a target list. Removes connections that aren't
+     * in the target and adds new ones. Existing connections present in the target stay.
+     */
+    private fun syncRelayList(target: List<String>) {
+        val targetSet = target.toSet()
+        // Remove any that are no longer wanted.
+        val toRemove = connections.keys - targetSet
+        toRemove.forEach { removeRelay(it) }
+        // Add any new ones (addRelay is idempotent for existing entries).
+        target.forEach { url -> addRelay(url) }
     }
 
     /**

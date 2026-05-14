@@ -802,8 +802,10 @@ fun RidestrApp(settingsRepository: SettingsRepository) {
                     connectionStates = connectionStates,
                     onBack = { currentScreen = Screen.MAIN },
                     onReconnect = {
-                        nostrService.relayManager.disconnectAll()
-                        nostrService.relayManager.connectAll()
+                        // Pass the current effective relay list so user edits take effect
+                        // without an app restart, and use the dedicated force-reconnect path
+                        // (cancels stale sockets immediately + resets backoff).
+                        nostrService.forceReconnect(settingsRepository.getEffectiveRelays())
                     },
                     modifier = Modifier.padding(innerPadding)
                 )
