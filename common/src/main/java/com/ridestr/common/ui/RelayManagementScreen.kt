@@ -18,7 +18,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.CircleShape
 import com.ridestr.common.nostr.relay.RelayConnectionState
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Standalone relay management screen accessible from:
@@ -45,26 +46,40 @@ fun RelayManagementScreen(
     BackHandler(onBack = onBack)
 
     // Tracks "we just kicked off a reconnect" so the button doesn't no-op visually.
-    // Auto-clears either when at least one relay reports CONNECTED, or after a hard cap
-    // so a totally unreachable relay set doesn't lock the button forever.
+    // Auto-clears either when at least one relay comes back CONNECTED after the
+    // forced disconnect propagates, or after a hard cap so a totally unreachable
+    // relay set doesn't lock the button forever.
     var reconnectInitiatedAt by remember { mutableStateOf<Long?>(null) }
     val isReconnecting = reconnectInitiatedAt != null
-    LaunchedEffect(reconnectInitiatedAt, connectedCount) {
+
+    // `connectedCount` is a regular composable parameter, recomputed per
+    // recomposition. Wrap it in `rememberUpdatedState` so `snapshotFlow` inside
+    // the LaunchedEffect can observe its changes without re-keying the effect
+    // (which would cancel/restart and lose the "transition seen" state).
+    val currentConnectedCount by rememberUpdatedState(connectedCount)
+
+    LaunchedEffect(reconnectInitiatedAt) {
         val started = reconnectInitiatedAt ?: return@LaunchedEffect
-        // Clear immediately on success.
-        if (connectedCount > 0) {
-            reconnectInitiatedAt = null
-            return@LaunchedEffect
-        }
-        // Hard cap so the button doesn't stay disabled if all relays are unreachable.
-        // 15s ≈ ample for fresh OkHttp WebSocket handshake (10s connectTimeout + slack).
-        val elapsed = System.currentTimeMillis() - started
-        val remaining = 15_000L - elapsed
-        if (remaining > 0) {
-            delay(remaining)
-        }
-        // Re-check on resume — connectedCount may have updated during the delay.
-        if (connectedCount == 0) {
+        val deadline = started + 15_000L
+        val timeBudget = { (deadline - System.currentTimeMillis()).coerceAtLeast(0) }
+        try {
+            // Phase 1: wait for the forced disconnect to be visible
+            // (connectedCount drops to 0). Without this, pre-existing CONNECTED
+            // state would let Phase 2 resolve instantly and the spinner would
+            // never appear. Cross-dispatcher (Dispatchers.IO -> Main) state
+            // propagation means `connectedCount` can briefly look stale right
+            // after the press; this wait absorbs that window.
+            withTimeoutOrNull(timeBudget()) {
+                snapshotFlow { currentConnectedCount }.first { it == 0 }
+            }
+            // Phase 2: wait for at least one relay to come back online, or hit
+            // the cap. If Phase 1 timed out (e.g., reconnect was a no-op),
+            // `currentConnectedCount` is already non-zero and this resolves
+            // immediately.
+            withTimeoutOrNull(timeBudget()) {
+                snapshotFlow { currentConnectedCount }.first { it > 0 }
+            }
+        } finally {
             reconnectInitiatedAt = null
         }
     }

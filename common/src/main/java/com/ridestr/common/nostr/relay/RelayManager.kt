@@ -94,6 +94,17 @@ class RelayManager(
 
         connections[url] = connection
 
+        // Seed the new connection with every active subscription so when it opens,
+        // resubscribeAll() actually has something to send. Without this, a relay
+        // added mid-session (e.g., via forceReconnectAll's syncRelayList) would
+        // come up CONNECTED but receive zero events — `subscriptions` is the
+        // authoritative registry, but `subscribe()` only fans out to connections
+        // that existed at call time. At construction time this loop is a no-op
+        // because subscriptions is empty.
+        subscriptions.values.forEach { subscription ->
+            connection.subscribe(subscription.id, subscription.filters)
+        }
+
         // Watch connection state changes
         scope.launch {
             connection.state.collect { state ->
@@ -102,7 +113,7 @@ class RelayManager(
         }
 
         updateConnectionStates()
-        Log.d(TAG, "Added relay: $url")
+        Log.d(TAG, "Added relay: $url (seeded with ${subscriptions.size} subscription(s))")
     }
 
     /**
@@ -391,6 +402,10 @@ class RelayManager(
      * Get all relay URLs.
      */
     fun getRelayUrls(): List<String> = connections.keys.toList()
+
+    /** Test-only accessor for a specific connection. */
+    @androidx.annotation.VisibleForTesting
+    internal fun connectionForTest(url: String): RelayConnection? = connections[url]
 
     private fun handleEvent(event: Event, subscriptionId: String, relayUrl: String) {
         Log.d(TAG, "Received event ${event.id} (kind ${event.kind}) from $relayUrl")

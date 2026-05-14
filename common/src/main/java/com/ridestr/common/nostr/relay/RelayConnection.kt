@@ -84,6 +84,10 @@ class RelayConnection(
     @VisibleForTesting
     internal fun connectionGenerationForTest(): Long = synchronized(this) { connectionGeneration }
 
+    /** Test-only accessor for the set of subscription IDs this connection has stored. */
+    @VisibleForTesting
+    internal fun activeSubscriptionIdsForTest(): Set<String> = activeSubscriptions.keys.toSet()
+
     private val activeSubscriptions = ConcurrentHashMap<String, String>() // subId -> filterJson
     private val pendingEvents = ConcurrentHashMap<String, Event>() // eventId -> event
 
